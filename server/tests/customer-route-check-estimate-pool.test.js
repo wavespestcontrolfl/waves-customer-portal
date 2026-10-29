@@ -148,7 +148,7 @@ describe('getAvailableSlots — one combined route check per request', () => {
     estimateSlotAvailability._internals.clearCaches();
     global.__routeCheckMode = 'on';
     // The only route-list start (09:00) would make another customer late; the other hours are fine.
-    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart === '09:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart === '09:00' ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } } : { feasible: true }));
     const after = slotKeys(await getAvailableSlots('est-rain-1', OFFER));
     expect(after).not.toContain('2027-05-20 09:00');
     expect(after.length).toBeGreaterThan(0);
@@ -156,7 +156,7 @@ describe('getAvailableSlots — one combined route check per request', () => {
   });
 
   test('the floor holds across the combined pool: nothing safe near-term in either list keeps both whole', async () => {
-    arrivalRoute.evaluateArrivalPlacement.mockReturnValue({ feasible: false, reason: 'arrival_window' });
+    arrivalRoute.evaluateArrivalPlacement.mockReturnValue({ feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } });
     const served = slotKeys(await getAvailableSlots('est-rain-1', OFFER));
     expect(served).toContain('2027-05-20 09:00');
     expect(summaryLines()[0]).toContain('floor_kept=true');
@@ -184,7 +184,7 @@ describe('getAvailableSlots — one combined route check per request', () => {
   });
 
   test('morning-only search where every morning start fails and only an afternoon start passes: the morning offers come back, never an empty picker', async () => {
-    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } } : { feasible: true }));
     const served = slotKeys(await getAvailableSlots('est-rain-1', { ...OFFER, timeOfDay: 'morning' }));
     expect(served.length).toBeGreaterThan(0);
     expect(served.every((k) => k.split(' ')[1] < '12:00')).toBe(true);

@@ -54,18 +54,18 @@ beforeEach(() => {
 });
 
 test('every morning start fails and only the afternoon start passes: a morning search still gets its morning offers', async () => {
-  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } } : { feasible: true }));
   const morning = await build('morning');
   expect(startsOf(morning)).toEqual(['09:00', '10:00']);
   expect(morning.slots.length).toBeGreaterThan(0);
 });
 
 test('with no time-of-day filter the same failures are removed while the afternoon survives', async () => {
-  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } } : { feasible: true }));
   expect(startsOf(await build('any'))).toEqual(['14:00']);
 });
 
 test('one morning start passes: only the failing one goes', async () => {
-  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart === '09:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+  arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart === '09:00' ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['x'] } } : { feasible: true }));
   expect(startsOf(await build('morning'))).toEqual(['10:00']);
 });

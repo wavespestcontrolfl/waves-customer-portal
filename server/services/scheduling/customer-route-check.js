@@ -8,8 +8,11 @@
  * re-service, the inspection link, the commercial first visit, the estimate
  * page) were built on the older gap engine, which does not run that check.
  * This module runs it over a list the picker ALREADY built, as a DROP-ONLY
- * filter: a slot is removed only when the check says 'arrival_window'. Every
- * other outcome keeps the slot.
+ * filter: a slot is removed only when the evaluator confirms (explain: true)
+ * that ANOTHER customer would arrive after their window because of the new
+ * visit, wherever it is placed. A visit that only misses its own window, a
+ * route past the day end, a day already late without the visit, and every
+ * other outcome keep the slot.
  *
  * Modes (customerRouteCheckMode, read at CALL time):
  *   off     unset or any other value. Callers never reach this module.
@@ -81,7 +84,7 @@ function floorEndDate(todayEt) {
 function newReport(surface, mode, offered) {
   return {
     surface: surface || '-', mode, offered,
-    removed: 0, keptUnverified: 0, keptOther: 0, evaluated: 0, errors: 0,
+    removed: 0, keptUnverified: 0, keptOther: 0, targetLate: 0, dayEnd: 0, baselineLate: 0, evaluated: 0, errors: 0,
     byReason: {}, floorKept: false, timedOut: false, error: null, skipped: null,
     firstStopHour: null, removedSlots: [],
   };
@@ -102,7 +105,7 @@ function firstStopHourOf(context, technicianId) {
 function logReport(report, startedAt) {
   const hour = report.firstStopHour == null ? '-' : String(report.firstStopHour).padStart(2, '0');
   logger.info(`[customer-route-check] surface=${report.surface} mode=${report.mode} offered=${report.offered}`
-    + ` removed=${report.removed} kept_unverified=${report.keptUnverified} kept_other=${report.keptOther}`
+    + ` removed=${report.removed} kept_unverified=${report.keptUnverified} kept_other=${report.keptOther} target_late=${report.targetLate} baseline_late=${report.baselineLate} day_end=${report.dayEnd}`
     + ` floor_kept=${report.floorKept} timed_out=${report.timedOut} first_stop_hour=${hour} ms=${Date.now() - startedAt}`
     + (report.error ? ` error=${String(report.error).slice(0, 120)}` : ''));
   for (const row of report.removedSlots.slice(0, MAX_REMOVED_LINES)) {
@@ -111,17 +114,36 @@ function logReport(report, startedAt) {
   }
 }
 
+// An `arrival_window` failure alone does not say another customer would be late: the new
+// visit may miss its own window, the route may run past the day end, or the day may already
+// be late without it. The evaluator's `lateness` (explain: true) tells them apart; only
+// newlyLateStopIds (another stop late WITH the visit and on time without it, wherever the
+// visit goes) removes a slot. Anything else, or no diagnosis, keeps the slot.
+function keptReasonOf(result) {
+  const lateness = result?.lateness;
+  if (!lateness) return 'arrival_window_unexplained';
+  if (lateness.baselineLateStopIds?.length) return 'baseline_late';
+  if (lateness.targetLate) return 'target_late';
+  if (lateness.dayEndExceeded) return 'day_end';
+  return 'arrival_window_unexplained';
+}
+
+const KEPT_COUNTER = { baseline_late: 'baselineLate', target_late: 'targetLate', day_end: 'dayEnd' };
+
 function tally(report, result, slotInfo) {
   report.evaluated += 1;
-  const reason = result?.feasible ? 'feasible' : (result?.reason || 'unknown');
+  let reason = result?.feasible ? 'feasible' : (result?.reason || 'unknown');
+  const removes = reason === 'arrival_window' && result.lateness?.newlyLateStopIds?.length > 0;
+  if (reason === 'arrival_window' && !removes) reason = keptReasonOf(result);
   report.byReason[reason] = (report.byReason[reason] || 0) + 1;
-  if (reason === 'arrival_window') {
+  if (removes) {
     report.removed += 1;
     report.removedSlots.push({ date: slotInfo.date, start: hhmm(slotInfo.startMin), technicianId: slotInfo.technicianId,
-      lateVisitId: result.lateVisitId || result.lateStopId || null });
+      lateVisitId: result.lateness.newlyLateStopIds.join(',') });
     return true;
   }
   if (reason === 'route_unverified') report.keptUnverified += 1;
+  else if (KEPT_COUNTER[reason]) report[KEPT_COUNTER[reason]] += 1;
   else report.keptOther += 1;
   return false;
 }
@@ -193,6 +215,7 @@ async function evaluateAll({ arrivalRoute, slots, target, durationMinutes, conn,
       }
       const result = arrivalRoute.evaluateArrivalPlacement(loaded.context, {
         windowStart: hhmm(info.startMin), windowEnd: hhmm(info.startMin + durationMinutes), durationMinutes,
+        explain: true,
       });
       if (tally(report, result, info)) remove.add(i);
     } catch {

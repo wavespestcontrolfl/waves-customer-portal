@@ -6234,10 +6234,14 @@ code, error code, message text, limiter, signature or token changes.
 - `off`: byte-identical to before; the check code is never loaded.
 - `shadow`: the check runs and logs one `[customer-route-check]` line; the
   list is today's list.
-- `true`: a start is removed only when the arrival-window route check says it
-  would make ANOTHER customer arrive after their 2-hour window
-  (`arrival_window`). Unverified routes, return-time, margin or overcommitted
-  results, errors, and starts not checked in time stay. Each start is checked
+- `true`: a start is removed only when the route check CONFIRMS that placing
+  the visit there, wherever it goes in the day, would make ANOTHER customer
+  arrive after their 2-hour window while they are on time without the visit
+  (the evaluator's `explain` diagnosis, `newlyLateStopIds`). A visit that
+  only misses its own window (`target_late`), a route past the day end
+  (`day_end`), a day already late without the visit (`baseline_late`),
+  unverified routes, return-time, margin or overcommitted results, errors, a
+  missing diagnosis, and starts not checked in time all stay. Each start is checked
   at its own minute and technician. Order, slot shapes and signed offers
   (`slot_sig`) of the kept starts are unchanged.
 - Floor: if the removals would leave no offered start dated today through

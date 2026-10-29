@@ -595,6 +595,40 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
   return sequencers.every(sequence => !simulate(sequence(groupedPending), []));
 }
 
+/** Why an `arrival_window` failure happened, from the same simulation re-run to report
+ *  lateness instead of stopping at the first miss (explain: true only).
+ *  - targetLate: in some tried order the new visit itself misses its window.
+ *  - newlyLateStopIds: OTHER stops that arrive after their window in EVERY tried order
+ *    and are not late in the day without the new visit. Empty unless every order shows
+ *    one, so a non-empty list means no place for the visit keeps everyone else on time.
+ *  - baselineLateStopIds: stops already late in the day without the new visit.
+ *  - dayEndExceeded: in some tried order the route runs past the day end. */
+function explainLateness({ orders, sequencers, groupedPending, simulate, target }) {
+  const lateIds = (order) => {
+    const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
+    return simulation ? simulation.arrivals.filter(arrival => arrival.lateMinutes > 0).map(arrival => arrival.id) : null;
+  };
+  const baselineLate = new Set(sequencers.flatMap(sequence => lateIds(sequence(groupedPending)) || []));
+  const newlyLate = new Set();
+  let everyOrderCrowdsAnotherStop = orders.length > 0;
+  let targetLate = false;
+  let dayEndExceeded = false;
+  for (const { order } of orders) {
+    const late = lateIds(order);
+    if (late == null) {
+      everyOrderCrowdsAnotherStop = false;
+      continue;
+    }
+    if (late.includes(target.id)) targetLate = true;
+    const others = late.filter(id => id !== target.id && !baselineLate.has(id));
+    if (others.length) others.forEach(id => newlyLate.add(id));
+    else everyOrderCrowdsAnotherStop = false;
+    if (!simulate(order, [], { reportLate: true })) dayEndExceeded = true;
+  }
+  return { targetLate, newlyLateStopIds: everyOrderCrowdsAnotherStop ? [...newlyLate] : [],
+    baselineLateStopIds: [...baselineLate], dayEndExceeded };
+}
+
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
 function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ, roadTravel = false }) {
@@ -634,7 +668,10 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
 
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
-  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false }) {
+  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false,
+  // Optional diagnostics (customer route check): on an `arrival_window` failure, add `lateness`
+  // (see explainLateness). Unset: no extra work and the result is exactly what it was.
+  explain = false }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -672,7 +709,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // (nothing is written for it: only a move's result carries an order).
   const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
-  const simulate = (order, usedLegs) => {
+  const simulate = (order, usedLegs, extra = {}) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
     return simulateArrivalRoute(RouteOptimizer, rangeForStop,
       // raw_estimate_minutes keeps the UNTOUCHED estimate for the co-visit
@@ -693,6 +730,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes, end: context.home || RouteOptimizer.HQ,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
+        ...extra,
         ...(travel ? { legMinutes: (from, to, departureMin) => {
           const leg = { date, from, to, departureMin };
           const metric = travel.lookup(leg);
@@ -739,7 +777,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     return { ...fail, reason: 'day_overcommitted',
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
-  if (!winner) return fail;
+  if (!winner) {
+    return explain ? { ...fail, lateness: explainLateness({ orders, sequencers, groupedPending, simulate, target }) } : fail;
+  }
   return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ,
     roadTravel: !!context.travel });
 }

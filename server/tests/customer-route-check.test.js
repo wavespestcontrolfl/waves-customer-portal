@@ -28,7 +28,9 @@ const FAR = addDays(TODAY, 12);
 const TARGET = { prospective: { lat: 27.4, lng: -82.4, estimated_duration_minutes: 60 } };
 const slot = (date, start, tech = 'tech-1', extra = {}) => ({ date, start_time: start, technician_id: tech, ...extra });
 const feasible = { feasible: true };
-const fail = (reason) => ({ feasible: false, reason });
+// An arrival_window failure that the evaluator confirms makes another stop newly late.
+const LATE = { targetLate: false, newlyLateStopIds: ['late-1'], baselineLateStopIds: [], dayEndExceeded: false };
+const fail = (reason, lateness = LATE) => ({ feasible: false, reason, ...(reason === 'arrival_window' ? { lateness } : {}) });
 
 function run(slots, extra = {}) {
   return filterOfferedSlots({ surface: 'book', mode: 'on', slots, target: TARGET, durationMinutes: 60, today: new Date(), ...extra });
@@ -86,12 +88,57 @@ describe('filterOfferedSlots — which outcomes remove a slot', () => {
   });
 });
 
+describe('filterOfferedSlots — only confirmed lateness for another stop removes a slot', () => {
+  const run1 = async (result) => {
+    arrivalRoute.evaluateArrivalPlacement.mockReturnValue(result);
+    const slots = [slot(SOON, '09:00'), slot(SOON, '10:00')];
+    const out = await run(slots);
+    return { slots, ...out };
+  };
+
+  test('asks the evaluator for the diagnosis', async () => {
+    await run([slot(SOON, '09:00')]);
+    expect(arrivalRoute.evaluateArrivalPlacement.mock.calls[0][1].explain).toBe(true);
+  });
+
+  test('the new visit missing only its own window is kept and counted target_late', async () => {
+    const { slots, slots: input, report } = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: [], targetLate: true }));
+    expect(slots).toBe(input);
+    expect(report).toMatchObject({ removed: 0, targetLate: 2, keptOther: 0 });
+    expect(logger.info.mock.calls[0][0]).toContain('target_late=2 baseline_late=0 day_end=0');
+  });
+
+  test('a day already late without the visit is kept and counted baseline_late', async () => {
+    const { report } = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: [], baselineLateStopIds: ['b'] }));
+    expect(report).toMatchObject({ removed: 0, baselineLate: 2 });
+  });
+
+  test('a route past the day end is kept and counted day_end', async () => {
+    const { report } = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: [], dayEndExceeded: true }));
+    expect(report).toMatchObject({ removed: 0, dayEnd: 2 });
+  });
+
+  test('arrival_window with no diagnosis, or an empty one, is kept (fail open)', async () => {
+    const none = await run1({ feasible: false, reason: 'arrival_window' });
+    expect(none.report).toMatchObject({ removed: 0, keptOther: 2 });
+    expect(none.report.byReason.arrival_window_unexplained).toBe(2);
+    const empty = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: [] }));
+    expect(empty.report).toMatchObject({ removed: 0, keptOther: 2 });
+  });
+
+  test('a removed slot logs the stops it would make late', async () => {
+    const { report } = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: ['s1', 's2'] }));
+    expect(report.removedSlots[0].lateVisitId).toBe('s1,s2');
+  });
+});
+
+
 describe('filterOfferedSlots — evaluation', () => {
   test('a 10:45 slot is evaluated at 10:45, with the legacy duration for its end', async () => {
     await run([slot(SOON, '10:45')], { durationMinutes: 90 });
     expect(arrivalRoute.evaluateArrivalPlacement).toHaveBeenCalledTimes(1);
     expect(arrivalRoute.evaluateArrivalPlacement.mock.calls[0][1])
-      .toEqual({ windowStart: '10:45', windowEnd: '12:15', durationMinutes: 90 });
+      .toEqual({ windowStart: '10:45', windowEnd: '12:15', durationMinutes: 90, explain: true });
   });
 
   test('the duration falls back to 60 and the planning minutes never appear', async () => {
@@ -173,8 +220,8 @@ describe('filterOfferedSlots — list safety', () => {
     expect(out).toBe(slots);
     expect(report.removed).toBe(1);
     const lines = logger.info.mock.calls.map(([l]) => l);
-    expect(lines[0]).toMatch(/^\[customer-route-check\] surface=reschedule mode=shadow offered=2 removed=1 kept_unverified=0 kept_other=1 floor_kept=false timed_out=false first_stop_hour=08 ms=\d+$/);
-    expect(lines[1]).toBe(`[customer-route-check] removed surface=reschedule date=${SOON} start=09:00 tech=tech-1 late=-`);
+    expect(lines[0]).toMatch(/^\[customer-route-check\] surface=reschedule mode=shadow offered=2 removed=1 kept_unverified=0 kept_other=1 target_late=0 baseline_late=0 day_end=0 floor_kept=false timed_out=false first_stop_hour=08 ms=\d+$/);
+    expect(lines[1]).toBe(`[customer-route-check] removed surface=reschedule date=${SOON} start=09:00 tech=tech-1 late=late-1`);
   });
 
   test('logs at most 5 removed-slot lines', async () => {
