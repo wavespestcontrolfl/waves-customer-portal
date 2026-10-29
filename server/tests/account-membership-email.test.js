@@ -427,6 +427,42 @@ describe('app intro tracker destination', () => {
   });
 });
 
+describe('sendMembershipRenewalReminder (annual prepay year-end notice)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a prepay term notice says "12 months prepaid" and drops the monthly rate even when the customer row has one', async () => {
+    setDbQueues({ customers: [chain({ first: customer({ monthly_rate: '159.00' }) }), chain({ first: customer({ monthly_rate: '159.00' }) })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 30,
+      termId: 'term-1',
+    });
+
+    const sent = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(sent.templateKey).toBe('membership.renewal_reminder');
+    expect(sent.payload.billing_cadence).toBe('12 months prepaid');
+    expect(sent.payload.monthly_rate).toBe('');
+  });
+
+  test('a termite plan 15/7-day notice keeps the existing cadence and rate payload', async () => {
+    setDbQueues({ customers: [chain({ first: customer({ monthly_rate: '159.00' }) }), chain({ first: customer({ monthly_rate: '159.00' }) })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 15,
+      termId: 'term-1',
+      termitePlan: true,
+    });
+
+    const sent = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(sent.payload.billing_cadence).toBe('monthly');
+    expect(sent.payload.monthly_rate).toBe('$159.00');
+  });
+});
+
 describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, slice 5)', () => {
   beforeEach(() => jest.clearAllMocks());
 

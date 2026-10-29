@@ -1047,3 +1047,191 @@ describe('NotificationBell admin "Recently done" (reopen an accidental Done)', (
     expect(screen.queryByRole('button', { name: /recently done/i })).toBeNull();
   });
 });
+
+describe('NotificationBell admin row buttons (actions)', () => {
+  const VERSION = '0123456789abcdef0123456789abcdef';
+  const rows = () => ([
+    { id: 'r1', category: 'referral', title: 'Possible referral: Fixture Friend', body: 'Came in through a link.', link: '/admin/referrals?tab=queue',
+      created_at: new Date().toISOString(), read_at: null, version: VERSION,
+      actions: [
+        { id: 'confirm-referrer', label: 'Confirm Fixture Referrer', prompt: 'Confirm Fixture Referrer as the referrer?' },
+        { id: 'not-referral', label: 'Not a referral' },
+      ] },
+    { id: 'live:overdue_invoices', category: 'alert', title: 'Overdue invoices', body: 'Three are overdue.', link: null,
+      created_at: new Date().toISOString(), read_at: null, actions: [{ id: 'nope', label: 'Should not show' }] },
+  ]);
+  const actionUrl = (id) => `/api/admin/notifications/r1/actions/${id}`;
+  const postCalls = () => global.fetch.mock.calls.filter(([, o]) => o?.method === 'POST');
+  // postResponse: what the action POST answers; list(): rows for each list read.
+  const setup = ({ postResponse, list = rows } = {}) => {
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (options.method === 'POST') return postResponse ? postResponse() : { ok: true, status: 200, json: async () => ({ success: true, message: 'Done.' }) };
+      if (options.method === 'PUT') return jsonResponse({ success: true });
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      return jsonResponse({ notifications: list() });
+    });
+  };
+  const failure = (status, body) => () => ({ ok: false, status, json: async () => body });
+  const openBell = async () => {
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Possible referral: Fixture Friend');
+  };
+
+  it('keeps only usable actions, and none on a live row or a customer bell', () => {
+    const { actionsFor } = _test;
+    const [persisted, live] = rows();
+    expect(actionsFor(persisted, 'admin').map((a) => a.id)).toEqual(['confirm-referrer', 'not-referral']);
+    expect(actionsFor(live, 'admin')).toEqual([]);
+    expect(actionsFor(persisted, 'customer')).toEqual([]);
+    expect(actionsFor({ ...persisted, actions: undefined }, 'admin')).toEqual([]);
+    expect(actionsFor({ ...persisted, actions: [{ id: 'x' }, null, { label: 'y' }] }, 'admin')).toEqual([]);
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('shows the server buttons on a persisted admin row only (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    setup();
+    try {
+      await openBell();
+      const primary = screen.getByRole('button', { name: 'Confirm Fixture Referrer' });
+      const secondary = screen.getByRole('button', { name: 'Not a referral' });
+      expect(primary).toHaveStyle({ background: '#18181B', color: '#FFFFFF' });
+      expect(secondary).toHaveStyle({ background: '#FFFFFF', color: '#18181B' });
+      expect(screen.queryByRole('button', { name: 'Should not show' })).toBeNull();
+      expect(primary.style.minHeight).toBe(width === 390 ? '44px' : '');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('shows no buttons on a customer bell', async () => {
+    setup();
+    render(<NotificationBell type="customer" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Possible referral: Fixture Friend');
+    expect(screen.queryByRole('button', { name: 'Confirm Fixture Referrer' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Not a referral' })).toBeNull();
+  });
+
+  it('asks first when the button has a prompt, Cancel restores, and the second tap posts with the version', async () => {
+    setup();
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Fixture Referrer' }));
+    expect(screen.getByText('Confirm Fixture Referrer as the referrer?')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Not a referral' })).toBeNull();
+    expect(postCalls()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText('Confirm Fixture Referrer as the referrer?')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Not a referral' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Fixture Referrer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Fixture Referrer' }));
+    await waitFor(() => expect(postCalls()).toHaveLength(1));
+    const [url, options] = postCalls()[0];
+    expect(url).toBe(actionUrl('confirm-referrer'));
+    expect(JSON.parse(options.body)).toEqual({ version: VERSION });
+  });
+
+  it('sends a button without a prompt on the first tap, disables the row while it runs, and ignores a second tap', async () => {
+    let release;
+    setup({ postResponse: () => new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, message: 'Marked.' }) }); }) });
+    await openBell();
+    const secondary = screen.getByRole('button', { name: 'Not a referral' });
+    fireEvent.click(secondary);
+    await waitFor(() => expect(screen.getByRole('button', { name: '…' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Confirm Fixture Referrer' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '…' }));
+    expect(postCalls()).toHaveLength(1);
+    expect(postCalls()[0][0]).toBe(actionUrl('not-referral'));
+    release();
+    await waitFor(() => expect(screen.queryByText('Possible referral: Fixture Friend')).toBeNull());
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('removes the row and shows the server message on success, then clears it when the panel closes (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    setup({ postResponse: () => ({ ok: true, status: 200, json: async () => ({ success: true, message: 'Referral confirmed. $25 credited to both accounts.' }) }) });
+    try {
+      await openBell();
+      fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+      expect(await screen.findByRole('status')).toHaveTextContent('Referral confirmed. $25 credited to both accounts.');
+      expect(screen.queryByText('Possible referral: Fixture Friend')).toBeNull();
+      expect(screen.getByText('Overdue invoices')).toBeInTheDocument();
+      expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: /^close/i }));
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      await screen.findByText('Overdue invoices');
+      expect(screen.queryByRole('status')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('on 409 changed, re-reads the list and says the alert changed', async () => {
+    let listCalls = 0;
+    setup({
+      postResponse: failure(409, { error: 'changed' }),
+      list: () => { listCalls += 1; return listCalls === 1 ? rows() : [{ ...rows()[0], title: 'Possible referral: Updated Friend' }]; },
+    });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByText('Possible referral: Updated Friend')).toBeInTheDocument();
+    expect(listCalls).toBe(2);
+    expect(screen.getByRole('status')).toHaveTextContent('That alert changed — the list was refreshed.');
+  });
+
+  it('on any other 409, re-reads the list and shows the server message (or a fallback)', async () => {
+    setup({ postResponse: failure(409, { error: 'already_handled', message: 'Someone already confirmed that referral.' }) });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Someone already confirmed that referral.');
+    cleanup();
+
+    setup({ postResponse: failure(409, { error: 'already_handled' }) });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('That alert was already handled.');
+  });
+
+  it('keeps the row and shows an inline error on a 500 or a network failure', async () => {
+    setup({ postResponse: failure(500, {}) });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't do that. Try again.");
+    expect(screen.getByText('Possible referral: Fixture Friend')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Not a referral' })).not.toBeDisabled();
+    expect(screen.queryByRole('status')).toBeNull();
+    cleanup();
+
+    setup({ postResponse: () => { throw new TypeError('network down'); } });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't do that. Try again.");
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('a tap never navigates or marks the row read (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    const previousLocation = window.location;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    setup();
+    const hrefSpy = vi.fn();
+    try {
+      await openBell();
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, set href(v) { hrefSpy(v); } },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm Fixture Referrer' }));
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Enter' });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+      await waitFor(() => expect(postCalls()).toHaveLength(1));
+      expect(hrefSpy).not.toHaveBeenCalled();
+      expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/read'))).toBe(false);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  });
+});
