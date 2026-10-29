@@ -137,6 +137,7 @@
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
@@ -4893,6 +4894,10 @@ const gates = {
   // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
   alertRetention: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase()),
 
+  // Admin alert catalog watch (owner 2026-10-29). Registered for logGateStatus only; NotificationService.create reads
+  // alertCatalogMode() at CALL time. 'watch' records muted alerts, no refusal. Kill switch: unset.
+  alertCatalog: String(process.env.GATE_ALERT_CATALOG || '').trim().toLowerCase() === 'watch',
+
   // Promise record evidence (owner 2026-10-29). Registered for logGateStatus only; consumers read
   // promiseRecordEvidenceMode() at CALL time. 'shadow' records, 'true' applies. Kill switch: unset.
   promiseRecordEvidence: ['shadow', 'true'].includes(String(process.env.GATE_PROMISE_RECORD_EVIDENCE || '').trim().toLowerCase()),
@@ -6908,6 +6913,13 @@ function secondTechLowsLive() {
 function alertRetentionMode() {
   const value = String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
+// GATE_ALERT_CATALOG read at CALL time: 'watch' or 'off' (NotificationService.create). 'watch' (trimmed, any
+// case) writes one audit_log row per Eastern day per distinct admin alert the bell policy silences, and
+// refuses nothing. Anything else is off: no read, no write. Unset is the kill.
+function alertCatalogMode() {
+  return String(process.env.GATE_ALERT_CATALOG || '').trim().toLowerCase() === 'watch' ? 'watch' : 'off';
 }
 
 // GATE_PROMISE_RECORD_EVIDENCE read at CALL time: 'shadow', 'true' or 'off' (services/sms-commitment-fulfillment.js
@@ -8978,6 +8990,8 @@ function alertClaudeQueueLive() {
 }
 // GATE_ALERT_CLAUDE_QUEUE reader, on its own line so gate PRs never conflict.
 module.exports.alertClaudeQueueLive = alertClaudeQueueLive;
+// GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
+module.exports.alertCatalogMode = alertCatalogMode;
 
 // GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
 // the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation

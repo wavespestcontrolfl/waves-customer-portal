@@ -704,6 +704,32 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     gateSpy.mockRestore(); allowSpy.mockRestore();
   });
 
+  // GATE_ALERT_CATALOG=watch (bell rebuild step D1): this silence returns before NotificationService.create, so it
+  // leaves the muted record itself; otherwise every muted registry event (payments, dashboard alerts) went uncounted.
+  test.each([['watch', 1], [undefined, 0]])('GATE_ALERT_CATALOG=%p: a registry event the bell policy silences leaves %p muted record(s)', async (mode, rows) => {
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+    const auditInsert = jest.fn(async () => []);
+    db.mockImplementation((table) => (
+      table === 'audit_log' ? { insert: auditInsert }
+        : table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
+    ));
+    if (mode) process.env.GATE_ALERT_CATALOG = mode;
+    try {
+      const stats = await triggerNotification('dashboard_alert', { title: `Catalog check ${mode}`, body: 'y' });
+      expect(stats.policySilenced).toBe(true);
+      expect(auditInsert).toHaveBeenCalledTimes(rows);
+      if (rows) {
+        expect(JSON.parse(auditInsert.mock.calls[0][0].metadata))
+          .toMatchObject({ category: TRIGGER_REGISTRY.dashboard_alert.category, triggerKey: 'dashboard_alert' });
+      }
+    } finally {
+      delete process.env.GATE_ALERT_CATALOG;
+      gateSpy.mockRestore(); allowSpy.mockRestore();
+    }
+  });
+
   // codex review, PR #4341 r1 P1: customer_landline_from_call's category
   // ('alert') default-denies under the gated policy — it must instead ring
   // via its own DEFAULT_ON_CATEGORIES membership (notification-bell-policy.js),
