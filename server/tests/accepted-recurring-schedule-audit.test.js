@@ -313,3 +313,22 @@ test('cadence-only repairs and later regressions on the same rows refresh alert 
   expect(check(e, rows.map((row) => ({ ...row, recurring_interval_days: 61 })))[0].evidenceKey).not.toBe(before.evidenceKey);
   expect(check(e, rows.map((row) => ({ ...row, date_exception: true })))[0].evidenceKey).not.toBe(before.evidenceKey);
 });
+
+test('the finding key stays put on routine row edits and moves when the finding does (GATE_ACCEPTED_PLAN_RING_ON_CHANGE)', () => {
+  const e = estimate({ estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }] } } } });
+  const rows = series('every_6_weeks', 9).map((row) => ({ ...row, service_type: 'Lawn Care', catalog_service_key: 'lawn_program',
+    service_key_snapshot: 'lawn_program', recurring_pattern: 'custom', recurring_interval_days: 60, row_revision: '100' }));
+  const before = check(e, rows)[0];
+  // Any UPDATE to a visit moves its xmin: new evidence, same finding.
+  const touched = check(e, rows.map((row) => ({ ...row, row_revision: '101' })))[0];
+  expect(touched.evidenceKey).not.toBe(before.evidenceKey);
+  expect(touched.findingKey).toBe(before.findingKey);
+  // A different wrong interval states the same issues and counts: still the same finding.
+  const otherInterval = check(e, rows.map((row) => ({ ...row, recurring_interval_days: 61 })))[0];
+  expect(otherInterval.issues).toEqual(before.issues);
+  expect(otherInterval.findingKey).toBe(before.findingKey);
+  // A lost application changes the recorded count and the issues: a new finding.
+  const fewer = check(e, rows.slice(0, 8))[0];
+  expect(fewer.recordedVisits).toBe(before.recordedVisits - 1);
+  expect(fewer.findingKey).not.toBe(before.findingKey);
+});

@@ -8912,6 +8912,17 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
+// GATE_ACCEPTED_PLAN_RING_ON_CHANGE read at CALL time, strict `=== 'true'`, dark in every environment
+// (owner 2026-10-29, "go"). On, the schedule-integrity watchdog versions its "Accepted recurring plan
+// needs schedule review" bell by the finding (issues, pattern, planned and recorded counts) instead of
+// every visit row's revision and date, so a routine visit edit no longer rings a standing bell again
+// or undoes a person's Done; a changed finding still rings. Off = today's behavior, byte for byte.
+function acceptedPlanRingOnChangeLive() {
+  return process.env.GATE_ACCEPTED_PLAN_RING_ON_CHANGE === 'true';
+}
+// GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
+module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
+
 // GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
 // On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is
 // 'person') or one of our own engineering faults (the classes in services/admin-alert-routing.js) is written Activity-only
