@@ -41,6 +41,7 @@ jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   claimPayrollLink: jest.fn(),
   unlinkPayrollMatched: jest.fn(),
+  healPayrollLinks: jest.fn(() => Promise.resolve(0)),
   // the snapshot heals have their own suites; the list routes here only shape the response
   resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
   healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
@@ -144,6 +145,11 @@ describe('unlink', () => {
     const res = await post(`/admin/tax/bank-import/${UUID_A}/unlink`, {});
     expect(res.status).toBe(200);
     expect(bankImport.unlinkPayrollMatched).toHaveBeenCalledWith(expect.objectContaining({ id: UUID_A }));
+    // the filing row was deleted (FK null) but the stored payrollMatch still says what the match did
+    bankImport.unlinkPayrollMatched.mockClear();
+    state.bankRow = { ...state.bankRow, matched_payroll_check_id: null, matched_tax_filing_id: null, suggestion: { payrollMatch: { filingId: UUID_B, reusedExpense: true } } };
+    expect((await post(`/admin/tax/bank-import/${UUID_A}/unlink`, {})).status).toBe(200);
+    expect(bankImport.unlinkPayrollMatched).toHaveBeenCalledTimes(1);
     bankImport.unlinkPayrollMatched.mockResolvedValue(false);
     expect((await post(`/admin/tax/bank-import/${UUID_A}/unlink`, {})).status).toBe(409);
   });

@@ -1922,6 +1922,8 @@ async function healBankImportSnapshot() {
   await bankImport.healEditedExpenseLinks();
   await bankImport.healUnreconciledLinks();
   await bankImport.healOrphanRefunds();
+  // a payroll-matched line a heal above released loses its payroll links before the page (or a claim) sees it
+  await bankImport.healPayrollLinks();
   // crash-leftover claim verifications finish here too (bounded sweeps):
   // the snapshots must not count a possibly-ambiguous claim as completed,
   // and a verifyPending payout is deliberately excluded from echo retries
@@ -3181,7 +3183,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       return res.json({ success: true, reconciliation: null });
     }
     // A line the payroll match linked to an expense the owner already had: the expense gets its category back.
-    if (row.status === 'matched_expense' && (row.matched_payroll_check_id || row.matched_tax_filing_id)) {
+    if (row.status === 'matched_expense' && (row.matched_payroll_check_id || row.matched_tax_filing_id || (row.suggestion && row.suggestion.payrollMatch))) {
       if (!(await bankImport.unlinkPayrollMatched(row))) return res.status(409).json({ error: 'row changed mid-flight — reload' });
       return res.json({ success: true, reconciliation: null });
     }

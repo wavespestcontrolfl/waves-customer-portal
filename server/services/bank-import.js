@@ -1070,7 +1070,11 @@ async function healEditedExpenseLinks() {
           }, ['verifyPending']),
           updated_at: new Date(),
         });
-      if (changed) reverted++;
+      if (changed) {
+        reverted++;
+        // a payroll-matched link released here loses its payroll provenance in the same transaction
+        if (payrollBankMatchOn()) await clearPayrollLinks(trx, link.id);
+      }
     });
   }
   return reverted;
@@ -1792,39 +1796,57 @@ async function unlinkPayrollMatched(row) {
   });
 }
 
-// Top of every gated pass: free a line whose expense was deleted (the owner's undo, see the unlink
-// route) from its paycheck link and remember the target as rejected, so the matcher does not
-// re-book what the owner just undid; then release the lines of voided pay runs.
+// A line that is back in review but still carries payroll provenance (a payroll FK, or the stored
+// payrollMatch): an expense the match reused gets its category back, the target is remembered as
+// rejected so the matcher does not re-book what was undone, and the snapshot goes. Atomic with the caller's
+// transaction when one is passed.
+async function clearPayrollLinks(trx, id) {
+  const o = await trx('bank_transactions').where({ id, status: 'unmatched' }).forUpdate()
+    .first('id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
+  if (!o) return false;
+  const sug = o.suggestion || {};
+  if (!o.matched_payroll_check_id && !o.matched_tax_filing_id && !sug.payrollMatch) return false;
+  const pm = sug.payrollMatch || null;
+  // an expense the match reused and another path (an edit heal, a generic unlink) released
+  if (pm && pm.reusedExpense && pm.expenseId) await releasePayrollExpense(trx, { matched_expense_id: pm.expenseId, suggestion: sug });
+  const patch = {};
+  const checkId = o.matched_payroll_check_id || (pm && pm.checkId) || null;
+  const filingId = o.matched_tax_filing_id || (pm && pm.filingId) || null;
+  if (checkId) patch.rejectedPayrollCheckIds = [...new Set([...(sug.rejectedPayrollCheckIds || []), checkId])];
+  if (filingId) patch.rejectedTaxFilingIds = [...new Set([...(sug.rejectedTaxFilingIds || []), filingId])];
+  await trx('bank_transactions').where({ id: o.id, status: 'unmatched' }).update({
+    matched_payroll_check_id: null,
+    matched_tax_filing_id: null,
+    suggestion: suggestionMerge(patch, ['payrollMatch']),
+    updated_at: new Date(),
+  });
+  return true;
+}
+
+// Top of every gated pass (and of every Bank Import snapshot): free a line whose expense was deleted or
+// unlinked (the owner's undo, an edit heal) from its paycheck link, then release the lines of voided
+// pay runs and reconcile tax links. Gate off: nothing.
 async function healPayrollLinks() {
+  if (!payrollBankMatchOn()) return 0;
   const orphans = await db('bank_transactions')
     .where({ status: 'unmatched' })
-    .where(function linked() { this.whereNotNull('matched_payroll_check_id').orWhereNotNull('matched_tax_filing_id'); })
-    .select('id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
+    .where(function linked() {
+      this.whereNotNull('matched_payroll_check_id').orWhereNotNull('matched_tax_filing_id').orWhereRaw("jsonb_exists(suggestion, 'payrollMatch')");
+    })
+    .select('id');
+  let cleared = 0;
   for (const o of orphans) {
-    const sug = o.suggestion || {};
-    const patch = {};
-    // an expense the match reused and another path (an edit heal) unlinked: give it its category back
-    // before the snapshot goes
-    if (sug.payrollMatch && sug.payrollMatch.reusedExpense && sug.payrollMatch.expenseId) {
-      await db.transaction((trx) => releasePayrollExpense(trx, { matched_expense_id: sug.payrollMatch.expenseId, suggestion: sug }));
-    }
-    if (o.matched_payroll_check_id) patch.rejectedPayrollCheckIds = [...new Set([...(sug.rejectedPayrollCheckIds || []), o.matched_payroll_check_id])];
-    if (o.matched_tax_filing_id) patch.rejectedTaxFilingIds = [...new Set([...(sug.rejectedTaxFilingIds || []), o.matched_tax_filing_id])];
-    await db('bank_transactions').where({ id: o.id, status: 'unmatched' }).update({
-      matched_payroll_check_id: null,
-      matched_tax_filing_id: null,
-      suggestion: suggestionMerge(patch, ['payrollMatch']),
-      updated_at: new Date(),
-    });
+    if (await db.transaction((trx) => clearPayrollLinks(trx, o.id))) cleared++;
   }
-  return orphans.length + await releaseVoidedPayrollLinks() + await reconcileTaxLinks();
+  return cleared + await releaseVoidedPayrollLinks() + await reconcileTaxLinks();
 }
 
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const payrollOn = payrollBankMatchOn();
-  if (payrollOn) await healPayrollLinks();
   const reconciliation = await retryPendingReconciliations();
+  // after the expense-link heals above: a link they released must lose its payroll provenance before any claim
+  if (payrollOn) await healPayrollLinks();
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
@@ -2478,6 +2500,7 @@ module.exports = {
   resetDanglingLinks,
   claimPayrollLink,
   unlinkPayrollMatched,
+  healPayrollLinks,
   releaseVoidedPayrollLinks,
   reconcileTaxLinks,
   healEditedExpenseLinks,

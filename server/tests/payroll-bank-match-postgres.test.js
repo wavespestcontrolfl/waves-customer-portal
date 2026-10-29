@@ -276,6 +276,34 @@ postgres('payroll bank match in the bank import', () => {
         expect((await row(id)).suggestion.rejectedPayrollCheckIds).toEqual([checkA]);
       });
 
+      it('an edit heal that releases a reused expense clears the payroll links in the same pass, before another claim', async () => {
+        const expenseId = await manual({ tax_deductible_amount: '812.63' });
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        await bankImport.runDeterministicMatching();
+        await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
+        // the owner edits the expense out of the line's window: the edit heal releases the link
+        await trx('expenses').where({ id: expenseId }).update({ expense_date: '2026-09-01' });
+        expect(await bankImport.healEditedExpenseLinks()).toBe(1);
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payroll_check_id: null });
+        expect(r.suggestion.payrollMatch).toBeUndefined();
+        expect(r.suggestion.rejectedPayrollCheckIds).toEqual([checkA]);
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '812.63' });
+      });
+
+      it('a line whose filing row was deleted and whose reused expense was generically unlinked is still cleaned', async () => {
+        const expenseId = await manual({ tax_deductible_amount: '350.00', amount: '350.00', vendor_name: 'IRS sample' });
+        const id = await line('IRS USATAXPYMT 270012345', '350.00', '2026-11-13');
+        await bankImport.runDeterministicMatching();
+        await bankImport.claimPayrollLink({ row: await row(id), filing: { id: filingId }, by: 'owner', expenseId });
+        await trx('tax_filing_calendar').where({ id: filingId }).del();
+        // generic unlink path: status back, expense link cleared, payrollMatch left behind, both FKs already null
+        await trx('bank_transactions').where({ id }).update({ status: 'unmatched', matched_expense_id: null, match_method: null });
+        await bankImport.runDeterministicMatching();
+        expect((await row(id)).suggestion.payrollMatch).toBeUndefined();
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '350.00' });
+      });
+
       it('names the existing expense beside a suggested paycheck too (a tie, a one-cent miss)', async () => {
         const expenseId = await manual({ vendor_name: 'Sample Beta pay', amount: '770.11' });
         const near = await line('ONLINE TRANSFER', '770.11', '2026-10-29');
