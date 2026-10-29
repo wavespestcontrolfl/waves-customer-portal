@@ -24,8 +24,11 @@ const SETTINGS = {
 };
 const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
 
+// The drive clock refines the calibrated model, so it needs
+// GATE_DRIVE_TIME_CALIBRATION too: with that off, every leg, Google's park
+// minutes and the saved label all stay legacy (pre-push P1).
 function driveClockLive() {
-  return gateEnvValue('GATE_DRIVE_CLOCK');
+  return gateEnvValue('GATE_DRIVE_CLOCK') && gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
 }
 
 function driveClockSetting(name) {

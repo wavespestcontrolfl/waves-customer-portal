@@ -155,8 +155,15 @@ describe('GATE_DRIVE_CLOCK', () => {
   const answerWith = (duration) => jest.fn(async () => ({ ok: true, json: async () => [
     { originIndex: 0, destinationIndex: 0, status: {}, condition: 'ROUTE_EXISTS', duration },
   ] }));
-  beforeEach(() => { process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key'; });
+  // The drive clock needs the calibrated model on, as it is live.
+  const savedCalibration = process.env.GATE_DRIVE_TIME_CALIBRATION;
+  beforeEach(() => {
+    process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  });
   afterEach(() => {
+    if (savedCalibration === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    else process.env.GATE_DRIVE_TIME_CALIBRATION = savedCalibration;
     delete process.env.GOOGLE_MAPS_API_KEY;
     delete process.env[CLOCK];
     delete process.env.DRIVE_CLOCK_PARK_MINUTES;

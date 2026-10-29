@@ -366,4 +366,21 @@ describe('GATE_DRIVE_CLOCK estimate legs', () => {
     delete process.env[GATE];
     expect(driveModelLabel()).toBe('legacy');
   });
+
+  // The drive clock refines the calibrated model: with calibration off it
+  // does nothing, so the label, the estimate and Google's park minutes agree.
+  test.each([
+    [false, false, 'legacy', false],
+    [false, true, 'legacy', false],
+    [true, false, 'calibrated', false],
+    [true, true, 'drive_clock', true],
+  ])('calibration %s, drive clock %s: label %s, live %s', (calibration, clock, label, live) => {
+    const { driveModelLabel, driveClockLive, parkedMinutes } = require('../services/scheduling/drive-clock');
+    if (calibration) process.env[GATE] = 'true'; else delete process.env[GATE];
+    if (clock) process.env[CLOCK] = 'true'; else delete process.env[CLOCK];
+    expect(driveModelLabel()).toBe(label);
+    expect(driveClockLive()).toBe(live);
+    expect(parkedMinutes(10)).toBe(live ? 14 : 10);
+    expect(milesToDriveMinutes(10)).toBe(live ? 30 : (calibration ? 28 : milesToDriveMinutes(10)));
+  });
 });
