@@ -332,14 +332,29 @@ postgres('payroll review bonus import', () => {
       expect(await trx('payroll_pay_lines').where({ source_id: later }).first()).toBeUndefined();
     });
 
-    it('still pays and reopens payouts of lines a run paid', async () => {
+    it('takes every open imported line off the next run, even one whose payout is still earned', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W1);
       const bonus = await payout(id, '2026-09-16T15:00:00Z');
       const created = await draft(W1);
+      expect(await importedLines()).toHaveLength(1);
       delete process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT;
+      // Finalizing the old numbers is refused: the line came off, so the draft is stale.
+      expect((await finalize(created.body.run.id)).status).toBe(409);
+      expect(await importedLines()).toHaveLength(0);
+      const shown = (await api('GET', `/runs/${created.body.run.id}`)).body.run;
+      expect(byName(shown, 'Sample Alpha').reviewBonusCents).toBe(0);
+      expect((await payoutRow(bonus)).status).toBe('earned');
+    });
+
+    it('still reopens the payout of a line a run paid when that run is voided', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const bonus = await payout(id, '2026-09-16T15:00:00Z');
+      const created = await draft(W1);
       expect((await finalize(created.body.run.id)).status).toBe(200);
       expect((await payoutRow(bonus)).status).toBe('paid');
+      delete process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT;
       expect((await voidRun(created.body.run.id)).status).toBe(200);
       expect((await payoutRow(bonus)).status).toBe('earned');
     });

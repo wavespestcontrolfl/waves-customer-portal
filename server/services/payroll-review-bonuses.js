@@ -36,9 +36,11 @@ const PAYOUT_COLUMNS = ['p.id', 'p.technician_id', 'p.amount_cents', 'p.status']
 
 /**
  * Deletes the open imported lines whose payout no longer matches them (paid, gone,
- * moved to another technician, other amount or week). Returns the payout ids dropped.
+ * moved to another technician, other amount or week), or every open imported line
+ * with dropAll (the import gate is off: payroll stops paying review bonuses and they
+ * wait on the Reviews page again). Returns the payout ids dropped.
  */
-async function dropStaleLines(trx, { lock }) {
+async function dropStaleLines(trx, { lock, dropAll }) {
   const linesQuery = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
     .select('id', 'technician_id', 'amount_cents', 'source_id', trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"));
   if (lock) linesQuery.forUpdate();
@@ -49,7 +51,7 @@ async function dropStaleLines(trx, { lock }) {
     .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
   if (lock) payoutQuery.forUpdate('p');
   const payouts = new Map((await payoutQuery).map((row) => [row.id, row]));
-  const stale = lines.filter((line) => {
+  const stale = dropAll ? lines : lines.filter((line) => {
     const payout = payouts.get(line.source_id);
     return !payout || payout.status !== 'earned' || payout.technician_id !== line.technician_id
       || Number(payout.amount_cents) !== Number(line.amount_cents)
@@ -93,14 +95,15 @@ async function addMissingLines(trx, weekEnd, { lock }) {
  * Makes the open review bonus lines match the payouts, for the pay run of the week ending
  * `weekEnd`. Take it inside the pay run's transaction, after the payroll lock and before
  * the run is worked out. With pay lines off it does nothing. With the import gate off it
- * only drops stale lines (a line imported earlier whose payout was paid by hand). With
+ * only drops lines: every open imported line, so payroll stops paying review bonuses. With
  * lock, the payout rows and the open imported lines are read FOR UPDATE, so a manual
  * mark-paid waits for the pay run's transaction. Returns { removed, added } (counts).
  */
 async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null } = {}) {
   if (!payLinesOn()) return { removed: 0, added: 0 };
-  const removedIds = await dropStaleLines(trx, { lock });
-  const addedIds = importOn() ? await addMissingLines(trx, weekEnd, { lock }) : [];
+  const importing = importOn();
+  const removedIds = await dropStaleLines(trx, { lock, dropAll: !importing });
+  const addedIds = importing ? await addMissingLines(trx, weekEnd, { lock }) : [];
   if (removedIds.length || addedIds.length) {
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
