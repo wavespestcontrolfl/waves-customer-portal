@@ -80,8 +80,10 @@ const AFTER_PAYMENT_PROBES = [
   {
     code: 'later_payment',
     message: 'Another payment or credit was recorded on this invoice after this one, so it cannot be undone here.',
+    // Only money after this payment: rows written later, whose status is not failed or canceled (a saved-card attempt that was declined
+    // BEFORE the office recorded this payment carries the same description prefix but moved no money).
     sql: `SELECT 1 FROM payments WHERE customer_id = :customerId AND id <> :paymentId AND starts_with(description, :descriptionPrefix)
-            AND metadata->'${UNDO_NOTE_KEY}' IS NULL
+            AND created_at > :since AND status NOT IN ('failed', 'canceled')
           UNION ALL SELECT 1 FROM customer_credit_ledger WHERE invoice_id = :invoiceId AND created_at >= :since
           UNION ALL SELECT 1 FROM stripe_orphan_charges WHERE invoice_id = :invoiceId AND created_at >= :since`,
   },
@@ -177,14 +179,27 @@ async function describeManualPaymentUndo(invoiceId) {
   };
 }
 
-// Payment-failed admin bells the payment's settlement closed ("The invoice was paid"): the invoice is unpaid again, so they reopen.
-// Only a bell this payment closed (done_at since the payment) — one a person closed earlier keeps its earlier done_at and is left.
-function reopenPaymentFailedBells(trx, invoiceId, since) {
-  return trx('notifications')
-    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: 'The invoice was paid' })
-    .whereRaw("metadata->>'triggerKey' = 'payment_failed' AND metadata->'payload'->>'invoiceId' = ?", [String(invoiceId)])
+// Payment-failed admin bells the payment's settlement closed ("The invoice was paid"): the invoice is unpaid again, so they reopen. The
+// closer's own link resolution picks them (payment-failed-allocation.js: payload.invoiceId, payload.allocationInvoiceIds, and
+// payload.paymentIntentId through the ledger's metadata.invoice_id, which also covers legacy bells and combined allocations whose
+// representative invoice is another one). Only a bell closed since the payment: one a person closed earlier keeps its earlier done_at
+// (or a resolution of their own) and is left.
+async function reopenPaymentFailedBells(trx, invoiceId, since) {
+  const { RESOLUTION } = require('./payment-failed-alert-close');
+  const { parseJson, failedAllocationInvoiceIds } = require('./payment-failed-allocation');
+  const closed = await trx('notifications')
+    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
+    .whereRaw("metadata->>'triggerKey' = 'payment_failed'")
     .where('done_at', '>=', since)
-    .update({ done_at: null, done_by: null, resolution: null });
+    .select('id', 'metadata');
+  const reopen = [];
+  for (const bell of closed) {
+    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = parseJson(bell.metadata).payload || {};
+    const allocation = await failedAllocationInvoiceIds(trx, { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds });
+    if (allocation.includes(String(invoiceId))) reopen.push(bell.id);
+  }
+  if (!reopen.length) return 0;
+  return trx('notifications').whereIn('id', reopen).update({ done_at: null, done_by: null, resolution: null });
 }
 
 async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'admin', undoneByTechnicianId = null } = {}) {

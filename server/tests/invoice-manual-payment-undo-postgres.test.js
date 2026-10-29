@@ -30,6 +30,7 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
   let undoManualPayment;
   let describeManualPaymentUndo;
   const customerIds = [];
+  const BELL_TITLE = 'Payment failed (synthetic undo)';
 
   beforeAll(() => {
     const connection = process.env.DATABASE_URL;
@@ -58,7 +59,7 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     await database('review_requests').whereIn('customer_id', ids).del();
     await database('activity_log').whereIn('customer_id', ids).del();
     await database('payments').whereIn('customer_id', ids).del();
-    await database('notifications').whereRaw("metadata->'payload'->>'invoiceId' = ANY(?)", [invoiceIds.map(String)]).del();
+    await database('notifications').where({ title: BELL_TITLE }).del();
     await database('invoices').whereIn('customer_id', ids).del();
     await database('customers').whereIn('id', ids).del();
   });
@@ -115,7 +116,7 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
       invoice_id: invoice.id, customer_id: invoice.customer_id, status: 'active', step_index: 1, touches_sent: 1, next_touch_at: new Date(Date.now() + 3600 * 1000),
     });
     const [bell] = await database('notifications').insert({
-      recipient_type: 'admin', category: 'payment', title: 'Payment failed (synthetic)',
+      recipient_type: 'admin', category: 'payment', title: BELL_TITLE,
       metadata: JSON.stringify({ triggerKey: 'payment_failed', payload: { invoiceId: invoice.id } }),
     }).returning('id');
 
@@ -151,6 +152,49 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     await expect(undo(invoice.id, { reason: 'second typo' })).resolves.toMatchObject({ payment: { method: 'cash' } });
   });
 
+  it('a saved-card attempt declined BEFORE the payment was recorded does not block Undo', async () => {
+    const invoice = await makeInvoice();
+    // chargeInvoiceWithSavedCard's failed row: the same description prefix as a manual payment, but earlier and no money.
+    await database('payments').insert({
+      customer_id: invoice.customer_id, amount: 100, status: 'failed', payment_date: new Date(), created_at: new Date(Date.now() - 3600 * 1000),
+      description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
+    });
+    await record(invoice.id);
+    await expect(undo(invoice.id)).resolves.toMatchObject({ payment: { method: 'check' } });
+    expect((await database('payments').where({ customer_id: invoice.customer_id, status: 'failed' }))).toHaveLength(1);
+  });
+
+  it('reopens exactly the payment-failed bells this payment closed: by invoice, by a legacy payment intent, by a combined allocation', async () => {
+    const invoice = await makeInvoice();
+    const other = await makeInvoice({ status: 'paid', paid_at: new Date() });
+    const bell = async (payload, over = {}) => (await database('notifications').insert({
+      recipient_type: 'admin', category: 'payment', title: BELL_TITLE, metadata: JSON.stringify({ triggerKey: 'payment_failed', payload }), ...over,
+    }).returning('id'))[0].id;
+    // The failed attempts' ledger rows: the closer (and Undo) resolve a payment intent to its invoices through metadata.invoice_id.
+    const attempt = (customerId, paymentIntent, invoiceId) => database('payments').insert({
+      customer_id: customerId, amount: 100, status: 'failed', payment_date: new Date(), description: 'Card attempt (synthetic)',
+      stripe_payment_intent_id: paymentIntent, metadata: JSON.stringify({ invoice_id: invoiceId }),
+    });
+    const suffix = randomUUID().slice(0, 8);
+    await attempt(invoice.customer_id, `pi_legacy_${suffix}`, invoice.id);
+    await attempt(invoice.customer_id, `pi_combined_${suffix}`, invoice.id);
+    await attempt(other.customer_id, `pi_combined_${suffix}`, other.id);
+    const byInvoice = await bell({ invoiceId: invoice.id });
+    const legacy = await bell({ paymentIntentId: `pi_legacy_${suffix}` });
+    const combined = await bell({ invoiceId: other.id, paymentIntentId: `pi_combined_${suffix}`, allocationInvoiceIds: [invoice.id, other.id] });
+    // Closed by the payments closer for ANOTHER invoice, at the same time: not this payment's.
+    const unrelated = await bell({ invoiceId: other.id }, { done_at: new Date(), done_by: 'payments', resolution: 'The invoice was paid' });
+    const isOpen = async (id) => (await database('notifications').where({ id }).first()).done_at === null;
+
+    await record(invoice.id);
+    expect(await Promise.all([byInvoice, legacy, combined, unrelated].map(isOpen))).toEqual([false, false, false, false]);
+
+    await undo(invoice.id);
+
+    expect(await Promise.all([byInvoice, legacy, combined, unrelated].map(isOpen))).toEqual([true, true, true, false]);
+    expect(await database('notifications').where({ id: byInvoice }).first()).toMatchObject({ done_by: null, resolution: null });
+  });
+
   it('restores a draft to draft: an invoice that was never sent does not become sent', async () => {
     const invoice = await makeInvoice({ status: 'draft', sent_at: null, viewed_at: null });
     await record(invoice.id);
@@ -174,6 +218,10 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     ['a second payment on the invoice', 'later_payment', async (id) => {
       const current = await row(id);
       await database('payments').insert({ customer_id: current.customer_id, amount: 5, status: 'paid', payment_date: new Date(), description: `Invoice ${current.invoice_number} — cash` });
+    }],
+    ['a later saved-card payment still processing', 'later_payment', async (id) => {
+      const current = await row(id);
+      await database('payments').insert({ customer_id: current.customer_id, amount: 100, status: 'processing', payment_date: new Date(), description: `Invoice ${current.invoice_number} — card on file` });
     }],
     ['a refund on the ledger row', 'payment_row', async (id) => database('payments').where({ customer_id: (await row(id)).customer_id }).update({ refund_amount: 10 })],
     ['an ad conversion upload', 'synced', (id) => database('meta_conversion_uploads').insert({ invoice_id: id, conversion_type: 'purchase', event_id: `synthetic-${id}`, event_name: 'Purchase' })],
