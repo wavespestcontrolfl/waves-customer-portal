@@ -38,8 +38,10 @@ function linkCell(url, label, registered) {
   return registered ? { text: 'missing', link: null, bold: true, missing: true } : { text: 'n/a', link: null, bold: false, missing: false };
 }
 
-function introLine({ businessName, licenseNumber, asOf }) {
-  return `${businessName} · FDACS license ${licenseNumber} · Products applied in the 12 months to ${longDay(asOf)} (ET). `
+function introLine({ businessName, licenseNumber, asOf, hasBidRows = false }) {
+  // With bid products the sentence adds ", then products proposed for bid work"; with none it is the text it always was.
+  const scope = hasBidRows ? ', then products proposed for bid work.' : '.';
+  return `${businessName} · FDACS license ${licenseNumber} · Products applied in the 12 months to ${longDay(asOf)} (ET)${scope} `
     + 'Every pesticide is EPA-registered and used according to its label. '
     + 'Current labels and Safety Data Sheets are linked and are available in print on request.';
 }
@@ -132,8 +134,9 @@ function drawTable(doc, title, rows, startY) {
 }
 
 // rows: [{ name, active_ingredient, epa_reg_number, label_url, sds_url }] already sorted. asOf: an Eastern calendar day.
-// Resolves to the PDF bytes.
-function buildProductListPdf({ rows, asOf, businessName, licenseNumber }) {
+// bidRows: the same shape, products proposed for bid work but not applied in the 12 months; with none (the default) the document
+// is exactly the one without this argument. Resolves to the PDF bytes.
+function buildProductListPdf({ rows, bidRows = [], asOf, businessName, licenseNumber }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true, info: { Title: 'Product List', Author: businessName } });
     const chunks = [];
@@ -144,12 +147,13 @@ function buildProductListPdf({ rows, asOf, businessName, licenseNumber }) {
       const { registered, other } = splitRows(rows);
       let y = drawFieldMasthead(doc, { title: 'Product List', eyebrow: 'Bid document' });
       doc.font('Helvetica').fontSize(PDF_TYPE.body).fillColor(PDF_COLORS.body);
-      const intro = introLine({ businessName, licenseNumber, asOf });
+      const intro = introLine({ businessName, licenseNumber, asOf, hasBidRows: bidRows.length > 0 });
       const introOptions = { width: FIELD_PDF_LAYOUT.contentWidth, lineGap: 2 };
       doc.text(intro, FIELD_PDF_LAYOUT.left, y, introOptions);
       y += doc.heightOfString(intro, introOptions) + 16;
       y = drawTable(doc, `Registered pesticides (${registered.length})`, registered, y);
-      drawTable(doc, `Fertilizers, adjuvants and other products (${other.length})`, other, y);
+      y = drawTable(doc, `Fertilizers, adjuvants and other products (${other.length})`, other, y);
+      if (bidRows.length) drawTable(doc, `Products proposed for bid work (not applied in the 12 months to ${longDay(asOf)})`, bidRows, y);
       const range = doc.bufferedPageRange();
       for (let i = range.start; i < range.start + range.count; i += 1) {
         doc.switchToPage(i);
