@@ -35,6 +35,7 @@
  *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
+ *   GATE_IB_AGENT_REVIEW_DRAFTS=true (the Intelligence Bar's Agent Review draft tools, owner ask 2026-10-28, gap 7: an admin can list the AI-suggested replies waiting in the Communications composer as Agent Review drafts (list_agent_review_drafts), and approve (approve_agent_review_draft: send the draft as written, recorded accepted), revise (revise_agent_review_draft: send edited wording, recorded corrected) or ignore (ignore_agent_review_draft: record ignored, no text) ONE of them. Approve and revise run the composer's own POST /admin/communications/sms handler in process with the draft attached (its verification, atomic claim, thread parking, provider-boundary checks, canonical sender and accepted / corrected settlement), are ALWAYS a confirm card on every login including the owner's, and show the exact text, the recipient name and masked number, the inbound text it answers and any newer-text warning; the send uses exactly the carded text and stops if the customer texts again before the provider handoff. Needs GATE_IB_PLATFORM. Read at call time via ibAgentReviewDraftsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_SET_BILL_TO=true (the Intelligence Bar's set_customer_bill_to write tool, owner ruling 2026-10-21 "BUILD" on IB gap #9: an admin can set ONE self-pay customer's Bill-To payer on a confirm card (never owner-direct), by running the customer page's own save handler (PUT /admin/customers/:id with only payerId) in process. Future billing only: offered only when the customer has no open invoice without a payer and no open checkout, so no invoice moves and nothing is cancelled; sends nothing. Changing or removing an existing payer stays on the customer page. Needs GATE_IB_PLATFORM. Read at call time via ibSetBillToLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_RESOLVE_DISPATCH_ALERT=true (the Intelligence Bar's resolve_dispatch_alert write tool, owner ask 2026-10-28 IB gap #4: an admin can resolve ONE Action Queue card on the dispatch board on a confirm card (admin only, never owner-direct), by running the board's own single-card Resolve (PATCH /admin/dispatch/alerts/:id/resolve) through the shared resolveAlertAsDispatcher. Marks the card resolved by that admin, closes the linked tracking bells, and tells every open dispatch board to drop the card; sends nothing to a customer or technician and changes no visit. Clear-all stays on the board; a card that needs a decision (a visit not closed out) is refused. Needs GATE_IB_PLATFORM. Read at call time via ibResolveDispatchAlertLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_UNBLOCK_SENDER=true (the Intelligence Bar's unblock_sender write tool, owner ask 2026-10-28 IB gap #6: an admin can unblock ONE blocked email sender or domain on a confirm card (admin only, never owner-direct), by running the Email page's own unblock (DELETE /admin/email/blocked/:id) through the shared unblockSender. Removes the Gmail trash filter when one is on file and deletes the blocklist row; mail already in Trash stays there; sends nothing. Needs GATE_IB_PLATFORM. Read at call time via ibUnblockSenderLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
@@ -60,6 +61,7 @@
  *   GATE_TECH_LOGIN_PRIVACY=true (owner 2026-10-25, second technician: a login with the technician role sees only its own customers' alerts and promises. Customer-text bells and pushes (sms_reply, reschedule intent, voicemail callback, service report and completion text failures, Twilio failures, job complete, follow-up bells) reach a technician only when the customer is on that technician's route (the same rule the Communications routes use); an alert with no customer keeps today's routing. The Promises tab feeds (proposals, open commitments, auto-closed) list only own-customer rows and closing, dismissing or reopening another customer's promise answers 404. The customer-deleted-account push goes to admin-role staff only. Admin and office logins see everything as before. Read at call time via techLoginPrivacyLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer.)
  *   GATE_ESTIMATE_SLOT_ONE_PER_HOUR=true (owner 2026-10-25, second technician: the estimate time picker lists ONE opening for each date and start time, not one per technician. Of the openings sharing a start the picker keeps the one it sorts first (route-optimal, then the shortest detour to a nearby job, then the slot id); the kept opening is a complete reservable slot with its own technician and hold. The "Only N openings" count and every cut of the list follow the collapsed list, so a repeated time no longer pushes other times out. Same list the page, its search, the fresh recheck, one-tap purchase and the estimate-time text drafts read. Reserve and accept are unchanged. Read at call time via estimateSlotOnePerHourLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer by itself.)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
+ *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_CALL_ADDRESS_FAMILY_CARD=true (owner 2026-10-24 "yes build": a caller on a number no account carries who states a service address a live customer already has no longer gets a new customer record. The call files ONE suggest-only office card, "<caller> called about <customer>'s home. Add as a contact?", with two actions: Attach as contact (the caller's name, number and role go into the first free service-contact slot of that customer and the call is relinked to it) and New customer (the card is closed and the call is reprocessed, which creates the record the old way). While the gate is on, any family-account card basis also keeps the pass from creating a customer for the call. Read at call time via callAddressFamilyCardLive(), strict 'true', dark by default; off = byte-identical to before. Sends no message and starts no opt-in.)
  *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
@@ -3617,16 +3619,6 @@ const gates = {
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
 
-  // WDO Report Payment Hold — "pay before you get the report". Arms the
-  // hold option on the WDO send-with-invoice flow: the customer gets the
-  // invoice + pay link only, and the FDACS-13645 report is emailed
-  // automatically once the invoice settles (release sweep). A money-path +
-  // customer-facing delivery change, so it FAILS CLOSED (explicit opt-in in
-  // EVERY environment). The gate governs CREATING new holds only — releases
-  // of already-held reports (payment sweep, manual send, public 402 gate)
-  // always run, so flipping it off can never strand a held report.
-  wdoReportPaymentHold: process.env.GATE_WDO_REPORT_PAYMENT_HOLD === 'true',
-
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
   // checked, mint the visit's invoice, apply the prepaid amount as payment, and
@@ -5680,6 +5672,13 @@ function setupFeeSettledAnywhereLive() {
   return process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE === 'true';
 }
 
+// GATE_SETUP_FEE_APPLICATION_SETTLED read at CALL time — strict `=== 'true'`; unset = kill.
+// setup-fee-alert-reconcile.js: a parked visit's application is billed when a live prepay
+// year bought it or the visit's own invoices bill its frozen charge (base + its add-ons).
+function setupFeeApplicationSettledLive() {
+  return process.env.GATE_SETUP_FEE_APPLICATION_SETTLED === 'true';
+}
+
 // GATE_CALL_PROMISE_AI_CLOSE read at CALL time — strict `=== 'true'`; unset = kill.
 // call-promise-ai-close.js: the nightly watchdog pass and the Owed queue read run the
 // text-follow-up AI check over a call promise the fixed rules left open.
@@ -5877,6 +5876,14 @@ function billToNoVisitInvoicesLive() {
 // offered and executable only while on. It texts a customer later: the flip is the owner's. Kill: unset.
 function ibScheduleSmsLive() {
   return process.env.GATE_IB_SCHEDULE_SMS === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_AGENT_REVIEW_DRAFTS read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tools exist only on the platform path). The Intelligence Bar's Agent Review
+// draft tools (services/intelligence-bar/agent-review-tools.js): offered and executable only while
+// on. Kill: unset.
+function ibAgentReviewDraftsLive() {
+  return process.env.GATE_IB_AGENT_REVIEW_DRAFTS === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
 // GATE_IB_COMPOSE_EMAIL read at CALL time — strict `=== 'true'`, dark, and it needs
@@ -8447,6 +8454,8 @@ module.exports.ibPaymentPlanLive = ibPaymentPlanLive;
 module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
 // GATE_IB_SET_BILL_TO reader, on its own line so gate PRs never conflict.
 module.exports.ibSetBillToLive = ibSetBillToLive;
+// GATE_IB_AGENT_REVIEW_DRAFTS reader, on its own line so gate PRs never conflict.
+module.exports.ibAgentReviewDraftsLive = ibAgentReviewDraftsLive;
 // GATE_IB_RESOLVE_DISPATCH_ALERT reader, on its own line so gate PRs never conflict.
 module.exports.ibResolveDispatchAlertLive = ibResolveDispatchAlertLive;
 // GATE_IB_UNBLOCK_SENDER reader, on its own line so gate PRs never conflict.
@@ -8852,3 +8861,5 @@ module.exports.techCostRatesLive = techCostRatesLive;
 module.exports.techOpenTimeLive = techOpenTimeLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE reader, on its own line so gate PRs never conflict.
 module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNoticeReconcileLive;
+// GATE_SETUP_FEE_APPLICATION_SETTLED reader, on its own line so gate PRs never conflict.
+module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;

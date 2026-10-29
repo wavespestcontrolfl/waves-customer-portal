@@ -185,6 +185,70 @@ const SHAPES = {
     kept: { effectiveMode: 'backstop_on_no_answer', ringTimeoutSec: 30 },
     content: { answersFirstReason: 'ring_staff_first' },
   },
+  // admin-health.js GET /scores/:customerId: { score (customers.* plus the score columns, the six detail objects parsed), history[] (customer_health_history rows),
+  // alerts[] (active customer_health_alerts rows, JSON columns parsed) }. customer-health.js writes the details (counters only) and churn_signals ({ signal, severity, message });
+  // health-alerts.js composes each alert's title and description from scores and counts; resolution_notes is staff-typed.
+  '/admin/health/scores/:customerId': {
+    params: { customerId: UUID },
+    body: {
+      score: {
+        id: UUID, first_name: 'Sample', last_name: 'Person', email: 'sample@example.test', phone: '+15555550111', address_line1: '2 Example Way', stripe_customer_id: 'cus_PLACEHOLDER', gate_code: 'PLACEHOLDER-GATE',
+        monthly_rate: 89, waveguard_tier: 'Gold',
+        overall_score: 61, score_grade: 'C', payment_score: 70, service_score: 55, engagement_score: 40, satisfaction_score: 80, loyalty_score: 65, growth_score: 50,
+        payment_details: { source: 'invoices', onTimeRate: null, lateCount: 1, failedCount: 0 },
+        service_details: { completedCount: 6, cancelledCount: 1, skippedCount: 0, daysSinceLastService: 41, adherenceRate: null, callbackCount: 0, callbackRatio: 0 },
+        engagement_details: { smsInbound: 3, smsOutbound: 5, interactions: 2, daysSinceLastContact: null },
+        satisfaction_details: { avgRating: null, reviewCount: 2, complaintCount: 0, complimentCount: 1 },
+        loyalty_details: { tenureMonths: 14, tier: 'Gold', referralCount: 1 },
+        growth_details: { distinctServices: 2, monthlyRate: 89, rateChange: '4.0' },
+        churn_risk: 'moderate', churn_probability: '0.3100', churn_signals: [{ signal: 'service_gap', severity: 'high', message: PASSWORD_NOTE }],
+        days_until_predicted_churn: 120, score_trend: 'down', previous_score: 66, score_change_30d: -5, scored_at: '2026-10-20T00:00:00Z',
+      },
+      history: [{ id: 1, customer_id: UUID, overall_score: 66, payment_score: 70, service_score: 60, engagement_score: 45, satisfaction_score: 80, loyalty_score: 65, growth_score: 50, churn_risk: 'low', scored_at: '2026-09-20', created_at: '2026-09-20T00:00:00Z' }],
+      alerts: [{
+        id: UUID, customer_id: UUID, alert_type: 'service_gap', severity: 'high', title: 'No service in 41 days for Sample Person', description: 'Sample Person has not had a service visit in over 1 months.', status: 'new',
+        trigger_data: { score: 61 }, recommended_actions: [{ type: 'schedule', label: PASSWORD_NOTE }], resolved_by: null, resolution_notes: LINK_NOTE, created_at: '2026-10-20T00:00:00Z',
+      }],
+    },
+    dropped: ['score.email', 'score.phone', 'score.address_line1', 'score.stripe_customer_id', 'score.gate_code', 'score.monthly_rate', 'score.churn_signals.0.message', 'score.payment_details.source', 'history.0.customer_id', 'history.0.id', 'history.0.created_at',
+      'alerts.0.customer_id', 'alerts.0.title', 'alerts.0.trigger_data', 'alerts.0.recommended_actions', 'alerts.0.resolved_by', 'alerts.0.resolution_notes'],
+    kept: { 'score.overall_score': 61, 'score.churn_risk': 'moderate', 'score.service_details.daysSinceLastService': 41, 'score.churn_signals.0.signal': 'service_gap', 'history.0.overall_score': 66, 'alerts.0.alert_type': 'service_gap', 'alerts.0.status': 'new' },
+    content: { 'alerts.0.description': 'Sample Person has not had a service visit in over 1 months.' },
+  },
+  // admin-sms-templates.js GET /: sms_templates rows (select *, columns from the migrations) each plus can_delete. Body and description are business-authored wording.
+  '/admin/sms-templates': {
+    body: {
+      templates: [{
+        id: UUID, template_key: 'appointment_reminder', name: 'Appointment reminder', category: 'service', body: 'Hi {first_name}, we are visiting on {date}.', description: 'Sent the day before.', variables: ['first_name', 'date'],
+        trigger_event_key: 'appointment.reminder', is_active: true, is_internal: false, sort_order: 10, created_at: '2026-05-14T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', can_delete: false,
+      }],
+    },
+    dropped: ['templates.0.template_key', 'templates.0.trigger_event_key', 'templates.0.created_at'],
+    kept: { 'templates.0.name': 'Appointment reminder', 'templates.0.category': 'service', 'templates.0.is_active': true, 'templates.0.variables': ['first_name', 'date'] },
+    content: { 'templates.0.body': 'Hi {first_name}, we are visiting on {date}.', 'templates.0.description': 'Sent the day before.' },
+  },
+  // admin-dispatch.js GET /:serviceId/tech-tips: { available, completionChoicesEnabled, ...tipsForVisit ({ line, season, groups[{ id, label, primary, tips[] }], more[] }), lastSent (tip id to date),
+  // conditions, previousRecommendations[{ text, serviceDate, serviceRecordId }], tipSources, yard, blogPosts (tip id to post) }. tip-library.js holds the tip fields; copy is business wording.
+  '/admin/dispatch/:serviceId/tech-tips': {
+    params: { serviceId: UUID },
+    body: {
+      available: true, completionChoicesEnabled: true, line: 'pest', season: 'wet',
+      groups: [{
+        id: 'moisture', label: 'Moisture', primary: true,
+        tips: [{ id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line', pests: ['Ants', 'Roaches'], keywords: ['ac', 'drip'], lines: ['pest'], season: 'all', blog: { topic: 'ac drain line and ants' },
+          sources: [{ fact: 'fact-tip-moisture-ac-drip', label: 'Extension', url: 'https://example.test/publication/1' }], sourcedCopy: 'Sourced wording.', copy: 'Where the line drips, the soil stays wet.' }],
+      }],
+      more: [{ id: 'lawn_mowing_height', group: 'lawn', label: 'Mow a little higher', pests: [], keywords: ['mow'], lines: ['lawn'], season: 'all', copy: 'Taller grass shades the soil.' }],
+      lastSent: { moisture_ac_drip: '2026-09-01' },
+      conditions: { irrigation_on_file: true },
+      previousRecommendations: [{ text: PASSWORD_NOTE, serviceDate: '2026-09-01', serviceRecordId: UUID }],
+      tipSources: true, yard: { grass: 'St. Augustine', irrigationSystem: true, county: 'Manatee' },
+      blogPosts: { moisture_ac_drip: { title: 'A/C drain lines and ants', url: 'https://portal.example.test/blog/ac-drain' } },
+    },
+    dropped: ['groups.0.tips.0.keywords', 'groups.0.tips.0.lines', 'groups.0.tips.0.blog', 'groups.0.tips.0.sources', 'groups.0.tips.0.sourcedCopy', 'more.0.keywords', 'more.0.lines', 'more.0.copy', 'lastSent.moisture_ac_drip', 'blogPosts.moisture_ac_drip.title', 'previousRecommendations.0.text', 'previousRecommendations.0.serviceRecordId'],
+    kept: { available: true, line: 'pest', 'groups.0.id': 'moisture', 'groups.0.tips.0.id': 'moisture_ac_drip', 'conditions.irrigation_on_file': true, 'yard.county': 'Manatee', 'previousRecommendations.0.serviceDate': '2026-09-01' },
+    content: { 'groups.0.tips.0.copy': 'Where the line drips, the soil stays wet.' },
+  },
   // admin-discounts.js:190-195 selects id, name, discount_key, times_applied, total_discount_given, is_active.
   '/admin/discounts/stats': {
     body: { discounts: [{ id: 1, name: 'Spring offer', discount_key: 'spring', times_applied: 3, total_discount_given: '30.00', is_active: true }], totalApplied: 3, totalGiven: 30 },
@@ -751,13 +815,13 @@ describe('the default withholds a name-matched key that no row declared', () => 
 });
 
 describe('keep mode: only the listed fields reach the model, and a new column never does', () => {
-  test('the 21 rows added with the core screens and leads, and the two email-template rows, are in keep mode', () => {
+  test('the 21 rows added with the core screens and leads, the two email-template rows, and the health, SMS template and tech tip rows, are in keep mode', () => {
     expect(KEEP_ENTRIES.map(entry => entry.endpoint).sort()).toEqual([
       '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
       '/admin/customers/:id/estimates-summary', '/admin/customers/:id/latest-scheduled-service', '/admin/customers/:id/timeline',
-      '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/email-templates/automations', '/admin/estimates',
-      '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
-      '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/schedule/list',
+      '/admin/dispatch/:serviceId/tech-tips', '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/email-templates/automations', '/admin/estimates',
+      '/admin/health/scores/:customerId', '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
+      '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/schedule/list', '/admin/sms-templates',
     ]);
   });
 

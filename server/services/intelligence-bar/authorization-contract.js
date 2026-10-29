@@ -108,6 +108,10 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'create_payment_plan',
   // A stopped reminder sequence has no undo in the portal (the panel offers Resume only for paused or Auto Pay-held ones).
   'stop_invoice_reminders',
+  // A text cannot be unsent, and no page restores an ignored Agent Review draft.
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -140,6 +144,9 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',
   'create_payment_plan',
+  // The confirmed run texts the customer the Agent Review draft (as written, or edited).
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
 ]);
 
 // send_invoice: its card lines come from its own preview
@@ -167,6 +174,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// The Agent Review draft cards: their card lines come from their own preview (agent-review-tools.js cardLines).
+for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
 // unblock-sender-tools.js cardLines). Neither sends anything.
 CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
@@ -257,6 +266,9 @@ const ACTION_LABELS = {
   create_invoice: 'Create a draft invoice (sends nothing)',
   compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  approve_agent_review_draft: 'Send an Agent Review draft as written',
+  revise_agent_review_draft: 'Send an edited Agent Review draft',
+  ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
   resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
   unblock_sender: 'Unblock an email sender (sends nothing)',
   block_sender: 'Block a sender',
@@ -958,6 +970,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The Agent Review draft cards: the exact text, the recipient (name and masked number) and the message it answers.
+  if (['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./agent-review-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // resolve_dispatch_alert: the alert, when it was raised, the visit, customer and technician, and every effect of the Resolve.
   if (toolName === 'resolve_dispatch_alert' && preview?.preview === true) {

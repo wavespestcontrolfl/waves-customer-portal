@@ -349,7 +349,7 @@ const SCOPE_SNAPSHOT = {
   route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments', 'unblock_sender'],
   record: [
     // reads: a customer or record selector confines the rows to one customer
-    'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
+    'check_customer_status', 'compute_estimate', 'draft_review_reply', 'list_agent_review_drafts', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
     'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
     // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
@@ -393,6 +393,8 @@ const SCOPE_SNAPSHOT = {
     'set_customer_bill_to',
     // schedule_sms carries customer_id: the queued text is that customer's own.
     'schedule_sms',
+    // The Agent Review draft cards carry decision_id: a decision_id is a task record (validateRecordTarget binds the decision's customer to the task customer).
+    'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft',
     // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.
     'resolve_dispatch_alert',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',

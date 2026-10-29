@@ -66,6 +66,11 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'create_invoice',
   // set_customer_bill_to previews name the customer, the payer and the invoices.
   'set_customer_bill_to',
+  // The Agent Review draft tools name the customer, a masked number and the message bodies.
+  'list_agent_review_drafts',
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
   // resolve_dispatch_alert previews name the customer and technician; unblock_sender previews carry the blocked address.
   'resolve_dispatch_alert',
   'unblock_sender',

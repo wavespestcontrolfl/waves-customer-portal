@@ -196,10 +196,6 @@ function projectIsExplicitlyNoCharge(project = {}) {
   return wdoFeeIsExplicitZero(findings.inspection_fee);
 }
 
-function projectReportPaymentIsHeld(project = {}) {
-  return ['held', 'releasing'].includes(String(project?.report_hold_status || '').toLowerCase());
-}
-
 function prepaidCoversAmount(scheduledService = {}, amount = 0) {
   // annual-prepay stamps are governed EXCLUSIVELY by annualPrepayCoversVisit
   // (which revalidates the term/invoice against refunds). A STALE
@@ -750,11 +746,8 @@ async function completeProjectBackedService({
     const recurringCustomer = await isRecurringCustomer(customer, trx);
     const portalAllowedByPolicy = shouldAttachProjectToPortal({ profile, customer, recurringCustomer });
     const portalReviewed = projectReviewedForPortalAttachment(project);
-    const paymentHeld = projectReportPaymentIsHeld(project);
-    const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
-    const portalAttachReason = paymentHeld
-      ? 'report_payment_held'
-      : portalAttached
+    const portalAttached = portalAllowedByPolicy && portalReviewed;
+    const portalAttachReason = portalAttached
       ? 'policy_allowed'
       : portalAllowedByPolicy && !portalReviewed
         ? 'report_not_sent'
@@ -1190,11 +1183,8 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
     ? shouldAttachProjectToPortal({ profile, customer, recurringCustomer })
     : false;
   const portalReviewed = projectReviewedForPortalAttachment(project);
-  const paymentHeld = projectReportPaymentIsHeld(project);
-  const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
-  const portalReason = paymentHeld
-    ? 'report_payment_held'
-    : portalAttached
+  const portalAttached = portalAllowedByPolicy && portalReviewed;
+  const portalReason = portalAttached
     ? 'policy_allowed'
     : portalAllowedByPolicy && !portalReviewed
       ? 'report_not_sent'
@@ -1345,7 +1335,6 @@ module.exports = {
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
   projectIsExplicitlyNoCharge,
-  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   resolveProjectCompletionBilling,

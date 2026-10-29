@@ -18,10 +18,12 @@ const RECORDS = {
   lead_id: { table: 'leads', fields: ['id', 'customer_id', 'first_name', 'last_name', 'updated_at', 'deleted_at'] },
   email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'gmail_thread_id', 'updated_at'] },
   call_id: { table: 'call_log', fields: ['id', 'customer_id', 'updated_at'] },
+  // An Agent Review draft (agent_decisions): the decision's customer must be a task customer.
+  decision_id: { table: 'agent_decisions', fields: ['id', 'customer_id'] },
   review_id: { table: 'google_reviews', fields: ['id', 'customer_id', 'reviewer_name', 'missing_since', 'dismissed', 'updated_at'] },
 };
 const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids', lead_id: 'lead_ids' };
-const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId' };
+const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId', decision_id: 'decisionId' };
 const normalizeName = value => String(value || '').toLowerCase().replace(/[’']/g, "'").replace(/'s\b/g, '')
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
@@ -1079,7 +1081,7 @@ function requestedRecordFields(prompt, page, nameHint) {
   // operation after "and/then <action>" retains its explicit target IDs.
   const explicitRecordClause = targetClause(prompt, true).split(ACTION_CLAUSE_SPLIT)
     .map(clause => clause.split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0]).join(' and ');
-  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
+  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead|decision)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
   }
   for (const [kind, ids] of Object.entries(explicitRecords)) {
@@ -1127,6 +1129,8 @@ async function resolve(input) {
   return null;
 }
 
+const UNLINKED_DRAFT_KINDS = new Set(['decision_id']);
+
 async function unlinkedRecordIsReferenced(record, context) {
   if (Object.hasOwn(context.requestedRecords || {}, record.kind) && ![context.requestedRecords[record.kind]].flat().includes(record.id)) return false;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
@@ -1137,6 +1141,9 @@ async function unlinkedRecordIsReferenced(record, context) {
     return threads.length === 1 && threads[0].thread_key === (record.gmail_thread_id || record.id);
   }
   if (record.customer_id) return true;
+  // A draft with no customer belongs to no one the task could name: inside a task for a resolved customer it is somebody else's, so
+  // it is refused; with no task customer only the exact draft the request typed is admitted (as for an unlinked call).
+  if (UNLINKED_DRAFT_KINDS.has(record.kind)) return targets.length === 0 && [context.requestedRecords?.[record.kind]].flat().includes(record.id);
   const ids = context.page?.ids || {};
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
   if (['call_id', 'appointment_id'].includes(record.kind)) return targets.length === 0 && [context.requestedRecords?.[record.kind]].flat().includes(record.id);

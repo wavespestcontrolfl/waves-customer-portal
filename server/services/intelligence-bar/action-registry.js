@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive, officeReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
@@ -84,6 +84,7 @@ const MODULES = [
   ['compose-email-tools', 'COMPOSE_EMAIL_TOOLS', 'executeComposeEmailTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
   ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
+  ['agent-review-tools', 'AGENT_REVIEW_TOOLS', 'executeAgentReviewTool'],
   ['dispatch-alert-tools', 'DISPATCH_ALERT_TOOLS', 'executeDispatchAlertTool'],
   ['unblock-sender-tools', 'UNBLOCK_SENDER_TOOLS', 'executeUnblockSenderTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
@@ -168,6 +169,10 @@ const GATED_ACTIONS = {
   compose_email: () => ibComposeEmailLive(),
   create_invoice: () => ibCreateInvoiceLive(),
   set_customer_bill_to: () => ibSetBillToLive(),
+  list_agent_review_drafts: () => ibAgentReviewDraftsLive(),
+  approve_agent_review_draft: () => ibAgentReviewDraftsLive(),
+  revise_agent_review_draft: () => ibAgentReviewDraftsLive(),
+  ignore_agent_review_draft: () => ibAgentReviewDraftsLive(),
   resolve_dispatch_alert: () => ibResolveDispatchAlertLive(),
   unblock_sender: () => ibUnblockSenderLive(),
   find_admin_reads: () => adminReadLive(),
