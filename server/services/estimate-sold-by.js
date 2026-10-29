@@ -45,7 +45,7 @@ const SOLD_BY_COLUMNS = [
 // street and no conflicting ZIP, city or state: flagCoversAddress). An estimate whose address the
 // office changed, or a typed phone or the same customer alone, never binds. One flag credits one
 // estimate: a lead already filling another estimate's Sold by is skipped, and the candidate lead
-// rows are locked so two saves cannot both take one. The seller is the technician who flagged
+// rows are locked (SKIP LOCKED) so two saves cannot both take one. The seller is the technician who flagged
 // (gps_check.technician_id, written once by the flag), never leads.assigned_to, which the office
 // may reassign.
 async function findMatchingFlag(trx, estimate, now) {
@@ -68,7 +68,11 @@ async function findMatchingFlag(trx, estimate, now) {
     })
     .orderBy('leads.created_at', 'desc')
     .orderBy('leads.id', 'desc')
+    // SKIP LOCKED: a save holds its estimate row by now, and createOrReuseAdminEstimate locks a
+    // lead before its estimate, so waiting here could deadlock with it. A lead another save holds
+    // is passed over; a later save fills from it.
     .forUpdate('leads')
+    .skipLocked()
     .select('leads.id as lead_id', 'technicians.id as technician_id',
       trx.raw("leads.gps_check->>'mode' as gps_mode"), trx.raw("leads.gps_check->'premise' as premise"));
   return candidates.find((flag) => flagProvesPremise(flag, estimate)) || null;
@@ -133,10 +137,13 @@ async function autoFillSoldBy(trx, estimate, { now = () => new Date() } = {}) {
 // A save may move a flag-filled estimate to another place (a revised address or customer), or the
 // office may have moved the lead to another estimate: the flag must still prove this estimate on
 // every save, or the credit comes off (and another flag that proves the new place may fill it).
-// The lead row is locked like a fill's. An office choice or a clear is never touched here.
+// A plain read, no lead lock (the save already holds its estimate row; see findMatchingFlag): the
+// premise is written once by the flag, and a lead re-linked meanwhile is caught by the next save,
+// while the other estimate's fill cannot take the flag while this one still holds it. An office
+// choice or a clear is never touched here.
 async function recheckFlagCredit(trx, estimate) {
   const flag = estimate.sold_by_lead_id
-    ? await trx('leads').where({ id: estimate.sold_by_lead_id }).forUpdate()
+    ? await trx('leads').where({ id: estimate.sold_by_lead_id })
       .first('estimate_id', trx.raw("gps_check->>'mode' as gps_mode"), trx.raw("gps_check->'premise' as premise"))
     : null;
   if (flag && String(flag.estimate_id || '') === String(estimate.id) && flagProvesPremise(flag, estimate)) return estimate;
