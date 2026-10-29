@@ -82,6 +82,15 @@ it('Add program opens a chooser with the six templates and a blank choice; nothi
   expect(screen.queryByLabelText('Service family')).toBeNull();
 });
 
+it('Cancel closes the chooser and adds nothing', async () => {
+  await mount();
+  openChooser();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('button', { name: 'Blank program' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Add program' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('Service family')).toBeNull();
+});
+
 it('the pest template fills the service, name, cadence, served stack and Taxable; the price box starts empty', async () => {
   await mount();
   addTemplate('Pest control · Quarterly');

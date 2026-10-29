@@ -1153,6 +1153,7 @@ function CommercialProposalEditor() {
         </Button>
       ))}
       <Button variant="ghost" size="sm" onClick={addProgram}>Blank program</Button>
+      <Button variant="ghost" size="sm" onClick={() => setProgramChooserOpen(false)}>Cancel</Button>
     </div>
   );
 
