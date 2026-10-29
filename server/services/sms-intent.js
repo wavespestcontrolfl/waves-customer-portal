@@ -202,6 +202,9 @@ function isCourtesyOnlyStrict(body, { awaitingAnswer = true } = {}) {
 const COURTESY_TAIL_MAX_CHARS = 80;
 const COURTESY_TAIL_MAX_WORDS = 6;
 const COURTESY_TAIL_BREAK_RE = /[.!,\n\r]|\s-\s/;
+// One character test for the tail rule: anything outside printable ASCII (emoji,
+// other symbols), a question mark, an @ or a digit.
+const COURTESY_TAIL_REJECT_CHARS_RE = /[^\x20-\x7e\n\r]|[?@\d]/;
 const COURTESY_TAIL_URL_RE = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|info|biz|app|ly)\b/i;
 const COURTESY_TAIL_BLOCK_WORDS = [
   // request words
@@ -245,7 +248,7 @@ function courtesyTailMode() {
   try {
     const reader = require('../config/feature-gates').courtesyTailMode;
     return typeof reader === 'function' ? reader() : 'off';
-  } catch (_) {
+  } catch {
     return 'off';
   }
 }
@@ -267,31 +270,25 @@ function headIsCourtesyGrammar(head) {
  * the strict rule says false, our last text asked nothing, and rules 2-6 hold.
  */
 function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
-  if (awaitingAnswer) return false;
-  const raw = String(body == null ? '' : body).replace(/[‘’]/g, "'").trim();
-  if (!raw || raw.length > COURTESY_TAIL_MAX_CHARS) return false;
+  // Every guard fails closed (doubt → false). An empty text has no break, and a
+  // TAIL with no sign-off part fails the allowlist, so neither needs its own check.
+  const raw = String(body ?? '').replace(/[‘’]/g, "'").trim();
+  if (awaitingAnswer || raw.length > COURTESY_TAIL_MAX_CHARS) return false;
   if (isCourtesyOnlyStrict(raw, { awaitingAnswer: false })) return false;
-  if (!/^[\x20-\x7e\n\r]+$/.test(raw)) return false; // emoji and other symbols: doubt → false
-  if (/[?@]/.test(raw) || /\d/.test(raw) || COURTESY_TAIL_URL_RE.test(raw)) return false;
+  // Emoji and other symbols, "?", "@" and digits in one test; then a URL.
+  if (COURTESY_TAIL_REJECT_CHARS_RE.test(raw) || COURTESY_TAIL_URL_RE.test(raw)) return false;
   if (hasSchedulingIntent(raw) || hasRescheduleOrAwayIntent(raw)) return false;
   const m = COURTESY_TAIL_BREAK_RE.exec(raw);
-  if (!m) return false;
-  const head = raw.slice(0, m.index);
+  if (!m || !headIsCourtesyGrammar(raw.slice(0, m.index))) return false;
   const tail = raw.slice(m.index + m[0].length);
-  if (!headIsCourtesyGrammar(head)) return false;
-  const words = tail.split(/[^a-z']+/i).filter((w) => /[a-z]/i.test(w));
-  if (words.length < 1 || words.length > COURTESY_TAIL_MAX_WORDS) return false;
-  // Allowlist (structural): every part of the TAIL must be a recognized sign-off.
+  if (tail.split(/[^a-z']+/i).filter((w) => /[a-z]/i.test(w)).length > COURTESY_TAIL_MAX_WORDS) return false;
+  // Allowlist (structural): one or two TAIL parts, each a recognized sign-off.
   // Unknown prose ("You missed the backyard") stays actionable. The denylist is
-  // an extra guard on top.
+  // an extra guard on top; "thanks again" is a sign-off although "again" is
+  // listed as a contrast word.
   const parts = tail.split(/[,.!]+/).map((x) => x.trim()).filter(Boolean);
-  if (parts.length < 1 || parts.length > 2) return false;
-  for (const part of parts) {
-    if (!COURTESY_SIGNOFF_RE.test(part)) return false;
-    // "thanks again" is a sign-off even though "again" is a contrast word elsewhere.
-    if (!COURTESY_SIGNOFF_AGAIN_RE.test(part) && COURTESY_TAIL_BLOCK_RE.test(part)) return false;
-  }
-  return true;
+  return [1, 2].includes(parts.length) && parts.every((part) => COURTESY_SIGNOFF_RE.test(part)
+    && (COURTESY_SIGNOFF_AGAIN_RE.test(part) || !COURTESY_TAIL_BLOCK_RE.test(part)));
 }
 
 // The webhook's metadata decision, pure so it is testable: stamp only in shadow
