@@ -28888,7 +28888,7 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // Rodent Removal row's access tier) is internal the same way.
 // pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
 // them from the stored estimate); the customer never sees them either.
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs', 'deadAnimalTier'];
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'deadAnimalTier', 'pricingKnobs'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {
