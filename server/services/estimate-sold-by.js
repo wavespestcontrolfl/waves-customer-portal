@@ -76,13 +76,13 @@ async function findMatchingFlag(trx, estimate, now) {
 
 // Was the truck at the place this estimate is for? The premise is the one the GPS check stored
 // when the flag was made (gps_check.premise), never the lead's editable columns: a visit flag
-// proved the visited customer's property, a Neighbor flag the typed address.
+// proved the visited customer's property (its customer row and service address), a Neighbor flag
+// the typed address. The estimate's service address must be that address either way.
 function flagProvesPremise(flag, estimate) {
   const premise = flag.premise && typeof flag.premise === 'object' ? flag.premise : {};
-  if (flag.gps_mode === 'customer') {
-    return Boolean(premise.customer_id) && String(premise.customer_id) === String(estimate.customer_id || '');
-  }
-  if (flag.gps_mode !== 'prospect' || !premise.address || !estimate.address) return false;
+  // A visit flag is also bound to the visited customer row (one row per property).
+  if (flag.gps_mode === 'customer' && String(premise.customer_id || '') !== String(estimate.customer_id || '')) return false;
+  if (!['customer', 'prospect'].includes(flag.gps_mode) || !premise.address || !estimate.address) return false;
   const { parseDisplayAddress, flagCoversAddress } = require('./lead-address-unverified');
   const place = parseDisplayAddress(estimate.address);
   return flagCoversAddress(

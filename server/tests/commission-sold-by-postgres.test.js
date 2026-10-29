@@ -63,7 +63,10 @@ postgres('commission sold by', () => {
   };
   const customer = async (patch = {}) => {
     const id = randomUUID();
-    await trx('customers').insert({ id, first_name: 'Sample', last_name: 'Customer', phone: '+19415550111', ...patch });
+    await trx('customers').insert({
+      id, first_name: 'Sample', last_name: 'Customer', phone: '+19415550111',
+      address_line1: '1 Sample St', city: 'Bradenton', zip: '34202', ...patch,
+    });
     return id;
   };
   const visit = async (technicianId, customerId, patch = {}) => {
@@ -90,13 +93,18 @@ postgres('commission sold by', () => {
     const [row] = await trx('leads').insert({
       first_name: 'Sample', lead_type: 'field_observation', first_contact_channel: 'field_observation', status: 'new',
       assigned_to: technicianId, gps_verified: true,
-      gps_check: { result: 'verified', mode: 'customer', technician_id: technicianId, premise: { customer_id: patch.customer_id || null } },
+      gps_check: {
+        result: 'verified', mode: 'customer', technician_id: technicianId,
+        premise: { customer_id: patch.customer_id || null, address: '1 Sample St', city: 'Bradenton', zip: '34202' },
+      },
       created_at: new Date(Date.now() - 2 * DAY), ...patch,
     }).returning('id');
     return row.id || row;
   };
   const estimate = async (patch = {}) => {
-    const [row] = await trx('estimates').insert({ customer_name: 'Sample Customer', status: 'draft', ...patch }).returning('id');
+    const [row] = await trx('estimates').insert({
+      customer_name: 'Sample Customer', status: 'draft', address: '1 Sample St, Bradenton, FL 34202', ...patch,
+    }).returning('id');
     return row.id || row;
   };
   const estimateRow = (id) => trx('estimates').where({ id }).first();
@@ -197,6 +205,7 @@ postgres('commission sold by', () => {
       expect(res.status).toBe(200);
       expect(lead.gps_verified).toBe(true);
       expect(lead.gps_check).toMatchObject({ result: 'verified', mode: 'customer', scheduled_service_id: v, distance_m: 40 });
+      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '1 Sample St', city: 'Bradenton', zip: '34202' });
       expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Chinch bugs · GPS: verified, 40 m');
     });
 
@@ -407,6 +416,12 @@ postgres('commission sold by', () => {
       expect((await fill(est)).sold_by_source).toBeFalsy();
       await trx('leads').where({ id: lead }).update({ estimate_id: est });
       expect((await fill(est)).sold_by_lead_id).toBe(lead);
+    });
+
+    it("does not fill a visit flag's estimate at another address of the same customer", async () => {
+      const t = await tech('Sample Alpha');
+      const { est } = await bound(t, { est: { address: '99 Other Rd, Bradenton, FL 34202' } });
+      expect((await fill(est)).sold_by_source).toBeFalsy();
     });
 
     it("does not fill a visit flag's estimate made for another customer", async () => {

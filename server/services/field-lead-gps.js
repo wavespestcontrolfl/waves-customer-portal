@@ -111,7 +111,19 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
   if (!arrival) return { ...check, result: 'no_gps_arrival' };
   const raw = arrival.metadata?.distance_meters;
   const logged = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
-  return { ...check, result: 'verified', distance_m: Number.isFinite(logged) ? Math.round(logged) : null };
+  return {
+    ...check,
+    premise: await visitedPremise(database, visit.customer_id),
+    result: 'verified',
+    distance_m: Number.isFinite(logged) ? Math.round(logged) : null,
+  };
+}
+
+// The property the truck arrived at: the visit's customer row (one customer row per property) and
+// its service address, kept with the result so the estimate can be checked against the same place.
+async function visitedPremise(database, customerId) {
+  const row = await database('customers').where({ id: customerId }).first('address_line1', 'city', 'zip');
+  return { customer_id: String(customerId), address: row?.address_line1 || null, city: row?.city || null, zip: row?.zip || null };
 }
 
 // Prospect mode: the typed address against the technician's truck.
