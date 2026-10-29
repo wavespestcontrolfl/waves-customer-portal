@@ -1633,7 +1633,7 @@ describe('caller wiring (source)', () => {
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');
     const preview = reb.slice(reb.indexOf('async previewSeriesMove('), reb.indexOf('module.exports = new SmartRebooker()'));
-    expect(preview).toContain('cadenceSlotDate(i);');
+    expect(preview).toContain('cadenceSlotDate(i, row);');
     expect(reb).toContain("if (options.clearAnchorWindow !== true\n      && sameDayWindowElapsed(seriesDateStr");
     expect(reb).toContain('rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],');
     // The live weekend-preference verdict is re-judged under the lock alongside the recurrence config.

@@ -11,7 +11,7 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
-const { LAWN_ROUNDS_9, lawnRoundDate, roundOf } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -147,14 +147,16 @@ function clampDateToRound(pattern, dateStr, { skipWeekends = false, blackoutDate
   const round = roundOf(intendedDate);
   if (!round) return dateStr;
   if (dateStr >= round.start && dateStr <= round.end) return dateStr;
+  // Start AT the edge that was crossed and walk inward, so the result never
+  // depends on how far outside the round the date is (an admin-moved exception
+  // can sit months away). Null only when every day of the round is closed.
   const step = dateStr > round.end ? -1 : 1;
-  let candidate = dateStr;
-  for (let i = 0; i < 75; i++) {
-    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
-    if (candidate < round.start || candidate > round.end) continue;
+  let candidate = step < 0 ? round.end : round.start;
+  for (let i = 0; i < round.length; i++) {
     const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
     const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
     if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
   }
   return null;
 }
@@ -358,7 +360,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
-  if (pattern === LAWN_ROUNDS_9) return lawnRoundDate(safe, i);
+  // opts.roundAnchor: the series anchor, when `safe` is a later visit of it
+  // (extension, top-up, reseed) — keeps the anchor's offset. See lawnRoundDateFrom.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -452,7 +456,9 @@ function* recurringDateCandidates(baseDate, pattern, {
   existingDates = [], blackoutDates = null, maxAttempts,
 } = {}) {
   const rOpts = recurrenceOrdinalOptions(baseDate, recurrenceOptions);
-  const seen = new Set([baseDate, ...existingDates]);
+  // A SeriesDates keeps which existing dates are boosters (they own no round).
+  const seen = new SeriesDates(existingDates);
+  seen.add(baseDate);
   for (let attempt = 1; attempt < maxAttempts; attempt++) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     const shifted = shiftPastWeekend(rawNext, skipWeekends, weekendShift);
@@ -460,6 +466,8 @@ function* recurringDateCandidates(baseDate, pattern, {
     const seasonal = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
     const nextDate = seasonal && clampDateToRound(pattern, seasonal, { skipWeekends, blackoutDates, intendedDate: rawNext });
     if (!nextDate || recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDate) || seen.has(nextDate)) continue;
+    // One visit a round: a visit already in this round, on another day, owns it.
+    if (pattern === LAWN_ROUNDS_9 && roundTaken(seen, nextDate)) continue;
     seen.add(nextDate);
     yield nextDate;
   }
@@ -484,7 +492,12 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
   });
-  const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
+  // existingSeriesDates hands a SeriesDates (boosters own no lawn round); a
+  // caller's plain list is read as cadence dates.
+  const existingDates = opts.existingDates instanceof SeriesDates
+    ? new SeriesDates(opts.existingDates)
+    : new SeriesDates((opts.existingDates || []).map(dateOnly).filter(Boolean));
+  existingDates.add(baseDate);
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -705,20 +718,22 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
 }
 
 async function existingSeriesDates(conn, parent, columns) {
-  const dates = [dateOnly(parent?.scheduled_date)].filter(Boolean);
+  // Every row blocks its day; a booster (is_recurring = false) owns no lawn
+  // round (SeriesDates).
+  const dates = new SeriesDates([dateOnly(parent?.scheduled_date)].filter(Boolean));
   if (!parent?.id || !columns?.recurring_parent_id) return dates;
   const rows = await conn('scheduled_services')
     .where(function () {
       this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
     })
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    .select('scheduled_date')
+    .select('scheduled_date', 'is_recurring')
     .catch(() => []);
   for (const row of rows || []) {
     const d = dateOnly(row.scheduled_date);
-    if (d) dates.push(d);
+    if (d) (row.is_recurring === false ? dates.addExtra(d) : dates.add(d));
   }
-  return [...new Set(dates)];
+  return dates;
 }
 
 // Find this customer's ACTIVE recurring series parents in the same service

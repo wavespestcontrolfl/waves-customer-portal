@@ -44,6 +44,24 @@ Rules:
   `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
   as naive. Verify the column's `udt_name` in the target environment before
   accepting the finding; production access still requires §3 authorization.
+- A timezone-less or date-only value from OUTSIDE the portal — a vendor API
+  deadline, a CSV import cell, a `--since` argument — is an Eastern
+  wall-clock value, so parse it with `parseETDateTime` and handle the
+  date-only form explicitly. `new Date(raw)` reads it as UTC on Railway and
+  lands it 4–5 hours early, or on the previous ET day: SAM deadlines
+  (`server/services/bid-desk/sam-gov.js`) rendered a day off, and a
+  `--since` in an `ops/agents/` report shifted the audit cohort.
+- Derive a "today", year, or season bound through `datetime-et.js`, never a
+  process-local `Date` getter. `getFullYear()` on Railway rolls into the new
+  year five hours before the ET calendar does, so a January-1 import
+  accepts a row from the next tax year instead of rejecting it.
+- Calendar-day arithmetic and validation ALREADY EXIST — reuse them instead
+  of adding a parallel date util (AGENTS.md rates a second mechanism P1):
+  `addStaffWorkDays` (`server/utils/staff-time-work-date.js`),
+  `addStaffCalendarDays` (`client/src/lib/staffTimeDate.js`), and
+  `validCalendarDate` (`server/utils/datetime-et.js`). On the client,
+  Eastern formatting lives in `client/src/lib/timezone.js` — never import
+  the server module into the Vite bundle.
 
 ## 3. Local DB access — Codex uses dev/preview only
 
@@ -428,6 +446,16 @@ reject.
   reminders fall back to EMAIL), never disable rows to change scheduling
   (kills the `original_message_type` mapping), and strip hardcoded fallback
   copy when retiring an SMS action (it sends even with templates deleted).
+- Narrowing an accepted value set, a validation, or a gate's scope must keep
+  rows written under the OLD rule usable. A readiness or eligibility check
+  rebuilt from the CURRENT option list rejects a persisted legacy value
+  (`new-construction-warranty.js` stopped issuing the still-supported
+  `Builder 1-year` certificates); an open record re-judged under a
+  newly enabled gate loses the policy it was accepted under
+  (`admin-cancellation.js`); and an absent optional field on a legacy row
+  means UNKNOWN, not `false` (a tech checklist then marked every such item
+  "(optional)"). Admit the legacy value explicitly, or anchor the row to
+  the rule in force when it was written.
 
 ## 6b. A protocol value nobody reads is not shipped
 

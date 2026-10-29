@@ -4028,4 +4028,496 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
   });
 
+
+  describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): three promises the records had already answered', () => {
+    const STAFF = '00000000-0000-4000-8000-000000000104';
+    afterEach(() => { delete process.env.GATE_PROMISE_RECORD_EVIDENCE; });
+    const hhmm = (d) => new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
+    const at = (ms) => new Date(message.created_at.getTime() + ms);
+    // A staff text with one promise, due one second after it.
+    const staffPromise = async (extra = {}) => {
+      message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+        admin_user_id: STAFF, status: 'delivered', message_body: "I'll adjust the payment terms and follow up with you Monday." };
+      await mockPg('sms_log').where({ id: message.id }).update(message);
+      context = await loadMessageContext(mockPg, message);
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise', promise_firm: true,
+        quote: "I'll adjust the payment terms", description: 'adjust the payment terms', due_at: at(1000).toISOString(), ...extra };
+      await recordMessageOperations(mockPg, message, result, context);
+      return mockPg('call_commitments').first();
+    };
+    const currentOf = async (row) => ({ ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } });
+    const prepayInvoice = async (sentAt, extra = {}) => {
+      const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: `WPC-2026-${Math.floor(Math.random() * 9000 + 1000)}`,
+        title: 'Annual prepay - quarterly pest control', total: 480, subtotal: 480, status: 'sent', sent_at: sentAt,
+        line_items: JSON.stringify([{ description: 'Annual prepay for 4 quarterly visits' }]), ...extra }).returning('id');
+      await mockPg('annual_prepay_terms').insert({ customer_id: message.customer_id, prepay_invoice_id: invoice.id, term_start: '2040-01-01', term_end: '2040-12-31' });
+      return invoice;
+    };
+
+    describe('rule 1: a staff promise is carried out by an invoice sent after it', () => {
+      const tick = (ms, extra = {}) => refreshSmsCommitments({ conn: mockPg, now: at(ms), ...extra });
+      const cite = (invoice) => ({ ok: true, json: { verdict: 'fulfilled', record_ref: `invoice:${invoice.id}`, quote: 'annual prepay invoice' } });
+
+      test('gate off: the invoice is context only, the promise stays open and rings (old behavior)', async () => {
+        const row = await staffPromise({ due_at: at(2 * 3600000).toISOString() });
+        const invoice = await prepayInvoice(at(60000));
+        dispatchWithFallback.mockResolvedValue(cite(invoice));
+        await tick(3 * 3600000);
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'open' });
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+        expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+      });
+
+      test('gate true: the model cites the invoice and the promise closes with no bell; the model was told it may', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise({ due_at: at(2 * 3600000).toISOString() });
+        const invoice = await prepayInvoice(at(60000));
+        dispatchWithFallback.mockResolvedValue(cite(invoice));
+        expect(await tick(3 * 3600000)).toMatchObject({ scanned: 1, fulfilled: 1 });
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'fulfilled',
+          fulfillment: expect.objectContaining({ record_type: 'invoice', record_id: invoice.id }) });
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+        const prompt = dispatchWithFallback.mock.calls[0][1].text;
+        expect(prompt).toContain(`"witness_refs":["invoice:${invoice.id}"]`);
+        expect(prompt).toContain('annual prepay invoice');
+        expect(prompt).toContain('Annual prepay for 4 quarterly visits');
+      });
+
+      test('gate true: the model saying open still rings; an invoice sent BEFORE the promise, a void one, another customer\'s and a payer-billed one are not evidence', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await staffPromise();
+        await prepayInvoice(at(-60000));
+        await prepayInvoice(at(60000), { status: 'void' });
+        const stranger = randomUUID();
+        await mockPg('customers').insert({ id: stranger, first_name: 'Other', last_name: 'Fixture', phone: '+12025550188' });
+        await prepayInvoice(at(60000), { customer_id: stranger });
+        const [payer] = await mockPg('payers').insert({ display_name: 'Synthetic Property Manager' }).returning('id');
+        const payerBilled = await prepayInvoice(at(60000), { payer_id: payer.id });
+        const current = await currentOf(await mockPg('call_commitments').first());
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        expect(evidence.records.filter((r) => r.type === 'invoice' && admissibleWitness(r, current, evidence.records))).toEqual([]);
+        // A payer-billed invoice went to the payer, not to this customer: not even loaded.
+        expect(evidence.records.find((r) => r.type === 'invoice' && r.id === payerBilled.id)).toBeUndefined();
+        dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+        await tick(3600000);
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      });
+
+      test('gate true: a promise about one property takes only that property\'s invoice, through its visit or its prepay estimate', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        const home = context.properties[0].id;
+        const otherProperty = randomUUID();
+        await mockPg('customer_properties').insert({ id: otherProperty, customer_id: message.customer_id, address_line1: '9 Other Lane', city: 'Sarasota', zip: '34236', active: true });
+        const visitAt = async (propertyId) => (await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: propertyId,
+          service_type: 'Quarterly Pest', scheduled_date: etDateString(at(86400000)), window_start: '09:00:00', status: 'confirmed' }).returning('id'))[0].id;
+        const prepayFrom = async (propertyId) => {
+          const invoice = await prepayInvoice(at(60000));
+          const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId, status: 'accepted',
+            service_interest: 'Quarterly pest control', accepted_at: at(-86400000) }).returning('id');
+          await mockPg('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).update({ source_estimate_id: estimate.id });
+          return invoice;
+        };
+        const visitHome = await prepayInvoice(at(60000), { scheduled_service_id: await visitAt(home) });
+        const visitElsewhere = await prepayInvoice(at(60000), { scheduled_service_id: await visitAt(otherProperty) });
+        const prepayHome = await prepayFrom(home);
+        const prepayElsewhere = await prepayFrom(otherProperty);
+        // Two properties now: an invoice nothing ties to a property is not this one's.
+        const unlinked = await prepayInvoice(at(60000));
+        const current = await currentOf(row);
+        expect(current.sms_context.property_id).toBe(home);
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        const admitted = evidence.records.filter((r) => r.type === 'invoice' && admissibleWitness(r, current, evidence.records)).map((r) => r.id);
+        expect(admitted.sort()).toEqual([visitHome.id, prepayHome.id].sort());
+        const propertyOf = (invoice) => evidence.records.find((r) => r.type === 'invoice' && r.id === invoice.id)?.property_id;
+        expect([propertyOf(visitElsewhere), propertyOf(prepayElsewhere), propertyOf(unlinked)]).toEqual([otherProperty, otherProperty, null]);
+      });
+
+      test('gate true: with one property, an invoice nothing ties to a property is that property\'s', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        const invoice = await prepayInvoice(at(60000));
+        const current = await currentOf(row);
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        expect(evidence.records.find((r) => r.type === 'invoice' && r.id === invoice.id)).toMatchObject({ property_id: context.properties[0].id });
+        expect(admissibleWitness(evidence.records.find((r) => r.id === invoice.id), current, evidence.records)).toBe(true);
+      });
+
+      test('a customer ask (basis request) never admits an invoice, with the gate true', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise({ basis: 'request' });
+        await prepayInvoice(at(60000));
+        const current = await currentOf(row);
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        expect(evidence.records.filter((r) => r.type === 'invoice' && admissibleWitness(r, current, evidence.records))).toEqual([]);
+      });
+
+      test('shadow: nothing changes; ONE audit row says the model would have closed it, and the same evidence is not asked twice', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        const row = await staffPromise();
+        const invoice = await prepayInvoice(at(60000));
+        dispatchWithFallback.mockReset()
+          .mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } })
+          .mockResolvedValueOnce(cite(invoice));
+        await tick(3600000);
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'open' });
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+        expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+        const audits = await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' });
+        expect(audits).toHaveLength(1);
+        expect(audits[0]).toMatchObject({ actor_type: 'system', resource_type: 'call_commitment', resource_id: row.id });
+        expect(audits[0].metadata).toMatchObject({ commitment_id: row.id, kind: 'other', base_verdict: 'open', shadow_verdict: 'fulfilled',
+          new_records: [{ type: 'invoice', id: invoice.id }], shadow_record: { type: 'invoice', id: invoice.id } });
+        // The stored verdict is the normal one: shadow never writes a fulfillment check of its own.
+        expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check.verdict).toBe('open');
+        await tick(2 * 3600000);
+        expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+        expect(await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' })).toHaveLength(1);
+      });
+
+      test('shadow: nothing new in the extended evidence means no extra model call and no audit row', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        await staffPromise();
+        dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+        await tick(3600000);
+        expect(dispatchWithFallback).not.toHaveBeenCalled();
+        expect(await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' })).toHaveLength(0);
+      });
+
+      test('shadow: a provider failure writes no row (retried on a later run); off writes none at all', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        await staffPromise();
+        await prepayInvoice(at(60000));
+        dispatchWithFallback.mockReset().mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } })
+          .mockResolvedValueOnce({ ok: false });
+        await tick(3600000);
+        expect(await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' })).toHaveLength(0);
+        delete process.env.GATE_PROMISE_RECORD_EVIDENCE;
+        dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+        await tick(2 * 3600000);
+        expect((await mockPg('audit_log').whereIn('action', ['sms_commitment.fulfillment.shadow', 'sms_commitment.on_track.shadow']))).toHaveLength(0);
+      });
+
+      test('shadow: at most 10 extra model calls in one run', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        const row = await staffPromise();
+        // Twelve more open promises from the same text; each one is a shadow candidate.
+        const copies = Array.from({ length: 12 }, (_, i) => ({ ...row, id: randomUUID(), description: `copy ${i}`, commitment_key: `copy-${i}`, created_at: new Date(), updated_at: new Date() }));
+        await mockPg('call_commitments').insert(copies.map((c) => ({ ...c, evidence: JSON.stringify(c.evidence), sms_context: JSON.stringify(c.sms_context) })));
+        await prepayInvoice(at(60000));
+        const verify = jest.fn(async () => ({ verdict: 'open', evidence_hash: 'x', retry_after: null }));
+        await refreshSmsCommitments({ conn: mockPg, now: at(3600000), verify });
+        const shadowCalls = verify.mock.calls.filter(([commitment]) => Object.getOwnPropertySymbols(commitment).length > 0);
+        expect(shadowCalls).toHaveLength(10);
+        expect(await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' })).toHaveLength(10);
+      });
+    });
+
+    describe('rule 2: an estimate the customer accepted after the ask', () => {
+      const estimateRow = async (extra = {}) => {
+        const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+          status: 'accepted', service_interest: 'Biting midge treatment', price_locked_by: 'manual_accept',
+          estimate_data: { deliveryState: { lastDeliveredAt: at(-2 * 86400000).toISOString() } }, accepted_at: at(3600000), ...extra }).returning('id');
+        return estimate;
+      };
+      const load = async () => {
+        const current = await currentOf(await mockPg('call_commitments').first());
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(7200000));
+        return { current, evidence };
+      };
+      afterEach(() => { delete process.env.GATE_PROMISE_RECORD_EVIDENCE; });
+
+      test('sent before the ask, accepted after it: refused with the gate off, grounded with it true', async () => {
+        await recordMessageOperations(mockPg, message, result, context);
+        const estimate = await estimateRow();
+        let { current, evidence } = await load();
+        expect(evidence.records.find((r) => r.id === estimate.id)).toBeUndefined();
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        ({ current, evidence } = await load());
+        expect(evidence.records.find((r) => r.id === estimate.id)).toBeUndefined();
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        ({ current, evidence } = await load());
+        const witness = evidence.records.find((r) => r.id === estimate.id);
+        expect(witness).toBeDefined();
+        expect(admissibleWitness(witness, current, evidence.records)).toBe(true);
+        expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'Biting midge' }, evidence, current))
+          .toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: estimate.id });
+      });
+
+      test('accepted BEFORE the ask, another customer\'s, and another property\'s are not evidence; sent after the ask still is', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await recordMessageOperations(mockPg, message, result, context);
+        const before = await estimateRow({ accepted_at: at(-86400000) });
+        const stranger = randomUUID();
+        await mockPg('customers').insert({ id: stranger, first_name: 'Other', last_name: 'Fixture', phone: '+12025550188' });
+        const foreign = await estimateRow({ customer_id: stranger });
+        const otherProperty = randomUUID();
+        await mockPg('customer_properties').insert({ id: otherProperty, customer_id: message.customer_id, address_line1: '9 Other Lane', city: 'Sarasota', zip: '34236', active: true });
+        const elsewhere = await estimateRow({ property_id: otherProperty });
+        const sentAfter = await estimateRow({ accepted_at: null, price_locked_by: null, status: 'sent',
+          estimate_data: { deliveryState: { lastDeliveredAt: at(1800000).toISOString() } } });
+        const { current, evidence } = await load();
+        expect(evidence.records.find((r) => r.id === before.id)).toBeUndefined();
+        expect(evidence.records.find((r) => r.id === foreign.id)).toBeUndefined();
+        const admitted = evidence.records.filter((r) => r.type === 'estimate' && admissibleWitness(r, current, evidence.records)).map((r) => r.id);
+        expect(admitted).toContain(sentAfter.id);
+        expect(admitted).not.toContain(elsewhere.id);
+      });
+
+      test('shadow: an open ask with an accepted estimate writes one audit row and still rings', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        await recordMessageOperations(mockPg, message, result, context);
+        const row = await mockPg('call_commitments').first();
+        await mockPg('call_commitments').where({ id: row.id }).update({ due_at: at(1000) });
+        const estimate = await estimateRow();
+        // A quote sent after the ask but unrelated gives the normal check something to read.
+        dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `estimate:${estimate.id}`, quote: 'Biting midge' } });
+        await refreshSmsCommitments({ conn: mockPg, now: at(7200000) });
+        const audits = await mockPg('audit_log').where({ action: 'sms_commitment.fulfillment.shadow' });
+        expect(audits).toHaveLength(1);
+        expect(audits[0].metadata).toMatchObject({ kind: 'send_estimate', new_records: [{ type: 'estimate', id: estimate.id }], shadow_verdict: 'fulfilled' });
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'open' });
+      });
+    });
+
+    describe('rule 3: on track until the visit', () => {
+      const NOW = 2 * 3600000;
+      const kindOf = (kind) => ({ kind, basis: 'promise' });
+      const windowEnd = () => at(4 * 3600000);
+      const visitRow = (extra = {}) => ({ customer_id: message.customer_id, property_id: context.properties[0].id,
+        service_type: 'Lawn Care Re-Service', status: 'confirmed', scheduled_date: etDateString(windowEnd()),
+        window_start: '00:00:00', window_end: `${hhmm(windowEnd())}:00`, created_at: at(3600000), ...extra });
+      const tick = (ms = NOW) => refreshSmsCommitments({ conn: mockPg, now: at(ms), verify: async () => ({ verdict: 'open' }) });
+      const rings = () => NotificationService.notifyAdmin.mock.calls.length;
+
+      test('gate off: the overdue promise rings although a visit is booked (old behavior)', async () => {
+        await staffPromise();
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(1);
+      });
+
+      test('gate true: no ring while the visit window is ahead; it rings once the window has ended', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'open' });
+        expect(await mockPg('notifications')).toHaveLength(0);
+        await tick(5 * 3600000);
+        expect(rings()).toBe(1);
+      });
+
+      // An alert an earlier ring left open (the promise was overdue before the visit was booked).
+      const openAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+        title: 'Comms — follow up with Synthetic Fixture', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) })
+        .returning('id').then(([alert]) => alert.id);
+      const alertOf = (id) => mockPg('notifications').where({ id }).first('done_at', 'done_by', 'resolution');
+
+      test('gate true: an alert that rang before the visit was booked closes while the visit is ahead; after the window a fresh one rings', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(0);
+          const closed = await alertOf(alert);
+          expect(closed.done_at).not.toBeNull();
+          expect(closed).toMatchObject({ done_by: 'sms-commitments', resolution: expect.stringMatching(/^On track: a visit is booked until /) });
+          await tick(5 * 3600000);
+          expect(rings()).toBe(1);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true: the shared alert stays open while another promise from the text is open; the held promise\'s own alert closes', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          const row = await staffPromise();
+          // A second open promise from the same text, of a kind rule 3 never holds, due later.
+          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
+            description: 'send the service report', channel: 'sms', due_at: at(3 * 86400000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+            evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+          const other = await mockPg('call_commitments').where({ kind: 'send_report' }).first('id');
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          const own = await openAlert(`sms-commitment:${row.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect((await alertOf(shared)).done_at).toBeNull();
+          expect((await alertOf(own)).done_at).not.toBeNull();
+          // The usual closer rewrites the shared alert to the promise still open: a quiet refresh, no ring.
+          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+          const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+          expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-source:${message.id}`, dedupeOpenOnly: true });
+          expect(refreshed.ringOnRefresh()).toBe(false);
+          expect(refreshed.metadata.commitment_ids).toEqual([other.id]);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true: two overdue promises from one text, both held by the visit: the shared alert closes, no refresh', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          // A second overdue promise from the same text, of a kind rule 3 holds too.
+          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
+            description: 'call them back Monday', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+            evidence: JSON.stringify([{ quote: 'follow up with you Monday', sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(0);
+          expect((await alertOf(shared)).done_at).not.toBeNull();
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      // A second overdue promise from the same text, of a kind rule 3 never holds.
+      const overdueReport = (id) => mockPg('call_commitments').insert({ id, sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
+        description: 'send the service report', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+        evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+        sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } })
+        .returning('id').then(([inserted]) => inserted.id);
+
+      // The scan runs in id order: the sibling's id puts it after or before the held promise.
+      test.each([['after', 'ffffffff-ffff-4fff-bfff-ffffffffffff'], ['before', '00000000-0000-4000-8000-000000000001']])(
+        'gate true: an overdue sibling scanned %s the held promise rings an alert without it (Codex #6974 r3)', async (_order, siblingId) => {
+          process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+          process.env.GATE_ALERT_RING_ONCE = 'true';
+          try {
+            const held = await staffPromise();
+            // The held promise's stored check says "can't tell": that must not set the alert's state either.
+            await mockPg('call_commitments').where({ id: held.id })
+              .update({ sms_context: mockPg.raw("sms_context || jsonb_build_object('fulfillment_check', jsonb_build_object('verdict', 'uncertain'))") });
+            const report = await overdueReport(siblingId);
+            await mockPg('scheduled_services').insert(visitRow());
+            await tick();
+            expect(rings()).toBe(1);
+            const [, , , rung] = NotificationService.notifyAdmin.mock.calls[0];
+            expect(rung.metadata).toMatchObject({ commitment_id: report, commitment_ids: [report], verification: 'open' });
+          } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        });
+
+      test.each([['true', true], [undefined, false]])('gate true, GATE_ALERT_RING_ONCE %p: the sibling settling closes the shared alert while the visit holds the other promise: %p', async (ringOnce, closes) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        if (ringOnce) process.env.GATE_ALERT_RING_ONCE = ringOnce;
+        try {
+          await staffPromise();
+          const report = await overdueReport(randomUUID());
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await mockPg('call_commitments').where({ id: report }).update({ status: 'fulfilled' });
+          await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: report, smsLogId: message.id, now: at(NOW) },
+            { done_at: trx.fn.now(), done_by: 'sms-commitments', resolution: 'The text follow-up was done' }));
+          expect((await alertOf(shared)).done_at !== null).toBe(closes);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true: an alert a person already marked done stays theirs (the on-track close touches open rows only)', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          const person = randomUUID();
+          await mockPg('notifications').where({ id: alert }).update({ done_at: at(-60000), done_by: person, resolution: 'Called them' });
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(await alertOf(alert)).toMatchObject({ done_by: person, resolution: 'Called them' });
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true without GATE_ALERT_RING_ONCE: the earlier alert stays open (a closed row would absorb the next ring for a day)', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await staffPromise();
+        const alert = await openAlert(`sms-commitment-source:${message.id}`);
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        expect((await alertOf(alert)).done_at).toBeNull();
+      });
+
+      test.each(['other', 'callback', 'technician_follow_up'])('gate true: a %s promise is held the same way', async (kind) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await staffPromise(kindOf(kind));
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+      });
+
+      test.each(['before the promise', 'a series child', 'cancelled', 'no_show', 'another property'])('gate true: a visit that is %s does not hold the ring', async (kind) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await staffPromise();
+        const extra = {
+          'before the promise': { created_at: at(-3600000) }, 'a series child': {}, cancelled: { status: 'cancelled' }, no_show: { status: 'no_show' },
+          'another property': {},
+        }[kind];
+        if (kind === 'a series child') {
+          const [parent] = await mockPg('scheduled_services').insert(visitRow({ created_at: at(-3600000) })).returning('id');
+          extra.recurring_parent_id = parent.id;
+        }
+        if (kind === 'another property') {
+          // The promise names the first property; the booked visit is at a second one.
+          await mockPg('call_commitments').update({ sms_context: mockPg.raw("sms_context || jsonb_build_object('property_id', ?::text)", [context.properties[0].id]) });
+          const otherId = randomUUID();
+          await mockPg('customer_properties').insert({ id: otherId, customer_id: message.customer_id, address_line1: '9 Other Lane', city: 'Sarasota', zip: '34236', active: true });
+          extra.property_id = otherId;
+        }
+        await mockPg('scheduled_services').insert(visitRow(extra));
+        await tick();
+        expect(rings()).toBe(1);
+      });
+
+      test('gate true: a customer request (basis request, the spilled-product case) is held until the window ends, then rings', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise({ basis: 'request' });
+        expect((await mockPg('call_commitments').where({ id: row.id }).first()).sms_context.basis).toBe('request');
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        await tick(5 * 3600000);
+        expect(rings()).toBe(1);
+      });
+
+      test('gate off: the same customer request rings although a visit is booked (old behavior)', async () => {
+        await staffPromise({ basis: 'request' });
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(1);
+      });
+
+      test.each([['true', 0], [undefined, 1]])('gate %p: a promise the visit answers (en route) after its due time rings the kept-late bell %p time(s)', async (gate, expected) => {
+        if (gate) process.env.GATE_PROMISE_RECORD_EVIDENCE = gate;
+        const row = await staffPromise();
+        const [visit] = await mockPg('scheduled_services').insert(visitRow({ status: 'en_route' })).returning('id');
+        await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at(NOW - 60000) });
+        dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+          quote: 'en route/on site/completed after the request' } });
+        await refreshSmsCommitments({ conn: mockPg, now: at(NOW) });
+        expect(rings()).toBe(expected);
+        expect((await mockPg('call_commitments').where({ id: row.id }).first()).status).toBe(expected ? 'open' : 'fulfilled');
+      });
+
+      test('shadow: the ring still happens and ONE audit row a day records the visit it would have waited for', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+        const row = await staffPromise();
+        const [visit] = await mockPg('scheduled_services').insert(visitRow()).returning('id');
+        await tick();
+        expect(rings()).toBe(1);
+        let audits = await mockPg('audit_log').where({ action: 'sms_commitment.on_track.shadow' });
+        expect(audits).toHaveLength(1);
+        expect(audits[0]).toMatchObject({ resource_type: 'call_commitment', resource_id: row.id });
+        expect(audits[0].metadata).toMatchObject({ commitment_id: row.id, kind: 'other', visit_id: visit.id });
+        await tick(NOW + 600000);
+        audits = await mockPg('audit_log').where({ action: 'sms_commitment.on_track.shadow' });
+        expect(audits).toHaveLength(1);
+      });
+    });
+  });
+
 });

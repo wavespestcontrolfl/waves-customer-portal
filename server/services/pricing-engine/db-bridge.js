@@ -26,6 +26,9 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
   tierQualifier: constants.RODENT.tierQualifier,
   excludeFromPctDiscount: constants.RODENT.excludeFromPctDiscount,
 }));
+// Dead Rodent Removal & Odor Treatment: the pristine prices and minutes, so a deleted or
+// malformed pricing_config row restores them on the next sync instead of pinning an old edit.
+const DEAD_ANIMAL_REMOVAL_DEFAULTS = JSON.parse(JSON.stringify(constants.RODENT.deadAnimalRemoval));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -1631,6 +1634,20 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (sa.heavy) {
         if (sa.heavy.crawlspace_multiplier !== undefined) constants.RODENT.sanitation.heavy.crawlspaceMultiplier = Number(sa.heavy.crawlspace_multiplier);
         if (sa.heavy.tight_access_multiplier !== undefined) constants.RODENT.sanitation.heavy.tightAccessMultiplier = Number(sa.heavy.tight_access_multiplier);
+      }
+    }
+
+    // Dead Rodent Removal & Odor Treatment: four prices and two durations. The
+    // whole row or nothing (a malformed row leaves the code defaults; the
+    // constants were already restored to the defaults at the start of this sync).
+    for (const tier of ['reachable', 'attic']) {
+      Object.assign(constants.RODENT.deadAnimalRemoval[tier], DEAD_ANIMAL_REMOVAL_DEFAULTS[tier]);
+    }
+    if (config.rodent_dead_animal_removal) {
+      const applied = require('./dead-animal-removal-config')
+        .applyDeadAnimalRemovalConfig(config.rodent_dead_animal_removal, constants.RODENT.deadAnimalRemoval);
+      if (!applied) {
+        console.warn('[pricing-engine] rodent_dead_animal_removal row ignored (malformed); code defaults stand');
       }
     }
 

@@ -269,6 +269,7 @@ const SERVICE_LABEL = {
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
   rodent_sanitation: 'Rodent Sanitation',
+  rodent_dead_animal_removal: 'Dead Rodent Removal & Odor Treatment',
   rodent_bundle_discount: 'Rodent Bundle Discount',
   rodent_guarantee: 'Rodent Guarantee Service',
   trap_only_retainer: 'Trap-Only Monitoring Retainer',
@@ -1249,6 +1250,12 @@ function mapV1ToLegacyShape(v1Result) {
           ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
         ...(li.atticSqFt !== undefined ? { atticSqFt: Number(li.atticSqFt) > 0 ? Number(li.atticSqFt) : null } : {}),
         ...(li.surfaceSqFt !== undefined ? { surfaceSqFt: Number(li.surfaceSqFt) > 0 ? Number(li.surfaceSqFt) : null } : {}),
+        // Dead Rodent Removal & Odor Treatment: the access tier and the engine's on-site minutes
+        // travel with the sold row so the booking sizes its slot by the tier (45 or 90 minutes),
+        // not only by the catalog default.
+        ...(li.service === 'rodent_dead_animal_removal'
+          ? { deadAnimalTier: li.tier || null, ...(Number(li.durationMin) > 0 ? { onSiteMinutes: Number(li.durationMin) } : {}) }
+          : {}),
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,

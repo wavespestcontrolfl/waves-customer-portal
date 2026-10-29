@@ -751,6 +751,55 @@ async function getStub(checkId, conn = db) {
   };
 }
 
+// ---- A technician's own stubs (GATE_TECH_PAY_STUBS, routes/tech-payroll.js)
+
+const TECH_CHECK_LIMIT = 60;
+
+// The caller's own checks from finalized, not-voided runs, newest pay date first. The technician id comes from the
+// authenticated session; nothing here reads a client-sent id.
+async function listOwnChecks(technicianId, conn = db) {
+  const rows = await conn('payroll_checks as c')
+    .join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where('c.technician_id', technicianId)
+    .where('c.status', 'finalized')
+    .where('r.status', 'finalized')
+    .orderBy([{ column: 'c.pay_date', order: 'desc' }, { column: 'c.week_start', order: 'desc' }])
+    .limit(TECH_CHECK_LIMIT)
+    .select([
+      'c.id', 'c.employee_name', 'c.hourly_rate', 'c.regular_minutes', 'c.overtime_minutes', 'c.pay_method',
+      ...MONEY_KEYS.map((key) => `c.${key}`), ...(timeOffOn() ? TIME_OFF_COLUMNS.map((key) => `c.${key}`) : []),
+      conn.raw("to_char(c.week_start, 'YYYY-MM-DD') as week_start"),
+      conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"),
+    ]);
+  return rows.map((row) => {
+    const c = serializeCheck(row);
+    return {
+      id: c.id,
+      name: c.name,
+      weekStart: row.week_start,
+      payDate: row.pay_date,
+      grossCents: c.grossCents,
+      netCents: c.netCents,
+      regularHours: c.regularHours,
+      overtimeHours: c.overtimeHours,
+      ...(timeOffOn() ? { ptoHours: c.ptoHours, holidayHours: c.holidayHours } : {}),
+      payMethod: c.payMethod,
+    };
+  });
+}
+
+// The stub of one of the caller's own checks. Another person's check, a draft, a voided check and an unknown or
+// malformed id all answer 404, so ids cannot be probed.
+async function getOwnStub(technicianId, checkId, conn = db) {
+  if (!UUID_RE.test(String(checkId || ''))) throw new PayrollError(404, 'Pay stub not found.');
+  const own = await conn('payroll_checks as c')
+    .join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'c.id': checkId, 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
+    .first('c.id');
+  if (!own) throw new PayrollError(404, 'Pay stub not found.');
+  return getStub(checkId, conn);
+}
+
 // ---- CSV
 
 const CSV_HEADERS = [
@@ -803,6 +852,8 @@ module.exports = {
   voidRun,
   setCheckNumber,
   getStub,
+  listOwnChecks,
+  getOwnStub,
   exportCsv,
   lockPayrollMutations,
   PAYROLL_LOCK_NS,

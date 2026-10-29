@@ -496,3 +496,46 @@ describe('reschedule-public wiring', () => {
     expect(body).toMatch(/if \(blocked\) return res\.status\(409\)\.json\(\{ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' \}\);/);
   });
 });
+
+describe('lawn_rounds_9: a round visit moves only inside its round', () => {
+  const roundVisit = (overrides = {}) => visit({ recurring_pattern: 'lawn_rounds_9', scheduled_date: '2027-03-20', ...overrides });
+  const RNOW = new Date('2027-03-05T16:00:00Z');
+
+  test('the last date is the last day of the round, not a late allowance after the due date', async () => {
+    // Round 3 of 2027 is Mar 15 - Apr 23.
+    const limit = await loadMoveLimit(roundVisit(), { database: dbFor(), now: RNOW });
+    expect(limit).toMatchObject({ dueDate: '2027-03-20', lastDate: '2027-04-23', firstVisitBlocked: false });
+  });
+
+  test('a visit moved earlier in the round keeps the round of its original due date', async () => {
+    const rows = [move({ original_date: '2027-03-20', new_date: '2027-03-30', created_at: '2027-03-02T14:00:00Z' })];
+    const limit = await loadMoveLimit(roundVisit({ scheduled_date: '2027-03-30' }), { database: dbFor({ rows }), now: RNOW });
+    expect(limit.dueDate).toBe('2027-03-20');
+    expect(limit.lastDate).toBe('2027-04-23');
+  });
+
+  test('a legacy row whose catalog cadence is rounds reads the same way', async () => {
+    const legacy = roundVisit({ recurring_pattern: 'custom', catalog_frequency: 'lawn_rounds_9' });
+    expect((await loadMoveLimit(legacy, { database: dbFor(), now: RNOW })).lastDate).toBe('2027-04-23');
+  });
+
+  test('it has no late allowance of its own, and other plans are unchanged', async () => {
+    expect(allowanceDays(roundVisit())).toBeNull();
+    expect(limits.roundEnd(roundVisit(), '2027-03-20')).toBe('2027-04-23');
+    expect(limits.roundEnd(visit(), '2027-03-20')).toBeNull();
+    expect((await loadMoveLimit(visit(), { database: dbFor(), now: NOW })).lastDate).toBe('2026-11-05');
+  });
+
+  test('a booster extra or a one-time visit that stores the pattern gets no round limit', async () => {
+    const booster = roundVisit({ is_recurring: false, recurring_parent_id: 'parent-1' });
+    expect((await loadMoveLimit(booster, { database: dbFor(), now: RNOW })).lastDate).toBeNull();
+  });
+
+  test('the picker drops days after the round end when enough times remain inside it', () => {
+    const day = (date) => ({ date, slots: [{ start_time: '09:00' }, { start_time: '11:00' }] });
+    const full = { days: [day('2027-04-21'), day('2027-04-22'), day('2027-04-26'), day('2027-04-27')], slots: [] };
+    const limit = { lastDate: '2027-04-23' };
+    expect(lateLimitApplies(limit, full, '2027-06-30')).toBe(true);
+    expect(withinLimit(full, '2027-04-23').days.map((d) => d.date)).toEqual(['2027-04-21', '2027-04-22']);
+  });
+});
