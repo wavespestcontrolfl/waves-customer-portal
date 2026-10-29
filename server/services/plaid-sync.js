@@ -787,7 +787,9 @@ function clearParkedChange(trx, ids) {
 // (category, transfer flag, noMatch, parked candidates) and the parked
 // bank change itself is dropped: the replacement is a fresh row the
 // matcher and categorizer judge on its new values.
-const DURABLE_SUGGESTION_KEYS = ['lastUnlink', 'rejectedExpenseIds', 'rejectedPayoutIds', 'bankingRejectedPayoutIds', 'autoRevert', 'releasedRefundOf'];
+const DURABLE_SUGGESTION_KEYS = ['lastUnlink', 'rejectedExpenseIds', 'rejectedPayoutIds', 'bankingRejectedPayoutIds', 'autoRevert', 'releasedRefundOf',
+  // payroll bank match (GATE_PAYROLL_BANK_MATCH): the owner's rejections of a paycheck or tax row and the unlink evidence
+  'rejectedPayrollCheckIds', 'rejectedTaxFilingIds', 'payrollUnlinked'];
 
 async function supersedeUnmatchedRow(trx, rowId, values) {
   const old = await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).first('*');
