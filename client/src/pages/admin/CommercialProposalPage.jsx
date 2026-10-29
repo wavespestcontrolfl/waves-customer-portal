@@ -62,11 +62,27 @@ const PER_YEAR = Object.fromEntries(FREQUENCY_OPTIONS.map((f) => [f.value, f.per
 const money = (n) =>
   `$${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-// `taxable`: a row the operator adds starts on its service's tax rule (defaultTaxable in the editor).
-const emptyLine = (taxable = false) => ({
-  id: crypto.randomUUID(), description: '', quantity: 1, unit: '', unitPrice: 0, frequency: 'monthly', taxable,
+// `tax`: the Taxable fields a row the operator adds starts with, from the building use (taxUnderUse in the editor).
+const emptyLine = (tax = {}) => ({
+  id: crypto.randomUUID(), description: '', quantity: 1, unit: '', unitPrice: 0, frequency: 'monthly', taxable: false, ...tax,
 });
-const emptyBuilding = (i, taxable = false) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine(taxable)] });
+const emptyBuilding = (i, tax) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine(tax)] });
+
+// Building use decides Florida sales tax on pest work (Rule 12A-1.009): homes, apartments, condos and their common
+// areas are residential and not taxed, whoever pays; a business building is taxed (owner 2026-10-28, proposal
+// defaults check). The pick is required before saving.
+const BUILDING_USE_OPTIONS = [
+  { value: 'residential', label: 'Homes or residential community', note: 'Homes, apartments, condos and HOA common areas. Florida does not tax pest work here.' },
+  { value: 'nonresidential', label: 'Business building', note: 'Offices, stores, restaurants and warehouses. Pest work is taxable; lawn and tree & shrub are not.' },
+];
+const BUILDING_USE_REQUIRED = 'Pick the building use before saving: homes or residential community, or business building. It sets which rows carry sales tax.';
+// A row's Taxable rule for a business building, from the served family registry: its service family's rule, or the
+// 'other' rule for a row with no service. Undefined for a service the registry does not list (a generated one-time
+// line), whose switch then stays as it is.
+function serviceTaxRule(registry, service) {
+  const entry = registry?.[service || 'other'];
+  return entry ? entry.taxable === true : undefined;
+}
 
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -294,6 +310,8 @@ function CommercialProposalEditor() {
   const [title, setTitle] = useState('Commercial Service Proposal');
   const [preparedFor, setPreparedFor] = useState('');
   const [propertyAddress, setPropertyAddress] = useState('');
+  // '' (not picked yet) | 'residential' | 'nonresidential' — see BUILDING_USE_OPTIONS.
+  const [buildingUse, setBuildingUse] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
   // Server-resolved tax suggestion (fraction, e.g. 0.07; 0 = exempt; null = no
   // lookup) and where it came from ("Sarasota County"). The rate shows as a
@@ -400,6 +418,20 @@ function CommercialProposalEditor() {
     setTitle(p.title || 'Commercial Service Proposal');
     setPreparedFor(p.preparedFor || est?.customerName || '');
     setPropertyAddress(p.propertyAddress || est?.address || '');
+    const loadedUse = p.buildingUse === 'residential' || p.buildingUse === 'nonresidential' ? p.buildingUse : '';
+    setBuildingUse(loadedUse);
+    // A proposal saved as residential has its rows off; keep each row's business rule so a later Business pick
+    // can turn the right ones back on: the server's rule for a row that names a service (its own key, so a
+    // canonical one-time service keeps its own rule), else the family registry's.
+    const registry = data.familyRegistry || familyRegistryRef.current;
+    const businessRules = data.businessTaxRules || {};
+    const keptRule = (row) => (loadedUse === 'residential'
+      ? { bizTaxable: (row.id && typeof businessRules[row.id] === 'boolean') ? businessRules[row.id] : serviceTaxRule(registry, row.service) }
+      : {});
+    // The empty starter line follows the pick like any new row.
+    const starterTax = loadedUse === 'nonresidential'
+      ? { taxable: serviceTaxRule(registry, 'other') === true }
+      : { taxable: false, bizTaxable: serviceTaxRule(registry, 'other') };
     // Percent to 4 places: 0.07 * 100 is 7.000000000000001 in floating point.
     setTaxRatePct(String(roundMoney((Number(p.taxRate) || 0) * 10000) / 100));
     // 0 is a real answer (exempt) and stays apart from null (no lookup).
@@ -433,13 +465,14 @@ function CommercialProposalEditor() {
               unitPrice: li.unitPrice ?? 0,
               frequency: li.frequency || 'monthly',
               taxable: li.taxable === true,
+              ...keptRule(li),
               // Server-owned identity of the mosquito misting system: kept through the editor so a save cannot drop it.
               ...(li.service ? { service: li.service } : {}),
               ...(li.originalRequestedService ? { originalRequestedService: li.originalRequestedService } : {}),
               ...(li.quoteRequired === true ? { quoteRequired: true } : {}),
             })),
           }))
-        : [emptyBuilding(0)],
+        : [emptyBuilding(0, starterTax)],
     );
     setScopeItems((p.propertyScope?.items || []).map((item) => ({
       label: item.label || '', value: item.value || '',
@@ -453,6 +486,7 @@ function CommercialProposalEditor() {
       pricePerApplication: program.pricePerApplication ?? 0,
       visitMinutes: program.visitMinutes ?? '',
       taxable: program.taxable === true,
+      ...keptRule(program),
       note: program.note || '',
       inclusionsText: (program.inclusions || []).join('\n'),
       exclusionsText: (program.exclusions || []).join('\n'),
@@ -475,6 +509,7 @@ function CommercialProposalEditor() {
       label: w.label || '',
       amount: w.amount ?? 0,
       taxable: w.taxable === true,
+      ...keptRule(w),
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
@@ -563,13 +598,37 @@ function CommercialProposalEditor() {
     setTaxRatePct(String(suggestedPct));
     markEdit();
   };
-  // A row the operator adds starts Taxable by its service's rule (owner
-  // 2026-10-28 builder scope): the served family registry carries the
-  // canonical commercialTaxableDefault per family (lawn and tree & shrub not
-  // taxable, the rest taxable). Building lines and corrective work have no
-  // service type, so they take the 'other' family's rule. Saved rows keep
-  // their switch as saved.
-  const defaultTaxable = (family) => familyRegistryRef.current?.[family]?.taxable === true;
+  // New and generated rows follow the building use (owner 2026-10-28, proposal
+  // defaults check). A business building: the row's rule, which is the served
+  // registry's commercialTaxableDefault for a hand-added row (lawn and tree &
+  // shrub off, the rest on; building lines and corrective work take the
+  // 'other' rule) and the server's flag for a generated row. A residential
+  // community, or no pick yet: not taxable, with the rule kept in
+  // `bizTaxable` (builder-only, never saved) for a later Business pick. Reads
+  // the pick at call time (formRef), so a generation that resolves after a
+  // pick change follows the new pick. Saved rows keep their switch as saved.
+  const taxUnderUse = (rule) => (formRef.current?.buildingUse === 'nonresidential'
+    ? { taxable: rule === true, bizTaxable: undefined }
+    : { taxable: false, bizTaxable: rule === true });
+  const familyRule = (family) => serviceTaxRule(familyRegistryRef.current, family) === true;
+  // The pick re-sets every row: a residential community turns each row off
+  // (Florida does not tax pest work at homes and their common areas) and
+  // keeps its flag; a business building puts each row back on its kept flag.
+  // A mixed site then flips its exceptions by hand. Not an itemization edit,
+  // so generation's authored-lines guard is untouched.
+  const chooseBuildingUse = (next) => {
+    if ((next !== 'residential' && next !== 'nonresidential') || next === buildingUse) return;
+    markEdit();
+    setBuildingUse(next);
+    // The save's "pick the building use" message is answered now; any other message stays.
+    setError((prev) => (prev === BUILDING_USE_REQUIRED ? null : prev));
+    const apply = next === 'residential'
+      ? (row) => ({ ...row, bizTaxable: row.bizTaxable ?? row.taxable, taxable: false })
+      : ({ bizTaxable, ...row }) => ({ ...row, taxable: bizTaxable ?? row.taxable });
+    setBuildings((prev) => prev.map((b) => ({ ...b, lineItems: b.lineItems.map(apply) })));
+    setProgramsState((prev) => prev.map(apply));
+    setCorrectiveWork((prev) => prev.map(apply));
+  };
   // Sidebar mirrors what SAVES: in programs mode the payload omits the
   // buildings entirely, so their (hidden) line items must not count.
   const totals = useMemo(
@@ -667,7 +726,7 @@ function CommercialProposalEditor() {
           label: program.label,
           frequencyPerYear: program.frequencyPerYear,
           pricePerApplication: program.pricePerApplication,
-          taxable: program.taxable === true,
+          ...taxUnderUse(program.taxable === true),
           note: '',
           inclusionsText: (program.inclusions || []).join('\n'),
           exclusionsText: (program.exclusions || []).join('\n'),
@@ -685,7 +744,7 @@ function CommercialProposalEditor() {
           ...(w.service ? { service: w.service } : {}),
           label: w.label,
           amount: w.amount,
-          taxable: w.taxable === true,
+          ...taxUnderUse(w.taxable === true),
           includesText: (w.includes || []).join('\n'),
         })));
         filled += 1;
@@ -720,7 +779,7 @@ function CommercialProposalEditor() {
         // reach here (the guards above), so clearing is safe.
         if (monetaryFilled > 0
           && !(live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)) {
-          setBuildings([emptyBuilding(0)]);
+          setBuildings([emptyBuilding(0, taxUnderUse(familyRule('other')))]);
         }
         markEdit();
         // Partial generation still surfaces the programs warning.
@@ -751,10 +810,10 @@ function CommercialProposalEditor() {
       lineItems: b.lineItems.map((l, i) => (i === li ? { ...l, ...patch } : l)),
     }));
 
-  const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine(defaultTaxable('other'))] }));
+  const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine(taxUnderUse(familyRule('other')))] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length, defaultTaxable('other'))]); };
+  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length, taxUnderUse(familyRule('other')))]); };
   const duplicateBuilding = (bi) => {
     markBuildingsEdit();
     setBuildings((prev) => {
@@ -854,7 +913,11 @@ function CommercialProposalEditor() {
       // family's default (the visible Tax switch stays operator-editable).
       // A row added here whose switch the operator has not touched follows
       // its family the same way (the new-row default).
-      if (newReg && (inc.hadGenerated || exc.hadGenerated || (p.isNew && !p.taxTouched))) next.taxable = newReg.taxable === true;
+      if (newReg && (inc.hadGenerated || exc.hadGenerated || (p.isNew && !p.taxTouched))) Object.assign(next, taxUnderUse(newReg.taxable === true));
+      // A kept business rule (residential, or no pick yet) belongs to the old
+      // family: it follows the new one even where the visible switch stays as
+      // the operator left it, so a later Business pick restores the right rule.
+      else if (newReg && p.bizTaxable !== undefined) next.bizTaxable = newReg.taxable === true;
       return next;
     }));
     // Generated responsibilities follow the same swap, pruning ONLY via the
@@ -919,7 +982,7 @@ function CommercialProposalEditor() {
     markEdit();
     setProgramsState((prev) => [...prev, {
       id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '',
-      taxable: defaultTaxable('pest'), note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [],
+      ...taxUnderUse(familyRule('pest')), note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [],
       isNew: true,
     }]);
     setOpenSections((prev) => ({ ...prev, programs: true }));
@@ -946,7 +1009,7 @@ function CommercialProposalEditor() {
   // from what is actually on screen.
   const formRef = React.useRef(null);
   formRef.current = {
-    title, preparedFor, propertyAddress, taxRate, terms, validThrough, projectCosting,
+    title, preparedFor, propertyAddress, buildingUse, taxRate, terms, validThrough, projectCosting,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
     loadedAuthored, dirty,
   };
@@ -1034,6 +1097,7 @@ function CommercialProposalEditor() {
       title: f.title.trim() || 'Commercial Service Proposal',
       preparedFor: f.preparedFor.trim(),
       propertyAddress: f.propertyAddress.trim(),
+      ...(f.buildingUse ? { buildingUse: f.buildingUse } : {}),
       taxRate: f.taxRate,
       terms: f.terms.trim() || null,
       ...(bidToolsEnabled ? { validThrough: f.validThrough || null } : {}),
@@ -1092,6 +1156,11 @@ function CommercialProposalEditor() {
     setSaving(true);
     setError(null);
     try {
+      // The building use sets which rows carry sales tax, so every save states it.
+      if (!formRef.current.buildingUse) {
+        setError(BUILDING_USE_REQUIRED);
+        return false;
+      }
       for (let attempt = 0; attempt < 5; attempt++) {
         // Applying the normalized reload below is only safe if no keystroke
         // lands while the round-trip is in flight — otherwise it would
@@ -1403,6 +1472,22 @@ function CommercialProposalEditor() {
                     <span className="mt-1 block text-12 text-zinc-500">The county rate could not be looked up. Enter the rate.</span>
                   )}
                 </div>
+                <div className="block">
+                  <label className="block">
+                    <span className={LABEL}>Building use</span>
+                    <Select className="mt-1" value={buildingUse} disabled={!!locked}
+                      onChange={(e) => chooseBuildingUse(e.target.value)}>
+                      {!buildingUse && <option value="">{locked ? 'Not set' : 'Pick one'}</option>}
+                      {BUILDING_USE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </Select>
+                  </label>
+                  {(buildingUse || !locked) && (
+                    <span className="mt-1 block text-12 text-zinc-500">
+                      {BUILDING_USE_OPTIONS.find((option) => option.value === buildingUse)?.note
+                        || 'Pick before saving. It sets which rows carry sales tax.'}
+                    </span>
+                  )}
+                </div>
               </div>
             </CardBody>
           </Card>
@@ -1691,7 +1776,7 @@ function CommercialProposalEditor() {
               </span>
               {!locked && buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim())) && (
                 <Button variant="secondary" size="sm"
-                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0, defaultTaxable('other'))]); }}>
+                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0, taxUnderUse(familyRule('other')))]); }}>
                   <Trash2 size={14} /> Clear building lines
                 </Button>
               )}
@@ -1913,7 +1998,7 @@ function CommercialProposalEditor() {
             ))}
             {!locked && (
               <Button variant="ghost" size="sm"
-                onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: defaultTaxable('other'), includesText: '' }]); }}>
+                onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, ...taxUnderUse(familyRule('other')), includesText: '' }]); }}>
                 <Plus size={14} /> Add corrective work
               </Button>
             )}

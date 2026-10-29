@@ -203,8 +203,9 @@ function signEligibility(estimate) {
 
 // Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
 // of narrative lines, a program's `visitMinutes`: scheduling only, it sizes the first visit and is not part of the
-// quote), so re-saving the same quote never changes it and any customer-visible change does.
-const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes']);
+// quote; the proposal's `buildingUse`: the operator's tax classification, whose effect on the quote is each row's
+// Taxable flag, hashed with the row), so re-saving the same quote never changes it and any customer-visible change does.
+const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes', 'buildingUse']);
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {

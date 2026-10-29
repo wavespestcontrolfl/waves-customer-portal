@@ -24,7 +24,7 @@ const makeFixture = ({ commercialTerms, billByInvoice = false, status = 'draft',
   suggestedTaxRate: 0,
   estimate: { id: 'synthetic-proposal', status, editVersion: 'loaded-version', customerName: 'Synthetic Office', billByInvoice },
   proposal: {
-    enabled: true, title: 'Synthetic proposal', taxRate: 0,
+    enabled: true, buildingUse: 'nonresidential', title: 'Synthetic proposal', taxRate: 0,
     buildings: [{ name: 'Office', lineItems: [{ description: 'Monthly service', quantity: 1, unitPrice: 116.3, frequency, taxable: false }] }],
     ...(commercialTerms !== undefined ? { commercialTerms } : {}),
   },

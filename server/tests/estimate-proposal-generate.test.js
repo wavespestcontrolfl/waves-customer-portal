@@ -4,6 +4,7 @@
 // sections come back null so the builder never fills a card with nothing.
 
 const {
+  businessTaxRulesFor,
   deriveProposalDraft,
   programFamilyForService,
 } = require('../services/estimate-proposal-generate');
@@ -1007,5 +1008,22 @@ describe('deriveProposalDraft', () => {
     });
     expect(mappedTwin.correctiveWork).toBeNull();
     expect(mappedTwin.warnings[0]).toMatch(/requires manual review/i);
+  });
+});
+
+// Owner 2026-10-28 (building use): a residential proposal switched to Business building restores each saved row
+// that names a service to its own business rule, so a canonical one-time key keeps its own answer (Codex #6945 r3).
+describe('businessTaxRulesFor', () => {
+  it('gives each saved row that names a service its business rule, keyed by row id', () => {
+    const rules = businessTaxRulesFor({
+      correctiveWork: [
+        { id: 'bed-bug', service: 'bed_bug', label: 'Bed bug treatment', amount: 500 },
+        { id: 'wdo', service: 'wdo_inspection', label: 'WDO inspection', amount: 125 },
+        { id: 'hand-added', label: 'Custom work', amount: 50 },
+      ],
+      buildings: [{ name: 'A', lineItems: [{ id: 'turf', service: 'lawn', description: 'Turf', frequency: 'monthly' }] }],
+      programs: [{ id: 'pest-program', service: 'pest', label: 'Pest' }],
+    });
+    expect(rules).toEqual({ 'bed-bug': true, wdo: false, turf: false, 'pest-program': true });
   });
 });

@@ -370,6 +370,18 @@ describe('commercial bid authoring', () => {
     expect(badQuantity.statusCode).toBe(400);
     expect(mutations).toHaveLength(0);
   });
+  // Owner 2026-10-28: the building use sets which rows the builder taxes, so it saves with the proposal and an
+  // unknown value is refused, never silently dropped.
+  test('PUT saves the building use and refuses an unknown one without saving', async () => {
+    row.status = 'draft';
+    const unknown = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), buildingUse: 'warehouse' } });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.body.error).toBe('Building use must be residential or nonresidential.');
+    expect(mutations).toHaveLength(0);
+    const saved = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), buildingUse: 'residential' } });
+    expect(saved.statusCode).toBe(200);
+    expect(dataOf().proposal.buildingUse).toBe('residential');
+  });
   // A pending send is judged at the first five-minute tick it can reach:
   // 04:55Z (23:55 ET) still fits a 2099-12-21 hold, 04:55:00.001Z first
   // runs at 05:00Z (pre-push codex P1 on #4309).
