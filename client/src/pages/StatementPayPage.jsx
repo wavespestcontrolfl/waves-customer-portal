@@ -688,5 +688,5 @@ export default function StatementPayPage() {
 }
 
 function termLabel(v) {
-  return { net15: "Net 15", net30: "Net 30", due_on_receipt: "Due on receipt" }[v] || v;
+  return { net15: "Net 15", net30: "Net 30", net60: "Net 60", due_on_receipt: "Due on receipt" }[v] || v;
 }

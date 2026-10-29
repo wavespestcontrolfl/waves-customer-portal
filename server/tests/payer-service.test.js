@@ -15,6 +15,20 @@ function makeDb(tables) {
   });
 }
 
+describe('PayerService payment terms', () => {
+  test('net60 is a canonical NET term worth 60 days (owner 2026-10-29)', () => {
+    expect(PayerService.PAYMENT_TERMS).toEqual(['due_on_receipt', 'net15', 'net30', 'net60']);
+    expect(PayerService.PAYMENT_TERM_NET_DAYS).toEqual({ net15: 15, net30: 30, net60: 60 });
+  });
+
+  test('isNetPaymentTerm reads the day map, so every NET term (and nothing else) counts', () => {
+    for (const terms of ['net15', 'net30', 'net60']) expect(PayerService.isNetPaymentTerm(terms)).toBe(true);
+    for (const terms of ['due_on_receipt', '', null, undefined, 'NET60', 'constructor', 'toString']) {
+      expect(PayerService.isNetPaymentTerm(terms)).toBe(false);
+    }
+  });
+});
+
 describe('PayerService.resolveForInvoice precedence', () => {
   test('per-job payer on the scheduled service wins over the customer default', async () => {
     const database = makeDb({

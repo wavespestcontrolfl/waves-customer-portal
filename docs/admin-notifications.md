@@ -80,7 +80,9 @@ that the bell asks before it sends (give one to any step the bell cannot undo); 
 four short strings or numbers that the handler checks again at the tap. `composeAdminAlert` checks
 the shape and the section 3 tokens in labels and prompts. The bell list serves a row's buttons as
 `actions` (`{ id, label, prompt }`) to the admin role only, on open rows, while the kind's gate is
-on. A tap is `POST /api/admin/notifications/:id/actions/:actionId` with the row's `version` (the
+on. A kind whose buttons depend on the record as it stands now gives its handler `visibleItems(rows)`:
+one read for that kind's rows on the page, answering which stored buttons each row serves (a row it
+leaves out serves none; a failed read serves none of that kind). The tap still checks again. A tap is `POST /api/admin/notifications/:id/actions/:actionId` with the row's `version` (the
 Done fence). A changed row, a second tap or a refusal by the step answers 409 with a short message,
 and the bell reloads its list.
 
@@ -103,6 +105,13 @@ Kinds today:
   speaks for, as Done does. It sends no reply and places no call. A follow-up row that is no longer
   call-back only writes `buttons: null`, so a refresh drops the old button. The emitters set the button when they raise the
   row (`closeNoteButtons`), so rows raised before the change carry none.
+- `bid_decision` (`server/services/bid-desk/alert-buttons.js`, `GATE_BID_ALERT_BUTTONS`, a trial;
+  owner 2026-10-29): **No bid** and **Bid** on a new bid invite's row (`bid-desk:new:<bid>`). Both
+  are stored at raise; `visibleItems` serves No bid while the bid is still new, and Bid only once
+  its due date is confirmed on the Bid desk (its reminders run on no other date). A tap is the Bid
+  desk's own save step (`saveBidUpdate` in `server/routes/admin-bid-desk.js`, behind the page's Save
+  decision) with the same checks again under its row lock: still new, and a confirmed date for Bid.
+  It sends nothing to a buyer or customer and moves no money. Off unless `GATE_BID_DESK` is on too.
 
 ## 3. Never in a headline or a why
 

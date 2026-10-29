@@ -6484,7 +6484,7 @@ const InvoiceService = {
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
       const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
-      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+      if (pre.payerId && PayerSvc.isNetPaymentTerm(pre.paymentTerms)) {
         return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
     }
@@ -6686,7 +6686,7 @@ const InvoiceService = {
     let accruedStatementId = null;
     if (!skipAccrual
       && resolvedPayerId
-      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && PayerService.isNetPaymentTerm(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
       // TOCTOU guard: the transaction wrap at the top was decided from a preflight
       // resolve. If the payer/terms flipped to NET between that preflight and this

@@ -8,6 +8,9 @@ const ALL = {
 const labels = (rows) => rows.map(([label]) => label);
 
 describe('commercialTermRows', () => {
+  it('labels a Net-60 payment term (owner 2026-10-29)', () => {
+    expect(commercialTermRows({ paymentTerms: 'net60' })).toEqual([['Payment', 'Net-60']]);
+  });
   it('lists every authored term in order, as before', () => {
     expect(labels(commercialTermRows(ALL))).toEqual(['Payment', 'Initial term', 'Renewal', 'Price adjustment', 'Cancellation', 'Property access']);
     expect(commercialTermRows(null)).toEqual([]);

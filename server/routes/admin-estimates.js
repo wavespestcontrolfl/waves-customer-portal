@@ -4766,7 +4766,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         : null;
       const autopayLive = require('../config/feature-gates').commercialAutopayLive();
       if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
-        return res.status(400).json({ error: `Payment terms must be one of: ${autopayLive ? 'Auto Pay, ' : ''}Due on receipt, Net-15, Net-30.` });
+        return res.status(400).json({ error: `Payment terms must be one of: ${autopayLive ? 'Auto Pay, ' : ''}Due on receipt, Net-15, Net-30, Net-60.` });
       }
       const { AUTOPAY_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
       if (canonicalPaymentTerms === AUTOPAY_PAYMENT_TERMS) {
@@ -4775,10 +4775,10 @@ router.put('/:id/proposal', async (req, res, next) => {
         // invoice-mode proposal (that bills its first invoice on its terms). With the gate off, a proposal already
         // saved on Auto Pay keeps it; a new Auto Pay term is refused.
         if (!autopayLive && savedProposal.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) {
-          return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+          return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30, Net-60.' });
         }
         if (estimate.bill_by_invoice) {
-          return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 for an invoiced proposal, or turn off Bill by invoice.' });
+          return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 or Net-60 for an invoiced proposal, or turn off Bill by invoice.' });
         }
       } else if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
         // Structured payment terms exist because billing CONSUMES them (the
@@ -4809,7 +4809,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         }
         if (payerResolution?.payerId != null && payerResolution.paymentTerms
           && payerResolution.paymentTerms !== canonicalPaymentTerms) {
-          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30', net60: 'Net-60' };
           return res.status(400).json({
             error: `This customer bills through a payer on ${labels[payerResolution.paymentTerms] || payerResolution.paymentTerms} terms — set payment terms to match, or leave them unset.`,
           });
