@@ -546,7 +546,8 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     .whereNotExists(function laneOwnedByHold() {
       this.select(db.raw('1')).from('estimate_card_holds as x').whereRaw('x.scheduled_service_id = r.scheduled_service_id');
     })
-    .select([...visitCols, 'r.stripe_payment_method_id as pm_id', 'r.no_show_fee_amount']);
+    .select([...visitCols, 'r.stripe_payment_method_id as pm_id', 'r.no_show_fee_amount',
+      'ss.is_recurring', 'ss.recurring_parent_id', 'ss.recurring_pattern']);
   const nowMs = now.getTime();
   const seen = new Set();
   const live = [];
@@ -563,6 +564,9 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
       const start = composeScheduledApptTime(row);
       const startMs = start ? start.getTime() : NaN;
       if (!Number.isFinite(startMs) || startMs <= nowMs) continue;
+      // The fee rail refuses recurring visits (one-time only, owner ruling
+      // 2026-10-29), so their frozen terms are no fee to warn about.
+      if (lane === 'appointment_card' && isRecurringLineageVisit(row)) continue;
       if (lane === 'appointment_card' && await appointmentRailPayerBilled({ customerId, scheduledServiceId: serviceId })) continue;
       live.push({
         lane,
