@@ -541,7 +541,7 @@ function openTimesDayLabel(d) {
 // that same engine whatever the gate says by then. A snapshot with no source is
 // the old finder's, and is rechecked there.
 const {
-  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE,
+  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE, ROUTE_TIMES_OFFER_SOURCE,
 } = require('./sms-offer-sources');
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
@@ -550,6 +550,10 @@ const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'n
 // (3s) was sized for, and the reschedule GET route runs it with no deadline.
 // Only the scheduler path uses this; the old finder keeps its 3000.
 const SCHEDULER_OPEN_TIMES_TIMEOUT_MS = 10000;
+// A quote built on the route list (GATE_ASSISTANT_ROUTE_TIMES=true) waits this
+// long for it before the old finder quotes instead; the send-time recheck of
+// such a quote uses SCHEDULER_OPEN_TIMES_TIMEOUT_MS.
+const ROUTE_TIMES_QUOTE_BUDGET_MS = 3000;
 
 // The same label the zone finder renders (availability.js fullDate):
 // "Tuesday, September 29", from the picker's YYYY-MM-DD day.
@@ -649,6 +653,7 @@ async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
   if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
   if (offer.source === WEBSITE_OFFER_SOURCE) return loadWebsiteEngineDays({ offer, customerId });
   if (offer.source === RESERVICE_OFFER_SOURCE) return loadReserviceDays({ customerId, serviceKey: offer.serviceKey });
+  if (offer.source === ROUTE_TIMES_OFFER_SOURCE) return loadRouteTimesDays({ offer, customerId, fresh });
   return null;
 }
 
@@ -734,6 +739,60 @@ async function websiteOfferFor({ serviceType, estimateId, city }) {
   }
   const serviceKey = String(serviceType || '').trim() ? await bookFunnelKeyFor({ serviceType }) : 'pest_control';
   return { source: WEBSITE_OFFER_SOURCE, serviceKey, city };
+}
+
+// GATE_ASSISTANT_ROUTE_TIMES: the customer pages' list for the customer's own
+// pin (services/scheduling/assistant-route-times.js). A fresh read, except the
+// list the quote itself just built, which rides on the offer.
+async function loadRouteTimesDays({ offer, customerId, fresh = false }) {
+  if (!fresh && offer.preloadedDays) return { days: offer.preloadedDays };
+  const routeTimes = require('./scheduling/assistant-route-times');
+  const loaded = await routeTimes.loadRouteDays({
+    customerId, estimateId: offer.estimateId || null, serviceKey: offer.serviceKey, budgetMs: SCHEDULER_OPEN_TIMES_TIMEOUT_MS,
+  });
+  return loaded.days ? { days: loaded.days } : null;
+}
+
+// GATE_ASSISTANT_ROUTE_TIMES=true: the offer for a customer with a stored pin
+// whose route list built, else null (the old finder quotes, and stamps nothing).
+// The returned offer's source is stamped on the snapshot, so the send-time recheck
+// asks this same list.
+async function routeTimesOfferFor({ serviceType, estimateId, city, customerId }) {
+  try {
+    const routeTimes = require('./scheduling/assistant-route-times');
+    if (routeTimes.assistantRouteTimesMode() !== 'on' || !customerId) return null;
+    const website = await websiteOfferFor({ serviceType, estimateId, city });
+    if (!website?.serviceKey) return null;
+    const loaded = await routeTimes.loadRouteDays({ customerId, estimateId, serviceKey: website.serviceKey, budgetMs: ROUTE_TIMES_QUOTE_BUDGET_MS });
+    if (!loaded.days) return null;
+    return { source: ROUTE_TIMES_OFFER_SOURCE, serviceKey: website.serviceKey, city, estimateId, preloadedDays: loaded.days };
+  } catch (err) {
+    logger.warn(`[sms-shadow] route-times quote failed (${err.message}); the by-city finder quotes`);
+    return null;
+  }
+}
+
+// Where the city-based fallback gets its times: the website engine under
+// GATE_MULTI_TECH_TEXT_TIMES, else the route list under
+// GATE_ASSISTANT_ROUTE_TIMES=true, else null (the old by-city finder).
+async function cityFallbackOfferFor({ eligible, serviceType, estimateId, city, context }) {
+  if (!eligible) return null;
+  if (multiTechTextTimesLive()) return websiteOfferFor({ serviceType, estimateId, city });
+  return routeTimesOfferFor({ serviceType, estimateId, city, customerId: context?.customer?.id || null });
+}
+
+// GATE_ASSISTANT_ROUTE_TIMES=shadow: after the old finder answered a draft,
+// build the route list for the same customer and log how it differs. Detached
+// by the caller; never throws.
+async function shadowRouteTimes({ city, customerId, estimateId, serviceType, oldResult }) {
+  try {
+    const routeTimes = require('./scheduling/assistant-route-times');
+    if (routeTimes.assistantRouteTimesMode() !== 'shadow' || !customerId) return;
+    const website = await websiteOfferFor({ serviceType, estimateId, city });
+    await routeTimes.shadowCompare({ surface: 'sms_drafter', customerId, estimateId, serviceKey: website?.serviceKey || '', oldDays: oldResult?.days });
+  } catch (err) {
+    logger.warn(`[sms-shadow] route-times shadow compare failed (${err.message})`);
+  }
 }
 
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
@@ -835,6 +894,7 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // thread already resolved to a specific estimate, the offered slots
     // must reflect THAT estimate's service minutes, not a generic default.
     const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
+    shadowRouteTimes({ city, customerId, estimateId, serviceType, oldResult: result });
     const lines = [];
     const days = [];
     for (const d of (result?.days || [])) {
@@ -4351,7 +4411,7 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
       ...(schedulerOffer ? {
         source: schedulerOffer.source,
         ...(schedulerOffer.scheduledServiceId ? { scheduledServiceId: schedulerOffer.scheduledServiceId } : {}),
-        ...([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE].includes(schedulerOffer.source) ? { serviceKey: schedulerOffer.serviceKey } : {}),
+        ...([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE, ROUTE_TIMES_OFFER_SOURCE].includes(schedulerOffer.source) ? { serviceKey: schedulerOffer.serviceKey } : {}),
       } : {}),
     },
     quotedWindows,
@@ -6090,9 +6150,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // GATE_MULTI_TECH_TEXT_TIMES: with no scheduler picker for this text, the
   // city-based fallback asks the website engine (stamped on the snapshot).
+  // GATE_ASSISTANT_ROUTE_TIMES=true: a customer with a stored pin and no other
+  // picker gets the route list instead, stamped on the snapshot the same way.
   const schedulerOffer = schedulerPickerOffer
-    || (willFetchOpenTimes && identityCertain && city && multiTechTextTimesLive()
-      ? await websiteOfferFor({ serviceType, estimateId: pricingEstimateId, city }) : null);
+    || await cityFallbackOfferFor({
+      eligible: willFetchOpenTimes && identityCertain && Boolean(city),
+      serviceType, estimateId: pricingEstimateId, city, context,
+    });
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.
@@ -6964,6 +7028,9 @@ module.exports = {
   looksLikeOfferText,
   computeOpenTimesSnapshot,
   websiteOfferFor,
+  cityFallbackOfferFor,
+  routeTimesOfferFor,
+  shadowRouteTimes,
   WEBSITE_OFFER_SOURCE,
   openTimesStillOffered,
   SLA_PHRASES: followupSla.SLA_PHRASES,
