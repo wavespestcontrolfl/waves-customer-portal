@@ -1172,37 +1172,39 @@ const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
   .orderBy('created_at').orderBy('id');
 
 // Close the alert for a finished commitment. The shared source alert stays
-// open while another promise from the same text is still open. `openOnly`
-// touches open rows only: a temporary close (GATE_PROMISE_RECORD_EVIDENCE
-// rule 3, on track until a visit) never takes over a row a person marked done.
-// `needsAlert` (optional) narrows the text's other open promises to those that
-// still need the alert (rule 3: one the same visit rule holds does not).
-async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false, needsAlert = null }, update) {
+// open while another promise from the same text still needs it (notOnTrack:
+// rule 3 of GATE_PROMISE_RECORD_EVIDENCE holds one with a visit booked ahead).
+// `openOnly` touches open rows only: a temporary close (rule 3, on track until
+// a visit) never takes over a row a person marked done.
+async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false, now = new Date() }, update) {
   // A non-settling update (edit, snooze) marks both alerts read; a settling
-  // one finishes the shared alert only when no other promise from the text is open.
+  // one finishes the shared alert only when no other promise from the text needs it.
   const others = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
-  const remaining = needsAlert ? await needsAlert(others) : others;
+  const remaining = others.length ? await refreshSharedSmsAlert(trx, smsLogId, others, now) : [];
   const keys = [legacyCommitmentAlertKey(commitmentId), ...(remaining.length ? [] : [smsSourceAlertKey(smsLogId)])];
   await trx('notifications').where({ recipient_type: 'admin' }).modify((q) => { if (openOnly) q.whereNull('done_at'); })
     .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
-  if (remaining.length) await refreshSharedSmsAlert(trx, smsLogId, remaining);
 }
 
 // The shared alert keeps naming a promise that has since settled. Rewrite its
-// copy and commitment list to the promises still open; it stays open and does
-// not ring again (refresh of an OPEN row only; nothing is created).
-async function refreshSharedSmsAlert(trx, smsLogId, remaining) {
+// copy and commitment list to the text's other open promises that still need
+// it; it stays open and does not ring again (refresh of an OPEN row only;
+// nothing is created). Returns those promises: none means the caller closes it.
+async function refreshSharedSmsAlert(trx, smsLogId, others, now) {
   const dedupeKey = smsSourceAlertKey(smsLogId);
   const queued = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
   // The same source the ring used: a scheduled text reads as its actual delivery.
   const source = queued && await scheduledSourceMessage(trx, queued);
-  const shared = source && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+  if (!source) return others;
+  const remaining = await notOnTrack(trx, others, source, now);
+  const shared = remaining.length && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id');
-  if (!shared) return;
+  if (!shared) return remaining;
   // The state comes from the promises still open, never from the one that just
   // settled (a settled promise's "kept late" must not stay on the alert).
   await ringOverdueBell(trx, { row: remaining[0], message: source, verdict: sourceAlertVerdict({ verdict: 'open' }, remaining),
     dedupeKey, promises: remaining, refreshOnly: true });
+  return remaining;
 }
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
@@ -1336,9 +1338,9 @@ function sourceAlertVerdict(verdict, promises, scannedId = null) {
 // listing every open promise from it. An alert an older build keyed on one
 // commitment is closed in its favor. `row` is the commitment that triggered the
 // ring; it leads the list.
-async function ringSmsSourceBell(trx, { row, message, verdict }) {
-  const open = await openSourceCommitments(trx, message.id);
-  const promises = [row, ...open.filter((item) => item.id !== row.id)];
+async function ringSmsSourceBell(trx, { row, message, verdict, now }) {
+  const siblings = (await openSourceCommitments(trx, message.id)).filter((item) => item.id !== row.id);
+  const promises = [row, ...await notOnTrack(trx, siblings, message, now)];
   const notification = await ringOverdueBell(trx, { row, message, verdict: sourceAlertVerdict(verdict, promises, row.id),
     dedupeKey: smsSourceAlertKey(message.id), promises });
   if (notification?.id) {
@@ -1382,9 +1384,13 @@ const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
 const SHADOW_MODEL_CALLS_PER_RUN = 10;
 const alertRingOnce = () => require('../config/feature-gates').alertRingOnceLive?.() === true;
 // The text's other open promises that still need its shared alert: every one
-// rule 3 does not hold in 'true' mode (findOnTrackVisit; a failed read holds
-// nothing, so that promise keeps the alert).
+// rule 3 does not hold (findOnTrackVisit; a failed read holds nothing, so that
+// promise keeps the alert). Only in 'true' mode with GATE_ALERT_RING_ONCE on,
+// the one setup where a hold closes an alert; otherwise every promise keeps
+// it. The ring, the hold and a settle all read this list, so the alert's
+// promises do not depend on which one a run scanned last (Codex #6974 r3).
 async function notOnTrack(conn, promises, message, now) {
+  if (!promises.length || promiseRecordMode() !== 'true' || !alertRingOnce()) return promises;
   const kept = [];
   for (const item of promises) {
     if ((await findOnTrackVisit(conn, item, message, now))?.mode !== 'true') kept.push(item);
@@ -1587,7 +1593,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     if (keptLate(live, verdict) && !holdBell && !await trx('notifications').where({ recipient_type: 'admin' })
       .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).first('id')) {
       // A suppressed bell leaves no row to find next tick: close now instead.
-      const bell = await ringSmsSourceBell(trx, { row, message, verdict: { ...verdict, late: true } });
+      const bell = await ringSmsSourceBell(trx, { row, message, verdict: { ...verdict, late: true }, now });
       rang = true;
       if (!bell.suppressed) return;
     }
@@ -1595,7 +1601,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
       });
-      await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id },
+      await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, now },
         require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
           resolution: verdict.basis === THREAD_BASIS ? `The text follow-up was done (${verdict.note})` : 'The text follow-up was done',
           at: now, keepExisting: true, conn: trx }));
@@ -1608,21 +1614,21 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // pass with new evidence does not repeat the same model call for free.
     // Rule 3 ('true'): an overdue alert that rang before the visit was booked
     // closes while the visit is ahead, through the usual closer (open rows
-    // only; a shared alert keeps the text's other open promises). Only with
+    // only; a shared alert keeps the text's other promises that still need
+    // it). Only with
     // GATE_ALERT_RING_ONCE on: its open-only probe lets the ring after the
     // window raise a fresh alert, and the ring's supersede step leaves a system
     // close alone. Without it a closed row would absorb that ring for a day.
     if (holdBell) {
       if (alertRingOnce()) {
-        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true,
-          needsAlert: (others) => notOnTrack(trx, others, message, now) },
+        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true, now },
         require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
           resolution: `On track: a visit is booked until ${etShortDateTime(onTrack.window_end)} ET`, at: now, keepExisting: true, conn: trx }));
       }
       return;
     }
     if (deadlinePassed) {
-      await ringSmsSourceBell(trx, { row, message, verdict });
+      await ringSmsSourceBell(trx, { row, message, verdict, now });
       rang = true;
     }
   });

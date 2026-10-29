@@ -4377,6 +4377,47 @@ postgres('SMS commitments on PostgreSQL', () => {
         } finally { delete process.env.GATE_ALERT_RING_ONCE; }
       });
 
+      // A second overdue promise from the same text, of a kind rule 3 never holds.
+      const overdueReport = (id) => mockPg('call_commitments').insert({ id, sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
+        description: 'send the service report', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+        evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+        sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } })
+        .returning('id').then(([inserted]) => inserted.id);
+
+      // The scan runs in id order: the sibling's id puts it after or before the held promise.
+      test.each([['after', 'ffffffff-ffff-4fff-bfff-ffffffffffff'], ['before', '00000000-0000-4000-8000-000000000001']])(
+        'gate true: an overdue sibling scanned %s the held promise rings an alert without it (Codex #6974 r3)', async (_order, siblingId) => {
+          process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+          process.env.GATE_ALERT_RING_ONCE = 'true';
+          try {
+            const held = await staffPromise();
+            // The held promise's stored check says "can't tell": that must not set the alert's state either.
+            await mockPg('call_commitments').where({ id: held.id })
+              .update({ sms_context: mockPg.raw("sms_context || jsonb_build_object('fulfillment_check', jsonb_build_object('verdict', 'uncertain'))") });
+            const report = await overdueReport(siblingId);
+            await mockPg('scheduled_services').insert(visitRow());
+            await tick();
+            expect(rings()).toBe(1);
+            const [, , , rung] = NotificationService.notifyAdmin.mock.calls[0];
+            expect(rung.metadata).toMatchObject({ commitment_id: report, commitment_ids: [report], verification: 'open' });
+          } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        });
+
+      test.each([['true', true], [undefined, false]])('gate true, GATE_ALERT_RING_ONCE %p: the sibling settling closes the shared alert while the visit holds the other promise: %p', async (ringOnce, closes) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        if (ringOnce) process.env.GATE_ALERT_RING_ONCE = ringOnce;
+        try {
+          await staffPromise();
+          const report = await overdueReport(randomUUID());
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await mockPg('call_commitments').where({ id: report }).update({ status: 'fulfilled' });
+          await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: report, smsLogId: message.id, now: at(NOW) },
+            { done_at: trx.fn.now(), done_by: 'sms-commitments', resolution: 'The text follow-up was done' }));
+          expect((await alertOf(shared)).done_at !== null).toBe(closes);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
       test('gate true: an alert a person already marked done stays theirs (the on-track close touches open rows only)', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         process.env.GATE_ALERT_RING_ONCE = 'true';
