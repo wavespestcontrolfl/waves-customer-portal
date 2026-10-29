@@ -595,7 +595,10 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+// Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
+// The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken } = require('../services/lawn-rounds');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -636,6 +639,8 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
     weekday: (opts.weekday != null && opts.weekday !== '' && !isNaN(parseInt(opts.weekday)))
       ? parseInt(opts.weekday)
       : et.dayOfWeek,
+    // The series anchor, for lawn_rounds_9 only (see nextRecurringDate).
+    roundAnchor: dateOnly(baseDateStr),
   };
 }
 
@@ -665,6 +670,11 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // dates the series was seeded with (it would otherwise take the generic
   // 91-day fallback below and schedule winter visits).
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safeBaseStr, i, opts);
+  // Lawn 9x rounds: one visit in each of nine fixed rounds a year. Extension,
+  // top-up and reseed hop from the LATEST visit, so opts.roundAnchor (the
+  // series anchor, set by recurrenceOrdinalOptions) keeps the anchor's offset
+  // in every round; without it every hop drifts toward the round's end.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safeBaseStr, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -713,7 +723,19 @@ function seasonalSafeShift(rawDate, pattern, skip, direction, blackoutDates = nu
   const shifted = clearOfBlackout(shiftPastWeekend(rawDate, skip, direction), blackoutDates, { skipWeekends: !!skip });
   // Null = the nudge's bounded search exhausted; callers skip the candidate.
   if (shifted == null) return null;
-  return clampDateToSeason(pattern, shifted, { skipWeekends: !!skip, blackoutDates });
+  const seasonal = clampDateToSeason(pattern, shifted, { skipWeekends: !!skip, blackoutDates });
+  // A lawn round is a window too: a weekend shift or a blackout nudge off the
+  // last day of a round must not land in the next one (two visits there, none
+  // here). The raw cadence date names the round the date belongs to.
+  return seasonal && clampDateToRound(pattern, seasonal, { skipWeekends: !!skip, blackoutDates, intendedDate: rawDate });
+}
+
+// True when the series already owns this date, or (lawn_rounds_9) a visit in
+// the same round: a series owes one visit a round, so a candidate whose round
+// is taken is a second visit, not a missing one. Every extension walk asks
+// this instead of seen.has(date).
+function seriesDateTaken(seen, pattern, date) {
+  return seen.has(date) || (pattern === LAWN_ROUNDS_9 && roundTaken(seen, date));
 }
 
 // Owner blackout layers ({ dates, weeklyDaysOff }) preloaded once per
@@ -962,7 +984,7 @@ function planCadenceRewriteTargets({
       // A cadence/anchor edit on an older parent must never re-date pending
       // children into the past (mirror of the extend planner's floor).
       if (candidate <= etDateString()) continue;
-      if (seenDates.has(candidate)) continue;
+      if (seriesDateTaken(seenDates, pattern, candidate)) continue;
       seenDates.add(candidate);
       nextDateStr = candidate;
     }
@@ -1036,7 +1058,7 @@ function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spa
     // future-only floor as the other planners so a child can never land in
     // the past.
     if (nextDateStr <= etDateString()) continue;
-    if (seen.has(nextDateStr)) continue;
+    if (seriesDateTaken(seen, pattern, nextDateStr)) continue;
     seen.add(nextDateStr);
     dates.push(nextDateStr);
   }
@@ -1053,7 +1075,7 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
     const nd = seasonalSafeShift(raw, pattern, skip, dir, blackoutDates);
     if (!nd) continue;
     if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nd)) continue;
-    if (seen.has(nd)) continue;
+    if (seriesDateTaken(seen, pattern, nd)) continue;
     // The anchor can itself be in the past on a stalled series; a top-up must
     // still only ever land on future dates.
     if (nd <= etDateString()) continue;
@@ -1197,6 +1219,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
     weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
     intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+    roundAnchor: dateOnly(parent.scheduled_date),
   });
 
   // Cadence rewrite of the pending children/boosters of a series parent.
@@ -9209,7 +9232,7 @@ async function scheduleCreateHandler(req, res, next) {
         const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
         if (!nextDateStr) continue;
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDates.has(nextDateStr)) continue;
+        if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
         seriesDates.add(nextDateStr);
         plannedChildDates.push(nextDateStr);
       }
@@ -16531,6 +16554,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+            roundAnchor: baseDateStr,
           };
           // B6: DATES honor the live weekday preference (ORed over both the
           // parent flag and the form's routinely-submitted false — the edit
@@ -16909,6 +16933,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+            roundAnchor: baseDateStr,
           };
           // B6: DATES honor the live preference; the STAMPED flag stays the
           // operator's raw value (see the rewrite branch above).
@@ -17041,7 +17066,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // Mirror planSpawnChildDates' future-only floor (the pre-trx lock
             // plan) — the two walks must stay candidate-for-candidate equal.
             if (nextDateStr <= etDateString()) continue;
-            if (seenChildDates.has(nextDateStr)) continue;
+            if (seriesDateTaken(seenChildDates, recurringPattern, nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
             // Children resolve the CURRENT catalog identity at insert — never
             // the parent label verbatim (a terminal parent keeps its retired
@@ -20901,7 +20926,7 @@ async function walkExtensionCandidates(ctx) {
       attempt++;
       continue;
     }
-    if (existingDates.has(candidate)) { attempt++; continue; }
+    if (seriesDateTaken(existingDates, parent.recurring_pattern, candidate)) { attempt++; continue; }
     // Another visit in the slot never skips it: the visit goes in on its
     // cadence date (cadenceSlotHandoffFields, below).
     nextStr = candidate;
@@ -22340,10 +22365,14 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
   // cancel left inside this term, else the series-end append as before.
   const { cancelReseedInTermLive } = require('../config/feature-gates');
+  // Lawn rounds never use it (null = the series-end append): the gap picker aims
+  // at the middle of the widest gap, which can sit in a round that already has
+  // its visit. A cancelled round's replacement goes to the next round after
+  // the series end.
   const placementPicker = cancelReseedInTermLive()
-    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+    ? ({ shift, takenDates }) => (parent.recurring_pattern === LAWN_ROUNDS_9 ? null : require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
       rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
-    })
+    }))
     : null;
   const add = await addOneReseedVisit(trx, {
     parent,
@@ -28435,7 +28464,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // The anchor can itself be in the past on a stalled series; an
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
-        if (seen.has(nd)) continue;
+        if (seriesDateTaken(seen, parent.recurring_pattern, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -28532,7 +28561,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // The anchor can itself be in the past on a stalled series; an
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
-        if (seen.has(nd)) continue;
+        if (seriesDateTaken(seen, parent.recurring_pattern, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -29279,6 +29308,9 @@ router._test = {
   planSpawnChildDates,
   planSeriesExtendDates,
   seriesExtendAnchor,
+  seasonalSafeShift,
+  recurrenceOrdinalOptions,
+  seriesDateTaken,
   mintOrReuseScheduledServiceInvoice,
   duesInvoiceCoveringPlanVisit,
   recordPrepaidUnderDuesLock,

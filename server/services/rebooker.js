@@ -232,7 +232,10 @@ function assertConflictSnapshot(actual, options) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+// Lawn 9x rounds (owner 2026-10-28): one visit in each of nine fixed rounds a
+// year. A rescheduled round visit stays inside its own round.
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal } = require('./lawn-rounds');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
@@ -294,6 +297,30 @@ function isMonthBasedRecurrence(pattern) {
   return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
     || !!MONTH_RECURRENCE_INTERVALS[pattern];
 }
+
+// Lawn rounds: true when a move would take a lawn_rounds_9 visit out of the
+// round it sits in. A round that has already ended (a missed visit being
+// rebooked) is the office's to place, so it is not held to its round. Exported
+// for tests.
+function leavesOwnRound(pattern, currentDate, targetDate, today = etDateString()) {
+  if (pattern !== LAWN_ROUNDS_9) return false;
+  const round = roundOf(currentDate);
+  if (!round || round.end < today) return false;
+  const target = String(targetDate || '').split('T')[0];
+  return !!target && (target < round.start || target > round.end);
+}
+
+// Lawn rounds: a series move re-places the rows from the anchor on by their
+// LIST position (occurrence 1, 2, 3...). That is only right when the rows
+// sit in consecutive rounds. After a skipped or cancelled round the move would
+// pull every later visit one round earlier, so it is refused: the caller moves
+// the one visit instead. `positionOf` is the row's series position date.
+function roundSweepHasGap(rows, startIdx, positionOf) {
+  const first = roundOrdinal(positionOf(rows[startIdx]));
+  return rows.slice(startIdx).some((row, k) => roundOrdinal(positionOf(row)) !== first + k);
+}
+
+const OUT_OF_ROUND_MESSAGE = 'This lawn visit has to stay inside its round. Contact the office if you need a different date.';
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -1052,6 +1079,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // dates the series was seeded with (it would otherwise take the generic
   // 91-day fallback below and schedule winter visits).
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
+  // Lawn rounds: the same walk as the seeder (opts.roundAnchor is the series
+  // anchor when `safe` is a later visit of it).
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -1214,6 +1244,13 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     // closed weeks) keeps the date: this projector always returns a date
     // (its write sites are not null-safe).
     out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+    // A lawn round is a window too: the weekend shift or a closed-day nudge
+    // must not carry the date into the next round. `raw` is the date the
+    // cadence (or an exception's shifted date) intended; its round is the one
+    // to stay in. Exhausts only if every day of the round is closed.
+    if (pattern === LAWN_ROUNDS_9) {
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate: String(raw).split('T')[0] }) || out;
+    }
     if (pattern !== SEASONAL_FEB_OCT) return out;
     // The clamp can exhaust only on 75 straight in-season closed or weekend
     // days; the || keeps the always-a-date contract above if it ever does.
@@ -1259,6 +1296,15 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
       }
       out = etDateString(at);
       out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+      if (pattern === LAWN_ROUNDS_9) {
+        // Same at a round edge: walk back into the round the slot belongs to,
+        // skipping the dates already handed out.
+        out = clampDateToRound(pattern, out, {
+          skipWeekends: seriesSkipWeekends,
+          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          intendedDate: start,
+        }) || out;
+      }
       if (pattern === SEASONAL_FEB_OCT) {
         // At the season edge the clamp walks a November date back into
         // October, so it skips the dates already handed out as well: a walk
@@ -1456,6 +1502,9 @@ class SmartRebooker {
         const month = Number(dateStr.slice(5, 7));
         if (month < 2 || month > 10) continue;
       }
+      // Same for a lawn round: reschedule() refuses a non-admin move out of
+      // the visit's round, so do not offer one.
+      if (reason && leavesOwnRound(service.recurring_pattern, service.scheduled_date, dateStr)) continue;
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)
@@ -1776,6 +1825,16 @@ class SmartRebooker {
           code: 'OFF_SEASON',
         });
       }
+    }
+
+    // A lawn round visit stays inside its round (one visit a round, nine a
+    // year). Admin moves stay allowed, like the seasonal guard above.
+    if (initiatedBy !== 'admin' && leavesOwnRound(service.recurring_pattern, service.scheduled_date, newDateStr)) {
+      throw Object.assign(new Error(OUT_OF_ROUND_MESSAGE), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'OUT_OF_ROUND',
+      });
     }
 
     const originalDate = service.scheduled_date;
@@ -2724,6 +2783,16 @@ class SmartRebooker {
         });
       }
     }
+    // A lawn round series keeps its anchor inside the anchor visit's own
+    // round: every later visit is placed from the anchor's offset, one per
+    // round, so an anchor in another round would push the whole series.
+    if (initiatedBy !== 'admin' && leavesOwnRound(parent.recurring_pattern, service.scheduled_date, seriesDateStr)) {
+      throw Object.assign(new Error(OUT_OF_ROUND_MESSAGE), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'OUT_OF_ROUND',
+      });
+    }
     // An explicit clear of both bounds lands the anchor windowless — no slot
     // to have elapsed; the stored window is abandoned, not carried (codex
     // r10 P2).
@@ -2970,6 +3039,13 @@ class SmartRebooker {
       };
       const droppedIdx = assertAnchorMovable(siblings);
       const startIdx = droppedIdx;
+      if (parent.recurring_pattern === LAWN_ROUNDS_9 && roundSweepHasGap(siblings, startIdx, seriesPosition)) {
+        throw Object.assign(new Error('This lawn plan skips a round, so the visits cannot move together. Move this visit only.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'ROUND_GAP',
+        });
+      }
       // What the sweep is about to write, as a comparable shape: identity,
       // position, technician and movability — the lock/projection inputs.
       // Window and tracker columns come fresh from the locked read.
@@ -4837,6 +4913,9 @@ module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
+module.exports.leavesOwnRound = leavesOwnRound;
+module.exports.roundSweepHasGap = roundSweepHasGap;
+module.exports.makeSeriesProjector = makeSeriesProjector;
 // Exported for tests: the per-occurrence window derivation (rollback toggle +
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;

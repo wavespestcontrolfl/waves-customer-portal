@@ -116,6 +116,42 @@ function lawnRoundDate(anchorDateStr, i = 0) {
   return snapped;
 }
 
+// The i-th round date after `base` (a visit in the series), counted in rounds
+// and placed from the SERIES ANCHOR's offset and weekday. lawnRoundDate hops
+// from whatever date it is given, and each hop snaps to the weekday again
+// (a hop gains 2 days a round), so extending a series one visit at a time from
+// its latest visit drifts toward the end of every round (a Jan 12 anchor ends
+// a year later on Jan 25). Extension, top-up and reseed hop from the latest
+// visit, so they pass the anchor: the answer is then the same date the series
+// was seeded with. No anchor, or an unreadable one: hop from `base`, as
+// lawnRoundDate does. i = 0 is `base` itself.
+function lawnRoundDateFrom(anchorDateStr, baseDateStr, i = 0) {
+  const base = dateOnly(baseDateStr);
+  const steps = Math.trunc(Number(i) || 0);
+  const anchorRound = roundOf(anchorDateStr);
+  const baseRound = roundOf(base);
+  if (!anchorRound || !baseRound) return lawnRoundDate(base, steps);
+  if (steps === 0) return base;
+  return lawnRoundDate(dateOnly(anchorDateStr), roundOrdinal(base) - roundOrdinal(anchorDateStr) + steps);
+}
+
+// Position of a date on the continuous round timeline: round 1 of program
+// year Y is Y * 9. Null for an unreadable date.
+function roundOrdinal(dateStr) {
+  const home = roundOf(dateStr);
+  return home ? home.programYear * ROUNDS_PER_YEAR + (home.round - 1) : null;
+}
+
+// True when `dates` (any iterable of 'YYYY-MM-DD') already holds a visit in
+// the same round as `dateStr`. A series owes one visit a round: a candidate
+// whose round is taken is not a missing visit, it is a second one.
+function roundTaken(dates, dateStr) {
+  const want = roundOrdinal(dateStr);
+  if (want == null) return false;
+  for (const d of dates || []) if (roundOrdinal(d) === want) return true;
+  return false;
+}
+
 module.exports = {
   LAWN_ROUNDS_9,
   ROUNDS_PER_YEAR,
@@ -124,4 +160,7 @@ module.exports = {
   roundStart,
   roundEnd,
   lawnRoundDate,
+  lawnRoundDateFrom,
+  roundOrdinal,
+  roundTaken,
 };

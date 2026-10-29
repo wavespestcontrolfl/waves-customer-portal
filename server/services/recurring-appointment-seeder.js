@@ -11,7 +11,7 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
-const { LAWN_ROUNDS_9, lawnRoundDate, roundOf } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken } = require('./lawn-rounds');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -358,7 +358,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
-  if (pattern === LAWN_ROUNDS_9) return lawnRoundDate(safe, i);
+  // opts.roundAnchor: the series anchor, when `safe` is a later visit of it
+  // (extension, top-up, reseed) — keeps the anchor's offset. See lawnRoundDateFrom.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -460,6 +462,8 @@ function* recurringDateCandidates(baseDate, pattern, {
     const seasonal = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
     const nextDate = seasonal && clampDateToRound(pattern, seasonal, { skipWeekends, blackoutDates, intendedDate: rawNext });
     if (!nextDate || recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDate) || seen.has(nextDate)) continue;
+    // One visit a round: a visit already in this round, on another day, owns it.
+    if (pattern === LAWN_ROUNDS_9 && roundTaken(seen, nextDate)) continue;
     seen.add(nextDate);
     yield nextDate;
   }
