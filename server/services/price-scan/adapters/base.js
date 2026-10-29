@@ -376,6 +376,79 @@ function applySizeHint(snapshot) {
   return snapshot;
 }
 
+// ---- Bot-check (Cloudflare challenge) detection ------------------------------------------
+// Some vendors (DoMyOwn, Keystone) answer the headless scan with Cloudflare's "Just a moment"
+// check. We only DETECT it, report it as VENDOR_BLOCKED and stop early; nothing here tries to
+// get past it.
+const BOT_CHECK_BREAKER_LIMIT = 2; // blocks for one adapter in one browser context before we stop loading pages
+
+// Runs in the browser: the few page signals the Node-side matcher needs (field names are
+// prefixed so a snapshot-shaped object can never be mistaken for these).
+function readBotCheckSignals() {
+  const body = document.body ? (document.body.innerText || '') : '';
+  return {
+    botCheckTitle: document.title || '',
+    botCheckBody: body.slice(0, 4000),
+    botCheckForm: !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-browser-verification'),
+  };
+}
+
+// PURE: do these page signals look like a Cloudflare challenge page?
+function isBotCheckSignals(sig) {
+  if (!sig || typeof sig !== 'object') return false;
+  if (/^\s*just a moment/i.test(String(sig.botCheckTitle || ''))) return true;
+  if (/performing security verification|verify you are human/i.test(String(sig.botCheckBody || ''))) return true;
+  return sig.botCheckForm === true;
+}
+
+function vendorBlockedError(label) {
+  const err = new Error(`${label} blocked the scan with a bot check (Cloudflare)`);
+  err.code = 'VENDOR_BLOCKED';
+  return err;
+}
+
+// Landed on the vendor's own host at a URL that is not the search-results path = the search
+// redirected straight to a product page (a single exact hit). PURE.
+function landedOnProductUrl(landedUrl, searchUrl) {
+  try {
+    const landed = new URL(String(landedUrl));
+    const search = new URL(String(searchUrl));
+    const host = (h) => h.toLowerCase().replace(/^www\./, '');
+    if (host(landed.hostname) !== host(search.hostname)) return false;
+    if (landed.pathname === '/' || landed.pathname === search.pathname) return false;
+    if (/\/catalogsearch\//i.test(landed.pathname)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// The shorter retry query: the first two whitespace tokens of the full one.
+function shortSearchQuery(product) {
+  return searchQuery(product).split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+}
+
+// How good one scraped candidate is, lower = better (fetchCandidate keeps the first page at
+// the best tier and returns a tier-0 page at once). PURE apart from verifyMatch.
+//   IDEAL       verified, buyable, and EPA-confirmed (or the product has no EPA to confirm)
+//   BUYABLE     verified and buyable, EPA not confirmed — a single-letter formulation suffix
+//               the slug can't encode (catalog "Talstar P" vs page "Talstar Professional")
+//               lets a sibling like "Talstar XTRA" pass name+size on brand overlap alone
+//   UNBUYABLE   verified but out of stock / backorder (compare drops it, so any buyable
+//               match must beat it, even one found later)
+//   UNVERIFIED  a priced page that did not confirm (a precise 'unverified' skip)
+const CANDIDATE_TIER = Object.freeze({ IDEAL: 0, BUYABLE: 1, UNBUYABLE: 2, UNVERIFIED: 3, NONE: 4 });
+function candidateTier(cand, product) {
+  const verdict = verifyMatch(
+    { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
+    product,
+  );
+  if (!verdict.matched) return CANDIDATE_TIER.UNVERIFIED;
+  if (isUnavailable(cand)) return CANDIDATE_TIER.UNBUYABLE;
+  const epaOk = !(product && product.epaReg) || verdict.signals.epa;
+  return epaOk ? CANDIDATE_TIER.IDEAL : CANDIDATE_TIER.BUYABLE;
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -384,6 +457,7 @@ function makeAdapter(config) {
   // never settles); an optional short settle lets client-rendered prices paint.
   async function scrapeCandidate(page, vendor, product, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    await assertNotBotChecked(page, vendor);
     if (config.settleMs) await page.waitForTimeout(config.settleMs);
     // Option cards render client-side (e.g. DoMyOwn product-cards.js) — wait for them
     // before snapshotting, else the size+price variants aren't in the DOM yet.
@@ -448,6 +522,68 @@ function makeAdapter(config) {
     };
   }
 
+  const vendorLabelOf = (vendor) => (vendor && vendor.name) || config.key;
+
+  // Per-run breaker, kept on the browser context like the login state: after
+  // BOT_CHECK_BREAKER_LIMIT blocks for this adapter, later products fail at once without
+  // loading a page (a blocked vendor would otherwise cost a page load, and for DoMyOwn a
+  // 9 s search wait, for every product in the run).
+  function blockState(page) {
+    if (!page || typeof page.context !== 'function') return null;
+    const ctx = page.context();
+    if (!ctx) return null;
+    ctx.__priceScanBlocked = ctx.__priceScanBlocked || new Map();
+    return ctx.__priceScanBlocked;
+  }
+  function assertBreakerClosed(page, vendor) {
+    const state = blockState(page);
+    if (state && (state.get(config.key) || 0) >= BOT_CHECK_BREAKER_LIMIT) throw vendorBlockedError(vendorLabelOf(vendor));
+  }
+  async function assertNotBotChecked(page, vendor) {
+    let sig = null;
+    try {
+      sig = await page.evaluate(readBotCheckSignals);
+    } catch (e) {
+      return; // a page that cannot be read is the normal fetch path's problem, not a bot check
+    }
+    if (!isBotCheckSignals(sig)) return;
+    const state = blockState(page);
+    if (state) state.set(config.key, (state.get(config.key) || 0) + 1);
+    throw vendorBlockedError(vendorLabelOf(vendor));
+  }
+
+  // One search round trip: load the results page, then either report that it redirected to a
+  // product page (opt-in) or collect the result links. Returns { landedUrl, links }.
+  async function searchOnce(page, vendor, product) {
+    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
+    if (!searchUrl) return null;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
+    await assertNotBotChecked(page, vendor);
+    // OPT-IN: a single exact hit redirects straight to the product page. Check BEFORE the
+    // result-link wait (it would burn the whole wait) and before collecting links (a product
+    // page carries related-product links that are not search results).
+    if (config.searchMayLandOnProduct && typeof page.url === 'function') {
+      const here = page.url();
+      if (landedOnProductUrl(here, searchUrl)) return { landedUrl: here, links: [] };
+    }
+    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
+    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
+    // results are already in the DOM, so we must NOT block here — otherwise a no-match
+    // (or a stale search path) burns the full timeout per product, adding minutes to a
+    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
+    // successful dynamic search is still fast; only a genuine no-match waits it out.
+    if (config.searchWaitMs) {
+      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
+      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
+      // burn the full wait when its links are already there.
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
+        ? config.productLinkSelectors.join(', ')
+        : 'a.product-link';
+      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
+    }
+    return { landedUrl: null, links: await collectResultLinks(page, config) };
+  }
+
   // Log in ONCE per browser context for adapters that need authentication (e.g. Veseris
   // account pricing). runScanMany shares one context across all product pages, so the
   // login cookies persist — we authenticate on the first product and reuse the session for
@@ -473,48 +609,45 @@ function makeAdapter(config) {
     }
   }
 
+  // The ranked product URLs to try for a search-backed vendor. The full catalog name goes
+  // first; an adapter with shortQueryFallback also tries the first two words ONCE when the
+  // full name finds nothing (skipped when that IS the full name). A search that lands
+  // straight on a product page (searchMayLandOnProduct) yields just that page.
+  async function candidateUrls(page, vendor, product) {
+    const queries = [product];
+    const shortQ = config.shortQueryFallback ? shortSearchQuery(product) : null;
+    if (shortQ && shortQ !== searchQuery(product)) queries.push({ ...product, searchQuery: shortQ });
+    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
+    for (const query of queries) {
+      const found = await searchOnce(page, vendor, query);
+      if (!found) return [];
+      if (found.landedUrl) return [found.landedUrl];
+      const picked = selectSearchCandidates(found.links, product, cap);
+      if (picked.length) return picked;
+    }
+    return [];
+  }
+
   async function fetchCandidate(page, vendor, product) {
+    assertBreakerClosed(page, vendor);
     await ensureAuthenticated(page, vendor);
     // Direct URL (explicit vendor.url or a builder) — one shot.
     const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
     if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);
 
-    // Otherwise search the vendor and open the best matches.
-    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
-    if (!searchUrl) return null;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
-    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
-    // results are already in the DOM, so we must NOT block here — otherwise a no-match
-    // (or a stale search path) burns the full timeout per product, adding minutes to a
-    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
-    // successful dynamic search is still fast; only a genuine no-match waits it out.
-    if (config.searchWaitMs) {
-      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
-      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
-      // burn the full wait when its links are already there.
-      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
-        ? config.productLinkSelectors.join(', ')
-        : 'a.product-link';
-      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
-    }
-
     // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
     // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
     // results in turn and let verifyMatch (EPA / formulation / size) pick the real
-    // one — returning the first that VERIFIES rather than betting on a single link.
-    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
-    const candidates = selectSearchCandidates(await collectResultLinks(page, config), product, cap);
-    const wantsEpa = !!(product && product.epaReg);
-    let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
-    let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
-    let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
+    // one — the first tier-0 page wins at once, else the best tier seen (first wins a tie).
+    let best = null;
+    let bestTier = CANDIDATE_TIER.NONE;
     let candidateError = null; // a per-candidate nav/scrape failure, surfaced only if nothing verifies
-    for (const url of candidates) {
+    for (const url of await candidateUrls(page, vendor, product)) {
       let cand;
       try {
         cand = await scrapeCandidate(page, vendor, product, url);
       } catch (err) {
+        if (err && err.code === 'VENDOR_BLOCKED') throw err; // a bot check ends the product at once
         // A transient nav timeout / scrape failure on ONE candidate must not abort the
         // product — the real match is often the very next link (the search is fuzzy and
         // relevance-ranked). Remember the error so an all-fail run still reports
@@ -523,40 +656,25 @@ function makeAdapter(config) {
         continue;
       }
       if (!cand) continue;
-      if (!fallback) fallback = cand;
-      const verdict = verifyMatch(
-        { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
-        product,
-      );
-      if (!verdict.matched) continue;
-      const buyable = !isUnavailable(cand); // out_of_stock / backorder can't be an opportunity
-      // Prefer an EPA-confirmed match — a single-letter formulation suffix the slug can't
-      // encode (catalog "Talstar P" vs page "Talstar Professional") lets a sibling like
-      // "Talstar XTRA" pass name+size on brand overlap alone — BUT only among BUYABLE
-      // pages: an out-of-stock EPA hit gets dropped by compare, so it must never beat an
-      // already-found buyable match. Ideal (EPA-ok AND buyable, or no EPA needed) wins now.
-      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
-      if (buyable) { if (!firstBuyable) firstBuyable = cand; } // buyable but EPA not confirmed
-      else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
+      const tier = candidateTier(cand, product);
+      if (tier === CANDIDATE_TIER.IDEAL) return cand;
+      if (tier < bestTier) { best = cand; bestTier = tier; }
     }
-    // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
-    // (compare would drop it). Only these two are actual verifyMatch passes.
-    const verified = firstBuyable || firstUnbuyable;
     // If NOTHING verified and a candidate threw, surface that error as a precise
     // 'fetch_error': the scan was INCOMPLETE (the candidate that timed out might have
-    // been the real match), so we must not let a priced-but-unverified fallback report a
+    // been the real match), so we must not let a priced-but-unverified page report a
     // clean 'unverified' — that reads as "found it, no match here, don't retry" when the
     // truth is "a fetch failed, retry". Only a verified match suppresses the error.
-    if (!verified && candidateError) throw candidateError;
+    if (bestTier >= CANDIDATE_TIER.UNVERIFIED && candidateError) throw candidateError;
     // A verified match wins; else the best priced page is a precise 'unverified' skip
     // (we did reach a page, it just didn't confirm).
-    return verified || fallback;
+    return best;
   }
 
   return { key: config.key, config, fetchCandidate };
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
-  searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
+  makeAdapter, candidateTier, CANDIDATE_TIER, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  searchQuery, targetOzOf, isBotCheckSignals, landedOnProductUrl, shortSearchQuery, BOT_CHECK_BREAKER_LIMIT, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

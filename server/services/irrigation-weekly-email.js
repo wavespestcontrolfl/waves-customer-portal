@@ -2177,6 +2177,8 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
       // Fields the exact membership predicates below read.
       'c.waveguard_tier', 'c.monthly_rate', 'c.waveguard_tier_source', 'c.billing_mode',
+      // Read by the shared whole-account hold rule below.
+      'c.service_paused_at', 'c.service_pause_reason',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
       // The most recent visit evidencing the class, so the watchdog can key
@@ -2199,7 +2201,14 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
   const { hasMembership } = require('./membership-state');
   const { isAutoDerivedTierLabelRow } = require('./self-booking-plan-sync');
   const { resolveBillingLane } = require('./billing-lane');
+  const { isCustomerServiceHeld } = require('./series-customer-eligibility');
   const gaps = [];
+  // A whole-account hold (a paused plan, owner 2026-10-28) is never pageable:
+  // a held account is not expected to have a recurring series booked, so
+  // "stamp the series" is not the fix (it paged 2026-09-12 for a customer
+  // paused 2026-09-11). Same shared rule the series top-up uses — an
+  // 'autopay_final_failure' pause stops only the dues cron, visits continue,
+  // so it still pages; an unset/unknown reason fails closed as a hold.
   // Intentional opt-out: never pageable, same rule as the evidence legs.
   // Membership must hold under the EXACT shared predicates: hasMembership
   // (real tier or paid monthly rate) minus auto-derived label-only rows —
@@ -2211,6 +2220,7 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
   // existing resolver; per_visit/per_application stay in — a real tier
   // billed at completion IS an ongoing plan.
   for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok
+    && !isCustomerServiceHeld(row)
     && hasMembership(row) && !isAutoDerivedTierLabelRow(row)
     && resolveBillingLane(row).mode !== 'one_time')) {
     // Same prerequisite validators as findLawnEmailAudienceGaps (codex

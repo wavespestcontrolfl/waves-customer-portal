@@ -149,8 +149,8 @@ test('gate on: an OUT-OF-ZONE stop across a real drive drops the touching window
   // Codex r3 P1: the far stop is merged into the SAME packing geometry
   // findGaps uses (it is a real neighbour on the one tech-blind route, just
   // in another zone), so the trailing gap is packed against it exactly like
-  // a zone-local stop would be. With GATE_BOOKING_LUNCH_BLOCK unset
-  // (default, owner ruling 2026-09-23, #4663) no artificial lunch occupancy
+  // a zone-local stop would be. With no lunch block
+  // (owner ruling 2026-09-23, #4663) no artificial lunch occupancy
   // resets that anchor mid-day any more, so the trailing gap offers its
   // first accepted hour once clear of the far stop's travel-gap radius —
   // 12:00, not the old lunch-block-reset [] or the un-packed 14:00 the bug
@@ -167,7 +167,7 @@ test('gate on with a customerId and no estimate (AI assistant session): the cust
   expect(seen).not.toContain('estimates');
   expect(seen).toContain('customers');
   expect(startsOf(result)).not.toContain('09:00');
-  // See the previous test — 12:00 with the lunch gate unset (default).
+  // See the previous test — 12:00, as there is no lunch block.
   expect(startsOf(result)).toContain('12:00');
 });
 
@@ -377,28 +377,15 @@ test('findGaps advances an hour at a time inside a rejected gap (r5 P2)', () => 
   expect(engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0).map((g) => g.start / 60)).toEqual([9, 16]);
 });
 
-test('GATE_BOOKING_LUNCH_BLOCK (owner ruling 2026-09-23): unset drops the artificial lunch occupancy, true restores it', async () => {
-  const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-  try {
-    // Unset (default): no lunch entry is pushed onto `occupied`, so the whole
-    // day is ONE gap; findGaps still offers its first hour (09:00) AND — so
-    // removing the block never costs the assistant its afternoon choices —
-    // the first accepted start at/after the configured afternoon boundary
-    // (13:00, the old lunch_end). Noon is offerable where a gap opens onto
-    // it (availability-lunch-gate-coverage.test.js).
-    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-    let result = await engine.getAvailableSlots('Palmetto');
-    expect(startsOf(result)).toEqual(['09:00', '13:00']);
-
-    // 'true' restores the legacy split: a morning gap (09:00) and an
-    // afternoon gap starting after the lunch block + buffer (14:00).
-    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
-    result = await engine.getAvailableSlots('Palmetto');
-    expect(startsOf(result)).toEqual(['09:00', '14:00']);
-  } finally {
-    if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-    else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
-  }
+test('no artificial lunch occupancy (owner ruling 2026-09-23): the whole day is ONE gap', async () => {
+  // No lunch entry is pushed onto `occupied`, so the whole day is ONE gap;
+  // findGaps still offers its first hour (09:00) AND — so removing the block
+  // never costs the assistant its afternoon choices — the first accepted
+  // start at/after the configured afternoon boundary (13:00, the old
+  // lunch_end). Noon is offerable where a gap opens onto it
+  // (availability-afternoon-coverage.test.js).
+  const result = await engine.getAvailableSlots('Palmetto');
+  expect(startsOf(result)).toEqual(['09:00', '13:00']);
 });
 
 test('a linked booking copy cannot retain the old window after its visit stops occupying it', async () => {

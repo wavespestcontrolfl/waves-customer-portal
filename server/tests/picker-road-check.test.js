@@ -251,6 +251,20 @@ describe('createPickerTravel', () => {
     expect(logger.info).toHaveBeenCalledWith('[picker-road] 2 lookups sent, 2 answered by Google');
   });
 
+  // A staff save (GATE_SAVE_ROAD_TIMES) reads what the pickers bought and buys
+  // nothing: no Google call inside a save's transaction.
+  test('a cache-only source buys nothing and reads what a picker bought', async () => {
+    await make().travel.preload([leg(plus(1), 9 * 60)]);
+    reserveRoadSpend.mockClear();
+    const save = make({ cacheOnly: true });
+    await save.travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
+    expect(reserveRoadSpend).not.toHaveBeenCalled();
+    expect(save.asked).toEqual({ traffic: [], plain: [] });
+    expect(save.travel.lookup(leg(plus(1), 9 * 60))).toMatchObject({ minutes: 17, source: 'google_traffic' });
+    // A drive no picker looked up keeps the model.
+    expect(save.travel.lookup(leg(plus(3), 9 * 60))).toMatchObject({ source: 'conservative_model' });
+  });
+
   // An error or a timeout is still paid; the log line is the only place it shows.
   test('lookups Google got but did not answer stay counted and show in the log', async () => {
     const { travel } = make({}, { answers: false });

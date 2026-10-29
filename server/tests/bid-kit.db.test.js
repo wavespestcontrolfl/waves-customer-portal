@@ -512,9 +512,11 @@ describeDb('Bid kit (PostgreSQL)', () => {
     test('the activity log records who did what, with field names and no values', async () => {
       const created = await create({ item_key: 'w9' });
       await call('PATCH', `/${created.id}`, { value: 'On file with the office', expected_updated_at: created.updated_at });
-      const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).orderBy('created_at').select('action', 'description', 'metadata');
-      expect(rows.map((row) => row.action)).toEqual(['bid_kit_created', 'bid_kit_updated']);
-      expect(rows[1].metadata).toMatchObject({ bid_kit_item_id: created.id, item_key: 'w9', fields: ['value'] });
+      // One transaction per test: every row's created_at is the same now(), so
+      // rows come back in heap order, not write order. Compare them as a set.
+      const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).select('action', 'description', 'metadata');
+      expect(rows.map((row) => row.action).sort()).toEqual(['bid_kit_created', 'bid_kit_updated']);
+      expect(rows.find((row) => row.action === 'bid_kit_updated').metadata).toMatchObject({ bid_kit_item_id: created.id, item_key: 'w9', fields: ['value'] });
       expect(JSON.stringify(rows)).not.toContain('On file with the office');
     });
   });
@@ -534,13 +536,17 @@ describeDb('Bid kit (PostgreSQL)', () => {
     expect((await archive(id)).status).toBe(200);
     const doc = await call('POST', '', { kind: 'document', item_key: 'custom', label: `${name} letter ${phone}`, source_document: address });
     expect((await upload(doc.body.item.id, 'letter.pdf', doc.body.item.updated_at)).status).toBe(200);
-    const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).orderBy('created_at').select('action', 'description', 'metadata');
-    expect(rows.map((row) => row.action)).toEqual(['bid_kit_created', 'bid_kit_updated', 'bid_kit_attested', 'bid_kit_archived', 'bid_kit_created', 'bid_kit_file_uploaded']);
+    // Every write shares the test's one transaction, so created_at (now()) is the
+    // same on every row and rows come back in heap order (CI 2026-10-28 got the
+    // document's two rows first). Compare them as a set; pick rows by item.
+    const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).select('action', 'description', 'metadata');
+    expect(rows.map((row) => row.action).sort()).toEqual(['bid_kit_archived', 'bid_kit_attested', 'bid_kit_created', 'bid_kit_created', 'bid_kit_file_uploaded', 'bid_kit_updated']);
     const everything = JSON.stringify(rows);
     for (const text of [name, 'Maria', phone, '555-0199', address, 'Fixture Way', 'Sampleville', 'gate']) expect(everything).not.toContain(text);
-    expect(rows[0].description).toBe('custom item (custom) created');
-    expect(rows[1].description).toBe('custom item (custom) updated: label, value, notes');
-    expect(rows[1].metadata).toMatchObject({ bid_kit_item_id: id, item_key: 'custom', fields: ['label', 'value', 'notes'] });
+    const itemRow = (action) => rows.find((row) => row.action === action && row.metadata?.bid_kit_item_id === id);
+    expect(itemRow('bid_kit_created').description).toBe('custom item (custom) created');
+    expect(itemRow('bid_kit_updated').description).toBe('custom item (custom) updated: label, value, notes');
+    expect(itemRow('bid_kit_updated').metadata).toMatchObject({ bid_kit_item_id: id, item_key: 'custom', fields: ['label', 'value', 'notes'] });
     // A catalog item is named by its catalog label.
     const catalogItem = await create({ item_key: 'w9' });
     const named = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).whereRaw("metadata->>'bid_kit_item_id' = ?", [catalogItem.id]).select('description', 'metadata');

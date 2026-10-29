@@ -294,8 +294,11 @@ const MODES = {
  * createSchedulingTravel shape). `spender` = the staff user the lookups are
  * reserved for; `budget` = the request's shared budget. A leg Google did not
  * answer gets the inner source's conservative model, labelled as such.
+ * `cacheOnly` = a staff save's check (GATE_SAVE_ROAD_TIMES): read the road
+ * times the pickers already bought and buy nothing, so no Google call runs
+ * inside a save's transaction.
  */
-function createPickerTravel({ spender = null, budget = createPickerBudget(), factories = {}, now = () => Date.now() } = {}) {
+function createPickerTravel({ spender = null, budget = createPickerBudget(), factories = {}, now = () => Date.now(), cacheOnly = false } = {}) {
   const RouteOptimizer = require('../route-optimizer');
   const travelFor = { traffic: TRAFFIC_TRAVEL, plain: PLAIN_TRAVEL };
   const sources = {};
@@ -376,7 +379,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
   }
   return {
     async preload(legs) {
-      if (budget.signal?.aborted || budget.refused) return;
+      if (cacheOnly || budget.signal?.aborted || budget.refused) return;
       const t = now();
       const nowEt = etAt(t);
       const want = { traffic: [], plain: [] };

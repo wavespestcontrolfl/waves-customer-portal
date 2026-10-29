@@ -139,6 +139,24 @@ describe('scanner scanProduct', () => {
     expect(scan.skipped.map((s) => s.reason).sort()).toEqual(['fetch_error', 'no_candidate']);
   });
 
+  test('a VENDOR_BLOCKED error is recorded as "blocked" with its message, not fetch_error', async () => {
+    const vendors = [
+      { vendor_id: 'a', name: 'A', url: 'https://a.com/p' },
+      { vendor_id: 'b', name: 'B', url: 'https://b.com/p' },
+    ];
+    const fetchCandidate = (adapter, vendor) => {
+      if (vendor.vendor_id === 'a') {
+        return Promise.reject(Object.assign(new Error('A blocked the scan with a bot check (Cloudflare)'), { code: 'VENDOR_BLOCKED' }));
+      }
+      return Promise.reject(new Error('nav timeout'));
+    };
+    const scan = await scanProduct(product, vendors, { fetchCandidate });
+    expect(scan.skipped).toEqual([
+      { vendor: 'A', reason: 'blocked', detail: 'A blocked the scan with a bot check (Cloudflare)' },
+      { vendor: 'B', reason: 'fetch_error', detail: 'nav timeout' },
+    ]);
+  });
+
   test('non-USD candidate is skipped before opportunity ranking', async () => {
     const cad = { ...goodCandidate, currency: 'CAD', price: 70, vendor_id: 'foreign' };
     const vendors = [{ vendor_id: 'foreign', name: 'CA Shop', url: 'https://ca.example/p' }];
