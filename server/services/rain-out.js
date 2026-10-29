@@ -988,8 +988,10 @@ async function routeSameDayOptions(service, now = new Date()) {
       dateTo: todayStr,
       ...(service.technician_id ? { technicianId: service.technician_id } : {}),
       excludeServiceIds: [service.id],
-      // The whole visit for a shared stop (GATE_COMBO_ROUTE_CHECK; ignored off).
-      arrivalWindow: { serviceId: service.id, unit: true },
+      // A shared stop is not asked as a whole visit (only the staff box asks
+      // that, arrival-route-visit-unit wiring test): its route_unverified
+      // answer keeps the +2h/+4h guesses below.
+      arrivalWindow: { serviceId: service.id },
       // Today is the only date: a Sunday route is searched too (the blackout
       // check above already covers a closed day).
       includeWeekends: true,
