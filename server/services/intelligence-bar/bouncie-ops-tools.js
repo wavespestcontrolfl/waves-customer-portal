@@ -20,12 +20,6 @@ const logger = require('../logger');
 
 const MAX_TRIPS_SHOWN = 30;
 
-const TRIPS_DESCRIPTION = `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron.
-Use for: "what did the truck drive today?", "how many miles yesterday?", "when did the day's route start?"`;
-
-const TRIPS_DESCRIPTION_PER_VEHICLE = `Trips for one day (default today, Eastern) for EVERY vehicle on the Bouncie account, each with its assigned technician: start/end times, distance, per-vehicle miles and total miles. Pass vehicle (a vehicle nickname or a technician's name) to see just that one. This is the live view of the same data the tax mileage ledger syncs on its cron.
-Use for: "what did the truck drive today?", "how many miles did each truck drive?", "what did <technician> drive yesterday?", "when did the day's route start?"`;
-
 const BOUNCIE_OPS_TOOLS = [
   {
     name: 'get_truck_status',
@@ -38,21 +32,16 @@ Use for: "where's the truck?", "is the truck moving?", "is the Bouncie tracker r
   },
   {
     name: 'get_truck_trips',
-    // GATE_TRUCK_VIEWS_PER_VEHICLE: read when the model's tool list is serialized,
-    // so off = the description and schema below, byte for byte.
-    get description() {
-      return truckViewsPerVehicleLive() ? TRIPS_DESCRIPTION_PER_VEHICLE : TRIPS_DESCRIPTION;
-    },
-    get input_schema() {
-      return {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' },
-          ...(truckViewsPerVehicleLive() && {
-            vehicle: { type: 'string', description: 'One vehicle, by its nickname or by the name of the technician it is assigned to (not case-sensitive). Leave out for every vehicle.' },
-          }),
-        },
-      };
+    // The tool list is copied once when the action registry loads, so this text and schema are
+    // static and true with GATE_TRUCK_VIEWS_PER_VEHICLE on or off; the gate is read per call.
+    description: `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron. With per-vehicle truck views on, it lists every vehicle with its technician, and \`vehicle\` (a nickname or a technician's name) picks one.
+Use for: "what did the truck drive today?", "how many miles yesterday?", "when did the day's route start?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' },
+        vehicle: { type: 'string', description: 'With per-vehicle truck views on: one vehicle, by its nickname or by the name of the technician it is assigned to (not case-sensitive); leave out for every vehicle. With them off, the answer covers the default truck only and this is ignored.' },
+      },
     },
   },
 ];

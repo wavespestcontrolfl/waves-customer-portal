@@ -128,13 +128,10 @@ describe('GATE_TRUCK_VIEWS_PER_VEHICLE (every vehicle and its technician)', () =
     expect(mockTechnicianNames).not.toHaveBeenCalled();
   });
 
-  test('off: status has no technician key; the tool description and schema are today\'s', async () => {
+  test('off: status has no technician key', async () => {
     const result = await executeBouncieOpsTool('get_truck_status', {});
     expect(Object.keys(result.vehicles[0])).not.toContain('technician');
     expect(mockTechnicianNames).not.toHaveBeenCalled();
-    const t = tool('get_truck_trips');
-    expect(t.input_schema).toEqual({ type: 'object', properties: { date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' } } });
-    expect(t.description).not.toMatch(/EVERY vehicle/);
   });
 
   test('any value but the exact string true keeps it off', async () => {
@@ -202,12 +199,13 @@ describe('GATE_TRUCK_VIEWS_PER_VEHICLE (every vehicle and its technician)', () =
       expect(result.vehicles[1].truncated).toBe(false);
     });
 
-    test('the tool description and schema offer the vehicle input', () => {
+    test('the tool definition is static: it offers the vehicle input whatever the gate says', () => {
       const t = tool('get_truck_trips');
-      expect(t.description).toMatch(/EVERY vehicle/);
+      expect(Object.getOwnPropertyDescriptor(t, 'description').get).toBeUndefined();
+      expect(Object.getOwnPropertyDescriptor(t, 'input_schema').get).toBeUndefined();
+      expect(t.description).toMatch(/per-vehicle truck views on/);
       expect(t.input_schema.properties.vehicle.type).toBe('string');
       expect(t.input_schema.properties.date).toBeDefined();
     });
   });
 });
-
