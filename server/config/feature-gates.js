@@ -4789,6 +4789,10 @@ const gates = {
   // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
   alertRetention: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase()),
 
+  // SMS courtesy tail (owner 2026-10-29). Registered for logGateStatus only; isCourtesyOnly and the
+  // inbound webhook read courtesyTailMode() at CALL time. 'shadow' stamps, 'true' applies. Kill switch: unset.
+  smsCourtesyTail: ['shadow', 'true'].includes(String(process.env.GATE_SMS_COURTESY_TAIL || '').trim().toLowerCase()),
+
   // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
@@ -6718,6 +6722,15 @@ function alertRetentionMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_SMS_COURTESY_TAIL read at CALL time: 'shadow', 'true' or 'off' (isCourtesyOnly in
+// services/sms-intent.js). 'shadow' (trimmed, any case) leaves every result alone and lets the
+// inbound webhook stamp metadata.courtesyTailWould; 'true' applies the courtesy-tail rule
+// ("Perfect. Go browns" closes the thread). Anything else is off. Unset is the kill.
+function courtesyTailMode() {
+  const value = String(process.env.GATE_SMS_COURTESY_TAIL || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_AUTOPAY_HOLD_TIMEOUT read at CALL time: 'shadow', 'true' or 'off' (releaseStaleAutopayHolds in
 // services/invoice-followups.js). 'shadow' (trimmed, any case) records what would be released and
 // changes nothing; 'true' releases stale Auto Pay holds. Anything else is off: no query. Unset is the kill.
@@ -8194,6 +8207,8 @@ module.exports.techJobTypeChecksLive = techJobTypeChecksLive;
 module.exports.secondTechLowsLive = secondTechLowsLive;
 // GATE_ALERT_RETENTION reader, on its own line so gate PRs never conflict.
 module.exports.alertRetentionMode = alertRetentionMode;
+// GATE_SMS_COURTESY_TAIL reader, on its own line so gate PRs never conflict.
+module.exports.courtesyTailMode = courtesyTailMode;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
 // GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.

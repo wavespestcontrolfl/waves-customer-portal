@@ -170,7 +170,7 @@ function isQuietSmsReaction(body) {
  * content, non-acknowledgement emoji (❓ 🚨 🐜). Fail-safe direction: doubt →
  * false.
  */
-function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
+function isCourtesyOnlyStrict(body, { awaitingAnswer = true } = {}) {
   const raw = String(body || '').trim();
   if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
   if (/[?]/.test(raw)) return false;
@@ -187,6 +187,93 @@ function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
   // someone will be home" did not answer it (hook P1). The tiers differ only
   // in what the grammar accepts; the context decides for all of them.
   return !awaitingAnswer;
+}
+
+// ── GATE_SMS_COURTESY_TAIL (owner 2026-10-29, fix F2 "Stuck Alert Fixes") ──
+// A closer with a short sign-off ("Perfect. Go browns") is still a closing
+// text. The strict grammar above needs the WHOLE text to be courtesy tokens,
+// so these threads stayed "needs reply" and the alert never closed. The new
+// rule splits HEAD and TAIL at the first sentence break: the HEAD must pass
+// the strict grammar and the TAIL must be a few plain words with no request,
+// contrast, problem, service, money or access word. Doubt → false.
+// Three states, read at CALL time: off (anything else) = byte-identical;
+// 'shadow' = results unchanged, the webhook only stamps courtesyTailWould;
+// 'true' = isCourtesyOnly applies the new rule.
+const COURTESY_TAIL_MAX_CHARS = 80;
+const COURTESY_TAIL_MAX_WORDS = 6;
+const COURTESY_TAIL_BREAK_RE = /[.!,\n\r]|\s-\s/;
+const COURTESY_TAIL_URL_RE = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|info|biz|app|ly)\b/i;
+const COURTESY_TAIL_BLOCK_WORDS = [
+  // request words
+  'can you', 'could you', 'would you', 'will you', 'please', 'pls', 'need', 'needs', 'want', 'wants', 'when', 'what', 'where', 'how', 'why', 'help', 'call', 'text me', 'send', 'come', 'check', 'let me know',
+  // contrast or new-info words
+  'but', 'however', 'also', 'except', 'still', 'again', 'not', "don't", 'dont', "didn't", 'didnt', "isn't", 'isnt', "can't", 'cant', "won't", 'wont',
+  // problem words
+  'problem', 'issue', 'broken', 'leak', 'damage', 'bite', 'bites', 'bug', 'bugs', 'roach', 'roaches', 'ant', 'ants', 'rat', 'rats', 'mouse', 'mice', 'termite', 'termites', 'wasp', 'wasps', 'spider', 'spiders', 'flea', 'fleas', 'mosquito', 'mosquitoes',
+  // service and money words
+  'spray', 'treat', 'treatment', 'invoice', 'bill', 'charge', 'pay', 'paid', 'payment', 'refund', 'cancel', 'quote', 'estimate',
+  // access words
+  'gate', 'code', 'door', 'dog', 'dogs', 'key', 'lock', 'locked',
+];
+const COURTESY_TAIL_BLOCK_RE = new RegExp(
+  `(?<![a-z'])(?:${COURTESY_TAIL_BLOCK_WORDS.map((w) => w.split(' ').map(escapeRe).join('\\s+')).join('|')})(?![a-z'])`,
+  'i'
+);
+
+function courtesyTailMode() {
+  try {
+    const reader = require('../config/feature-gates').courtesyTailMode;
+    return typeof reader === 'function' ? reader() : 'off';
+  } catch (_) {
+    return 'off';
+  }
+}
+
+// Strict grammar on a HEAD alone: the same tests isCourtesyOnlyStrict uses on a
+// whole text. A bare "ok" head is too weak to carry a tail, so it fails here.
+function headIsCourtesyGrammar(head) {
+  const stripped = String(head || '').replace(/\s+/g, ' ').trim();
+  if (!stripped || /\d/.test(stripped) || WEAK_ONLY_RE.test(stripped)) return false;
+  const named = COURTESY_WITH_NAME_RE.exec(stripped);
+  const grammar = COURTESY_ONLY_RE.test(stripped)
+    || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
+  return grammar && CLOSER_ANCHOR_RE.test(stripped);
+}
+
+/**
+ * Would the NEW courtesy-tail rule newly call this text courtesy-only? Gate
+ * independent (the webhook's shadow stamp and the tests use it). True only when
+ * the strict rule says false, our last text asked nothing, and rules 2-6 hold.
+ */
+function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
+  if (awaitingAnswer) return false;
+  const raw = String(body == null ? '' : body).replace(/[‘’]/g, "'").trim();
+  if (!raw || raw.length > COURTESY_TAIL_MAX_CHARS) return false;
+  if (isCourtesyOnlyStrict(raw, { awaitingAnswer: false })) return false;
+  if (!/^[\x20-\x7e\n\r]+$/.test(raw)) return false; // emoji and other symbols: doubt → false
+  if (/[?@]/.test(raw) || /\d/.test(raw) || COURTESY_TAIL_URL_RE.test(raw)) return false;
+  if (hasSchedulingIntent(raw) || hasRescheduleOrAwayIntent(raw)) return false;
+  const m = COURTESY_TAIL_BREAK_RE.exec(raw);
+  if (!m) return false;
+  const head = raw.slice(0, m.index);
+  const tail = raw.slice(m.index + m[0].length);
+  if (!headIsCourtesyGrammar(head)) return false;
+  const words = tail.split(/[^a-z']+/i).filter((w) => /[a-z]/i.test(w));
+  if (words.length < 1 || words.length > COURTESY_TAIL_MAX_WORDS) return false;
+  if (COURTESY_TAIL_BLOCK_RE.test(tail)) return false;
+  return true;
+}
+
+// The webhook's metadata decision, pure so it is testable: stamp only in shadow
+// mode and only when the new rule would newly say true. Off and 'true' stamp nothing.
+function courtesyTailShadowMetadata(mode, would) {
+  return mode === 'shadow' && would === true ? { courtesyTailWould: true } : {};
+}
+
+function isCourtesyOnly(body, opts = {}) {
+  if (isCourtesyOnlyStrict(body, opts)) return true;
+  if (courtesyTailMode() !== 'true') return false;
+  return courtesyTailWould(body, { awaitingAnswer: opts.awaitingAnswer === undefined ? true : opts.awaitingAnswer });
 }
 
 function hasSchedulingIntent(body) {
@@ -394,5 +481,8 @@ module.exports = {
   reactionQuotedTarget,
   outboundAsksForReply,
   isCourtesyOnly,
+  courtesyTailWould,
+  courtesyTailMode,
+  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
 };
