@@ -1108,6 +1108,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN, 9:00-11:45 AM ET — the referrer's one thank-you email for a
+  // referral credit, at the next 9:00 AM after it posts (owner 2026-10-29: email
+  // only, no reward text). Later ticks catch a missed 9:00 tick; a missed
+  // morning sends the next morning. The email's idempotency key makes each one
+  // go once across ticks and replicas.
+  cron.schedule('*/15 9-11 * * *', async () => {
+    try {
+      await runExclusive('referral-reward-email', () => require('./referral-engine').sendDueReferralRewardEmails());
+    } catch (err) {
+      logger.error(`[referral-reward-email] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {
