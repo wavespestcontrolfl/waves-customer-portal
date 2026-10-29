@@ -469,7 +469,18 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // the drain's recovery of a crashed operator send) delivered the receipt in
 // between, and this send is refused ({ alreadySent: true }). A caller that
 // saw it already stamped is a deliberate resend and is never refused here.
-async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } = {}) {
+// Transaction-scoped advisory lock that serializes "insert a receipt claim" with "reverse the payment" for ONE invoice. The claim row
+// (receipt_delivery_jobs, unique per invoice, no invoice foreign key) is the commit point every operator receipt send passes before it
+// sends, and the session lock in receipt-send-lock.js is held only by the operator send. So a sender takes this lock inside its claim transaction and
+// re-reads the invoice status under it (claimReceiptJobForOperatorSend, requirePaid), and Undo (invoice-manual-payment-undo.js) takes it
+// before its invoice row lock and probes for a claim under it: either Undo commits first and the sender sees the reopened invoice and
+// claims nothing, or the claim commits first and Undo sees it and refuses. Held only for the length of the claim insert, never across a
+// send. Lock order for Undo: combined-session lock, this lock, invoice row. The claim takes only this lock (its invoice read is unlocked).
+async function lockInvoiceReceiptClaim(trx, invoiceId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['invoice-receipt-claim', String(invoiceId)]);
+}
+
+async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false, requirePaid = false } = {}) {
   // A stale row is settled first by the same rules as the drain's recovery
   // (closed on its own recorded email, removed when a claim created it,
   // otherwise requeued), so what is left running is genuinely in flight. A
@@ -479,8 +490,14 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   if (settled.closedDelivered > 0) return { alreadySent: true };
   const token = `operator:${workerId()}:${randomUUID()}`;
   const ALREADY_SENT = Symbol('already sent');
+  const NOT_PAID = Symbol('not paid');
   try {
     return await db.transaction(async (trx) => {
+      // The per-invoice claim lock (lockInvoiceReceiptClaim, above) serializes this claim with Undo of the payment. A sender
+      // that has just checked the invoice is paid (requirePaid) re-reads it HERE, under the lock: Undo may have reopened it since, and a
+      // paid receipt must never go out for a reopened invoice. Nothing is written for a refused claim.
+      await lockInvoiceReceiptClaim(trx, invoiceId);
+      if (requirePaid && (await trx('invoices').where({ id: invoiceId }).first('status'))?.status !== 'paid') throw NOT_PAID;
       // Read only once this transaction holds the job slot (inserted, or
       // locked below): whatever delivered it had already stamped the invoice.
       const stampedSinceRead = async () => sawUnsent
@@ -529,6 +546,7 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
     });
   } catch (err) {
     if (err === ALREADY_SENT) return { alreadySent: true };
+    if (err === NOT_PAID) return { notPaid: true };
     throw err;
   }
 }
@@ -704,6 +722,7 @@ module.exports = {
   // Also the IB closeout repair card's rule for "no email, on purpose".
   expectedEmailSkip,
   enqueueReceiptDelivery,
+  lockInvoiceReceiptClaim,
   claimDueReceiptDeliveryJobs,
   processDueReceiptDeliveryJobs,
   processReceiptDeliveryJob,

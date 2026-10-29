@@ -3876,6 +3876,13 @@ const gates = {
   // commercial account follows GATE_SLAB_HOME_NO_TAX exactly as before.
   slabBusinessSiteTax: gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX'),
 
+  // Undo last manual payment (owner 2026-10-29, built before partial payments): the office can reverse a cash,
+  // check, Zelle, Venmo, PayPal or other off-Stripe entry recorded by hand, the same Eastern day, before any
+  // receipt or reminder went out (services/invoice-manual-payment-undo.js, POST /admin/invoices/:id/undo-payment).
+  // Read at CALL time via undoManualPaymentLive(); strict `true`, dark by default. Off = the route answers 404
+  // and the Invoices page hides the button. Kill switch: unset.
+  undoManualPayment: process.env.GATE_UNDO_MANUAL_PAYMENT === 'true',
+
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
   // taxes pest control only for an infestation of a nonresidential building, so
@@ -6307,6 +6314,11 @@ function buildingUseTaxLive() {
   return gateEnvValue('GATE_BUILDING_USE_TAX');
 }
 
+// GATE_UNDO_MANUAL_PAYMENT read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
+function undoManualPaymentLive() {
+  return process.env.GATE_UNDO_MANUAL_PAYMENT === 'true';
+}
+
 // GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
 function taxServiceCountyLive() {
   return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
@@ -8325,6 +8337,8 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
+module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
