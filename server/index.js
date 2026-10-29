@@ -2,6 +2,8 @@
 require('./config/load-env')();
 // Sentry must be initialized before all other imports
 require("./instrument.js");
+// AI credit key pool (GATE_AI_CREDIT_KEYS, dark): wraps globalThis.fetch once, before any module builds an Anthropic client.
+require('./services/llm/credit-key-pool').installCreditKeyPool();
 const Sentry = require("@sentry/node");
 
 // Prevent unhandled promise rejections from crashing the process
