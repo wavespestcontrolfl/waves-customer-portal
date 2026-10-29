@@ -1861,7 +1861,21 @@ describe('commercial Auto Pay payment term', () => {
     row.bill_by_invoice = true;
     const res = await put({ paymentTerms: 'autopay' });
     expect(res.statusCode).toBe(400);
-    expect(res.body.error).toBe('Auto Pay cannot be combined with Bill by invoice. Pick Net-30 for an invoiced proposal, or turn off Bill by invoice.');
+    expect(res.body.error).toBe('Auto Pay cannot be combined with Bill by invoice. Pick Net-30 or Net-60 for an invoiced proposal, or turn off Bill by invoice.');
+    expect(mutations).toEqual([]);
+  });
+
+  test('Net-60 saves on a Bill-by-invoice proposal, in its canonical spelling (owner 2026-10-29)', async () => {
+    row.bill_by_invoice = true;
+    const res = await put({ paymentTerms: 'Net 60' });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposal.commercialTerms.paymentTerms).toBe('net60');
+  });
+
+  test('Net-60 without Bill by invoice is refused like every invoice term, and nothing is written', async () => {
+    const res = await put({ paymentTerms: 'net60' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe('Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.');
     expect(mutations).toEqual([]);
   });
 
@@ -1869,7 +1883,7 @@ describe('commercial Auto Pay payment term', () => {
     commercialAutopayLive.mockReturnValue(false);
     const refused = await put({ paymentTerms: 'autopay' });
     expect(refused.statusCode).toBe(400);
-    expect(refused.body.error).toBe('Payment terms must be one of: Due on receipt, Net-15, Net-30.');
+    expect(refused.body.error).toBe('Payment terms must be one of: Due on receipt, Net-15, Net-30, Net-60.');
     row.estimate_data = { proposal: recurring({ paymentTerms: 'autopay' }) };
     expect((await put({ paymentTerms: 'autopay' })).statusCode).toBe(200);
   });

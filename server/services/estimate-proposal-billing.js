@@ -158,7 +158,7 @@ function documentCarriesRateReviewTerms(estimate, acceptance = null) {
 const FIXED_TERM_LABELS = new Set(['Initial term', 'Renewal', 'Price adjustment', 'Cancellation']);
 function commercialTermLines(commercialTerms, { recurring } = {}) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
-  const paymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+  const paymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30', net60: 'Net-60' };
   return [
     ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
     ['Initial term', commercialTerms.initialTermMonths != null
