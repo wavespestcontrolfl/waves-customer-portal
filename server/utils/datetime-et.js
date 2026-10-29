@@ -42,6 +42,11 @@ function formatETDate(dt) {
   return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: TZ });
 }
 
+// "Mon, Nov 2": a day an office alert names, short enough for a 110-character line.
+function formatETDayDate(dt) {
+  return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: TZ });
+}
+
 function formatETTime(dt) {
   return dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TZ });
 }
@@ -482,7 +487,7 @@ function dateOnlyString(value) {
 module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETDayDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, etOffsetIso, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

@@ -23,6 +23,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
+const { formatETDayDate } = require('../../utils/datetime-et');
 const config = require('../../config/invoice-followups');
 const Followups = require('../invoice-followups');
 const { isTerminalEmailRefusal, reminderProgress } = require('../billing-reminder-delivery');
@@ -72,7 +73,7 @@ async function customerName(customerId) {
     const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
     const first = String(row?.first_name || '').trim();
     const last = String(row?.last_name || '').trim();
-    return first ? { full: `${first} ${last}`.trim(), first } : null;
+    return first ? { full: `${first} ${last}`.trim(), first, short: `${first} ${last ? `${last[0].toUpperCase()}.` : ''}`.trim() } : null;
   } catch {
     return null; // the alert still rings, with a generic headline
   }
@@ -80,9 +81,10 @@ async function customerName(customerId) {
 
 /**
  * `verb` completes "<verb> for <Customer Name>" (the headline names the customer when it fits the 60
- * characters the rule allows, then the first name, then falls back to `generic`).
+ * characters the rule allows, then the first name, then falls back to `generic`). `short` names them as
+ * first name and last initial only ("Sam T."), the form the Auto Pay timeout and combined-start alerts use.
  */
-async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId, subject = null, metadata = {} }) {
+async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId, subject = null, metadata = {}, short = false }) {
   try {
     const { composeAdminAlert, raiseAdminAlert } = require('../admin-alert-compose');
     const name = await customerName(customerId);
@@ -91,7 +93,8 @@ async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId,
       area: 'Billing', action, why, severity: 'needs-you', who: 'person', doneWhen, subject: subj,
       link: customerId ? `/admin/customers?customerId=${encodeURIComponent(customerId)}` : '/admin/invoices',
     });
-    const candidates = name ? [`${verb} for ${name.full}`, `${verb} for ${name.first}`, generic] : [generic];
+    const named = name ? (short ? [name.short] : [name.full, name.first]).map((who) => `${verb} for ${who}`) : [];
+    const candidates = [...named, generic];
     const action = candidates.find((candidate) => {
       try { composeAdminAlert(spec(candidate)); return true; } catch { return false; }
     }) || generic;
@@ -279,6 +282,23 @@ async function promoteInTransaction(trx, customerId, set, now) {
   return { promoted: true, schedule, seed: decision.seed };
 }
 
+// The office hears once per new schedule (owner 2026-10-29), so a person can look before the first combined
+// reminder goes out. Promotion itself still sends the customer nothing. The key is the schedule id: a re-run
+// that finds the schedule open promotes nothing, and a later episode is a new schedule with its own alert.
+async function alertCombinedStarted(schedule, set, seed) {
+  const count = set.members.length;
+  return alertStaff({
+    verb: 'combined reminders started',
+    generic: 'combined reminders started for a customer',
+    short: true,
+    why: `${count} invoices, $${(set.totalCents / 100).toFixed(2)} total; first reminder ${formatETDayDate(seed.next_touch_at)}; pause it from the invoice panel if wrong.`,
+    doneWhen: 'combined_reminders_reviewed',
+    dedupeKey: `customer-dunning-started:${schedule.id}`,
+    customerId: schedule.customer_id,
+    metadata: { schedule_id: schedule.id, invoice_count: count },
+  });
+}
+
 /**
  * Promote ONE customer. Never sends: `next_touch_at` is always a future run's
  * anchor (seed.js). A concurrent promotion loses on the open unique index
@@ -289,7 +309,10 @@ async function promoteCustomer(customerId, now = new Date(), { database = db } =
   const set = await resolveDunnableSet(customerId, { database, now });
   if (set.kind !== 'multi') return { promoted: false, reason: set.kind === 'hold' ? set.reason : `set_${set.kind}` };
   try {
-    return await database.transaction((trx) => promoteInTransaction(trx, customerId, set, now));
+    const out = await database.transaction((trx) => promoteInTransaction(trx, customerId, set, now));
+    // After the commit and best effort: an alert that fails never undoes a promotion.
+    if (out.promoted) await alertCombinedStarted(out.schedule, set, out.seed);
+    return out;
   } catch (err) {
     if (err.code === '23505') {
       logger.info(`[customer-dunning] promotion of customer ${customerId} lost the race to a concurrent promotion`);

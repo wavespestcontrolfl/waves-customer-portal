@@ -185,6 +185,45 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(new Date(row.next_touch_at).getTime()).toBeGreaterThan(NOW.getTime());
     });
 
+    test('a new schedule raises ONE office alert naming the customer, the count, the total and the first reminder day; a re-run raises none', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 60, step: 4 }); // already due: lands on the next run, Wednesday
+      const b = await member(c, { sentDaysAgo: 30, step: 3 });
+      mockResolve.mockResolvedValue(setFor([a, b]));
+      await Schedule.promoteCustomer(c, NOW, { database: app });
+      expect(await Schedule.promoteCustomer(c, NOW, { database: app })).toMatchObject({ promoted: false, reason: 'already_open' });
+      await Schedule.promote(NOW, { database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      const [row] = await schedules(c);
+      expect(mockNotify).toHaveBeenCalledWith(
+        'alert',
+        'Billing — combined reminders started for Pat S.',
+        '2 invoices, $200.00 total; first reminder Wed, Oct 7; pause it from the invoice panel if wrong.',
+        expect.objectContaining({
+          dedupeKey: `customer-dunning-started:${row.id}`,
+          link: `/admin/customers?customerId=${c}`,
+          metadata: expect.objectContaining({ schedule_id: row.id, customer_id: c, severity: 'needs-you', who: 'person' }),
+        }),
+      );
+    });
+
+    test('a promotion that is refused raises no alert, and a later episode is its own alert', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 30, step: 3 });
+      const b = await member(c, { sentDaysAgo: 20, step: 2 });
+      mockResolve.mockResolvedValue(setFor([a, b], { kind: 'hold', reason: 'member_paused' }));
+      await Schedule.promoteCustomer(c, NOW, { database: app });
+      expect(mockNotify).not.toHaveBeenCalled();
+      mockResolve.mockResolvedValue(setFor([a, b]));
+      await Schedule.promoteCustomer(c, NOW, { database: app });
+      const [first] = await schedules(c);
+      await app('customer_dunning_schedules').where({ id: first.id }).update({ status: 'released' });
+      await Schedule.promoteCustomer(c, NOW, { database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      const keys = mockNotify.mock.calls.map((call) => call[3].dedupeKey);
+      expect(new Set(keys).size).toBe(2);
+    });
+
     test('quiet members are named but never count toward promotion (needs two ACTIVE)', async () => {
       const c = await customer();
       const a = await member(c, { sentDaysAgo: 30, step: 3 });
