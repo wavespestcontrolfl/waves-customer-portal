@@ -136,6 +136,20 @@ const PROGRAM_FAMILY_OPTIONS = [
   ['termite', 'Termite'], ['rodent', 'Rodent'], ['other', 'Other'],
 ];
 
+// Starting points for "Add program" (owner 2026-10-29 "yes do phase 2"). The visit counts are the pricing engine's
+// standard cadences (server/services/pricing-engine/constants.js: PEST.frequencies quarterly 4, RODENT.baitVisitsPerYear 4,
+// TERMITE.monitoringVisitsPerYear 4, MOSQUITO.tierVisits monthly12, lawn and tree & shrub standard 6). There is no
+// template price: the engine returns a manual quote for commercial programs (pricing-engine/commercial-helpers.js
+// buildCommercialManualQuoteResult, price null), so the operator types the price.
+const PROGRAM_TEMPLATES = [
+  { service: 'pest', label: 'Pest control', frequencyPerYear: 4 },
+  { service: 'rodent', label: 'Rodent control', frequencyPerYear: 4 },
+  { service: 'termite', label: 'Termite monitoring', frequencyPerYear: 4 },
+  { service: 'mosquito', label: 'Mosquito control', frequencyPerYear: 12 },
+  { service: 'lawn', label: 'Lawn care', frequencyPerYear: 6 },
+  { service: 'tree_shrub', label: 'Tree & shrub care', frequencyPerYear: 6 },
+];
+
 // A builder program row counts (totals, payload) once it is actually
 // priced — same predicate everywhere so the sidebar shows what will save.
 const programRowIsPriced = (p) => String(p.label || '').trim()
@@ -361,6 +375,8 @@ function CommercialProposalEditor() {
   const [openSections, setOpenSections] = useState({
     scope: false, programs: true, corrective: false, responsibilities: false, terms: false, additionalTerms: false,
   });
+  // The Add program chooser (template buttons) is open.
+  const [programChooserOpen, setProgramChooserOpen] = useState(false);
   const toggleSection = (key) => setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   // Below lg the sidebar drops under the form, so a bottom bar keeps the
   // totals and Save in reach.
@@ -986,6 +1002,44 @@ function CommercialProposalEditor() {
       isNew: true,
     }]);
     setOpenSections((prev) => ({ ...prev, programs: true }));
+    setProgramChooserOpen(false);
+  };
+  // A row started from a template: the service's served stack (inclusions, exclusions, responsibilities) installs the
+  // way a family change installs it, with the same provenance, so a later family switch or removal prunes exactly
+  // these lines. The cadence bullet leads the inclusions (setProgramFrequency keeps it in sync) and is not provenance.
+  // The price box starts empty: no template carries a price.
+  const addProgramFromTemplate = (template) => {
+    const { service, label, frequencyPerYear: n } = template;
+    const reg = familyRegistryRef.current?.[service];
+    const bullet = `${n} scheduled application${n === 1 ? '' : 's'} per year`;
+    const regInc = (reg?.inclusions || []).map((line) => String(line).trim()).filter(Boolean);
+    const regExc = (reg?.exclusions || []).map((line) => String(line).trim()).filter(Boolean);
+    const genInclusions = regInc.filter((line) => line !== bullet);
+    markEdit();
+    if (reg) {
+      const lines = responsibilitiesText.trim() ? responsibilitiesText.split('\n') : [];
+      const present = new Set(lines.map((line) => line.trim()));
+      // Only the lines appended here are provenance: a pre-existing identical line may be hand-authored and must stay unprunable.
+      const appended = [...new Set((reg.responsibilities || []).map((line) => String(line).trim()).filter((line) => line && !present.has(line)))];
+      if (appended.length) {
+        setResponsibilitiesText([...lines, ...appended].join('\n'));
+        generatedRespByFamilyRef.current = {
+          ...(generatedRespByFamilyRef.current || {}),
+          [service]: [...new Set([...(generatedRespByFamilyRef.current?.[service] || []), ...appended])],
+        };
+      }
+    }
+    setProgramsState((prev) => [...prev, {
+      id: crypto.randomUUID(), service, label, frequencyPerYear: n, pricePerApplication: '', visitMinutes: '',
+      ...taxUnderUse(familyRule(service)), note: '', coversText: '',
+      inclusionsText: reg ? [bullet, ...genInclusions].join('\n') : '',
+      exclusionsText: reg ? regExc.join('\n') : '',
+      genInclusions: reg ? genInclusions : [],
+      genExclusions: reg ? regExc : [],
+      isNew: true,
+    }]);
+    setOpenSections((prev) => ({ ...prev, programs: true }));
+    setProgramChooserOpen(false);
   };
   // Standard / Custom for one fixed term (a blank old term is the only 'none',
   // and only until this pick). Custom starts from the current wording (the
@@ -1089,6 +1143,18 @@ function CommercialProposalEditor() {
       ...(hasTerms ? { commercialTerms: ct } : {}),
     };
   };
+
+  // "Add program" opens a chooser: one button per template plus a blank row.
+  const programChooser = (
+    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Choose a program to add">
+      {PROGRAM_TEMPLATES.map((t) => (
+        <Button key={t.service} variant="secondary" size="sm" onClick={() => addProgramFromTemplate(t)}>
+          {t.label} · {PROGRAM_FREQUENCY_PRESETS.find((f) => f.perYear === t.frequencyPerYear)?.label}
+        </Button>
+      ))}
+      <Button variant="ghost" size="sm" onClick={addProgram}>Blank program</Button>
+    </div>
+  );
 
   const buildPayload = (f = formRef.current) => ({
     expectedEditVersion: loadedVersionRef.current,
@@ -1625,9 +1691,11 @@ function CommercialProposalEditor() {
                 <span className="flex-1 min-w-[200px] text-13 text-zinc-600">
                   Price by service program (a price per application) instead of building line items?
                 </span>
-                <Button variant="secondary" size="sm" onClick={addProgram}>
-                  <Plus size={14} /> Add program
-                </Button>
+                {programChooserOpen ? programChooser : (
+                  <Button variant="secondary" size="sm" onClick={() => setProgramChooserOpen(true)}>
+                    <Plus size={14} /> Add program
+                  </Button>
+                )}
               </div>
             )
           ) : (
@@ -1760,11 +1828,11 @@ function CommercialProposalEditor() {
                   </div>
                 );
               })}
-              {!locked && (
-                <Button variant="ghost" size="sm" onClick={addProgram}>
+              {!locked && (programChooserOpen ? programChooser : (
+                <Button variant="ghost" size="sm" onClick={() => setProgramChooserOpen(true)}>
                   <Plus size={14} /> Add program
                 </Button>
-              )}
+              ))}
             </FoldCard>
           )}
 

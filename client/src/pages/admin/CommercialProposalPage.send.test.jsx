@@ -253,6 +253,7 @@ it('withholds the costing margin while any program row is incomplete, exactly as
   fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '1' } });
   expect(screen.getByText('$399.00')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Blank program' }));
   expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
   expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
 });
