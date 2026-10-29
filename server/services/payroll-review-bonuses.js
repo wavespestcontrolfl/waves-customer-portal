@@ -21,6 +21,9 @@ const { recordAuditEvent } = require('./audit-log');
 const { PayrollError } = require('./payroll-w4');
 const { payrollPayLinesLive, payrollReviewBonusImportLive } = require('../config/feature-gates');
 const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+// Only the sources the Reviews page shows and pays ('google_review'); legacy review_request
+// payouts stay out of payroll as they stay out of the Reviews page's mark-paid.
+const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 
 const SOURCE_TYPE = 'review_incentive_payout';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,7 +35,7 @@ const importOn = () => typeof payrollReviewBonusImportLive === 'function' && pay
 
 // The ET calendar date of earned_at, as text so a server time zone can never move a day.
 const earnedOnSql = (conn) => conn.raw("to_char((p.earned_at AT TIME ZONE ?)::date, 'YYYY-MM-DD') as earned_on", [STAFF_TIME_ZONE]);
-const PAYOUT_COLUMNS = ['p.id', 'p.technician_id', 'p.amount_cents', 'p.status'];
+const PAYOUT_COLUMNS = ['p.id', 'p.technician_id', 'p.amount_cents', 'p.status', 'p.source'];
 
 /**
  * Deletes the open imported lines whose payout no longer matches them (paid, gone,
@@ -53,7 +56,8 @@ async function dropStaleLines(trx, { lock, dropAll }) {
   const payouts = new Map((await payoutQuery).map((row) => [row.id, row]));
   const stale = dropAll ? lines : lines.filter((line) => {
     const payout = payouts.get(line.source_id);
-    return !payout || payout.status !== 'earned' || payout.technician_id !== line.technician_id
+    return !payout || payout.status !== 'earned' || !PAYOUT_ELIGIBLE_SOURCES.includes(payout.source)
+      || payout.technician_id !== line.technician_id
       || Number(payout.amount_cents) !== Number(line.amount_cents)
       || staffWeekStartForWorkDate(payout.earned_on) !== line.earned_week_start;
   });
@@ -66,6 +70,7 @@ async function addMissingLines(trx, weekEnd, { lock }) {
   const query = trx('review_incentive_payouts as p')
     .join('technicians as t', 't.id', 'p.technician_id')
     .where('p.status', 'earned')
+    .whereIn('p.source', PAYOUT_ELIGIBLE_SOURCES)
     .where('p.amount_cents', '>', 0)
     .where('t.employment_type', 'w2')
     .whereRaw('(p.earned_at AT TIME ZONE ?)::date <= ?::date', [STAFF_TIME_ZONE, weekEnd])
@@ -133,7 +138,7 @@ async function markPayoutsPaid(trx, runId, actorId) {
   for (const [technicianId, ids] of byTech) {
     if (!ids.every((id) => UUID_RE.test(id))) throw changedError;
     const changed = await trx('review_incentive_payouts')
-      .whereIn('id', ids).where({ technician_id: technicianId, status: 'earned' })
+      .whereIn('id', ids).where({ technician_id: technicianId, status: 'earned' }).whereIn('source', PAYOUT_ELIGIBLE_SOURCES)
       .update({ status: 'paid', paid_at: trx.fn.now(), paid_by: actorId || null, updated_at: trx.fn.now() });
     if (changed !== ids.length) throw changedError;
   }

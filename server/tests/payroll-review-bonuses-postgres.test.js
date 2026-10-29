@@ -315,6 +315,26 @@ postgres('payroll review bonus import', () => {
     });
   });
 
+  describe('payout sources', () => {
+    it('never imports a legacy review_request payout, and drops a line that points at one', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const legacy = await payout(id, '2026-09-16T15:00:00Z', { source: 'review_request' });
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(0);
+      expect(await importedLines()).toHaveLength(0);
+      // A line that points at one (written by hand) comes off at the next recompute.
+      await trx('payroll_pay_lines').insert({
+        technician_id: id, kind: 'review_bonus', amount_cents: 500, earned_week_start: W1,
+        source_type: 'review_incentive_payout', source_id: legacy, note: 'Sample',
+      });
+      const recomputed = await recompute(created.body.run.id);
+      expect(byName(recomputed.body.run, 'Sample Alpha').reviewBonusCents).toBe(0);
+      expect(await importedLines()).toHaveLength(0);
+      expect((await payoutRow(legacy)).status).toBe('earned');
+    });
+  });
+
   describe('with the import gate off', () => {
     it('imports nothing, and still drops an imported line whose payout was marked paid by hand', async () => {
       const id = await readyTech('Sample Alpha');
