@@ -231,6 +231,26 @@ async function sendRefusal(text, target) {
   return null;
 }
 
+// Links the sender rewrites at delivery (send-customer-message.js): the portal-link wrap to tracked short links, and for receipt-type
+// purposes the estimate-link rewrite. Decided by the sender's own read-only predicates (wrappableSpans, withheldLinkPolicyForSmsPurpose,
+// rewriteWithheldEstimateLinks), on the delivered text; nothing is minted or written. No link that qualifies, no note.
+async function deliveryLinkNotes(text, { audience, purpose, messageType }) {
+  const notes = [];
+  try {
+    if (require('../messaging/sms-link-wrap').wrappableSpans({ body: text, channel: 'sms', audience, purpose }).length) {
+      notes.push('The portal link goes out as a tracked short link.');
+    }
+    const Annual = require('../estimate-annual-guard');
+    if (Annual.withheldLinkPolicyForSmsPurpose(purpose, messageType) === 'rewrite') {
+      const rewritten = await Annual.rewriteWithheldEstimateLinks({ db, text });
+      if (rewritten.rewrittenIds.length) notes.push('An estimate link that is no longer offered goes out as the portal home link.');
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar:agent-review] link note unavailable (${err?.code || err?.name || 'error'})`);
+  }
+  return notes;
+}
+
 async function buildPlan(toolName, input = {}) {
   const action = TOOL_ACTION[toolName];
   const loaded = await loadPlannableDecision(input);
@@ -257,6 +277,8 @@ async function buildPlan(toolName, input = {}) {
     if (blocked) return blocked;
   }
 
+  const linkNotes = action === 'ignore' ? []
+    : await deliveryLinkNotes(finalText, { audience: target.customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: 'manual' });
   const snap = snapshotOf(d);
   const name = fullName(d);
   const latestId = await suggest().newestInboundIdForThread(last10(target.to));
@@ -277,6 +299,7 @@ async function buildPlan(toolName, input = {}) {
     lint_failures: Array.isArray(snap?.comms_lint) ? snap.comms_lint : [],
     promised_actions: Array.isArray(snap?.intended_actions) ? snap.intended_actions.map((a) => (typeof a === 'string' ? a : (a?.label || a?.type || JSON.stringify(a)))) : [],
     newer_inbound: newerInbound,
+    link_notes: linkNotes,
     sends_to_customer: action !== 'ignore',
     // The office line the customer texted (one of ours); the composer posts it as fromNumber.
     from_number: target.fromNumber || null,
@@ -292,6 +315,7 @@ async function buildPlan(toolName, input = {}) {
       customer_name: name,
       inbound_message: inbound,
       latest_inbound_id: latestId,
+      link_notes: linkNotes,
     },
     note: action === 'ignore'
       ? 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this draft and sends nothing.'
@@ -442,6 +466,7 @@ function cardLines(toolName, preview) {
     lines.push({ kind: 'comms', text: 'Nothing is sent: no text, email or call goes to anyone. The draft is recorded ignored and no page restores it.' });
   } else {
     lines.push({ kind: 'comms', text: `Goes out through the office texting path, the same checks as the composer's Send. The draft is recorded ${preview.action === 'revise' ? 'corrected' : 'accepted'}; the thread's other waiting drafts are recorded ignored.` });
+    for (const note of preview.link_notes || []) lines.push({ kind: 'comms', text: note });
     lines.push({ kind: 'comms', text: 'The text cannot be unsent.' });
   }
   return lines;
