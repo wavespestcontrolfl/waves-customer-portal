@@ -1264,6 +1264,7 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
   WHEN s.recurring_pattern = 'quarterly' THEN 'quarterly'
   WHEN s.recurring_pattern = 'semiannual' THEN 'semiannual'
   WHEN s.recurring_pattern = 'every_6_weeks' OR (s.recurring_pattern = 'custom' AND s.recurring_interval_days = 42) THEN 'every_6_weeks'
+  WHEN s.recurring_pattern = 'lawn_rounds_9' THEN 'every_6_weeks'
   WHEN s.recurring_pattern = 'custom' AND s.recurring_interval_days BETWEEN 26 AND 35 THEN 'monthly'
   WHEN s.recurring_pattern = 'custom' AND s.recurring_interval_days BETWEEN 56 AND 65 THEN 'bimonthly'
   WHEN s.recurring_pattern = 'custom' AND s.recurring_interval_days BETWEEN 84 AND 98 THEN 'quarterly'

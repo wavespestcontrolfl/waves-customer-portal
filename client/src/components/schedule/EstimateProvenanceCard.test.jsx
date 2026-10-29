@@ -30,6 +30,19 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
+  it('labels a lawn rounds line for staff instead of the raw token', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={90}
+        onetimeTotal={0}
+        currentPrice={90}
+        lines={[{ name: 'Lawn Care', cadence: 'lawn_rounds_9', price: 90, perApplicationPrice: 90 }]}
+        estimateRef="EST-2026-0002"
+      />,
+    );
+    expect(screen.getByText(/\$90\.00\/application · Lawn rounds \(9 a year\)/)).toBeTruthy();
+  });
+
   it('group scope compares against recurring + schedulable one-time (the booked visit charge)', () => {
     render(
       <EstimateProvenanceCard

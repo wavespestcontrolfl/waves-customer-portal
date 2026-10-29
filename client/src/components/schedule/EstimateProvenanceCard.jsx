@@ -76,6 +76,7 @@ const CADENCE_LABEL = {
   semiannual: 'Twice a year',
   annual: 'Annual',
   seasonal_feb_oct: 'Seasonal (Feb–Oct)',
+  lawn_rounds_9: 'Lawn rounds (9 a year)',
   one_time: 'One-time',
 };
 
