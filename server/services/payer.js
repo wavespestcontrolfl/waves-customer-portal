@@ -15,13 +15,19 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30'];
+const PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30', 'net60'];
 
 // Canonical NET-terms day counts — the ONE place term tokens map to days.
 // Consumed by payer statements (statement due dates) and commercial-proposal
 // acceptance invoicing (proposal-win.js); anything else that turns a term
 // into a date must read this map, never a local copy (codex #3297 r4c).
-const PAYMENT_TERM_NET_DAYS = { net15: 15, net30: 30 };
+// net60: owner 2026-10-29 ("lets create the option net-60, just to have it").
+const PAYMENT_TERM_NET_DAYS = { net15: 15, net30: 30, net60: 60 };
+
+// A NET term (accrues to a payer statement, due on a day count) versus
+// due_on_receipt. Every "is this a NET payer?" check reads this, never a
+// literal list, so a new term in the map is a NET term everywhere at once.
+const isNetPaymentTerm = (terms) => Object.prototype.hasOwnProperty.call(PAYMENT_TERM_NET_DAYS, terms);
 
 // An invoice's AP delivery email is "frozen" to the snapshot once the invoice has
 // been issued/delivered (or reached a terminal state). Before that — while it's
@@ -592,6 +598,7 @@ function payerRecipient(payer) {
 module.exports = {
   PAYMENT_TERMS,
   PAYMENT_TERM_NET_DAYS,
+  isNetPaymentTerm,
   buildPayerWrite,
   listPayers,
   getPayer,

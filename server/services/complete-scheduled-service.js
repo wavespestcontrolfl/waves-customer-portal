@@ -12571,7 +12571,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const { isEnabled } = require('../config/feature-gates');
             if (isEnabled('payerStatements')) {
               const payerRow = await db('payers').where({ id: invoice.payer_id }).first('payment_terms');
-              if (['net15', 'net30'].includes(payerRow?.payment_terms)) {
+              if (require('./payer').isNetPaymentTerm(payerRow?.payment_terms)) {
                 logger.info(`[dispatch] backfill completion: payer-statement accrual SKIPPED for visit ${svc.id} — ${payerRow.payment_terms} invoice ${invoice.invoice_number || invoice.id} minted OFF the payer's open statement for review; to bill it on the monthly statement, void + re-create it (attach happens only at create), or send it individually to the AP`);
               }
             }

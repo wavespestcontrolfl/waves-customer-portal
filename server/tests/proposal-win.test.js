@@ -7,8 +7,8 @@ jest.mock('../utils/datetime-et', () => ({
   addETDays: (_date, days) => new Date(Date.UTC(2026, 5, 20 + (days || 0))),
 }));
 jest.mock('../services/payer', () => ({
-  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30'],
-  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30 },
+  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30', 'net60'],
+  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30, net60: 60 },
   resolveForInvoice: jest.fn().mockResolvedValue({ payerId: null, paymentTerms: null }),
 }));
 jest.mock('../routes/admin-customers', () => ({
@@ -57,6 +57,7 @@ describe('proposalNetTermDays', () => {
   test('maps only the canonical payer tokens — lookup, never a parse (codex #3297 r2)', () => {
     const withTerms = (paymentTerms) => ({ commercialTerms: { paymentTerms } });
     expect(proposalNetTermDays(withTerms('net30'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('net60'))).toBe(60);
     expect(proposalNetTermDays(withTerms('net15'))).toBe(15);
     expect(proposalNetTermDays(withTerms('due_on_receipt'))).toBe(0);
     // Non-canonical strings never reach here (the normalizer nulls them and
@@ -265,6 +266,18 @@ describe('createProposalAcceptanceInvoice', () => {
       customerId: 'cust-1',
     });
     expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
+  });
+
+  test('authored Net-60 terms push the invoice due date 60 ET days out (owner 2026-10-29)', async () => {
+    InvoiceService.create.mockResolvedValue({ id: 9, invoice_number: 'WPC-2026-0009', total: 1 });
+    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
+    await createProposalAcceptanceInvoice({
+      trx,
+      estimate: { id: 43 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net60' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-08-19');
   });
 
   test('payer-term resolution: match proceeds on payer terms, mismatch REJECTS acceptance, self-pay uses the proposal term (codex #3297 r2d)', async () => {

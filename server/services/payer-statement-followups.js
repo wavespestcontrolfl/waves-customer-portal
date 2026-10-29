@@ -38,7 +38,7 @@ const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 // (closed, not yet delivered to AP) is intentionally excluded — dun only what AP
 // has actually received. `processing`/`paid`/`void` stop dunning.
 const DUNNABLE_STATEMENT_STATUSES = ['sent', 'viewed'];
-const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on receipt' };
+const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', net60: 'Net 60', due_on_receipt: 'Due on receipt' };
 
 function currency(n) {
   return `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

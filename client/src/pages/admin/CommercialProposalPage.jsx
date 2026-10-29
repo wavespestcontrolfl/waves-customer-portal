@@ -11,7 +11,7 @@ import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
-import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
+import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, NET60_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
 import useIsMobile from '../../hooks/useIsMobile';
 
@@ -168,7 +168,8 @@ function termChoiceOf(key, value) {
 const termChoicesOf = (terms) => Object.fromEntries(TERM_CHOICE_KEYS.map((key) => [key, termChoiceOf(key, terms[key])]));
 
 const PAYMENT_TERM_LABELS = {
-  [AUTOPAY_PAYMENT_TERMS]: 'Auto Pay', [INVOICE_PAYMENT_TERMS]: 'Net-30', net15: 'Net-15', due_on_receipt: 'Due on receipt',
+  [AUTOPAY_PAYMENT_TERMS]: 'Auto Pay', [INVOICE_PAYMENT_TERMS]: 'Net-30', [NET60_PAYMENT_TERMS]: 'Net-60', net15: 'Net-15',
+  due_on_receipt: 'Due on receipt',
 };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const formatPct = (pct) => String(roundMoney(pct));
@@ -2060,7 +2061,9 @@ function CommercialProposalEditor() {
                       {PAYMENT_TERM_LABELS[commercialTerms.paymentTerms]} (no online signing)
                     </option>
                   )}
-                  <option value="net30" disabled={!estimate?.billByInvoice}>Net-30</option>
+                  <option value={INVOICE_PAYMENT_TERMS} disabled={!estimate?.billByInvoice}>Net-30</option>
+                  {/* Net-60: the Net 30 paragraph with sixty days (owner 2026-10-29). Signs online like Net-30. */}
+                  <option value={NET60_PAYMENT_TERMS} disabled={!estimate?.billByInvoice}>Net-60</option>
                 </Select>
                 {!estimate?.billByInvoice && (
                   <span className="mt-1 block text-11 text-zinc-400">
