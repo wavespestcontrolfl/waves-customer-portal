@@ -4,11 +4,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/validators/suppression', () => ({ loadSuppressionState: jest.fn() }));
-jest.mock('../services/recipient-optin', () => ({
-  recipientPhoneKey: (phone) => String(phone || '').replace(/\D/g, '').slice(-10),
-}));
+// The ask rule itself (which rows a YES confirms) is tested in recipient-optin.test.js.
+jest.mock('../services/recipient-optin', () => ({ yesWouldConfirmAsk: jest.fn() }));
 
 const { loadSuppressionState } = require('../services/messaging/validators/suppression');
+const { yesWouldConfirmAsk } = require('../services/recipient-optin');
 const logger = require('../services/logger');
 const { bareYesIsReply } = require('../services/messaging/bare-yes-reply');
 
@@ -38,16 +38,15 @@ function fakeDb(answers = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   loadSuppressionState.mockImplementation(async (input, contactState) => ({ ...contactState, suppressionLoaded: true }));
+  yesWouldConfirmAsk.mockResolvedValue(false);
 });
 
-test('a subscribed number with texts on and no open ask is a reply', async () => {
+test('a subscribed number with texts on and no ask to confirm is a reply', async () => {
   const { dbh, calls } = fakeDb({ notification_prefs: { sms_enabled: true } });
   await expect(bareYesIsReply({ phone: PHONE, customerId: 'cust-1', dbh })).resolves.toBe(true);
   expect(loadSuppressionState).toHaveBeenCalledWith({ to: PHONE }, {}, dbh);
-  expect(calls).toEqual([
-    { table: 'notification_prefs', filters: [['where', { customer_id: 'cust-1' }]] },
-    { table: 'recipient_optin', filters: [['where', { phone_key: '9415550123' }], ['whereNot', { status: 'confirmed' }]] },
-  ]);
+  expect(calls).toEqual([{ table: 'notification_prefs', filters: [['where', { customer_id: 'cust-1' }]] }]);
+  expect(yesWouldConfirmAsk).toHaveBeenCalledWith(PHONE, { dbh });
 });
 
 test('an active suppression keeps the opt-in, so YES still undoes a STOP', async () => {
@@ -55,6 +54,7 @@ test('an active suppression keeps the opt-in, so YES still undoes a STOP', async
   const { dbh, calls } = fakeDb();
   await expect(bareYesIsReply({ phone: PHONE, customerId: 'cust-1', dbh })).resolves.toBe(false);
   expect(calls).toEqual([]);
+  expect(yesWouldConfirmAsk).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -74,12 +74,20 @@ test('texts turned off on the customer keep the opt-in', async () => {
 test('a sender with no matched customer skips the preference read', async () => {
   const { dbh, calls } = fakeDb();
   await expect(bareYesIsReply({ phone: PHONE, dbh })).resolves.toBe(true);
-  expect(calls.map((c) => c.table)).toEqual(['recipient_optin']);
+  expect(calls).toEqual([]);
 });
 
-test('an open recipient ask keeps the opt-in, so YES still confirms it', async () => {
-  const { dbh } = fakeDb({ recipient_optin: { id: 'ask-1' } });
+test('a recipient ask the YES would confirm keeps the opt-in, so YES still confirms it', async () => {
+  yesWouldConfirmAsk.mockResolvedValueOnce(true);
+  const { dbh } = fakeDb();
   await expect(bareYesIsReply({ phone: PHONE, customerId: 'cust-1', dbh })).resolves.toBe(false);
+});
+
+test('a failed ask read keeps the opt-in', async () => {
+  yesWouldConfirmAsk.mockRejectedValueOnce(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+  const { dbh } = fakeDb();
+  await expect(bareYesIsReply({ phone: PHONE, customerId: 'cust-1', dbh })).resolves.toBe(false);
+  expect(logger.warn).toHaveBeenCalledTimes(1);
 });
 
 test('a query error keeps the opt-in and logs no phone digits', async () => {
