@@ -2840,11 +2840,14 @@ function parseDateOnly(value, field) {
 // card's settlementFence (its invoice pin, held-report and annual-plan checks, run before the Stripe retirement and again under
 // the invoice row lock), and that the invoice is still
 // the customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
+// A part payment (GATE_IB_RECORD_PAYMENT_PARTIAL, owner 2026-10-29) adds `part: { amountCents, owedCentsSeen }` to the approval, built from the
+// card's own pin and never from the request body; the writer then gets the internal barApprovedPart marker (and re-checks both gates).
 const cardPinsOf = (req) => (req.ibApprovedPayment
   ? {
     expectedAmountCents: req.ibApprovedPayment.expectedAmountCents,
     settlementFence: req.ibApprovedPayment.settlementFence,
     requireSelfPay: true,
+    ...(req.ibApprovedPayment.part ? { barApprovedPart: true } : {}),
   }
   : {});
 
@@ -2870,10 +2873,17 @@ const recordPaymentHandler = async (req, res, next) => {
         error: `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`,
       });
     }
-    // The amount the office typed, in whole cents. Only the Invoices page sends one: the Intelligence Bar card never does (it records the
-    // whole balance, fenced by its own expectedAmountCents), so a stray amount in its body is dropped here.
+    // The amount the office typed, in whole cents. Only the Invoices page sends one: the Intelligence Bar card records the whole balance,
+    // fenced by its own expectedAmountCents, so a stray amount in its body is dropped here. The one exception is a part payment the card
+    // priced (req.ibApprovedPayment.part, internal, built by the bar's tool only for a part card): its figures come from that approval, never
+    // from the body, and the writer refuses it (400, nothing recorded, never a whole-balance fallback) unless both part gates are on.
     let amountCents = null;
-    if (amount != null && amount !== '' && !req.ibApprovedPayment) {
+    let barOwedCentsSeen = null;
+    const barPart = req.ibApprovedPayment?.part || null;
+    if (barPart) {
+      amountCents = barPart.amountCents;
+      barOwedCentsSeen = barPart.owedCentsSeen;
+    } else if (amount != null && amount !== '' && !req.ibApprovedPayment) {
       const dollars = Number(amount);
       amountCents = Math.round(dollars * 100);
       if (!Number.isFinite(dollars) || !(amountCents > 0) || Math.abs(dollars * 100 - amountCents) > 1e-6) {
@@ -2881,8 +2891,8 @@ const recordPaymentHandler = async (req, res, next) => {
       }
     }
     // The amount owed the page showed beside that amount: the writer refuses when it is no longer what is owed (a repeat submit).
-    let owedCentsSeen = null;
-    if (amountCents != null && owedSeen != null && owedSeen !== '') {
+    let owedCentsSeen = barOwedCentsSeen;
+    if (!barPart && amountCents != null && owedSeen != null && owedSeen !== '') {
       const dollars = Number(owedSeen);
       owedCentsSeen = Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
     }
@@ -4091,7 +4101,9 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
 // The Intelligence Bar's record_payment runs the SAME handler as POST /:id/record-payment. `body` is exactly what the
 // Invoices page sends with its Send receipt switch off: the shim forces sendReceipt=false and drops via, so the bar never sends a
 // receipt from here (a receipt is a separate act: resend_receipt, or the Invoices page). The recorder is the staff member's name as
-// the page path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence }.
+// the page path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence, part? } (part: the card's
+// { amountCents, owedCentsSeen } for a part payment; the tool builds it only while GATE_IB_RECORD_PAYMENT_PARTIAL and GATE_PARTIAL_PAYMENTS are on,
+// and the writer re-checks both).
 function recordPaymentFromBar({ invoiceId, body, actor, approvedPayment }) {
   const { via: _via, ...withoutVia } = body || {};
   return runInvoiceHandler(recordPaymentHandler, barRequest(invoiceId, { ...withoutVia, sendReceipt: false }, actor, {

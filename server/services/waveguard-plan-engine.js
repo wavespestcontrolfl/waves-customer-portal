@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning, roundStepForPlan, visitForRound, visitWithSpotLines } = require('./lawn-program');
 const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
@@ -10,7 +10,8 @@ const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = req
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
-const { LAWN_ROUNDS_9 } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, roundSpotMonth } = require('./lawn-rounds');
+const roundsCatchUp = require('./lawn-rounds-catchup');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { convertToOz, normalizeQuantityToOz } = require('./product-costing');
 const {
@@ -621,12 +622,18 @@ function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
 // production mode. Keys not in the table carry no field text. Order is display order.
 const NOV_TO_MAR = (month) => month > 3 && month < 11;
 const isNorthPort = (municipality) => /north\s*port/i.test(String(municipality || ''));
+// North Port bans nitrogen and phosphorus from April 1 to September 30: is this calendar month (1-12) inside that span? The ONE test for
+// the stored northPortBlocked note of a rounds visit and for the round-3 nitrogen hold (roundsNitrogenHold), so the two never disagree.
+const northPortNpBanMonth = (month) => Number(month) >= 4 && Number(month) <= 9;
 const V13_GATE_NOTES = [
   { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
   { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
-  { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
+  // A rounds visit judges the weed and spot rule by the real date (`spotMonthNumber`); every other visit by the service month.
+  { key: 'novToMarOnly', required: true, when: (ctx) => (ctx.spotMonthNumber ?? ctx.monthNumber) != null && NOV_TO_MAR(ctx.spotMonthNumber ?? ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
-  { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
+  // The stored gate was written for the step's own month (North Port bans N and P Apr 1 to Sep 30). A rounds visit can read a step of
+  // another season (round 2 reads April's Dimension row in Feb and Mar), so it judges the ban by the REAL date (`realMonthNumber`).
+  { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality) && (ctx.realMonthNumber == null || northPortNpBanMonth(ctx.realMonthNumber)), text: () => 'Not allowed in North Port this month; skip this product.' },
   { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
   { key: 'ownPass', text: () => 'Apply as its own spreader pass: do not blend with the month\'s granular or any other product.' },
@@ -692,10 +699,17 @@ function v13ApplyAloneBlocks(selectedItems) {
 // track and month, read from the database. Empty with the gate off. With the gate
 // on and no staged v13 protocol it throws (code lawn_v13_protocol_missing): the v13
 // recipe must never be priced or mixed at catalog-default rates.
-async function loadV13RowsForMonth(knex, trackKey, monthName, { includeBermudaRemoval = false } = {}) {
+//
+// `spotMonth` (1-12; a rounds visit's tank sheet): the weed and spot rows come from that month's window while every other row comes from
+// `monthName`'s (getProtocolWindowContext roundStep). Absent, one window, as always. `catchUp` (with spotMonth): the spring pre-emergent
+// catch-up row of the March window joins them (lawn-rounds-catchup.js).
+async function loadV13RowsForMonth(knex, trackKey, monthName, { includeBermudaRemoval = false, spotMonth = null, catchUp = false } = {}) {
   if (featureGates.lawnV13Live?.() !== true) return new Map();
   const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
-  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true, planning: true, ...(includeBermudaRemoval ? { includeBermudaRemoval: true } : {}) }));
+  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, {
+    serviceDate, grassTrack: trackKey, strict: true, planning: true, ...(includeBermudaRemoval ? { includeBermudaRemoval: true } : {}),
+    ...(spotMonth ? { roundStep: roundsCatchUp.roundStepFields({ month: MONTH_ABBR.indexOf(monthName) + 1, spotMonth }, catchUp) } : {}),
+  }));
   if (summary?.version !== LAWN_V13_VERSION) {
     throw Object.assign(new Error(`GATE_LAWN_V13 is on but the staged ${LAWN_V13_VERSION} protocol is missing for ${trackKey}`), { code: 'lawn_v13_protocol_missing' });
   }
@@ -2011,6 +2025,8 @@ function planLineFields(item) {
     selectionReason: item.selectionReason,
     selected: item.selected,
     ...(item.bermudaStep ? { bermudaStep: true } : {}),
+    // The spring pre-emergent catch-up line of a new rounds customer's first visit: named for every reader.
+    ...roundsCatchUp.catchUpLineFields(item),
   };
 }
 
@@ -2028,6 +2044,7 @@ function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {},
   const row = bermudaRemoval.rowFor(v13Rows, product.id, item.bermudaStep === true);
   if (!row) return { row, state: 'unavailable' };
   if (v13NorthPortHold(row, gateContext.municipality)) return { row, state: 'held' };
+  if (gateContext.holdRoundsNitrogen === true && holdsRoundsNitrogen(item, product)) return { row, state: 'held', roundsNitrogen: true };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
   return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
 }
@@ -2042,19 +2059,47 @@ function v13NorthPortHold(row, municipality) {
   return row?.gates?.northPortProductWindow === true && isNorthPort(municipality);
 }
 
-// The matched items a North Port visit may not apply: not selected, so no default, no amount.
-function holdNorthPortProducts(items, v13Rows, municipality) {
-  return items.map((item) => (item.product && v13NorthPortHold(bermudaRemoval.rowFor(v13Rows, item.product.id, item.bermudaStep === true), municipality)
-    ? { ...item, selected: false, selectionReason: NORTH_PORT_HOLD_REASON } : item));
+// 9x rounds, round 3 (Mar 15 to Apr 23) is the 24-0-11 feeding. North Port bans nitrogen and phosphorus from Apr 1 to Sep 30, so a
+// round-3 visit dated Apr 1 or later holds the nitrogen bag (the visit's base product that carries N). The ordinance check at completion
+// already blocks N by the real date; this keeps the plan from offering it. `roundsNitrogenHold` is the one test, for every reader.
+const NORTH_PORT_ROUNDS_N_REASON = 'north_port_rounds_nitrogen';
+const holdsRoundsNitrogen = (item, product = item?.product) => item?.role === 'base' && Number(product?.analysis_n) > 0;
+function roundsNitrogenHold(routing, municipality) {
+  return !!routing && routing.round === 3 && northPortNpBanMonth(routing.realMonth) && isNorthPort(municipality);
+}
+
+// The rounds routing of a booked visit: its round's step month and variant, and the month its weed and spot rows come from (the real
+// date's, with the St. Augustine green-up exception). null for every visit that is not on a lawn_rounds_9 series. `service` needs
+// recurring_pattern and scheduled_date; `trackKey` is the visit's grass track.
+function roundRouting(service, trackKey = null) {
+  const roundStep = roundStepForPlan(service);
+  if (!roundStep) return null;
+  const realMonth = etParts(toServiceDate(service.scheduled_date)).month;
+  return { ...roundStep, realMonth, spotMonth: roundSpotMonth({ round: roundStep.round, realMonth, grassTrack: trackKey }) };
+}
+
+// The matched items a North Port visit may not apply: not selected, so no default, no amount. `nitrogen` (a rounds round-3 visit in
+// North Port from Apr 1) also holds the visit's nitrogen bag.
+function holdNorthPortProducts(items, v13Rows, municipality, { nitrogen = false } = {}) {
+  return items.map((item) => {
+    if (item.product && v13NorthPortHold(bermudaRemoval.rowFor(v13Rows, item.product.id, item.bermudaStep === true), municipality)) {
+      return { ...item, selected: false, selectionReason: NORTH_PORT_HOLD_REASON };
+    }
+    return nitrogen && item.product && holdsRoundsNitrogen(item) ? { ...item, selected: false, selectionReason: NORTH_PORT_ROUNDS_N_REASON } : item;
+  });
 }
 
 function v13HoldWarnings(planItems) {
-  return planItems.filter((item) => item.selectionReason === NORTH_PORT_HOLD_REASON && item.product).map((item) => ({
+  return planItems.filter((item) => item.product && [NORTH_PORT_HOLD_REASON, NORTH_PORT_ROUNDS_N_REASON].includes(item.selectionReason)).map((item) => (item.selectionReason === NORTH_PORT_ROUNDS_N_REASON ? {
+    code: 'lawn_rounds_north_port_nitrogen', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: North Port bans nitrogen and phosphorus from April 1 to September 30. The plan holds this round-3 feeding back; do not apply it at this visit.`,
+  } : {
     code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
     message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
   }));
 }
 
+const V13_ROUNDS_N_HELD = 'North Port bans nitrogen and phosphorus from April 1 to September 30, so this round-3 feeding is not selected and no amount is planned.';
 const V13_UNAVAILABLE = {
   held: 'North Port holds this product in the summer until the city confirms, so it is not selected and no amount is planned.',
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
@@ -2134,10 +2179,37 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
   return { capped, warnings };
 }
 
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js), settled once the limits were read: a line that cannot be applied (a yearly cap
+// reached, an unlinked or inactive product, a v13 protocol that is not resolved) leaves with a WARNING and never blocks the plan or the
+// visit's own lines. The dropped line also leaves the limit read (its cap block and warnings) and the protocol's products (the March row that
+// came in with it), so the output and the completion read one list. Returns { items, protocol, warnings }; no catch-up line: the inputs.
+function settleCatchUpLines({ items, v13Active, v13Rows, v13Limit, structuredProtocol }) {
+  if (!items.some(roundsCatchUp.isCatchUpItem)) return { items, protocol: structuredProtocol, warnings: [] };
+  const settled = v13Active
+    ? roundsCatchUp.settleCatchUp(items, { rowOf: (item) => bermudaRemoval.rowFor(v13Rows, item.product.id, false), calculates: v13RowCalculates, cappedIds: new Set(v13Limit.capped.keys()) })
+    : { items: items.filter((item) => !roundsCatchUp.isCatchUpItem(item)), warnings: [], dropped: items.filter(roundsCatchUp.isCatchUpItem) };
+  const droppedIds = new Set(settled.dropped.map((item) => String(item.product?.id)));
+  for (const id of droppedIds) v13Limit.capped.delete(id);
+  v13Limit.warnings = v13Limit.warnings.filter((warning) => !droppedIds.has(String(warning.productId)));
+  const products = (structuredProtocol?.products || []).filter((row) => !(droppedIds.has(String(row.productId)) && row.role === 'pre_emergent'));
+  return { items: settled.items, protocol: droppedIds.size && structuredProtocol ? { ...structuredProtocol, products } : structuredProtocol, warnings: settled.warnings };
+}
+
 // The lawn-visit step for a recipe visit and the visit's plan: `override` (applications a
 // year, when the caller states it) else the plan the booked visit resolves to. One path
 // for the plan, the tank sheet and everything else that reads a cadence-dependent step.
-async function visitForPlan(knex, recipeVisit, service, override = null) {
+//
+// A visit on a lawn_rounds_9 series takes the step of its ROUND instead (roundRouting): the recipe visit passed in is already that
+// round's step, and this applies its rounds-only variant (round 2: April's 9x bag; round 3: February's 1.0 lb N bag) and, when the
+// track is given, swaps in the weed and spot lines of the real date's step (the spot rules follow the date the visit is on). It never
+// reads the plan count: the pattern says 9. Every other visit goes through the cadence path below, unchanged.
+async function visitForPlan(knex, recipeVisit, service, override = null, { track = null, trackKey = null } = {}) {
+  const routing = roundRouting(service, trackKey);
+  if (routing) {
+    const stepped = visitForRound(recipeVisit, routing);
+    const spotRecipe = track && routing.spotMonth !== routing.month ? track.visits?.find((v) => v.month === MONTH_ABBR[routing.spotMonth - 1]) : null;
+    return { visit: visitWithSpotLines(stepped.visit, spotRecipe), branch: stepped.branch, unknownCadence: null, warnings: [] };
+  }
   const stated = Number(override) > 0 ? Number(override) : null;
   const perYear = stated ?? (recipeVisit?.cadenceVariants && service ? await lawnVisitsPerYear(knex, service) : null);
   const found = visitForCadence(recipeVisit, perYear);
@@ -2180,7 +2252,7 @@ async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
   const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
   if (!onV13) return false;
   if (windowMonth == null) return true;
-  const planMonth = lawnCompletionDefaultsEnabled() ? windowMonth : etParts(toServiceDate(visit.scheduled_date)).month;
+  const planMonth = lawnCompletionDefaultsEnabled() ? windowMonth : (roundStepForPlan(visit)?.month ?? etParts(toServiceDate(visit.scheduled_date)).month);
   return planMonth === MONTH_ABBR.indexOf(month) + 1;
 }
 
@@ -2218,10 +2290,20 @@ function v13NorthPortReferenceWarnings(items) {
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
-async function v13VisitLimits(knex, service, items, rows, targets = {}, { place = null } = {}) {
+async function v13VisitLimits(knex, service, items, rows, targets = {}, { place = null, strict = false } = {}) {
   if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
-  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets, place });
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets, place, strict });
   return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
+}
+
+// The catch-up's settlement for a reader that has a booked visit but not the plan (the tank sheet, the pre-visit brief): the SAME decision the
+// plan makes (lawn-rounds-catchup.js settleCatchUp, fed by the same v13Limits read), so every surface keeps or drops the line together.
+// Returns { items, warnings, dropped }; no catch-up line in `items`: the inputs. `strict` throws a failed limit read (the brief).
+async function settleCatchUpForVisit(knex, service, items, rows, targets = {}, { strict = false } = {}) {
+  const lines = items.filter(roundsCatchUp.isCatchUpItem);
+  if (!lines.length) return { items, warnings: [], dropped: [] };
+  const found = await v13VisitLimits(knex, service, lines, rows, targets, { strict });
+  return roundsCatchUp.settleCatchUp(items, { rowOf: (item) => bermudaRemoval.rowFor(rows, item.product.id, false), calculates: v13RowCalculates, cappedIds: new Set(found.capped.keys()) });
 }
 
 // Plan notices for the v13 lines: a hard limit is a block per limit (the existing
@@ -2264,7 +2346,7 @@ function v13ItemFields(line, gateContext, product, extraNotes = []) {
       }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
-    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
+    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: line.roundsNitrogen ? V13_ROUNDS_N_HELD : V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
   };
 }
 
@@ -2375,7 +2457,15 @@ async function buildPlanForService(serviceId, options = {}) {
   }, { strict });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
-  const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
+  // A visit on a lawn_rounds_9 series takes the program step of its round (roundRouting), not of its calendar month; null for every other
+  // visit, which plans exactly as it always did. The step month drives the recipe step, the month-keyed program rules and the window the
+  // protocol rows come from; the weed and spot rows and every real-date rule (ordinance, heat, chinch season) keep the real date.
+  const roundStep = roundStepForPlan(service);
+  const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled, ...(roundStep ? { month: roundStep.month } : {}) });
+  const rounds = roundRouting(service, calendarProtocol.trackKey);
+  // A new customer's first rounds visit in round 3 with no pre-emergent on the ledger this year: the spring pre-emergent catch-up joins it
+  // (lawn-rounds-catchup.js, the whole decision). false for every other visit, which reads nothing.
+  const catchUpWanted = await roundsCatchUp.catchUpWanted(knex, service, { strict });
   // GATE_LAWN_BERMUDA_REMOVAL: every bermuda removal decision (who wants the step, the extra
   // staged rows, the month, the cultivar, the projection, the output) lives in
   // lawn-bermuda-removal.js openPlanStep; the planner only passes what it knows. Gate off or any
@@ -2391,6 +2481,7 @@ async function buildPlanForService(serviceId, options = {}) {
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
     planning: true,
+    ...(rounds ? { roundStep: roundsCatchUp.roundStepFields({ round: rounds.round, month: rounds.month, spotMonth: rounds.spotMonth }, catchUpWanted) } : {}),
     ...bermuda.protocolOptions,
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
@@ -2404,7 +2495,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // ordinance and nutrient-ledger checks keep the actual appointment date.
   const selection = completionDefaultsEnabled
     ? selectProtocolVisit(profile, serviceDate, service.lawn_type, {
-      requireKnownGrass: true, month: structuredProtocolContext?.window?.month,
+      requireKnownGrass: true, month: structuredProtocolContext?.window?.month ?? rounds?.month,
     }) : calendarProtocol;
   const { trackKey, track, month } = selection;
   const recipeVisit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
@@ -2412,7 +2503,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
   // Dimension 18-0-10 where every other plan takes the 44-0-0 polymer bag) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
-  const { visit: recipeStep, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
+  const { visit: recipeStep, unknownCadence } = await visitForPlan(knex, recipeVisit, service, null, { track, trackKey });
   const assignedProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   // The April and June bermuda removal step: its three spot lines join the visit's secondary
@@ -2420,7 +2511,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const step = await bermuda.resolve({ structuredProtocol: assignedProtocol, trackKey, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
   // The protocol products this appointment reads: the assigned window's, with the appointment month's step rows when
   // the visit moved across months. The rows, the completion defaults and the ledger all read this one list.
-  const structuredProtocol = step.protocol(assignedProtocol);
+  let structuredProtocol = step.protocol(assignedProtocol);
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
@@ -2432,6 +2523,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
     ...step.lines,
+    ...roundsCatchUp.catchUpLines(track, (text, role) => parseProtocolLines(text, role, { exactName }), catchUpWanted),
   ];
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
@@ -2444,8 +2536,9 @@ async function buildPlanForService(serviceId, options = {}) {
   });
   // A product the city bans for this visit's window is held back before anything is sized; the
   // bermuda step lines are then one selection: any selected selects all.
-  const candidateItems = step.select(holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity));
-  const plannedCandidateItems = candidateItems.filter((item) => item.selected);
+  const holdRoundsNitrogen = roundsNitrogenHold(rounds, resolvedOrdinanceCity);
+  let candidateItems = roundsCatchUp.selectCatchUp(step.select(holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity, { nitrogen: holdRoundsNitrogen })));
+  let plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
   // anything else the summary picks is inferred.
@@ -2477,10 +2570,19 @@ async function buildPlanForService(serviceId, options = {}) {
   };
   const gateContext = {
     monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
+    // A rounds visit: the weed and spot rules (Dismiss, November to March) are judged by the real date, not the step month.
+    ...(rounds ? { spotMonthNumber: rounds.spotMonth, realMonthNumber: rounds.realMonth } : {}),
+    ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}),
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
   };
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
+  // The catch-up is settled before anything reads the lines again (settleCatchUpLines).
+  const catchUp = settleCatchUpLines({ items: candidateItems, v13Active, v13Rows, v13Limit, structuredProtocol });
+  candidateItems = catchUp.items;
+  plannedCandidateItems = candidateItems.filter((item) => item.selected);
+  structuredProtocol = catchUp.protocol;
+  const catchUpKept = candidateItems.some(roundsCatchUp.isCatchUpItem);
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext, item) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
@@ -2496,7 +2598,8 @@ async function buildPlanForService(serviceId, options = {}) {
     const mix = plannedProduct && (!line || line.state === 'calculate') && !(applyAloneBlocks.length && item.selected) ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
-      carrierGalPer1000: carrier,
+      // The catch-up is a hose pass at its own row's carrier (1 gal per 1,000 sq ft), whatever rig the round's spreader visit names.
+      carrierGalPer1000: roundsCatchUp.carrierFor(item, line?.row, carrier),
       areaFactor: effectiveAreaFactor(line?.row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, areaContext),
       ...nutrientTargets,
       ...v13RateOptions(line?.row),
@@ -2504,7 +2607,7 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...nitrogenCutNotes(mix, plannedProduct, nitrogen), ...chinchTetrinoNotes(line?.row, mix, chinchRate), ...productSwapNotes(plannedProduct, productSwap, v13Rows)]) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...nitrogenCutNotes(mix, plannedProduct, nitrogen), ...chinchTetrinoNotes(line?.row, mix, chinchRate), ...productSwapNotes(plannedProduct, productSwap, v13Rows), ...roundsCatchUp.catchUpNotes(item)]) : {}),
       // GATE_LAWN_DEC_LARGE_PATCH_K: the swapped-in bag is the visit's default whole-lawn product though its staged row is not a default.
       ...(isSwapProduct(plannedProduct, productSwap, v13Rows) ? { productSwapIn: true } : {}),
       matched: !!plannedProduct,
@@ -2558,7 +2661,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems), ...v13HoldWarnings(planItems));
   if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
-  warnings.push(...bermudaProjection.warnings);
+  warnings.push(...bermudaProjection.warnings, ...catchUp.warnings);
   blocks.push(...applyAloneBlocks);
   blocks.push(...bermudaProjection.blocks);
   if (v13Active) {
@@ -2786,6 +2889,10 @@ async function buildPlanForService(serviceId, options = {}) {
     inventory: inventorySummary,
     // Gate off, or not a bermuda removal visit: no field, the payload is the old one.
     ...step.field,
+    // A rounds visit: the step the plan read, so the completion attributes to the same row set (lawn-protocol-completion loadProtocolRows).
+    ...(rounds ? { roundStep: roundsCatchUp.roundStepFields({ round: rounds.round, month: rounds.month, spotMonth: rounds.spotMonth }, catchUpKept) } : {}),
+    // The spring pre-emergent catch-up this visit carries (named for the panel, the sheet, the brief and the report), only while it is planned.
+    ...roundsCatchUp.planField(catchUpKept),
     appointmentAssignment: {
       protocolKey: service.lawn_protocol_key || null,
       protocolVersion: service.lawn_protocol_version || null,
@@ -2807,7 +2914,7 @@ async function buildPlanForService(serviceId, options = {}) {
       protocolWindowKey: structuredProtocol?.window?.key || null,
       protocolWindowTitle: structuredProtocol?.window?.title || null,
       customerRecapPreview: visit
-        ? `${month} WaveGuard visit planned for ${track?.name || 'selected turf track'}.`
+        ? `${rounds ? `Round ${rounds.round}` : month} WaveGuard visit planned for ${track?.name || 'selected turf track'}.`
         : null,
     },
   };
@@ -2856,6 +2963,9 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   holdNorthPortProducts,
+  roundRouting,
+  roundsNitrogenHold,
+  northPortNpBanMonth,
   lawnV13InactiveProductNotices,
   v13NorthPortHold,
   loadVisitCity,
@@ -2865,6 +2975,7 @@ module.exports = {
   visitForPlan,
   loadVisitForPlan,
   v13VisitLimits,
+  settleCatchUpForVisit,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

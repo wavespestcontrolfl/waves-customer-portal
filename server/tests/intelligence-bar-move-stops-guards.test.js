@@ -603,3 +603,81 @@ test('scoped (techScopedConfirmActive): a stop a concurrent reassignment committ
     delete process.env.GATE_SCHEDULING_CAPACITY;
   }
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): once
+// the batch is written, each moved stop gets the arrival-window route check as
+// a SECOND advisory probe. A route result is a warning, never a refusal; the
+// real-overlap probes are unchanged.
+describe('GATE_ROUTE_CHECK_STAFF_SAVES — move_stops_to_day route check', () => {
+  const actualOccupancy = jest.requireActual('../services/scheduling/occupancy');
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-01-15. Review the route before driving it.';
+  const arrivalCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => a.arrivalWindow);
+  const wire = () => {
+    const listChain = chain({
+      select: jest.fn().mockResolvedValue([
+        stop('svc-a', 'confirmed', { technician_id: 'tech-1' }),
+        stop('svc-b', 'confirmed', { technician_id: null, window_start: '11:00:00', window_end: '12:00:00' }),
+        stop('svc-c', 'confirmed', { technician_id: 'tech-1', window_start: null, window_end: null }),
+      ]),
+    });
+    const svcChains = Array.from({ length: 12 }, () => chain());
+    let svcIdx = 0;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        if (listChain.select.mock.calls.length === 0) return listChain;
+        return svcChains[svcIdx++];
+      }
+      if (table === 'reschedule_log') return chain();
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+  };
+  const moveAll = () => executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-a', 'svc-b', 'svc-c'], new_date: '2099-01-15', confirmed: true,
+  });
+  beforeEach(() => {
+    findConflictingVisits.mockImplementation((args) => (args && args.arrivalWindow
+      ? Promise.resolve([{ id: args.arrivalWindow.serviceId, conflict_reason: 'arrival_window', warning: ROUTE_WARNING }])
+      : actualOccupancy.findConflictingVisits(args)));
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    findConflictingVisits.mockImplementation((...args) => actualOccupancy.findConflictingVisits(...args));
+  });
+
+  test('gate off: no arrival check is passed and the result has no warning', async () => {
+    wire();
+    const result = await moveAll();
+    expect(result).toMatchObject({ success: true, moved_count: 3 });
+    expect(result.warning).toBeUndefined();
+    expect(arrivalCalls()).toHaveLength(0);
+  });
+
+  test('gate on: each timed stop is checked on cached road times after the writes; the moves commit with ONE deduplicated warning', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    wire();
+    const result = await moveAll();
+    expect(result).toMatchObject({ success: true, moved_count: 3 });
+    expect(result.warning).toBe(ROUTE_WARNING);
+    // The technician is the one on the COMMITTED row (tech-1 for every write here); svc-c has no window: nothing to verify.
+    expect(arrivalCalls().map((a) => a.arrivalWindow)).toEqual([
+      { serviceId: 'svc-a', roads: 'cache' },
+      { serviceId: 'svc-b', roads: 'cache' },
+    ]);
+    expect(arrivalCalls()[0]).toMatchObject({ date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00', excludeServiceIds: ['svc-a'] });
+  });
+
+  test('gate on: a route result never refuses; the real-overlap probe keeps its own arguments', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    wire();
+    await moveAll();
+    const overlapCalls = findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => !a.arrivalWindow);
+    expect(overlapCalls.map((a) => [a.excludeServiceIds[0], a.technicianId])).toEqual([
+      ['svc-a', 'tech-1'],
+      ['svc-b', undefined],
+    ]);
+    expect(overlapCalls.every((a) => a.arrivalWindow === undefined)).toBe(true);
+  });
+});

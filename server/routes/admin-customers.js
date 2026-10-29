@@ -1416,14 +1416,17 @@ function applyCustomerListFilters(query, filters, healthColumns) {
   if (lastVisited && lastVisited !== 'all') {
     if (lastVisited === 'never') {
       query = query.whereNotExists(function () {
-        this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id');
+        this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id')
+          .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'");
       });
     } else {
       const days = parseInt(lastVisited, 10);
       if (Number.isFinite(days) && days >= 0) {
         query = query.whereExists(function () {
+          // Last COMPLETED visit, the same rule as the list's last_service_date.
           this.select('customer_id').from('service_records')
             .whereRaw('service_records.customer_id = customers.id')
+            .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'")
             .groupBy('customer_id')
             .havingRaw('MAX(service_date) >= ?::date - (? * INTERVAL \'1 day\')', [etDateString(), days]);
         });
@@ -2570,8 +2573,10 @@ router.get('/', async (req, res, next) => {
     // The directory columns, shared by the exact rows and the approximate (sound-alike) rows below.
     const withListColumns = (base) => base.select(
       'customers.*',
-      db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
-      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
+      // Completed visits (days) only, like the customer-detail visitStats: an
+      // incomplete record is not a visit and not the customer's last visit.
+      db.raw("(SELECT COUNT(DISTINCT service_date) FROM service_records WHERE service_records.customer_id = customers.id AND COALESCE(service_records.status, 'completed') = 'completed') as services_count"),
+      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND COALESCE(service_records.status, 'completed') = 'completed') as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= ? AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date", [etDateString()]),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
@@ -3418,7 +3423,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary, visitStatsRow] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -3544,6 +3549,22 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] address_neighbors: ${e.message}`); return []; }),
       req.techRole === 'technician' ? null : openBalanceSummary(c.id, { displayLimit: 0 })
         .catch(e => { logger.warn(`[customers:${c.id}] balance_summary: ${e.message}`); return null; }),
+      // Visit stats count trips to the property, not service_records rows:
+      // one stop can carry several appointments (pest + lawn) and one
+      // appointment can carry sibling records from different completion
+      // rails, and scheduled / in_progress / incomplete / cancelled rows are
+      // not visits. A completed record per ET service day is one visit, over
+      // the whole history (the `services` list above is capped at 20).
+      db('service_records')
+        .where({ customer_id: c.id })
+        .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'") // NULL = legacy completed
+        .whereNotNull('service_date')
+        .first(
+          db.raw('COUNT(DISTINCT service_date)::int AS count'),
+          db.raw('MIN(service_date) AS first_date'),
+          db.raw('MAX(service_date) AS last_date'),
+        )
+        .catch(e => { logger.warn(`[customers:${c.id}] visit_stats: ${e.message}`); return null; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -3656,6 +3677,11 @@ router.get('/:id', async (req, res, next) => {
       })),
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      visitStats: visitStatsRow ? {
+        count: Number(visitStatsRow.count || 0),
+        firstDate: dateOnlyForApi(visitStatsRow.first_date),
+        lastDate: dateOnlyForApi(visitStatsRow.last_date),
+      } : null,
       // Reference the stored quote through the existing net-price mapper.
       // No live catalog or current plan repricing belongs in historical quotes.
       estimates: estimates.map((estimate) => ({

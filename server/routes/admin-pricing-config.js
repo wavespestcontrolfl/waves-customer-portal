@@ -207,6 +207,19 @@ function normalizeIncomingConfigData(configKey, data) {
     delete normalized.stationSpacing;
     return normalized;
   }
+  if (configKey === 'rodent_dead_animal_removal' && data && typeof data === 'object' && !Array.isArray(data)) {
+    // `riding` is retired (owner 2026-10-29: one price per tier) and prices nothing. Stripping it on save keeps the
+    // row from advertising a dial that changes nothing; the panel's one-field inline edits save either way.
+    const normalized = { ...data };
+    for (const tier of ['reachable', 'attic']) {
+      const row = normalized[tier];
+      if (row && typeof row === 'object' && !Array.isArray(row) && 'riding' in row) {
+        const { riding: _retired, ...rest } = row;
+        normalized[tier] = rest;
+      }
+    }
+    return normalized;
+  }
   return data;
 }
 

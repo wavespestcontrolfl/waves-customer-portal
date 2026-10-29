@@ -2183,7 +2183,9 @@ describe('rain-out service', () => {
       expect(SmartRebooker.findRescheduleOptions).toHaveBeenCalledWith(
         // travelGap: the customer-facing sheet applies GATE_SLOT_TRAVEL_GAP;
         // admin reschedule-options stay overlap-only (advisory saves).
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true },
+        // caller: GATE_ROUTE_CHECK_STAFF_LISTS buys Google road times for an
+        // admin caller only; this tech caller stays on the estimate.
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
@@ -2197,6 +2199,27 @@ describe('rain-out service', () => {
       expect(options.service.hasPhone).toBe(true);
       // Chips hidden in both sheets while the gate is dark.
       expect(options.extraReasonsEnabled).toBe(false);
+    });
+
+    test('passes the caller through for the office route (admin) and the tech route, and none for no caller', async () => {
+      const wire = () => {
+        SmartRebooker.findRescheduleOptions.mockReset().mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+      };
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: true, technicianId: 'tech-9' } });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toEqual({ isAdmin: true, technicianId: 'tech-9' });
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toEqual({ isAdmin: false, technicianId: 'tech-1' });
+      wire();
+      await RainOut.getOptions('svc-1');
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
     });
 
     test('each option carries the hourly rain chance for its own window; the day number is only the fallback', async () => {

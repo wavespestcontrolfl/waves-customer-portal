@@ -6532,11 +6532,18 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
 // under a savepoint and never fails the booking. Read at call time; a partial
 // test mock of the gates module reads as off.
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b) is
+// the umbrella for the automatic writers: with the gate above off it places the
+// same booking through the shared auto-save helper (source 'call_booking'). With
+// the gate above on, THIS call is the only placement, so the umbrella never adds
+// a second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
   const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue !== 'function' || !gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) return null;
-  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
+    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  }
+  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -10385,6 +10392,25 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
 // processRecording's outer guard — every path that stamps extraction_failed
 // counts against the same budget and surfaces the same card at the cap. The
 // partial unique index dedupes re-files while a card is already open.
+// A recording too short to hold words (a pick-up, or a hang-up at the beep)
+// gives a person nothing to review, so its spent transcription retries file
+// no blocking card. When a person took the call, the connected leg must be
+// short too: a long conversation with a near-empty recording may have lost
+// its audio, and that call keeps its card. Without a person on the line,
+// only a voicemail's recording is the whole message (call audit 2026-10-29).
+const WORDLESS_RECORDING_MAX_SECONDS = 3;
+const WORDLESS_LEG_MAX_SECONDS = 10;
+function recordingTooShortForWords(call) {
+  const recorded = Number(call?.recording_duration_seconds);
+  if (!(recorded > 0 && recorded <= WORDLESS_RECORDING_MAX_SECONDS)) return false;
+  const meta = callMetadataObject(call);
+  if (meta.forward_acceptance?.accepted === true) {
+    const leg = (Date.parse(meta.ended_at) - Date.parse(meta.forward_acceptance.accepted_at)) / 1000;
+    return Number.isFinite(leg) && leg <= WORDLESS_LEG_MAX_SECONDS;
+  }
+  return call.answered_by === 'voicemail' && !meta.customer_leg;
+}
+
 async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) {
   if (attempts < CALL_EXTRACTION_MAX_ATTEMPTS) return;
   try {
@@ -11939,7 +11965,10 @@ const CallRecordingProcessor = {
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
       // (codex #6271 r43 P1). fileExtractionExhaustedTriage is a no-op under the cap.
-      await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
+      // A recording too short to hold words is the exception: nothing to review.
+      if (!recordingTooShortForWords(call)) {
+        await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
+      }
       return { success: false, error: 'No transcription available' };
     }
 
@@ -25879,6 +25908,7 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // same reason as the two promotions above — promoted rather than
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+CallRecordingProcessor.recordingTooShortForWords = recordingTooShortForWords;
 
 // Callback-spam parent settlement: on the module surface for its live-PG
 // suite (callback-spam-closes-parent.test.js), which drives it directly.

@@ -3790,6 +3790,8 @@ Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhook
 
 `GATE_CUSTOMER_TEXT_TO_VISIT_TECH` (dark; census M3, 2026-10-25): on `POST /api/webhooks/twilio/sms`, a text from a KNOWN customer to an office line (any line except a technician line), when the sender's number belongs to exactly ONE live customer across every identity phone slot (primary, service contacts, second phone; a number on two customers relays nothing, even when the webhook matched one by the primary phone), also writes a tech-home text card (`tech_notifications` type `tech_line_sms`, headline "Text from your customer") and one push to the technician of each of that customer's visits TODAY (Eastern) that is en route or on site, or is that technician's next open stop in the dispatch day-plan order (`server/services/visit-tech-relay.js`). One card per technician per text. It is registered before the consuming branches (reschedule reply, lead intake), so a consumed reply is relayed too, and it runs after the response is sent. No copy for an admin technician (the owner already gets the office bell), an inactive or office-only (not field-dispatchable) account, a text to the AI customer-chat line, a STOP / START / HELP keyword, a reaction, a courtesy-only text or a staff sender. The TwiML response, the inbox row, the `sms_log` row, the office bell and the owner forward are unchanged, and nothing is sent to the customer. A relay error is logged and the webhook carries on. Gate off = no visit read at all and every response and side effect byte-identical.
 
+`GATE_SMS_BARE_YES_REPLY` (dark, strict `true`, read at call time via `smsBareYesReplyLive()`; owner 2026-10-29, weekly sweep #5007 B3): on `POST /api/webhooks/twilio/sms`, a compliance-eligible sender's bare "YES" (the opt-in detector's keyword `YES`: any case, trailing punctuation ignored, a tapback quoting it included) is handled as START today: the inbox row is typed `opt_in`, suppression is cleared, recipient asks are confirmed, `notification_prefs.sms_enabled` is set, the TwiML response is `<Message>You've been re-subscribed to Waves Pest Control SMS.</Message>` (or the "received your request" text after a failed clear), and the handler returns before every later branch. Gate on, `server/services/messaging/bare-yes-reply.js` decides first, right after the carrier-command detector: the YES keeps that START handling and response only while it can restore something — an active `messaging_suppression` row for the number (`loadSuppressionState`), `notification_prefs.sms_enabled = false` on the matched customer, or a recipient ask this YES would confirm (`yesWouldConfirmAsk`, sharing its predicate with `markRecipientOptin`). Otherwise the text continues down the ordinary inbound path as a text with no carrier command: no opt-in response (the ordinary `<Response></Response>` or whatever a later branch answers), no suppression clear, no consent or preference write, no `opt_in` typing, and the existing courtesy rule decides the reply bell. The decision is made once, before the recruiting lookup (so for any sender's bare YES), and every later keyword check reads it: a YES called a reply takes the ordinary recruiting lookup (fail-closed for a plausible applicant, where a command's lookup is best-effort), is a staff text from an active technician's phone (`GATE_TECH_STAFF_GUARDS`), and reaches the visit-technician relay (`GATE_CUSTOMER_TEXT_TO_VISIT_TECH`). One `logger.info` line with the masked phone. A failed or incomplete lookup keeps START. START, SUBSCRIBE, UNSTOP, OPTIN, OPT IN, STOP/HELP and every non-eligible sender are unchanged. Off (unset) = byte-identical.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
@@ -6211,6 +6213,76 @@ the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
 start grid is the shared 09:00–17:00 customer grid with 12:00 present.
 `GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
 unchanged by it.
+
+Customer route check (`GATE_CUSTOMER_ROUTE_CHECK`, dark, owner 2026-10-29).
+Read at call time (`customerRouteCheckMode()`): unset or any other value =
+`off`, `shadow`, `true`. It is an OFFER-LIST filter only. It changes which
+start times these LIST responses contain, and nothing else: no field, status
+code, error code, message text, limiter, signature or token changes.
+- Filtered lists (mode `true`): `GET /api/booking/availability` and
+  `POST /api/booking/find-slots` (and the texting assistant's open times built
+  from the same builder); `GET /api/public/reschedule/:token` and
+  `POST /:token/find-slots`; `GET /api/public/reservice/:token` and
+  `POST /:token/find-slots`; `GET /api/public/inspection/:token`,
+  `POST /:token/availability` and `POST /:token/find-slots`;
+  `GET /api/public/estimate-assessment/:token` and `POST /:token/find-slots`;
+  `GET /api/public/estimates/:token/available-slots` and
+  `POST /:token/find-slots` (primary and expander lists, plus the ASAP
+  windows); `POST /api/public/estimates/:token/first-visit/availability`
+  (commercial first visit).
+- Phone agent (voice): its availability searches are never filtered. With the
+  gate set, each search runs the check in shadow only, after the answer is
+  built and without waiting for it (the call's tool timeout is 3 seconds).
+- `off`: byte-identical to before; the check code is never loaded.
+- `shadow`: the check runs and logs one `[customer-route-check]` line; the
+  list is today's list.
+- `true`: an hour is removed only if, at every placement that keeps the new
+  customer's own 2-hour window, a customer who is on time without the new
+  visit would arrive late (the evaluator's `explain` diagnosis tries the visit
+  at every position of the day; `newlyLateStopIds`). Stops already late
+  before the new visit never count. A late day end alone never removes an
+  hour. A placement that "saves" the others only by missing the new
+  customer's own window does not count. A customer who is newly late is a new
+  broken promise even on a day that is already late elsewhere or runs past
+  the day end, so such a day still loses the hour. If one placement keeps
+  every promise, or the new customer cannot be reached in their own window
+  anywhere (`target_late`), the start stays. A day that is only already late
+  (`baseline_late`) or only past the day end (`day_end`) keeps it. Also kept:
+  unverified routes, return-time, margin or overcommitted results, errors, a
+  missing diagnosis, and starts not checked in time all stay. Each start is checked
+  at its own minute and technician. Order, slot shapes and signed offers
+  (`slot_sig`) of the kept starts are unchanged.
+- Floor: if the removals would leave no offered start dated today through
+  today+6 (Eastern), the whole list is served unchanged. The check runs
+  after every eligibility filter (time of day, lead time, season, notice
+  window, last start, zone day), so the floor is judged on the list the
+  customer could actually be shown: a morning-only search whose morning starts
+  all fail gets its morning offers back, never an empty picker. The estimate
+  page checks its route list and its ASAP windows together in one request, so
+  the floor, the time budget and the route reads are shared. The reschedule
+  list routes skip the check while a late-move limit holds the page back,
+  because that limit drops later days after the list is built.
+- Fail-open: any error, a missing pin, `GATE_ADMIN_ARRIVAL_WINDOWS` (and
+  capacity mode) both off, or a check that passes its time budget (about
+  1.5 seconds a request) serves the unfiltered list. The check never throws
+  into the route.
+- Cost: no Google call. Drive times are the default route-optimizer estimate
+  (the GPS-fitted clock while `GATE_DRIVE_CLOCK` is on).
+- Commits and confirmations are unchanged and are NOT filtered. Every
+  confirmation, commit, reserve or recheck path rebuilds its anti-forgery list
+  WITHOUT the check: `POST /api/public/reschedule/:token` (and its SLOT_TAKEN
+  refresh and the move-limit full-range build), `POST /api/public/reservice/:token`,
+  `POST /api/public/inspection/:token` and its revalidation,
+  `POST /api/public/estimate-assessment/:token`, the commercial first-visit
+  booking (`POST /api/public/estimates/:token/first-visit`), `/api/booking/confirm` and the capture-intent revalidation, the
+  estimate reserve (`POST /api/public/estimates/:token/reserve` and its
+  SLOT_UNAVAILABLE refresh), the voice booking-time recheck, and the text-link
+  and one-tap rebuilds. So a time a list offered is still accepted when
+  confirmed, with the gate in any mode. A time the check removed from a list
+  can still be confirmed by a client that already holds it.
+- Estimate page cache: the five-minute slot cache is keyed by the route check
+  mode (and by whether the caller asked for the check), so changing the gate
+  never serves the other mode's list.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

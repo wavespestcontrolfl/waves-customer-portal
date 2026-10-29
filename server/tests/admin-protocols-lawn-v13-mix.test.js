@@ -16,7 +16,11 @@ jest.mock('../services/lawn-protocol-operating-layer', () => ({
 
 // The application-limit reader the plan and the sheet share (v13Limits calls it per selected product).
 const mockCheckLimits = jest.fn();
-jest.mock('../services/application-limits', () => ({ checkLimits: (...args) => mockCheckLimits(...args) }));
+jest.mock('../services/application-limits', () => ({
+  checkLimits: (...args) => mockCheckLimits(...args),
+  // The catch-up's ledger check scopes its query the way every limit reader does (the real helper builds query conditions only).
+  scopeHistoryToTreatment: (...args) => jest.requireActual('../services/application-limits').scopeHistoryToTreatment(...args),
+}));
 
 const db = require('../models/db');
 const operatingLayer = require('../services/lawn-protocol-operating-layer');
@@ -436,4 +440,195 @@ test('July is the scout visit on the tank sheet: no whole-lawn product, the insp
   expect(JSON.stringify(body)).not.toMatch(/0-0-50|[Pp]otash/);
   expect(body.items.filter((item) => item.role === 'base' && item.product)).toEqual([]);
   expect(body.items.some((item) => item.role === 'base' && /^Scout visit/.test(item.raw))).toBe(true);
+});
+
+// A visit on a 9x rounds series (recurring_pattern lawn_rounds_9) takes the step of its ROUND whatever calendar month the client sends
+// (the schedule page sends the visit's calendar month with ?scheduledServiceId=): the sheet reads the round's step, its nitrogen target
+// and its bag, the program rows of that step's window and the weed rows of the REAL date's window. Every other visit is unchanged.
+describe('a 9x rounds visit takes the step of its round on the tank sheet', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const visit = (date, extra = {}) => ({ id: VISIT, customer_id: 'cust-1', property_id: null, scheduled_date: date, service_id: null, service_type: 'Lawn Care', recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null, ...extra });
+  const codes = (body) => body.warnings.map((w) => w.code);
+  const secondary = (body) => String(body.visit.secondary || '');
+  const lastWindowCall = () => operatingLayer.getProtocolWindowContext.mock.calls.map((call) => call[1]).filter((options) => options.roundStep).pop();
+
+  test('round 3 (Mar 20, client month 3): February\'s 24-0-11 at 4.17 lb per 1,000 (1.0 lb N); March\'s weed mix', async () => {
+    visitRows = [visit('2027-03-20')];
+    const body = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(body.month).toBe('Feb');
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(itemFor(body, F24).jobMix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 1, amountUnit: 'lb' });
+    expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(4.1667, 3);
+    expect(body.visit.objective.startsWith('N rate: 1.0 lb N.')).toBe(true);
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 2, spotMonth: 3 });
+    expect(secondary(body)).toContain('Certainty Turf Herbicide');
+    expect(secondary(body)).toContain('Blindside Herbicide');
+    expect(codes(body)).not.toContain('lawn_v13_plan_cadence_unknown');
+  });
+
+  test('round 2 (Mar 10, St. Augustine): April\'s 9x Dimension bag (0.5 lb N) with February\'s green-up weed line: Celsius alone', async () => {
+    visitRows = [visit('2027-03-10')];
+    const body = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(body.month).toBe('Apr');
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
+    expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.7778, 3);
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 4, spotMonth: 2 });
+    expect(secondary(body)).toContain('Celsius WG');
+    expect(secondary(body)).not.toContain('Certainty Turf Herbicide');
+    expect(secondary(body)).not.toContain('Blindside');
+    expect(codes(body)).not.toContain('lawn_v13_plan_cadence_unknown');
+  });
+
+  test('round 2 (Mar 10) on bermuda: March\'s weed mix (the green-up rule is St. Augustine\'s)', async () => {
+    visitRows = [visit('2027-03-10')];
+    const body = await lawnMix({ month: '3', track: 'bermuda', scheduledServiceId: VISIT });
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 4, spotMonth: 3 });
+    expect(secondary(body)).toContain('Certainty Turf Herbicide');
+  });
+
+  test('a 12x and a legacy 9x visit keep the calendar month: February 24-0-11 at 3.125 lb (0.75 lb N), no roundStep', async () => {
+    for (const pattern of ['monthly', 'every_6_weeks', 'custom', null]) {
+      operatingLayer.getProtocolWindowContext.mockClear();
+      visitRows = [visit('2027-02-10', { recurring_pattern: pattern, recurring_interval_days: pattern === 'custom' ? 42 : null })];
+      const body = await lawnMix({ month: '2', track: 'st_augustine', scheduledServiceId: VISIT });
+      expect(body.month).toBe('Feb');
+      expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(operatingLayer.getProtocolWindowContext.mock.calls.every((call) => !call[1].roundStep)).toBe(true);
+    }
+  });
+
+  test('the reference sheet (no visit) is the calendar month it was asked for', async () => {
+    const body = await lawnMix({ month: '3', track: 'st_augustine' });
+    expect(body.month).toBe('Mar');
+  });
+
+  test('North Port, round 3 on Apr 5: the 24-0-11 is held with the ban warning; Mar 25 plans it', async () => {
+    visitRows = [visit('2027-04-05', { service_address_city: 'North Port' })];
+    const held = await lawnMix({ month: '4', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(itemFor(held, F24)).toMatchObject({ selected: false, selectionReason: 'north_port_rounds_nitrogen', jobMix: null });
+    expect(held.warnings.find((w) => w.code === 'lawn_rounds_north_port_nitrogen').message).toMatch(/North Port bans nitrogen and phosphorus from April 1 to September 30/);
+    visitRows = [visit('2027-03-25', { service_address_city: 'North Port' })];
+    const before = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(itemFor(before, F24)).toMatchObject({ selected: true });
+    expect(itemFor(before, F24).jobMix.ratePer1000).toBeCloseTo(4.1667, 3);
+    expect(codes(before)).not.toContain('lawn_rounds_north_port_nitrogen');
+  });
+
+  test('North Port, round 2 on Feb 20 and Mar 10: the April Dimension row\'s stored northPortBlocked gate gives no note (the ban starts Apr 1); a legacy 9x April visit still gets it', async () => {
+    operatingLayer.summarizeProtocolContext.mockReturnValue({
+      ...V13_SUMMARY, products: V13_SUMMARY.products.map((row) => (row.productId === 'dim' ? { ...row, gates: { northPortBlocked: true } } : row)),
+    });
+    const noteKeys = (body) => (itemFor(body, DIMENSION).gateNotes || []).map((note) => note.key);
+    for (const date of ['2027-02-20', '2027-03-10']) {
+      visitRows = [visit(date, { service_address_city: 'North Port' })];
+      const body = await lawnMix({ month: '2', track: 'st_augustine', scheduledServiceId: VISIT });
+      expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
+      expect(noteKeys(body)).not.toContain('northPortBlocked');
+      expect(JSON.stringify(body.warnings)).not.toMatch(/Not allowed in North Port/);
+    }
+    visitRows = [visit('2027-04-09', { service_address_city: 'North Port', recurring_pattern: 'custom', recurring_interval_days: 42 })];
+    const legacy = await lawnMix({ month: '4', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(noteKeys(legacy)).toContain('northPortBlocked');
+  });
+});
+
+// The spring pre-emergent catch-up (owner 2026-10-29, lawn-rounds-catchup.js): a new customer's first rounds visit in round 3 with no
+// pre-emergent on the ledger this year carries Dimension 2EW (0.5 fl oz per 1,000, hose, 1 gal) beside the round's bag, labelled; the sheet
+// reads the plan's own decision, drops a capped line with a warning (never a block), and no other visit changes.
+describe('the spring pre-emergent catch-up on the tank sheet', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const DIM_2EW = 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide';
+  const LABEL = 'Spring pre-emergent catch-up for a new customer';
+  const visit = (date, extra = {}) => ({ id: VISIT, customer_id: 'cust-1', property_id: null, scheduled_date: date, service_id: null, service_type: 'Lawn Care', recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null, ...extra });
+  const codes = (body) => body.warnings.map((w) => w.code);
+  const lastWindowCall = () => operatingLayer.getProtocolWindowContext.mock.calls.map((call) => call[1]).filter((options) => options.roundStep).pop();
+
+  let earlierVisit = null;
+  let ledger = [];
+  let added;
+  beforeEach(() => {
+    earlierVisit = null;
+    ledger = [];
+    added = { id: 'd2ew', name: DIM_2EW, aliases: [], active_ingredient: 'dithiopyr', default_rate_per_1000: 0.5, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' };
+    CATALOG.push(added);
+    operatingLayer.summarizeProtocolContext.mockReturnValue({
+      ...V13_SUMMARY,
+      products: [...V13_SUMMARY.products, { productId: 'd2ew', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', carrierGalPer1000: 1, defaultInPlan: true, gates: { annualCounter: 'prodiamine_oz_per_1000' } }],
+    });
+    const baseImplementation = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        const query = readQuery(visitRows);
+        for (const method of ['whereNot', 'whereNotIn', 'orWhere']) query[method] = jest.fn(() => query);
+        // The decision reads the visit's parent, then looks for an earlier visit of its series; the sheet loads the visit itself.
+        query.first = jest.fn(async (...columns) => (columns[0] === 'recurring_parent_id' ? { recurring_parent_id: null }
+          : (columns.length === 1 && columns[0] === 'id' ? earlierVisit : visitRows[0] || null)));
+        return query;
+      }
+      if (table === 'property_application_history as pah') {
+        const query = readQuery(ledger);
+        for (const method of ['leftJoin', 'whereNull', 'whereNotIn', 'orWhereRaw', 'whereRaw']) query[method] = jest.fn(() => query);
+        return query;
+      }
+      return baseImplementation(table);
+    });
+  });
+  afterEach(() => { CATALOG.splice(CATALOG.indexOf(added), 1); });
+
+  const sheet = (date = '2027-03-20', extra = {}) => { visitRows = [visit(date, extra)]; return lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT }); };
+
+  test('first visit, no pre-emergent this year: the bag and Dimension 2EW at 0.5 fl oz, hose, 1 gal, labelled; round 3 stays 1.0 lb N', async () => {
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24, DIM_2EW]);
+    const line = itemFor(body, DIM_2EW);
+    expect(line).toMatchObject({ selected: true, roundsCatchUp: true, roundsCatchUpLabel: LABEL });
+    expect(line.jobMix).toMatchObject({ ratePer1000: 0.5, rateUnit: 'fl oz', amount: 5, carrierGallons: 10 });
+    expect(line.gateNotes.find((note) => note.key === 'roundsCatchUp').text).toMatch(new RegExp(`^${LABEL}\\.`));
+    expect(itemFor(body, F24).jobMix).toMatchObject({ targetNPer1000: 1 });
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 2, spotMonth: 3, catchUp: true });
+    expect(body.blocks).toEqual([]);
+    expect(codes(body)).not.toContain('lawn_rounds_catchup_unavailable');
+  });
+
+  test('a pre-emergent on the ledger this year: no catch-up, and the window read asks for none', async () => {
+    ledger = [{ id: 'h1' }];
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(body.items.some((item) => item.roundsCatchUp)).toBe(false);
+    expect(lastWindowCall().roundStep.catchUp).toBeUndefined();
+  });
+
+  test('an earlier visit in the series: no catch-up', async () => {
+    earlierVisit = { id: 'earlier' };
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  });
+
+  test('a capped 2EW: the line leaves with a warning and the sheet has no block', async () => {
+    mockCheckLimits.mockImplementation(async (_customer, productId) => (productId === 'd2ew'
+      ? { allowed: false, blocks: [{ type: 'annual_max_rate', message: 'Dimension 2EW: dithiopyr 114% of the yearly label cap.' }], warnings: [] }
+      : { allowed: true, blocks: [], warnings: [] }));
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(body.items.some((item) => item.roundsCatchUp)).toBe(false);
+    expect(body.blocks).toEqual([]);
+    expect(body.warnings.find((w) => w.code === 'lawn_rounds_catchup_unavailable').message).toMatch(/not planned on this visit \(a yearly application limit is reached\)/);
+  });
+
+  test('an inactive 2EW product: the line leaves with the plan\'s warning, no block', async () => {
+    added.active = false;
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(body.blocks).toEqual([]);
+    expect(body.warnings.find((w) => w.code === 'lawn_rounds_catchup_unavailable').message).toMatch(/is inactive/);
+  });
+
+  test('a first round-4 visit (May 5) and a 12x March visit: no catch-up', async () => {
+    const may = await sheet('2027-05-05');
+    expect(may.items.some((item) => item.roundsCatchUp)).toBe(false);
+    visitRows = [visit('2027-03-20', { recurring_pattern: 'monthly' })];
+    const twelveX = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(twelveX.items.some((item) => item.roundsCatchUp)).toBe(false);
+    expect(operatingLayer.getProtocolWindowContext.mock.calls.every((call) => !call[1].roundStep?.catchUp)).toBe(true);
+  });
 });

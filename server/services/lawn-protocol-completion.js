@@ -187,7 +187,7 @@ function resolveAttribution(plan, allLawn) {
   // `bermudaStep`: the plan carries the bermuda removal step, so its staged rows are planned work.
   // `bermudaStepMonth`: the appointment month the plan read the step from (it can differ from the
   // assigned window's when the visit was rescheduled).
-  return { structured, window, attributed, bermudaStep: plan?.bermudaRemoval?.active === true, bermudaStepMonth: plan?.bermudaRemoval?.month || null };
+  return { structured, window, attributed, bermudaStep: plan?.bermudaRemoval?.active === true, bermudaStepMonth: plan?.bermudaRemoval?.month || null, roundStep: plan?.roundStep || null };
 }
 
 // The protocol rows the completion attributes to: protocol → window →
@@ -217,7 +217,15 @@ async function loadBermudaStepRows(trx, protocolId, assignedWindowId, stepMonth)
   }, []);
 }
 
-async function loadProtocolRows(trx, { structured, window, attributed, bermudaStep = false, bermudaStepMonth = null }) {
+// The rows a rounds visit's plan read: the round window's program rows with the real-date window's weed and spot rows in place of its own.
+async function roundWindowProducts(trx, protocolId, windowRow, programProducts, roundStep) {
+  const { getLawnProtocolById, withRoundSpotRows } = require('./lawn-protocol-operating-layer');
+  const protocol = await getLawnProtocolById(trx, protocolId);
+  if (!protocol) return programProducts;
+  return (await withRoundSpotRows(trx, protocol, windowRow, programProducts, { roundStep, strict: false, includeBermudaRemoval: false })).rows;
+}
+
+async function loadProtocolRows(trx, { structured, window, attributed, bermudaStep = false, bermudaStepMonth = null, roundStep = null }) {
   if (!attributed) return { protocolRow: null, windowRow: null, protocolProducts: [] };
   const protocolRow = await failSoftRead(trx, (k) => k('lawn_protocols')
     .where({ protocol_key: structured.protocolKey, version: structured.version })
@@ -231,12 +239,18 @@ async function loadProtocolRows(trx, { structured, window, attributed, bermudaSt
   // a visit whose plan carries the step, and then they come from the appointment month's window
   // (loadBermudaStepRows). On any other visit (gate off, an unflagged lawn) Recognition or
   // Fusilade II recorded by hand is off-protocol.
-  const windowProducts = windowRow?.id
+  const programProducts = windowRow?.id
     ? await failSoftRead(trx, (k) => require('./lawn-bermuda-removal').withoutBermudaRemovalRows(k('lawn_protocol_products as lpp')
       .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
       .where({ lawn_protocol_window_id: windowRow.id }), 'lpp')
       .select('lpp.*', 'pc.name as catalog_product_name'), [])
     : [];
+  // A 9x rounds visit: the plan read the round step window's program rows with the weed and spot rows of the REAL date's window, so the
+  // completion resolves that same set, through the same merge (lawn-protocol-operating-layer withRoundSpotRows). Any other visit: the
+  // window's own rows.
+  const windowProducts = roundStep && windowRow?.id
+    ? await roundWindowProducts(trx, protocolRow.id, windowRow, programProducts, roundStep)
+    : programProducts;
   const stepProducts = bermudaStep && windowRow?.id
     ? await loadBermudaStepRows(trx, protocolRow.id, windowRow.id, bermudaStepMonth)
     : [];

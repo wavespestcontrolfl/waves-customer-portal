@@ -622,7 +622,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
     const availability = await booking.buildBookingAvailability({
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
-      timeOfDay: w.timeOfDay, expandOpenDays: true,
+      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice',
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     return {
@@ -644,7 +644,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   const rangeFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
   const rangeTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
   const availability = await booking.buildBookingAvailability({
-    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today,
+    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice',
   });
   return {
     status: 'ok',

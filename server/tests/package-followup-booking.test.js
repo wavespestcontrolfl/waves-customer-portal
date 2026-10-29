@@ -17,6 +17,11 @@ jest.mock('../services/scheduling/occupancy', () => ({
   findConflictingVisits: jest.fn(async () => []),
   fenceBookingDay: jest.fn(async () => ({ acquired: true, keys: [] })),
 }));
+// GATE_ROUTE_CHECK_AUTO_SAVES reader stands in for arrival-route's (read at call time).
+jest.mock('../services/scheduling/arrival-route', () => ({
+  routeCheckAutoSavesLive: () => process.env.GATE_ROUTE_CHECK_AUTO_SAVES === 'true',
+  placeMovedVisit: jest.fn(async () => [1]),
+}));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 'alert-1' })) }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
   createScheduledService: jest.fn(async ({ insertData, source }) => ({ id: 'child-1', ...insertData, source_action: source.sourceAction })),
@@ -26,6 +31,7 @@ const { assertAssignableTechnician } = require('../services/technician-eligibili
 const { findConflictingVisits, fenceBookingDay } = require('../services/scheduling/occupancy');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { createScheduledService } = require('../services/booking/create-scheduled-service');
+const { placeMovedVisit } = require('../services/scheduling/arrival-route');
 const logger = require('../services/logger');
 const {
   ensurePackageFollowUpVisit, packageFollowUpDate, isPackageFollowUpServiceKey,
@@ -373,5 +379,41 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY })).toBeNull();
     expect(createScheduledService).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('link columns'));
+  });
+});
+
+describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b)', () => {
+  afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; });
+
+  test('gate off (unset): no placement, same child', async () => {
+    const { trx } = fakeTrx();
+    expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toMatchObject({ id: 'child-1' });
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+  });
+
+  test('gate on: visit 2 is placed once, on the booking transaction, after its insert, with its source', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    const { trx } = fakeTrx();
+    expect(trx.isTransaction).toBe(true);
+    await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'child-1', staffSave: true, source: 'package_followup' });
+    expect(createScheduledService.mock.invocationCallOrder[0]).toBeLessThan(placeMovedVisit.mock.invocationCallOrder[0]);
+  });
+
+  test('gate on, a throwing placement: the child still books and the primary is untouched', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
+    const { trx } = fakeTrx();
+    expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toMatchObject({ id: 'child-1' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('an existing live child is returned as before and not placed again', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    const { trx } = fakeTrx({ existingChild: { id: 'child-old', status: 'confirmed' } });
+    await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
+    expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });

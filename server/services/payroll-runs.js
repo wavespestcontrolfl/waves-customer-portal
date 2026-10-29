@@ -67,11 +67,12 @@ const {
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
-const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-gates');
+const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
 const { syncReviewBonusLines } = require('./payroll-review-bonuses');
+const { syncCommissionLines } = require('./payroll-commission');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -102,6 +103,10 @@ const EMPLOYER_TAX_KEYS = ['employer_social_security_cents', 'employer_medicare_
 // GATE_PAYROLL_TIME_OFF, read at call time. The typeof guard keeps a test mock of
 // feature-gates that lacks the reader working (off).
 const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
+
+// GATE_PAYROLL_BANK_MATCH, read at call time, with the same guard. On, a finalized check carries
+// its bank status; off, no response gains a key.
+const bankMatchOn = () => typeof payrollBankMatchLive === 'function' && payrollBankMatchLive();
 
 // payroll_checks time-off columns, read and written only with the gate on.
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
@@ -648,9 +653,27 @@ async function evaluate(conn, run, { lock = false } = {}) {
   return { checks, blocked, waiting, lines: lineMap };
 }
 
+// Bank status of each finalized check (GATE_PAYROLL_BANK_MATCH): matched with the date of the
+// bank line, needs the owner's pick when a suggestion names the check, else not seen yet.
+async function bankStatusByCheck(conn, rows) {
+  const ids = rows.map((row) => row.id);
+  // a link whose expense is gone is not a match (the next pass sends the line back to review)
+  const matched = new Map((await conn('bank_transactions').whereIn('matched_payroll_check_id', ids).whereNotNull('matched_expense_id')
+    .select('matched_payroll_check_id', conn.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date")))
+    .map((line) => [line.matched_payroll_check_id, line.txn_date]));
+  const parked = await conn('bank_transactions').where({ status: 'unmatched' })
+    .whereRaw("jsonb_exists(suggestion, 'payrollCandidates')").select('suggestion');
+  const pickable = new Set();
+  for (const line of parked) for (const c of (line.suggestion.payrollCandidates || [])) if (c.kind === 'check') pickable.add(c.id);
+  return new Map(ids.map((id) => [id, matched.has(id)
+    ? { state: 'matched', date: matched.get(id) }
+    : { state: pickable.has(id) ? 'needs_pick' : 'not_seen' }]));
+}
+
 async function runView(conn, runId, { evaluation = null } = {}) {
   const run = await loadRun(conn, runId);
   const rows = await loadCheckRows(conn, runId);
+  const bank = bankMatchOn() && run.status === 'finalized' && rows.length ? await bankStatusByCheck(conn, rows) : null;
   const view = {
     id: run.id,
     weekStart: run.week_start,
@@ -661,7 +684,7 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     finalizedAt: iso(run.finalized_at),
     voidedAt: iso(run.voided_at),
     voidReason: run.void_reason || null,
-    checks: rows.map(serializeCheck),
+    checks: rows.map((row) => (bank ? { ...serializeCheck(row), bank: bank.get(row.id) } : serializeCheck(row))),
     blocked: [],
     waiting: [],
     stale: false,
@@ -733,6 +756,11 @@ const syncReviewBonuses = (trx, weekStart, actorId) => syncReviewBonusLines(trx,
   weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
 });
 
+// Commission lines follow the commission ledger (GATE_PAYROLL_COMMISSION_LEDGER), at the same three points.
+const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
+  weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
+});
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -748,6 +776,7 @@ async function draftRun(input, actor, conn = db) {
       const id = inserted && inserted.id ? inserted.id : inserted;
       const run = await loadRun(trx, id);
       await syncReviewBonuses(trx, start, actorId);
+      await syncCommission(trx, start, actorId);
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
         throw new PayrollError(409, 'No W-2 hours to pay for that week.');
@@ -771,6 +800,7 @@ async function recomputeRun(runId, actor, conn = db) {
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, 'Only a draft pay run can be recomputed.');
     await syncReviewBonuses(trx, run.week_start, actorId);
+    await syncCommission(trx, run.week_start, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
@@ -822,6 +852,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, `This pay run is already ${run.status}.`);
     await syncReviewBonuses(trx, run.week_start, actorId);
+    await syncCommission(trx, run.week_start, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
@@ -870,6 +901,14 @@ async function voidRun(runId, input, actor, conn = db) {
     await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId });
   });
   await syncPayrollFilingsSafe({ conn });
+  // Bank lines matched to this run's checks go back to review. Never fails the void.
+  if (bankMatchOn()) {
+    try {
+      await require('./bank-import').releaseVoidedPayrollLinks();
+    } catch (err) {
+      require('./logger').warn(`[payroll-runs] bank lines of a voided run not released: ${err.code || err.name || 'error'}`);
+    }
+  }
   return runView(conn, runId);
 }
 

@@ -1437,41 +1437,37 @@ const RODENT = {
   },
 
   // ── Dead Rodent Removal & Odor Treatment (one-time; GATE_DEAD_ANIMAL_REMOVAL) ─
-  // FIXED tier prices (owner 2026-10-29, "do this" on the 2026-10-26 market check of these
-  // four prices). The owner's add-on cost formula is the FLOOR, and each price sits above it;
-  // the formula is NOT evaluated at quote time:
+  // FIXED tier prices, ONE per access tier (owner 2026-10-29: "make easy reach 199, and attic
+  // search 299" after a second market check, then "think we just have the 3 options, and can
+  // discount if they have other work"). Other rodent work on the same estimate does not lower
+  // the price; staff discount on the estimate itself. The owner's add-on cost formula is the
+  // FLOOR, and each price sits above it; the formula is NOT evaluated at quote time:
   //
   //   floor = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40,
   //           rounded UP to the next price ending in 9
   //
   //   reachable  45 min on site, $12 material
-  //     alone:  (45 + 20 drive) x $35/h / 60 = $37.92 + $12 + $8 admin = $57.92 / 0.40 -> floor $149; price $169
-  //     riding: 45 x $35/h / 60 = $26.25 + $12 = $38.25 / 0.40 -> floor $99; price $119 (no drive, no admin)
+  //     (45 + 20 drive) x $35/h / 60 = $37.92 + $12 + $8 admin = $57.92 / 0.40 -> floor $149; price $199
   //   attic      90 min on site, $15 material
-  //     alone:  (90 + 20 drive) x $35/h / 60 = $64.17 + $15 + $8 admin = $87.17 / 0.40 -> floor $219; price $269
-  //     riding: 90 x $35/h / 60 = $52.50 + $15 = $67.50 / 0.40 -> floor $169; price $219 (no drive, no admin)
+  //     (90 + 20 drive) x $35/h / 60 = $64.17 + $15 + $8 admin = $87.17 / 0.40 -> floor $219; price $299
   //   (drive = GLOBAL.DRIVE_TIME 20 min; labor = GLOBAL.LABOR_RATE $35/h; admin = AREA_ADDONS.adminPerJob $8.)
   //
-  // "Riding" = the SAME estimate already carries another PRICED rodent one-time line
-  // (trapping, exclusion incl. V2, wire mesh, bird box, sanitation, rodent inspection): the
-  // crew is on site anyway, so no drive and no admin. The engine decides this from its own
-  // line list; a client value is never read. in_wall is not priced (a custom quote: it
-  // needs an opening cut, which is a different job).
+  // `alone` is the tier's one price: the key predates the one-price rule, and the stored row
+  // keeps it. in_wall is not priced (a custom quote: it needs an opening cut, which is a
+  // different job).
   // `material` is the formula's material cost; it is used ONLY to state the line's cost for
   // the pricing audit (costs.total), never to compute the price.
   // DB-tunable via pricing_config.rodent_dead_animal_removal (db-bridge; bounded positive
   // numbers, a malformed row leaves these defaults).
   deadAnimalRemoval: {
     reachable: {
-      alone: r(169),
-      riding: r(119),
+      alone: r(199),
       durationMin: 45,
       material: 12,
       label: 'Easy reach',
     },
     attic: {
-      alone: r(269),
-      riding: r(219),
+      alone: r(299),
       durationMin: 90,
       material: 15,
       label: 'Attic search',

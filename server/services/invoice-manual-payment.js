@@ -23,7 +23,12 @@
  * continue for the remainder. The paid flip of a part-paid invoice resets amount_paid to 0 (the column holds money received on an
  * invoice that is still open), books the REMAINDER as the payments row, and the receipt reads the whole bill.
  * Refused for a part: gate off; Auto Pay customer (fail closed); an active payment plan; an annual prepay invoice; a payer-billed
- * invoice; any caller carrying expectedAmountCents / settlementFence / requireSelfPay / automated (the Zelle paths, the Intelligence Bar).
+ * invoice; any caller carrying expectedAmountCents / settlementFence / requireSelfPay / automated (the Zelle paths).
+ * ONE exception, the Intelligence Bar's record_payment card (owner 2026-10-29): `barApprovedPart: true`, an internal argument only the bar
+ * shim sets (admin-invoices.js cardPinsOf, from the card's own approval; never read from a request body). It needs GATE_PARTIAL_PAYMENTS AND
+ * GATE_IB_RECORD_PAYMENT_PARTIAL, the card's settlementFence and requireSelfPay, never `automated`, and expectedAmountCents must equal
+ * owedCentsSeen (the amount owed the card showed): the under-lock amount fence then compares the live amount owed with the card's, not with
+ * the part. Every other part refusal above applies to it unchanged.
  * owedCentsSeen (required with amountCents): the amount owed the page showed. It must still be what is owed, before the lock and on
  * the locked row, so a double click, a retry after a lost response, or a payment someone else recorded meanwhile is refused (409)
  * instead of booking the same part payment twice.
@@ -87,7 +92,7 @@ const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
-const { partialPaymentsLive } = require('../config/feature-gates');
+const { partialPaymentsLive, ibRecordPaymentPartialLive } = require('../config/feature-gates');
 const { customerOnAutopay } = require('./autopay-eligibility');
 
 // Append the operator note to the invoice notes (don't clobber existing notes). Built from the LOCKED row's notes inside the
@@ -194,6 +199,9 @@ async function recordManualPayment(id, {
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
+  // Set ONLY by the Intelligence Bar shim (admin-invoices.js cardPinsOf, from the card's internal approval, never from a request body):
+  // this call is a part payment the operator approved on the bar's card (see the rule at the part-payment check below).
+  barApprovedPart = false,
   // Staff user id behind an operator-recorded payment (audit attribution
   // for the invoice-issued closeout); null for automated settlements.
   recordedByTechnicianId = null,
@@ -255,8 +263,16 @@ async function recordManualPayment(id, {
       if (expectedAmountCents == null) expectedAmountCents = amountCents;
     } else {
       if (!partialPaymentsLive()) throw refusal(400, 'Part payments are not turned on. Record the whole amount owed, or ask for help.');
-      // Person-entered only: the Zelle reconciler and notice Apply, and the Intelligence Bar card, carry a figure or a fence of their own.
-      if (automated || expectedAmountCents != null || settlementFence || requireSelfPay) {
+      if (barApprovedPart) {
+        // The Intelligence Bar card (owner 2026-10-29), behind its own gate too. The card carries its fence and the self-pay re-proof, and the
+        // figure it priced from (expectedAmountCents) must be the amount owed it showed (owedCentsSeen, already matched above), so the
+        // under-lock re-checks compare against the card's amount owed, never the part. Nothing automated ever takes this door.
+        if (!ibRecordPaymentPartialLive()) throw refusal(400, 'Part payments from the Intelligence Bar are not turned on. Record the whole amount owed, or use the Invoices page.');
+        if (automated || !settlementFence || !requireSelfPay || expectedAmountCents !== owedCentsSeen) {
+          throw refusal(400, 'A part payment can only be entered by hand on the Invoices page, or approved on the Intelligence Bar card.');
+        }
+      } else if (automated || expectedAmountCents != null || settlementFence || requireSelfPay) {
+        // Person-entered only: the Zelle reconciler and notice Apply carry a figure or a fence of their own.
         throw refusal(400, 'A part payment can only be entered by hand on the Invoices page.');
       }
       const refused = await partPaymentRefusal(db, invoice);
@@ -817,5 +833,6 @@ module.exports = {
   PART_FIELDS,
   refusal,
   recordManualPayment,
+  partPaymentRefusal,
   retireOpenPaymentIntentBeforeSettlement,
 };

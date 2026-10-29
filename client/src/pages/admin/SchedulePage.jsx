@@ -25437,6 +25437,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
   "lesco black out 0-0-24":
     "potassium fertilizer with no nitrogen for winter hardiness",
+  "k-acetate":
+    "potassium that helps the lawn handle summer heat and stress",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

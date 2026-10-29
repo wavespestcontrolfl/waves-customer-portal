@@ -232,6 +232,8 @@ const LANE_RUNTIME = {
   // runNarrative (writer fallback) for lawn_diag_writer, via ledgerCall — while each lane's primary is a raw
   // Gemini / OpenAI fetch outside the adapters. Marking them 'call' would read the unrecorded primary traffic as a
   // silent lane.
+  // 2026-10-29: runPerception's OpenAI backup (on a Gemini miss) runs through dispatch() and records under this
+  // lane; the Gemini primary is still the raw fetch, so the lane stays unrecordable.
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.

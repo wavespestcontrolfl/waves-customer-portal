@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { mistingInstallLinesTotal, isMistingInstallLine } = require('../utils/mosquito-misting-system');
 const { isAnnualPrepayCoverageLine, looksLikeLegacyCoverageDescription } = require('../utils/annual-prepay-line-kinds');
 const logger = require('./logger');
+const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
@@ -1953,6 +1954,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the timed first visit
+    // in its technician's day, inside this transaction (silent, never fails the
+    // seed, a no-op while the gate is off or the seed has no technician).
+    await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the visit actually exists: fileCoverageException writes
     // through the global connection and dedupes for 7 days, so a notice
     // emitted before a deferred/aborted insert would outlive the rollback
@@ -2045,6 +2050,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    // GATE_ROUTE_CHECK_AUTO_SAVES: the retimed visit moved within its day.
+    await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the retime is written (same rule as the seed path):
     // the notice claims the visit WAS retimed, so it must never outlive a
     // failed update.

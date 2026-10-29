@@ -229,7 +229,8 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
 
   test('one tool per visit: spreader visits carry granulars, hose visits carry liquids, July none', () => {
     const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME, december.NEW_NAME, require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3').NEW_NAME]);
-    const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET]);
+    // The liquid potassium (20261029170000) rides the August and September hose passes beside Nutra-TECH.
+    const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET, require('../models/migrations/20261029170000_lawn_v13_summer_potassium').NAME]);
     for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'none'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
       const tools = lines(visitFor(month).primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
       if (mode === 'none') { expect(tools).toEqual([]); continue; }

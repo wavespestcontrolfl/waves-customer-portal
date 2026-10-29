@@ -370,4 +370,86 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     expect(auto.statusCode).toBe(409);
     expect(auto.message).toMatch(/Zelle notice cannot settle it by itself/);
   });
+
+  // The Intelligence Bar card's part (owner 2026-10-29, GATE_IB_RECORD_PAYMENT_PARTIAL): the REAL tool, the REAL route shim, the REAL
+  // writer and the REAL fence against the real tables. Admin login, no technician row: the recorder falls back to 'admin'.
+  describe('a part payment approved on the Intelligence Bar card', () => {
+    const ADMIN = { isAdmin: true };
+    let tool;
+    beforeAll(() => { tool = require('../services/intelligence-bar/record-payment-tools'); });
+    beforeEach(() => {
+      for (const name of ['GATE_IB_RECORD_PAYMENT', 'GATE_IB_PLATFORM', 'GATE_IB_RECORD_PAYMENT_PARTIAL']) process.env[name] = 'true';
+    });
+    afterEach(() => {
+      for (const name of ['GATE_IB_RECORD_PAYMENT', 'GATE_IB_PLATFORM', 'GATE_IB_RECORD_PAYMENT_PARTIAL']) delete process.env[name];
+    });
+    const cardFor = (invoiceId, amount) => tool.executeRecordPaymentTool('record_payment', { invoice_id: invoiceId, amount, method: 'zelle', reference: 'ZL-77' }, ADMIN);
+    const confirmCard = (card, invoiceId, amount) => tool.executeRecordPaymentTool('record_payment', {
+      invoice_id: invoiceId, amount, method: 'zelle', reference: 'ZL-77', confirmed: true, _verified_record_payment_version: card._version,
+    }, ADMIN);
+
+    it('records the part through the card: amount_paid grows, the invoice stays open, one payments row, no receipt, reminders running', async () => {
+      const invoice = await makeInvoice();
+      await seedSequence(invoice);
+      const card = await cardFor(invoice.id, 40);
+      expect(card).toMatchObject({ preview: true, part_payment: true, balance_due: 100, amount: 40, still_owed_after: 60 });
+
+      const res = await confirmCard(card, invoice.id, 40);
+
+      expect(res).toMatchObject({ success: true, partial: true, amount: 40, still_owed: 60, sent_to_customer: false });
+      const after = await row(invoice.id);
+      expect(after.status).toBe('viewed');
+      expect(Number(after.amount_paid)).toBe(40);
+      expect(after.paid_at).toBeNull();
+      expect(after.payment_recorded_at).not.toBeNull();
+      expect(invoiceAmountDue(after)).toBe(60);
+      const payments = await database('payments').where({ customer_id: invoice.customer_id });
+      expect(payments).toHaveLength(1);
+      expect(Number(payments[0].amount)).toBe(40);
+      expect(JSON.parse(JSON.stringify(payments[0].metadata))).toMatchObject({ invoice_id: invoice.id, partial_payment: true });
+      expect((await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first()).status).toBe('active');
+      expect(await database('receipt_delivery_jobs').where({ invoice_id: invoice.id })).toHaveLength(0);
+    });
+
+    it('a double confirm of the same card records once: the second meets $60 owed, not the $100 the card priced from', async () => {
+      const invoice = await makeInvoice();
+      const card = await cardFor(invoice.id, 40);
+      const [first, second] = await Promise.all([confirmCard(card, invoice.id, 40), confirmCard(card, invoice.id, 40)]);
+      expect([first, second].filter((r) => r.success === true)).toHaveLength(1);
+      const refused = [first, second].find((r) => r.success !== true);
+      expect(refused.preview_changed === true || refused.code === 'preview_changed' || refused.failed === true).toBe(true);
+      expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+      expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
+      // And a later confirm of the same card, once the part is on the invoice, is refused before the writer runs.
+      expect(await confirmCard(card, invoice.id, 40)).toMatchObject({ preview_changed: true });
+      expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+    });
+
+    it('the writer\'s page refusals reach the card: an active payment plan, and both part gates are required', async () => {
+      const invoice = await makeInvoice();
+      await database('payment_plans').insert({
+        customer_id: invoice.customer_id, invoice_id: invoice.id, total_balance: 100, payment_amount: 25, payment_frequency: 'monthly',
+        plan_start_date: '2030-01-01', next_payment_date: '2030-02-01', status: 'active',
+      });
+      expect(await cardFor(invoice.id, 40)).toMatchObject({ code: 'part_not_allowed' });
+      const plain = await makeInvoice();
+      process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = 'false';
+      expect(await cardFor(plain.id, 40)).toMatchObject({ code: 'partial_not_supported' });
+      process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = 'true';
+      process.env.GATE_PARTIAL_PAYMENTS = 'false';
+      expect(await cardFor(plain.id, 40)).toMatchObject({ code: 'partial_not_supported' });
+      expect(Number((await row(plain.id)).amount_paid)).toBe(0);
+    });
+
+    it('the card\'s full balance is unchanged: marks the invoice paid, books the whole amount', async () => {
+      const invoice = await makeInvoice();
+      const card = await cardFor(invoice.id, 100);
+      expect(card).not.toHaveProperty('part_payment');
+      const res = await confirmCard(card, invoice.id, 100);
+      expect(res).toMatchObject({ success: true, status: 'paid', amount: 100 });
+      const after = await row(invoice.id);
+      expect(after.status).toBe('paid');
+      expect(Number(after.amount_paid)).toBe(0);
+    });
+  });
 });

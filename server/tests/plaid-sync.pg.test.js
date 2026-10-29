@@ -511,6 +511,9 @@ async function activate(itemId, overrides = {}) {
       rejectedExpenseIds: ['x'], lastUnlink: { expenseId: 'y' },
       // derived from the $10 version — obsolete once the bank corrects it
       categoryId: 'c1', noMatch: true, ignore: true, candidates: [{ id: 'z' }],
+      // payroll bank match: the owner's rejections and the unlink evidence carry over, the derived keys do not
+      rejectedPayrollCheckIds: ['pc1'], rejectedTaxFilingIds: ['tf1'], payrollUnlinked: { reason: 'owner_unlinked' },
+      payrollCandidates: [{ id: 'pc2' }], payrollMatch: { by: 'auto' },
     } });
     // create-expense has READ the row at $10 (unlocked) and is about to claim it
     plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 25, '2026-09-05')], [], 'cursor-2'));
@@ -524,7 +527,10 @@ async function activate(itemId, overrides = {}) {
     expect(now.id).not.toBe(before.id);
     expect(Number(now.amount)).toBe(25);
     expect(now.row_hash).toBe(before.row_hash);
-    expect(now.suggestion).toEqual({ rejectedExpenseIds: ['x'], lastUnlink: { expenseId: 'y' } });
+    expect(now.suggestion).toEqual({
+      rejectedExpenseIds: ['x'], lastUnlink: { expenseId: 'y' },
+      rejectedPayrollCheckIds: ['pc1'], rejectedTaxFilingIds: ['tf1'], payrollUnlinked: { reason: 'owner_unlinked' },
+    });
   });
 
   test('setup accepts tomorrow as the start date (CSV already covers today)', async () => {

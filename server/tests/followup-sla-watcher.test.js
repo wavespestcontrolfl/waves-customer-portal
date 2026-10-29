@@ -315,13 +315,44 @@ test('an emptied list is retired and flagged, so a miss that returns later (e.g.
   listOpenCommitments.mockResolvedValue([]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch).toMatchObject({ done_by: 'followup-sla' });
+  expect(updates[0].patch).toMatchObject({ done_by: 'followup-sla', resolution: 'Every listed promise was followed up' });
   expect(updates[0].patch.done_at).toBeTruthy();
   expect(JSON.parse(updates[0].patch.metadata).emptied).toBe(true);
 
   mockDb({ standingRow: { ...posted(['a'], { emptied: true }), read_at: NOW } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
+});
+
+// Call audit 2026-10-29: two lists whose promises simply aged past 24 hours
+// closed as "Every listed promise was followed up" while nobody had acted.
+const agedOff = (id) => row(id, { call_started_at: et('09:00', '2026-09-25').toISOString() });
+
+test('an emptied list whose promise aged off with no follow-up says it was not followed up', async () => {
+  const updates = mockDb({ standingRow: posted(['a']) });
+  listOpenCommitments.mockResolvedValue([agedOff('a')]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(updates).toHaveLength(1);
+  expect(updates[0].patch.resolution).toBe('1 not followed up; still open in Owed');
+  expect(JSON.parse(updates[0].patch.metadata).emptied).toBe(true);
+});
+
+test('an emptied list whose open promise was followed up still closes as followed up', async () => {
+  const updates = mockDb({ standingRow: posted(['a']), activity: { sms_log: true } });
+  listOpenCommitments.mockResolvedValue([agedOff('a')]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(updates[0].patch.resolution).toBe('Every listed promise was followed up');
+});
+
+test('a failed emptied-list check leaves the list for the next tick and fails job health', async () => {
+  const updates = mockDb({ standingRow: posted(['a']) });
+  listOpenCommitments.mockResolvedValue([agedOff('a')]);
+  stillOpenIds.mockImplementation(async (_conn, ids) => {
+    if (ids.length) throw new Error('lookup down');
+    return new Set();
+  });
+  await expect(runFollowUpSlaWatcher({ now: NOW })).rejects.toThrow('Follow-up verification incomplete for 1 call(s)');
+  expect(updates).toHaveLength(0);
 });
 
 test('the clock starts when the promise call ENDED — a 45-minute call is not due 15 minutes after it', async () => {

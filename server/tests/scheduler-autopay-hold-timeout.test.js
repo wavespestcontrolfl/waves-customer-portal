@@ -84,6 +84,7 @@ describe('gate reader and gate-off sweep', () => {
   test.each([
     [undefined, 'off'], ['', 'off'], ['false', 'off'], ['on', 'off'], ['1', 'off'],
     ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['true', 'true'], ['TRUE', 'true'],
+    ['charge', 'charge'], [' Charge ', 'charge'], ['CHARGE', 'charge'], ['charged', 'off'], ['chargeit', 'off'],
   ])('GATE_AUTOPAY_HOLD_TIMEOUT=%p reads as %s', (value, expected) => {
     if (value === undefined) delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
     else process.env.GATE_AUTOPAY_HOLD_TIMEOUT = value;

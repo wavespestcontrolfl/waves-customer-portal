@@ -171,7 +171,10 @@ postgres('payroll review bonus import', () => {
       expect(events).toHaveLength(1);
       expect(events[0].metadata).toMatchObject({ week_end: '2026-09-20', added_count: 2, removed_count: 0 });
       expect(events[0].metadata.added_payout_ids.sort()).toEqual([lateSunday, midweek].sort());
-      expect(JSON.stringify(events[0].metadata)).not.toMatch(/700|amount/);
+      // Payout ids are random and can hold '700' by chance (#7018 CI), so blank them first.
+      const metaText = JSON.stringify(events[0].metadata)
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
+      expect(metaText).not.toMatch(/700|amount/);
 
       // A second recompute adds nothing and writes no second event.
       const again = await recompute(created.body.run.id);
