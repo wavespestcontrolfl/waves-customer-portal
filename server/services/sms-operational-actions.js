@@ -1262,9 +1262,11 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
       subject: { type: 'customer', id: message.customer_id },
       doneWhen: 'promise_fulfilled',
       who: 'person',
-      // Called back on a call-back promise only (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS): the bell's own
-      // Done with that note, which also settles the follow-up. It places no call.
-      ...(parts.alert === KIND_ALERT.callback ? { buttons: require('./admin-alert-buttons').closeNoteButtons('called_back') } : {}),
+      // Called back on a text call-back promise only (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS): the bell's
+      // own Done with that note, which also settles the follow-up. It places no call. An email follow-up gets
+      // none: Done's settle step settles text follow-ups only, so the email promise would ring again.
+      ...(parts.alert === KIND_ALERT.callback && channelWord === 'text'
+        ? { buttons: require('./admin-alert-buttons').closeNoteButtons('called_back') } : {}),
     },
   };
 }

@@ -96,8 +96,8 @@ Kinds today:
   locks and saves nothing when one fails. Any other case is answered in the Queue.
 - `close_note` (`server/services/admin-alert-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`): close-only
   buttons. **Handled** on a customer's texts (the `sms_reply` thread row), **Called back** on a
-  call-back follow-up (an `sms_operational_followup` row for a call-back promise; other promise
-  kinds get no button) and on a missed call (`customer_missed_call`). The step is the bell's own
+  text call-back follow-up (an `sms_operational_followup` row for a call-back promise; other
+  promise kinds and email follow-ups get no button) and on a missed call (`customer_missed_call`). The step is the bell's own
   Done with the button's label as the note, fenced on the version the tap claimed (a new message
   that rewrote the row meanwhile is never closed unseen), and it settles a text follow-up the row
   speaks for, as Done does. It sends no reply and places no call. A follow-up row that is no longer

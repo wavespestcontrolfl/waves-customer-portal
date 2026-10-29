@@ -270,6 +270,9 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[3].metadata.buttons).toBeNull();
     await ring({ row: callback, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [callback, row({ ...callback, id: 'commit-3' })] } });
     expect(lastCall()[3].metadata.buttons).toEqual(CALLED_BACK);
+    // An email call-back promise gets none: Done's settle step settles text follow-ups only.
+    await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] }, args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    expect(lastCall()[3].metadata.buttons).toBeNull();
     // notifyAdmin's refresh merge lets that null win over a standing row's old button.
     const { mergeRefreshMetadata } = jest.requireActual('../services/notification-service')._private;
     expect(mergeRefreshMetadata({ buttons: CALLED_BACK, kind: 'callback' }, { buttons: null }, false).buttons).toBeNull();
