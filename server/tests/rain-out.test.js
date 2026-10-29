@@ -320,6 +320,172 @@ describe('rain-out service', () => {
     });
   });
 
+  // Owner 2026-10-28: techs move visits from their own app. Behind
+  // GATE_TECH_MOVE_ROUTE_TIMES the "Later today" choices are the hours the
+  // technician's route can keep, each with its added drive minutes.
+  describe('getOptions: route-checked same-day hours (GATE_TECH_MOVE_ROUTE_TIMES)', () => {
+    const findTime = require('../services/scheduling/find-time');
+    const blackout = require('../services/scheduling/blackout-dates');
+    const slot = (start, detour, extra = {}) => ({
+      date: '2026-06-11', technician: { id: 'tech-1', name: 'T' }, start_time: start, end_time: start, detour_minutes: detour, ...extra,
+    });
+    let finder;
+    let blackoutSpy;
+    // A visit not under way by default: the stop the tech is at keeps the guesses.
+    const sameDay = async (overrides = {}) => {
+      SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
+          chain({ rows: [] }),
+        ],
+      });
+      const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+      expect(options.ok).toBe(true);
+      return options.sameDay;
+    };
+
+    beforeEach(() => {
+      // 14:00Z = 10:00 ET: the guesses are 12:00 and 14:00; the earliest route hour is 11:00.
+      jest.useFakeTimers({ now: new Date('2026-06-11T14:00:00Z') });
+      finder = jest.spyOn(findTime, 'findAvailableSlots').mockResolvedValue({ slots: [] });
+      blackoutSpy = jest.spyOn(blackout, 'isBlackoutDate').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      delete process.env.GATE_TECH_MOVE_ROUTE_TIMES;
+      finder.mockRestore();
+      blackoutSpy.mockRestore();
+      jest.useRealTimers();
+    });
+
+    test('gate off: the +2h and +4h guesses, the finder is never asked', async () => {
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(options.every((o) => o.driveMinutes === undefined)).toBe(true);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    test('gate on: feasible hours with added drive, lowest drive first, at most 4, none before now + 60 min', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [
+        slot('10:00', 1), // starts before now + 60 min (11:00): dropped
+        slot('11:00', 20.4),
+        slot('12:00', 5),
+        slot('13:00', 12.6),
+        slot('13:00', 30), // same hour: the lower drive wins
+        slot('14:00', 5), // ties 12:00 on drive: later start second
+        slot('15:00', 2),
+        slot('16:00', 40),
+        slot('13:30', 0), // not on the hour: dropped
+        slot('17:00', 0), // past the last same-day start: dropped
+        slot('12:00', 0, { date: '2026-06-12' }), // another day: dropped
+      ] });
+      const options = await sameDay();
+      expect(options.map((o) => [o.window.start, o.driveMinutes])).toEqual([['15:00', 2], ['12:00', 5], ['14:00', 5], ['13:00', 13]]);
+      expect(options[0]).toEqual(expect.objectContaining({
+        kind: 'same_day', date: '2026-06-11', window: { start: '15:00', end: '16:00' }, label: 'Later today', display: 'Today, 3:00 PM-4:00 PM',
+      }));
+      // The finder is asked for this visit's technician, today, one-hour blocks, the free estimate only.
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({
+        technicianId: 'tech-1', dateFrom: '2026-06-11', dateTo: '2026-06-11', durationMinutes: 60,
+        excludeServiceIds: ['svc-1'], arrivalWindow: { serviceId: 'svc-1' }, providerTravel: false,
+        includeWeekends: true,
+        // Every hourly start from the lead-time floor, continuing from the current stop.
+        everyStepStart: true, earliestStartMin: expect.any(Number), fromActiveStop: true,
+      }));
+      expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
+    });
+
+    test('gate on: an hour with no drive number is offered last, without driveMinutes', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
+      const options = await sameDay();
+      expect(options.map((o) => [o.window.start, o.driveMinutes])).toEqual([['12:00', 9], ['11:00', undefined]]);
+    });
+
+    test('gate on: rounds now + 60 min up to the next hour', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      jest.setSystemTime(new Date('2026-06-11T14:10:00Z')); // 10:10 ET: first hour is 12:00
+      finder.mockResolvedValue({ slots: [slot('11:00', 1), slot('12:00', 8)] });
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00']);
+    });
+
+    test('gate on: a blackout today offers nothing and never asks the finder', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      blackoutSpy.mockResolvedValue(true);
+      expect(await sameDay()).toEqual([]);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    // Codex #6932 r4: the visit's saved service location, as the staff finder reads it.
+    test('gate on: a visit at a secondary property searches from its own pin, not the customer\'s home', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', lat: 27.1, lng: -82.3 });
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.1, lng: -82.3 }));
+    });
+
+    test('gate on: a stamped address with no pin is resolved from the geocode cache only', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      const dayStops = require('../services/scheduling/day-stops');
+      const resolve = jest.spyOn(dayStops, 'resolveServiceLocation').mockResolvedValue({ lat: 27.2, lng: -82.35, source: 'address_geocoded_now' });
+      try {
+        finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+        await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', service_address_zip: '34285' });
+        expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ address_line1: '9 Rental Way', zip: '34285' }), undefined, { cacheOnly: true });
+        expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.2, lng: -82.35 }));
+        // No cached pin: the route cannot be judged, so the guesses stay and no finder runs.
+        resolve.mockResolvedValue({ lat: null, lng: null, source: null });
+        finder.mockClear();
+        const options = await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice' });
+        expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+        expect(finder).not.toHaveBeenCalled();
+      } finally {
+        resolve.mockRestore();
+      }
+    });
+
+    test('gate on: no stamped address searches from the customer\'s pin', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay();
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.4 }));
+    });
+
+    test('gate on: the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [], rejections_by_date: { '2026-06-11': { arrival_window: 2, route_unverified: 1 } } });
+      expect(await sameDay()).toEqual([]);
+    });
+
+    test.each([
+      ['no refusal at all', { slots: [] }],
+      ['only route_unverified refusals', { slots: [], rejections_by_date: { '2026-06-11': { route_unverified: 3 } } }],
+    ])('gate on: no hour with %s, so the route was not judged and the guesses stay', async (_name, answer) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue(answer);
+      expect((await sameDay()).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+    });
+
+    test.each(['on_site', 'en_route'])('gate on: moving the stop the tech is at (%s) keeps the guesses and asks no finder', async (status) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      expect((await sameDay({ status })).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(finder).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['throws', () => finder.mockRejectedValue(new Error('boom'))],
+      ['returns an error', () => finder.mockResolvedValue({ error: 'lat/lng required', slots: [] })],
+    ])('gate on: the finder %s, so the +2h and +4h guesses are offered', async (_name, arrange) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      arrange();
+      const options = await sameDay();
+      expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(options.every((o) => o.driveMinutes === undefined)).toBe(true);
+    });
+  });
+
   describe('commit — single job', () => {
     function wireSingle() {
       wireDb({
