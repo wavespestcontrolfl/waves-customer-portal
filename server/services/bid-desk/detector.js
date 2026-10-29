@@ -41,6 +41,10 @@ const BLUEBOOK_DOMAIN = 'thebluebook.com';
 const OPENGOV_DOMAIN = 'opengov.com';
 const CHARLOTTE_DOMAIN = 'charlottecountyfl.gov';
 const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com', 'internationaleprocurement.com', 'myflorida.com'];
+// The public agency portals the Bid Desk reads. spam-blocker treats each one as a government sender, so a model's spam
+// label never trashes or auto-blocks a bid notice (one VendorLink label blocked the portal, and its Gmail filter then
+// trashed every later notice: inbox replay 2026-10-28).
+const PUBLIC_PORTAL_DOMAINS = [VENDORLINK_DOMAIN, ...PORTAL_DOMAINS];
 const GOV_SUFFIXES = ['.gov', '.fl.us'];
 const INTERNAL_SUBJECT = /^\s*(?:FIX|ACT|FYI|OK)\s*:/;
 const BID_WORDS = /\b(?:RFP|RFQ|ITB|IFB|ITN)\b|invitation to bid|bid invite|request for (?:proposal|quote|qualifications)|addend(?:um|ums|a)\b|pre-?bid/i;
@@ -521,5 +525,5 @@ const passesGmailSpam = (email = {}) => email.gmail_spam_verified === true && se
 
 module.exports = {
   detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
-  BID_WORDS, ADDENDUM_WORDS,
+  BID_WORDS, ADDENDUM_WORDS, PUBLIC_PORTAL_DOMAINS,
 };

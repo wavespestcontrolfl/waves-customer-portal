@@ -533,6 +533,88 @@ describe('planRescheduleFromCall', () => {
   });
 });
 
+// ── accepted slot (GATE_CALL_RESCHEDULE_APPLY, owner 2026-10-27) ─────────
+// The automatic path moves on the booking step's accepted slot (the
+// extraction's confirmed_start_at, the caller's grounded acceptance and the
+// agent's grounded commitment), not on agreed_slot_words sitting inside a
+// quote. Oct 24: the words were empty on 10 of 12 calls. Same grounding as
+// the make-up move (#6437).
+describe('planRescheduleFromCall: the accepted slot replaces the slot-word quote check', () => {
+  // The real shape of a call whose extraction left the slot words empty and
+  // pinned no quote to confirmed_start_at: the agent says the time in plain
+  // words, the caller agrees.
+  const SAID = "Okay, I'll get you in Thursday around noon.";
+  const emptyWords = (scheduling = {}, extra = {}) => v2({
+    scheduling: { agreed_slot_words: null, ...scheduling },
+    evidence: [
+      { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: SAID },
+      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+    ],
+    ...extra,
+  });
+  const base = () => ({ call: call({ transcription: `Agent: ${SAID}\nCaller: ${ACCEPT}` }), customer: customer(), candidates: [visit()], now: NOW });
+
+  test('gate-on behavior: moves with empty slot words when the caller accepted the extraction\'s slot', () => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords(), acceptedSlot: true }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID, newDate: '2026-09-24', newWindow: { start: '12:00', end: '13:00' } });
+  });
+
+  test('without the accepted-slot mode the strict word check is unchanged', () => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords() }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'agreed_slot_words_missing' });
+  });
+
+  test.each([
+    ['the caller did not accept', { caller_accepted_slot: false }, 'caller_did_not_accept'],
+    ['acceptance was never judged', { caller_accepted_slot: null }, 'caller_did_not_accept'],
+    ['the commitment was not definite', { definite_commitment: false }, 'agent_commitment_not_definite'],
+  ])('refuses when %s', (_label, scheduling, agreementReason) => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords(scheduling), acceptedSlot: true }))
+      .toMatchObject({ action: 'skip', reason: 'reschedule_not_agreed', agreementReason });
+  });
+
+  test('refuses when the agent did not commit', () => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords({ agent_committed_booking: false }), acceptedSlot: true }))
+      .toMatchObject({ action: 'skip', reason: 'agent_did_not_commit' });
+  });
+
+  test('refuses when there is no accepted slot, or it is off the hour or in the past', () => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords({ confirmed_start_at: null }), acceptedSlot: true }))
+      .toMatchObject({ action: 'skip', reason: 'no_confirmed_start' });
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords({ confirmed_start_at: '2026-09-24T12:30:00-04:00' }), acceptedSlot: true }))
+      .toMatchObject({ action: 'skip', reason: 'off_grid_start_time' });
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords({ confirmed_start_at: '2026-09-20T12:00:00-04:00' }), acceptedSlot: true }))
+      .toMatchObject({ action: 'skip', reason: 'confirmed_start_in_past' });
+  });
+
+  test('refuses when the commitment or the acceptance is not in the transcript', () => {
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords(), acceptedSlot: true,
+      call: call({ transcription: `Agent: Let me check on that.\nCaller: ${ACCEPT}` }) }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'agent_commitment_ungrounded' });
+    expect(planRescheduleFromCall({ ...base(), v2: emptyWords(), acceptedSlot: true,
+      call: call({ transcription: `Agent: ${SAID}\nCaller: Hmm, I will think about it.` }) }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'caller_acceptance_ungrounded' });
+  });
+
+  test('a relative date still needs its recorded words: they are the only check of the resolved day', () => {
+    const relative = emptyWords({ relative_date_used: true }, { evidence: [
+      { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: SAID },
+      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+      { field_path: '/scheduling/relative_date_used', speaker: 'agent', quote: SAID },
+    ] });
+    expect(planRescheduleFromCall({ ...base(), v2: relative, acceptedSlot: true }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'agreed_slot_words_missing' });
+  });
+
+  test('every other guard still holds: unmatched customer, two visits, a grouped visit, no customer message fields', () => {
+    const args = { ...base(), v2: emptyWords(), acceptedSlot: true };
+    expect(planRescheduleFromCall({ ...args, call: { ...args.call, customer_id: null } })).toMatchObject({ reason: 'customer_not_matched' });
+    expect(planRescheduleFromCall({ ...args, candidates: [visit(), visit({ id: 'other-visit' })] })).toMatchObject({ reason: 'ambiguous_visit' });
+    expect(planRescheduleFromCall({ ...args, candidates: [visit({ visit_id: 'group-1' })] })).toMatchObject({ reason: 'grouped_visit' });
+    expect(planRescheduleFromCall({ ...args, transcriptLabelsTrusted: false })).toMatchObject({ reason: 'untrusted_speaker_labels' });
+  });
+});
+
 // ── applier against a mocked connection ─────────────────────────────────
 function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0, portalRequest = null, smsOffer = false } = {}) {
   const writes = { updates: [], inserts: [] };
@@ -913,5 +995,45 @@ describe('applyCallReschedule', () => {
     const rebooker = { reschedule: jest.fn().mockRejectedValue(Object.assign(new Error('slot taken'), { statusCode: 409 })) };
     await expect(applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).rejects.toThrow('slot taken');
     expect(conn.writes.inserts).toHaveLength(0);
+  });
+
+  // The processor calls applyCallReschedule only behind the gate, and the
+  // applier plans in accepted-slot mode both before the move and again under
+  // the move transaction.
+  describe('accepted slot (gate on)', () => {
+    const SAID = "Okay, I'll get you in Thursday around noon.";
+    const emptyWords = (scheduling = {}) => v2({
+      scheduling: { agreed_slot_words: null, ...scheduling },
+      evidence: [
+        { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: SAID },
+        { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+      ],
+    });
+    const spoken = call({ transcription: `Agent: ${SAID}\nCaller: ${ACCEPT}` });
+    const guarded = (conn) => ({ reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) });
+
+    test('moves the one visit when the slot words are empty but the caller accepted the slot', async () => {
+      const conn = makeConn({ extraction: emptyWords(), settledCall: { transcription: spoken.transcription } });
+      const rebooker = guarded(conn);
+      expect(await applyCallReschedule({ conn, call: spoken, procGeneration: 3, now: NOW, rebooker }))
+        .toMatchObject({ outcome: 'applied', visitId: VISIT_ID, newDate: '2026-09-24', newWindow: { start: '12:00', end: '13:00' }, cardsResolved: 1 });
+      expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ notifyRequested: false });
+    });
+
+    test.each([
+      ['caller acceptance missing', { caller_accepted_slot: false }],
+      ['no accepted slot', { confirmed_start_at: null }],
+    ])('moves nothing and sends nothing: %s', async (_label, scheduling) => {
+      const conn = makeConn({ extraction: emptyWords(scheduling), settledCall: { transcription: spoken.transcription } });
+      const rebooker = guarded(conn);
+      const result = await applyCallReschedule({ conn, call: spoken, procGeneration: 3, now: NOW, rebooker });
+      expect(result).toMatchObject({ outcome: 'skipped' });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+      expect(conn.writes.inserts.filter((w) => w.table === 'activity_log')).toHaveLength(0);
+    });
   });
 });

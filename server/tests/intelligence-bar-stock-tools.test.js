@@ -1809,4 +1809,197 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
   });
+
+  // ─── a named product is a receipt target (W10) ─────────────────────────
+  describe('a receipt that names the product', () => {
+    const queue = require('../services/inventory-restock-queue');
+    const RECEIVE_PREVIEW = { product: { id: TAURUS.id, name: TAURUS.name }, request: { id: 'req-taurus' }, action: 'receive' };
+    const activeRequests = (...ids) => jest.spyOn(queue, 'listRestockRequests').mockResolvedValue({ requests: ids.map((id) => ({ id })) });
+    afterEach(() => jest.restoreAllMocks());
+    const receive = (prompt, over = {}) => resolveInventoryWriteTarget({
+      toolName: 'update_restock_request', prompt, preview: RECEIVE_PREVIEW, actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2, ...over,
+    });
+    const ASK = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+
+    test.each([
+      'We received 2 gallons of Taurus SC.',
+      'Two gallons of Taurus SC came in today.',
+      'Taurus SC, 2 gallons, arrived this morning.',
+      'We just received 2 gallons of Taurus SC, show me what we have now.',
+    ])('"%s" targets the one open request of the named product', async (prompt) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive(prompt)).toEqual({ productId: TAURUS.id, requestId: 'req-taurus' });
+      expect(queue.listRestockRequests).toHaveBeenCalledWith(expect.objectContaining({ productId: TAURUS.id, status: 'active' }));
+    });
+
+    test('a product with two active requests asks which request (never guesses)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus', 'req-other');
+      expect(await receive('We received 2 gallons of Taurus SC.')).toEqual(ASK);
+    });
+
+    test('an open request that is not the one the preview acts on asks', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-other');
+      expect(await receive('We received 2 gallons of Taurus SC.')).toEqual(ASK);
+    });
+
+    test('naming a different product than the request belongs to is a relationship mismatch', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive('We received 2 gallons of Alpine WSG.')).toMatchObject({ code: 'target_relationship_mismatch' });
+    });
+
+    test('a question, a modal statement, an order and an unnamed product never ground a receipt', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      for (const prompt of ['Did we receive 2 gallons of Taurus SC?', 'We will receive 2 gallons of Taurus SC.', 'Order 2 gallons of Taurus SC.', 'We received 2 gallons.', 'Show me what we have now.']) {
+        expect(await receive(prompt)).toEqual(ASK);
+      }
+    });
+
+    // The read tail is a closed grammar of read-only asks. Free text after "show/tell me" is never discarded: the prompt
+    // stays whole, its leftover words fail the closed-vocabulary rule, and the bar asks.
+    test('the audit sentence (a prohibition after "tell me") never grounds a receipt', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive('We received 2 gallons of Taurus SC, tell me the balance but do not record this again')).toEqual(ASK);
+    });
+
+    test.each([
+      ['a negation', 'tell me the balance but do not record this'],
+      ['a contraction', "show me what we have, don't record it"],
+      ['never', 'tell me the balance and never record it'],
+      ['no more', 'show me what we have, no more'],
+      ['cancel', 'show me what we have and cancel the receipt'],
+      ['undo', 'tell me the balance then undo it'],
+      ['stop', 'show me what we have, stop'],
+      ['instead', 'show me what we have instead'],
+      ['except', 'show me everything except Taurus SC'],
+      ['but', 'show me what we have but wait'],
+      ['again', 'show me what we have now again'],
+      ['an unrecognised read ask', 'show me the price of Taurus SC'],
+      ['a second instruction', 'show me what we have now and order more'],
+    ])('a tail with %s is not a read tail, so nothing is stripped and the bar asks', async (_label, tail) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive(`We received 2 gallons of Taurus SC, ${tail}`)).toEqual(ASK);
+      const adjust = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: `We received 2 gallons of Taurus SC, ${tail}`, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+      expect(adjust).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test.each([
+      'show me what we have now', 'Show me what we have.', 'tell me what we have left', 'and show me what we have on hand',
+      'then please tell me the new on-hand', 'show me the new total', 'tell me the balance', 'show me how much we have now',
+    ])('the read-only ask ", %s" is a read tail and the receipt still grounds', async (tail) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive(`We received 2 gallons of Taurus SC, ${tail}`)).toEqual({ productId: TAURUS.id, requestId: 'req-taurus' });
+    });
+
+    test('a prohibition BEFORE a valid read tail still asks (the receipt words are validated, not dropped)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      for (const prompt of ['Do not record 2 gallons of Taurus SC, show me what we have now', 'We received 2 gallons of Taurus SC but do not record it, show me what we have now']) {
+        expect(await receive(prompt)).toEqual(ASK);
+      }
+    });
+
+    test('words the vocabulary does not cover next to the name still ask', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive('We received 2 gallons of Taurus SC but the lid was cracked.')).toEqual(ASK);
+    });
+
+    test('only a receive preview grounds on receipt words (cancel and mark_ordered keep asking)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      for (const action of ['cancel', 'mark_ordered']) {
+        expect(await receive('We received 2 gallons of Taurus SC.', { preview: { ...RECEIVE_PREVIEW, action } })).toEqual(ASK);
+      }
+    });
+
+    test('adjust_stock takes the product from an order clause when a receipt clause records it', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const prompt = 'Reorder four more jugs of Taurus SC from the vendor and record the three that just came in.';
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+      expect(result).toEqual({ productId: TAURUS.id });
+    });
+
+    test('the order-plus-receipt wording never grounds a different product, a second product or content it cannot read', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const adjust = (prompt, id = TAURUS.id) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: { product: { id, name: 'x' }, movement_type: 'restock' } });
+      expect(await adjust('Reorder four more jugs of Taurus SC from the vendor and record the three that just came in.', ALPINE.id)).toMatchObject({ code: 'target_relationship_mismatch' });
+      expect(await adjust('Reorder four more jugs of Taurus SC and Alpine WSG and record the three that just came in.')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await adjust('Reorder four more jugs of Taurus SC and record the three that were damaged.')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('free text in the order-plus-receipt wording is validated, never dropped', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const adjust = (prompt) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+      for (const prompt of [
+        'Reorder four more jugs of Taurus SC from the vendor, not the supplier and record the three that just came in.',
+        'Reorder four more jugs of Taurus SC from the vendor and record the three that just came in but do not add them.',
+        "Reorder four more jugs of Taurus SC from the vendor and record the three that just came in, don't record them again.",
+        'Reorder four more jugs of Taurus SC from the vendor and record the three that just came in again.',
+      ]) {
+        expect(await adjust(prompt)).toMatchObject({ code: 'target_clarification_required' });
+      }
+    });
+
+    describe('a stated correction of the amount just recorded', () => {
+      const CORRECTION = 'that was 2 gallons, not 2 quarts';
+      const correct = (over = {}) => resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: CORRECTION, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'correction' },
+        actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2, ...over,
+      });
+
+      test('takes the product from the receipt an earlier operator turn described', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC.']);
+        expect(await correct()).toEqual({ productId: TAURUS.id });
+        expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, expect.objectContaining({ maxSeq: 2 }));
+      });
+
+      test('reads an earlier receipt that ended in a closed read tail (Codex #6923 r1 P2)', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC, show me what we have now.']);
+        expect(await correct()).toEqual({ productId: TAURUS.id });
+        // Words outside the closed tail still stop the look-back.
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC, tell me the balance but do not record this again']);
+        expect(await correct()).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('needs the earlier turn to be a receipt, an instruction, and the same product', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        for (const turn of ['Order 2 quarts of Taurus SC.', 'Did we receive 2 quarts of Taurus SC?', 'We received 2 quarts of Alpine WSG.']) {
+          IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([turn]);
+          expect(await correct()).toMatchObject({ code: expect.stringMatching(/^target_/) });
+        }
+      });
+
+      test('reads no earlier turn without the tab\'s own thread position', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC.']);
+        expect(await correct({ threadSeq: null })).toMatchObject({ code: 'target_clarification_required' });
+        expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+      });
+
+      test('is only a correction for a correction movement; a restock never borrows the product from it', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC.']);
+        const result = await correct({ preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('other wording about amounts is not a correction', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValue(['We received 2 quarts of Taurus SC.']);
+        for (const prompt of ['that was 2 gallons, not 2 quarts of Alpine WSG', 'make it 2 gallons', 'that was 2 gallons, not 2 quarts, and order more', 'that was 2 gallons, not 2 quarts, but do not record it', 'that was 2 gallons, not 2 quarts again']) {
+          expect(await correct({ prompt })).toMatchObject({ code: 'target_clarification_required' });
+        }
+      });
+    });
+  });
 });

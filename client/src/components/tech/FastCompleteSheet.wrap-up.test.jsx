@@ -94,7 +94,6 @@ function makeRequest({ kind = 'regular', wrapUp = true, service, seeds = { exter
     if (bare.endsWith('/promises')) return { available: false, promises: [] };
     if (bare.endsWith('/blog-posts')) return { available: false, posts: [] };
     if (bare.endsWith('/photos')) return { photos: [] };
-    if (bare.endsWith('/treatment-zone/last')) return { available: false };
     if (bare.endsWith('/treatment-zone')) return { enabled: true, treatmentZone: null };
     if (bare.endsWith('/property-map')) return { available: true, stationsLoaded: true, stations: [station(1), station(2)] };
     if (bare === '/admin/schedule/generate-report') return { report: REPORT };

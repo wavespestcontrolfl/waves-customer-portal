@@ -1550,7 +1550,7 @@ async function runRouteReorder(opts = {}, conn = db) {
         const RouteOptimizer = require('./route-optimizer');
         for (const [techId, techStops] of byTech) {
           summary.measurements.push({ date: dateStr, technician_id: techId, as_of: now.toISOString(), snapshot_phase: 'loaded_schedule',
-            drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
+            drive_model: require('./scheduling/drive-clock').driveModelLabel(),
             ...measureDayQuality(RouteOptimizer, techStops, { home: homeFromMap(techHomes, techId), modeledDepartureMinutes: dayStartMin }) });
         }
       }
@@ -1862,7 +1862,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             // defect this same run repaired.
             const finalIds = finalOrdered.map(stop => stop.id);
             summary.measurements.push({ date: dateStr, technician_id: techId, as_of: (opts.now || new Date()).toISOString(),
-              snapshot_phase: 'applied_reorder', drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
+              snapshot_phase: 'applied_reorder', drive_model: require('./scheduling/drive-clock').driveModelLabel(),
               ...require('./scheduling/day-quality').measureDayQuality(RouteOptimizer,
                 techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 })), { home, modeledDepartureMinutes: dayStartMin }) });
           }

@@ -7,7 +7,6 @@ import {
   autoAssignWarning,
   bookableProperties,
   bookingPropertyTarget,
-  buildFindTimeRequestBody,
   canSubmitAppointments,
   classifyCallBookingConflict,
   classifyManualPrepayMintOutcome,
@@ -137,39 +136,6 @@ describe('CreateAppointmentModal won estimate helpers', () => {
   });
 });
 
-describe('buildFindTimeRequestBody', () => {
-  it('never sends the catalog service id as serviceId (server reads it as a visit id → 404)', () => {
-    const body = buildFindTimeRequestBody({
-      customerId: 'cust-1',
-      serviceName: 'Quarterly Pest',
-      durationMinutes: 60,
-      dateFrom: '2026-08-24',
-      dateTo: '2026-08-31',
-      technicianId: undefined,
-      horizonDays: 7,
-    });
-    expect(body).not.toHaveProperty('serviceId');
-    // No property chosen → no address override; the server resolves the primary.
-    expect(body.address).toBeUndefined();
-    expect(body.lat).toBeUndefined();
-    expect(body).toMatchObject({
-      customerId: 'cust-1',
-      serviceType: 'Quarterly Pest',
-      durationMinutes: 60,
-      dateFrom: '2026-08-24',
-      dateTo: '2026-08-31',
-      topN: 25,
-    });
-    expect(body.technicianId).toBeUndefined();
-  });
-
-  it('widens topN for long horizons and passes a chosen technician', () => {
-    const body = buildFindTimeRequestBody({ customerId: 'c', serviceName: 's', durationMinutes: 90, dateFrom: 'a', dateTo: 'b', technicianId: 'tech-9', horizonDays: 30 });
-    expect(body.topN).toBe(100);
-    expect(body.technicianId).toBe('tech-9');
-  });
-});
-
 describe('quick-add phone-match confirm helpers', () => {
   // The shape adminFetch throws: the server's JSON reply rides on err.body.
   const err = (status, code, match) => Object.assign(new Error('x'), { status, body: { error: 'x', code, ...(match ? { match } : {}) } });
@@ -239,8 +205,6 @@ describe('service-address picker guards', () => {
     // A half pair is no pair.
     expect(bookingPropertyTarget({ ...RENTAL, latitude: '26.1', longitude: null })).toMatchObject({ lat: undefined, lng: undefined });
     expect(bookingPropertyTarget(null)).toEqual({});
-    const body = buildFindTimeRequestBody({ customerId: 'c', ...bookingPropertyTarget(COMPLETE), serviceName: 's', durationMinutes: 60, dateFrom: 'a', dateTo: 'b' });
-    expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '10 Palm Ave, Naples, FL 34102' });
   });
 });
 

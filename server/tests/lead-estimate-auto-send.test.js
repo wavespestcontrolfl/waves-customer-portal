@@ -5,6 +5,10 @@ const {
   leadEstimateAutoSendAuditRow,
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
+  candidateLeadEstimateAutoSends,
+  parseCreatedAfter,
+  previewLeadEstimateAutoSendAudit,
+  processLeadEstimateAutoSendBatch,
   mergeAutoSendMetadata,
   staleAutoSendRecoveryDecision,
 } = require('../services/lead-estimate-auto-send');
@@ -49,6 +53,8 @@ describe('lead estimate auto-send policy', () => {
       staleClaimMinutes: DEFAULT_STALE_CLAIM_MINUTES,
       allowedReviewReasons: DEFAULT_ALLOWED_REVIEW_REASONS,
       sendMethod: 'both',
+      createdAfter: null,
+      createdAfterProblem: 'unset',
     });
 
     expect(leadEstimateAutoSendConfigFromEnv({
@@ -57,12 +63,15 @@ describe('lead estimate auto-send policy', () => {
       LEAD_ESTIMATE_AUTO_SEND_STALE_CLAIM_MINUTES: '45',
       LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: 'property_measurements_defaulted,email_missing_sms_only',
       LEAD_ESTIMATE_AUTO_SEND_METHOD: 'sms',
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: '2026-10-28T12:00:00Z',
     })).toEqual({
       delayMinutes: 12,
       limit: 3,
       staleClaimMinutes: 45,
       allowedReviewReasons: ['property_measurements_defaulted', 'email_missing_sms_only'],
       sendMethod: 'sms',
+      createdAfter: new Date('2026-10-28T12:00:00Z'),
+      createdAfterProblem: null,
     });
   });
 
@@ -455,5 +464,173 @@ describe('updateAutoSendMetadata — a pricing-authority block is written only w
     await updateAutoSendMetadata(database, { id: 'estimate-1', status: 'draft' }, { blockedAt: 'now', blockedReason: 'quote_required' }, null, {});
     expect(written).not.toHaveProperty('status');
     expect(written).toHaveProperty('estimate_data');
+  });
+});
+
+describe('created-after cutoff (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER) — fail closed', () => {
+  const NOW = new Date('2026-05-26T12:00:00.000Z');
+  const ALLOW = 'property_measurements_defaulted';
+
+  test('parses only a strict ISO 8601 timestamp with an explicit zone', () => {
+    expect(parseCreatedAfter('2026-10-28T12:00:00Z').createdAfter).toEqual(new Date('2026-10-28T12:00:00Z'));
+    expect(parseCreatedAfter(' 2026-10-28T08:00:00-04:00 ').createdAfter).toEqual(new Date('2026-10-28T12:00:00Z'));
+    expect(parseCreatedAfter(undefined)).toEqual({ createdAfter: null, createdAfterProblem: 'unset' });
+    expect(parseCreatedAfter('   ')).toEqual({ createdAfter: null, createdAfterProblem: 'unset' });
+    for (const bad of ['yesterday', '2026-10-28', '2026-10-28T12:00:00', '2026-13-45T99:00:00Z', '10/28/2026', '1761652800000']) {
+      expect(parseCreatedAfter(bad)).toEqual({ createdAfter: null, createdAfterProblem: 'unparseable' });
+    }
+  });
+
+  test('eligibility: draft created at or before the cutoff is skipped, a newer one follows every other rule', () => {
+    const cfg = leadEstimateAutoSendConfigFromEnv({
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: new Date(NOW.getTime() - 30 * 60 * 1000).toISOString(),
+    });
+    const at = (mins) => new Date(NOW.getTime() - mins * 60 * 1000).toISOString();
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(60) }), { ...cfg, now: NOW }))
+      .toEqual({ eligible: false, reason: 'created_before_cutoff' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(30) }), { ...cfg, now: NOW }))
+      .toEqual({ eligible: false, reason: 'created_before_cutoff' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(10) }), { ...cfg, now: NOW }))
+      .toEqual({ eligible: true, reason: null });
+    // newer than the cutoff but still inside the delay, unsafe review reason, or no server stamp: existing rules still win
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(2) }), { ...cfg, now: NOW }).reason).toBe('delay_not_elapsed');
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(10), pricing_authority: 'CLIENT_FALLBACK' }), { ...cfg, now: NOW }).reason).toBe('pricing_authority_not_server');
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(10) }), { ...cfg, allowedReviewReasons: [], now: NOW }).reason).toBe('disallowed_review_reasons');
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ created_at: at(10), customer_phone: null, customer_email: null }), { ...cfg, now: NOW }).reason).toBe('missing_delivery_contact');
+  });
+
+  test('eligibility: config from env with the cutoff unset or bad is never eligible', () => {
+    for (const value of [undefined, '', 'not-a-date']) {
+      const cfg = leadEstimateAutoSendConfigFromEnv({
+        LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+        LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: value,
+      });
+      expect(leadEstimateAutoSendEligibility(generatedEstimate(), { ...cfg, now: NOW }))
+        .toEqual({ eligible: false, reason: 'created_after_cutoff_unset' });
+    }
+  });
+
+  // Minimal knex stand-in: records the created_at bounds the candidate scan asks for.
+  function scanDatabase({ staleRows = [], candidateRows = [] } = {}) {
+    const calls = { candidateWheres: [], candidateScans: 0, updates: 0 };
+    const database = () => {
+      let isStale = false;
+      const chain = {
+        where: (...args) => {
+          if (args[0] && typeof args[0] === 'object' && args[0].status === 'sending') isStale = true;
+          if (!isStale) calls.candidateWheres.push(args);
+          return chain;
+        },
+        whereNull: () => chain,
+        whereNot: () => chain,
+        whereRaw: () => chain,
+        orderBy: () => chain,
+        limit: () => chain,
+        select: async () => {
+          if (!isStale) calls.candidateScans += 1;
+          return isStale ? staleRows : candidateRows;
+        },
+        first: async () => null,
+        update: () => { calls.updates += 1; return chain; },
+        returning: async () => [],
+      };
+      return chain;
+    };
+    database.fn = { now: () => 'NOW()' };
+    database.raw = (sql) => sql;
+    return { database, calls };
+  }
+
+  test('candidate scan adds a strict created_at > cutoff bound', async () => {
+    const { database, calls } = scanDatabase({ candidateRows: [generatedEstimate()] });
+    const cutoff = new Date('2026-05-26T11:00:00.000Z');
+    const rows = await candidateLeadEstimateAutoSends({ database, now: NOW, createdAfter: cutoff });
+    expect(rows).toHaveLength(1);
+    expect(calls.candidateWheres).toEqual(expect.arrayContaining([['created_at', '>', cutoff]]));
+  });
+
+  test('candidate scan with no valid cutoff returns nothing and never queries', async () => {
+    const { database, calls } = scanDatabase({ candidateRows: [generatedEstimate()] });
+    expect(await candidateLeadEstimateAutoSends({ database, now: NOW })).toEqual([]);
+    expect(await candidateLeadEstimateAutoSends({ database, now: NOW, createdAfter: new Date('nope') })).toEqual([]);
+    expect(calls.candidateScans).toBe(0);
+  });
+
+  test('batch with the cutoff unset sends nothing, scans nothing and logs why (once)', async () => {
+    const logger = require('../services/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const { database, calls } = scanDatabase({ candidateRows: [generatedEstimate()] });
+    const sendEstimateNow = jest.fn();
+    const config = leadEstimateAutoSendConfigFromEnv({ LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW });
+    const first = await processLeadEstimateAutoSendBatch({ database, now: NOW, config, sendEstimateNow });
+    const second = await processLeadEstimateAutoSendBatch({ database, now: NOW, config, sendEstimateNow });
+    expect(first).toMatchObject({ scanned: 0, sent: 0, blocked: 0, failed: 0, cutoffProblem: 'unset' });
+    expect(second.sent).toBe(0);
+    expect(sendEstimateNow).not.toHaveBeenCalled();
+    expect(calls.candidateScans).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER is not set');
+    warn.mockRestore();
+  });
+
+  test('batch with an unparseable cutoff logs the unparseable reason and sends nothing', async () => {
+    const logger = require('../services/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const { database } = scanDatabase({ candidateRows: [generatedEstimate()] });
+    const sendEstimateNow = jest.fn();
+    const config = leadEstimateAutoSendConfigFromEnv({
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: 'last tuesday',
+    });
+    const result = await processLeadEstimateAutoSendBatch({ database, now: NOW, config, sendEstimateNow });
+    expect(result).toMatchObject({ scanned: 0, sent: 0, cutoffProblem: 'unparseable' });
+    expect(sendEstimateNow).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((c) => c[0]).join('\n')).toContain('not an ISO 8601 timestamp');
+    warn.mockRestore();
+  });
+
+  test('batch: a returned draft older than the cutoff is skipped, never sent and never stamped blocked', async () => {
+    const old = generatedEstimate({ id: 'old', created_at: new Date(NOW.getTime() - 120 * 60 * 1000).toISOString() });
+    const { database, calls } = scanDatabase({ candidateRows: [old] });
+    const sendEstimateNow = jest.fn();
+    const config = leadEstimateAutoSendConfigFromEnv({
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+    });
+    const result = await processLeadEstimateAutoSendBatch({ database, now: NOW, config, sendEstimateNow });
+    expect(result).toMatchObject({ scanned: 1, sent: 0, blocked: 0, skipped: 1, cutoffProblem: null });
+    expect(sendEstimateNow).not.toHaveBeenCalled();
+    expect(calls.updates).toBe(0);
+  });
+
+  test('preview applies the same cutoff: SQL bound, and a missing cutoff lists no candidates', async () => {
+    const cutoff = new Date(NOW.getTime() - 60 * 60 * 1000);
+    const config = leadEstimateAutoSendConfigFromEnv({
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: cutoff.toISOString(),
+    });
+    const withCutoff = scanDatabase({ candidateRows: [generatedEstimate()] });
+    const audit = await previewLeadEstimateAutoSendAudit({ database: withCutoff.database, now: NOW, config });
+    expect(withCutoff.calls.candidateWheres).toEqual(expect.arrayContaining([['created_at', '>', cutoff]]));
+    expect(audit.counts.wouldSend).toBe(1);
+    expect(audit.config).toMatchObject({ createdAfter: cutoff.toISOString(), createdAfterProblem: null });
+
+    const noCutoff = scanDatabase({ candidateRows: [generatedEstimate()] });
+    const emptyConfig = leadEstimateAutoSendConfigFromEnv({ LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW });
+    const blank = await previewLeadEstimateAutoSendAudit({ database: noCutoff.database, now: NOW, config: emptyConfig });
+    expect(noCutoff.calls.candidateScans).toBe(0);
+    expect(blank.counts.wouldSend).toBe(0);
+    expect(blank.config).toMatchObject({ createdAfter: null, createdAfterProblem: 'unset' });
+  });
+
+  test('a stale-recovery row older than the cutoff is not listed as would-send in the audit', () => {
+    const cfg = leadEstimateAutoSendConfigFromEnv({
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS: ALLOW,
+      LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER: new Date(NOW.getTime() - 5 * 60 * 1000).toISOString(),
+    });
+    const row = leadEstimateAutoSendAuditRow(generatedEstimate(), { ...cfg, now: NOW });
+    expect(row).toMatchObject({ action: 'skipped', wouldSend: false });
+    expect(row.eligibility.reason).toBe('created_before_cutoff');
   });
 });

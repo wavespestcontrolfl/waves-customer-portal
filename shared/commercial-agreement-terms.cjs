@@ -28,4 +28,11 @@ const AGREEMENT_PAYMENT_TEXT = Object.freeze({
   [INVOICE_PAYMENT_TERMS]: 'Services are invoiced on Net 30 terms — payment is due within thirty (30) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
 });
 
-module.exports = { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, AGREEMENT_PAYMENT_TEXT };
+/**
+ * How a typed term compares with the agreement's text: case, whitespace and apostrophe style do not matter
+ * ("30 days\u2019" typed on a phone equals "30 days'"). The signing check and the builder's Standard / Custom
+ * choice both compare through this, so the builder never calls a term Custom that signing accepts as standard.
+ */
+const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+
+module.exports = { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, AGREEMENT_PAYMENT_TEXT, normalizeTermText };

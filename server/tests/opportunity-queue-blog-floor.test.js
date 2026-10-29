@@ -119,6 +119,24 @@ describe('claimNext action-aware floor', () => {
     expect((sql.match(/\?/g) || []).length).toBeGreaterThanOrEqual(bindings.length);
   });
 
+  test('an id scope adds one bound id filter after the exclude filter (written terminal drafts first); none leaves the claim unscoped', async () => {
+    db.mockImplementation(() => chainResolving([]));
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({ excludeIds: ['x'], onlyIds: ['a', null, 'b'] });
+    let [sql, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).toMatch(/AND NOT \(id = ANY\(\?\)\)\s+AND id = ANY\(\?\)/);
+    // [claimed_at, maxAttempts, blogFloor, rewriteFloor, minScore, excludeIds, onlyIds]
+    expect(bindings.slice(5)).toEqual([['x'], ['a', 'b']]);
+    expect((sql.match(/\?/g) || []).length).toBeGreaterThanOrEqual(bindings.length);
+
+    db.raw.mockClear();
+    await queue.claimNext({});
+    [sql, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).not.toMatch(/AND id = ANY\(\?\)/);
+    expect(bindings).toHaveLength(5);
+  });
+
   test('no bucket scope leaves the claim unfiltered by bucket', async () => {
     db.mockImplementation(() => chainResolving([]));
     db.raw.mockResolvedValue({ rows: [] });

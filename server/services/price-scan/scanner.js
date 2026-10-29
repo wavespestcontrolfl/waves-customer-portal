@@ -95,7 +95,10 @@ async function scanProduct(product, vendors, deps = {}) {
     try {
       candidate = await fetchCandidate(adapter, vendor, product);
     } catch (err) {
-      skipped.push({ vendor: vendorLabel(vendor), reason: 'fetch_error', detail: err.message });
+      // A Cloudflare bot check is the vendor's answer, not a broken fetch: report it as
+      // 'blocked' (not fetch-class, so an always-blocking vendor never degrades a run).
+      const reason = err && err.code === 'VENDOR_BLOCKED' ? 'blocked' : 'fetch_error';
+      skipped.push({ vendor: vendorLabel(vendor), reason, detail: err.message });
       continue;
     }
     if (!candidate) {

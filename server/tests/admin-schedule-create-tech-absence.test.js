@@ -512,7 +512,7 @@ describe('POST / — admin create — New Appointment stop order', () => {
     const { status } = await post(body);
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment' });
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment', staffSave: true });
   });
 
   test('gate on, a recurring create: the parent visit only (the night pass orders the children)', async () => {
@@ -520,7 +520,7 @@ describe('POST / — admin create — New Appointment stop order', () => {
     const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment' });
+    expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment', staffSave: true });
   });
 
   test('gate off (default): the save writes no stop order', async () => {
