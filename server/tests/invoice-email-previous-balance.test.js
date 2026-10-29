@@ -225,26 +225,6 @@ describe('sendInvoiceEmail previous-balance note', () => {
     });
   });
 
-  test('partial account credit: the PDF nets it like the pay page and prints it as its own row', async () => {
-    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility' || gate === 'payIncludeBalance');
-    openBalanceSummary.mockResolvedValue(twoOpenInvoices());
-    // Siblings total is un-netted (it is what the equality check compares);
-    // the bottom line is net of the credit setup applies to this invoice.
-    payPageCombinedBalance.mockResolvedValueOnce({ invoices: [{}, {}], total: 300.1, creditToApply: 20, combinedTotal: 430.1 });
-    mockDb(invoiceRow());
-
-    await sendInvoiceEmail('inv-1');
-
-    expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toEqual({
-      invoices: expectedRows,
-      moreCount: 0,
-      total: 300.1,
-      creditToApply: 20,
-      combinedTotal: 430.1,
-      totalLabel: 'Total account balance',
-    });
-  });
-
   test('payIncludeBalance off: the note still names the balance, but the PDF prints no block', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockResolvedValue(twoOpenInvoices());
@@ -315,7 +295,7 @@ describe('sendInvoiceEmail previous-balance note', () => {
   test.each([
     ['the combined charge leaves an open invoice out (payment plan, stopped reminders, micro-deposit or in-flight payment)', () => payPageCombinedBalance.mockResolvedValueOnce({ invoices: [{}], total: 117, combinedTotal: 267 })],
     ['the combined charge has the same count but other cents (a sibling changed between the reads)', () => payPageCombinedBalance.mockResolvedValueOnce({ invoices: [{}, {}], total: 233.99, combinedTotal: 383.99 })],
-    ['setup would charge this invoice alone (credit, capture hold)', () => payPageCombinedBalance.mockResolvedValueOnce(null)],
+    ['setup would charge this invoice alone, or might not match (any account credit, capture hold)', () => payPageCombinedBalance.mockResolvedValueOnce(null)],
     ['the combined lookup fails', () => payPageCombinedBalance.mockRejectedValueOnce(new Error('stripe down'))],
   ])('both gates on but %s: the note keeps pointing at each invoice\'s own link and the PDF prints no block', async (_label, arrange) => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility' || gate === 'payIncludeBalance');

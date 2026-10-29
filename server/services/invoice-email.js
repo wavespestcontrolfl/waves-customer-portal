@@ -344,9 +344,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       moreCount: previousBalance.moreCount,
       total: totalCents / 100,
       // The bottom line is the pay page's own figure: this invoice plus every
-      // earlier one, net of the partial account credit setup applies, printed
-      // as its own row so the lines still add up.
-      ...(combined.creditToApply > 0 ? { creditToApply: combined.creditToApply } : {}),
+      // other open one, what the Pay button charges.
       combinedTotal: combined.combinedTotal,
       totalLabel: 'Total account balance',
     };

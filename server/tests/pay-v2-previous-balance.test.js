@@ -267,9 +267,11 @@ describe('GET /pay/:token/invoice.pdf previous balance', () => {
     expect(pdfInvoice).not.toHaveProperty('previous_balance');
   });
 
-  test('gate ON, partial auto-credit: "Total due today" is net of the credit setup will apply', async () => {
-    // $150 anchor + $44.55 sibling, $20 opted-in credit: setup applies the
-    // credit to the anchor before the combined allocation, so it charges $174.55.
+  test('gate ON, opted-in partial account credit: no combined block, since setup decides the credit under its own locks', async () => {
+    // $150 anchor + $44.55 sibling, $20 opted-in credit. Setup's
+    // applyAccountCreditToInvoice may decline it (an active payment plan, an
+    // attached PaymentIntent), so a net total could understate the charge
+    // and a gross one could overstate it: print neither.
     isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
     const gates = require('../config/feature-gates').gates;
     gates.autoApplyAccountCredit = true;
@@ -277,7 +279,22 @@ describe('GET /pay/:token/invoice.pdf previous balance', () => {
       const pdfInvoice = await getInvoicePdf(invoiceData(), {
         customer: { id: 'cust-1', account_credits: '20.00', auto_apply_account_credit: true },
       });
-      expect(pdfInvoice.previous_balance).toMatchObject({ total: 44.55, creditToApply: 20, combinedTotal: 174.55, totalLabel: 'Total due today' });
+      expect(pdfInvoice).not.toHaveProperty('previous_balance');
+    } finally {
+      gates.autoApplyAccountCredit = false;
+    }
+  });
+
+  test('gate ON, credit on file but not opted in: setup applies none, so the combined block prints in full', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      const pdfInvoice = await getInvoicePdf(invoiceData(), {
+        customer: { id: 'cust-1', account_credits: '20.00', auto_apply_account_credit: false },
+      });
+      expect(pdfInvoice.previous_balance).toMatchObject({ total: 44.55, combinedTotal: 194.55, totalLabel: 'Total due today' });
+      expect(pdfInvoice.previous_balance).not.toHaveProperty('creditToApply');
     } finally {
       gates.autoApplyAccountCredit = false;
     }

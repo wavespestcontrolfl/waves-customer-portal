@@ -2007,15 +2007,13 @@ async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerReso
 }
 
 // What the Pay button will charge beyond this invoice, decided the way
-// /:token/setup decides it: the gate is on, account credit does not fully
-// cover the anchor (an unverifiable credit counts as "might", so nothing is
-// promised), and no required-save capture hold is pending (setup's
-// holdCoverageForCapture skips the combined allocation). A partial
-// auto-credit is netted out of combinedTotal (and reported as
-// creditToApply), as setup does. Null when the charge would be this invoice
-// alone. Shared by the invoice.pdf download
-// and the invoice email's "pay everything at once" line, so neither states
-// a combined total that setup will not charge.
+// /:token/setup decides it: the gate is on, no account credit is in play,
+// and no required-save capture hold is pending (setup's
+// holdCoverageForCapture skips the combined allocation). Null when the
+// charge would be this invoice alone, or might not match. Shared by the
+// invoice.pdf download and the invoice email (its PDF block and "pay
+// everything at once" line), so neither states a combined total that setup
+// will not charge.
 async function payPageCombinedBalance(data) {
   if (!require('../config/feature-gates').isEnabled('payIncludeBalance')) return null;
   let creditWillCoverAnchor;
@@ -2026,21 +2024,21 @@ async function payPageCombinedBalance(data) {
   }
   if (creditWillCoverAnchor) return null;
   if (await invoiceRequiresSavedMethod(data) && await invoiceCaptureNeeded(data)) return null;
-  // Setup applies a PARTIAL auto-credit to the anchor before building the
-  // combined allocation, so the total it charges is net of that credit.
+  // Opted-in account credit: whether setup applies it to the anchor, and how
+  // much, is decided under setup's own locks by
+  // customer-credit.applyAccountCreditToInvoice (it declines an invoice on an
+  // active payment plan or with a PaymentIntent attached, among others). A
+  // projected total that guesses wrong states a figure setup will not charge,
+  // so with any credit in play, or a credit read that fails, nothing combined
+  // is promised.
   let creditToApply;
   try {
     creditToApply = await invoiceProjectedCreditApplied(data);
   } catch {
     return null;
   }
-  const balance = await payPagePreviousBalance(data, { creditWillCoverAnchor });
-  if (!balance || !(creditToApply > 0)) return balance;
-  return {
-    ...balance,
-    creditToApply,
-    combinedTotal: (Math.round(balance.combinedTotal * 100) - Math.round(creditToApply * 100)) / 100,
-  };
+  if (creditToApply > 0) return null;
+  return payPagePreviousBalance(data, { creditWillCoverAnchor });
 }
 
 // =========================================================================

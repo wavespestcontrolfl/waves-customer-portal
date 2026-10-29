@@ -74,13 +74,6 @@ describe('invoice PDF previous balance', () => {
     expect(text).toContain('Past due since August 15, 2026');
   });
 
-  test('pay-page download with a partial account credit shows the credit row so the rows add up', async () => {
-    const text = await renderedText(invoice({ previous_balance: { ...previousBalance, creditToApply: 20, combinedTotal: 475.1, totalLabel: 'Total due today' } }));
-    expect(text).toContain('Account credit applied at payment');
-    expect(text).toContain('− $20.00');
-    expect(text).toContain('$475.10');
-  });
-
   test('no previous_balance: no block', async () => {
     const text = await renderedText(invoice());
     expect(text).not.toContain('PREVIOUS BALANCE');
