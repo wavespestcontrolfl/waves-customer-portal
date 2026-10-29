@@ -207,6 +207,15 @@ function chainFor(tableSpec, db, data) {
     const list = typeof source === 'function' ? source(filters) : (source || []);
     return list.filter((row) => filters.every(([key, value]) => !(key in row) || (Array.isArray(value) ? value.map(String).includes(String(row[key])) : String(row[key]) === String(value))));
   };
+  chain.forShare = () => chain;
+  chain.del = async () => 0;
+  // A completion upsert answers its returning row; an actual insert just records. Both are kept on db.inserts.
+  chain.insert = (row) => {
+    (db.inserts[table] = db.inserts[table] || []).push(row);
+    const done = Promise.resolve([row]);
+    done.onConflict = () => ({ merge: () => ({ returning: async () => [{ id: 'completion-1', ...row }] }) });
+    return done;
+  };
   chain.first = async () => rows()[0] ?? null;
   chain.pluck = async (column) => rows().map((row) => row[column]);
   chain.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
@@ -219,6 +228,7 @@ function fakeDb(data) {
   db.raw = async () => ({ rows: [] });
   db.fn = { now: () => new Date() };
   db.isTransaction = false;
+  db.inserts = {};
   return db;
 }
 
@@ -493,6 +503,56 @@ describe('the closeout pin writes the round\'s window', () => {
   test('the closeout stamps the plan\'s structured window (source pin, so the chain plan -> pin stays one line)', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(source).toMatch(/const structured = waveguardPlan\.protocol\.structured;\s+const window = structured\.window \|\| \{\};\s+scheduledServiceUpdate\.lawn_protocol_key = structured\.protocolKey \|\| null;\s+scheduledServiceUpdate\.lawn_protocol_version = structured\.version \|\| null;\s+scheduledServiceUpdate\.lawn_protocol_window_key = window\.key \|\| null;/);
+  });
+});
+
+// ── Completion attribution ──────────────────────────────────────────────────────────────────────────────────────────────────────
+// The completion maps each applied product back to a protocol row (lawn-protocol-completion loadProtocolRows). For a rounds visit it must
+// resolve the SAME row set the plan read: the round window's program rows plus the real date's weed and spot rows.
+describe('completion attribution on a rounds visit', () => {
+  const { recordLawnProtocolCompletion } = require('../services/lawn-protocol-completion');
+  const rowId = (month, name) => `row-${month}-${name}`;
+  const applied = (name) => ({ id: `sp-${name}`, product_id: CAT[name].id, product_name: name, application_rate: 1, rate_unit: 'oz', total_amount: 1, amount_unit: 'oz' });
+  async function attribute(options, names) {
+    const db = planDb(options);
+    const plan = await engine.buildPlanForService('visit-1', { db, billingModeColumnExists: false, now: new Date('2026-10-29T16:00:00Z') });
+    await recordLawnProtocolCompletion(db, {
+      service: { id: 'visit-1', customer_id: 'cust-1' }, serviceRecord: { id: 'record-1' }, plan, serviceProducts: names.map(applied), completionInput: { inventoryDeductions: [] },
+    });
+    return Object.fromEntries((db.inserts.lawn_protocol_product_actuals || []).map((row) => [row.product_name, row]));
+  }
+
+  test.each(['2027-02-20', '2027-03-10'])('St. Augustine round 2 on %s: Celsius attributes to FEBRUARY\'s spot row; the April program bag still attributes', async (date) => {
+    const actuals = await attribute({ date }, [NAMES.CEL, NAMES.DIM]);
+    expect(actuals[NAMES.CEL]).toMatchObject({ protocol_product_id: rowId(2, NAMES.CEL), status: 'applied' });
+    expect(actuals[NAMES.DIM]).toMatchObject({ protocol_product_id: rowId(4, NAMES.DIM), status: 'applied' });
+  });
+
+  test('bermuda round 2 on Mar 10: the weed rows are March\'s (Certainty is a protocol row), Celsius is March\'s', async () => {
+    const actuals = await attribute({ date: '2027-03-10', track: 'bermuda' }, [NAMES.CER, NAMES.CEL]);
+    expect(actuals[NAMES.CER]).toMatchObject({ protocol_product_id: rowId(3, NAMES.CER), status: 'applied' });
+    expect(actuals[NAMES.CEL]).toMatchObject({ protocol_product_id: rowId(3, NAMES.CEL), status: 'applied' });
+  });
+
+  test('St. Augustine round 2 on Mar 10: Certainty is NOT a February row, so it is off protocol (the green-up rule)', async () => {
+    expect((await attribute({ date: '2027-03-10' }, [NAMES.CER]))[NAMES.CER].status).toBe('off_protocol_applied');
+  });
+
+  test('round 3 on Mar 20: a March spot product attributes to March\'s row, the bag to February\'s', async () => {
+    const actuals = await attribute({ date: '2027-03-20' }, [NAMES.CER, NAMES.F24]);
+    expect(actuals[NAMES.CER]).toMatchObject({ protocol_product_id: rowId(3, NAMES.CER), status: 'applied' });
+    expect(actuals[NAMES.F24]).toMatchObject({ protocol_product_id: rowId(2, NAMES.F24), status: 'applied' });
+  });
+
+  test('a non-rounds visit is attributed to its own window only, as before (an April Celsius is off protocol; February\'s is February\'s)', async () => {
+    expect((await attribute({ date: '2027-04-09', pattern: 'monthly' }, [NAMES.CEL]))[NAMES.CEL]).toMatchObject({ protocol_product_id: null, status: 'off_protocol_applied' });
+    expect((await attribute({ date: '2027-02-10', pattern: 'monthly' }, [NAMES.CEL, NAMES.F24]))[NAMES.CEL]).toMatchObject({ protocol_product_id: rowId(2, NAMES.CEL), status: 'applied' });
+    expect((await attribute({ date: '2027-03-10', pattern: 'custom', interval: 42 }, [NAMES.CER]))[NAMES.CER]).toMatchObject({ protocol_product_id: rowId(3, NAMES.CER), status: 'applied' });
+  });
+
+  test('the plan carries the round it read only on a rounds visit', async () => {
+    expect((await planFor({ date: '2027-02-20' })).roundStep).toEqual({ round: 2, month: 4, spotMonth: 2 });
+    expect(await planFor({ date: '2027-02-20', pattern: 'monthly' })).not.toHaveProperty('roundStep');
   });
 });
 

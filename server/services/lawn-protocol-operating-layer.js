@@ -381,6 +381,7 @@ module.exports = {
   lockDraftProtocol,
   getActiveLawnProtocol,
   getLawnProtocolById,
+  withRoundSpotRows,
   getProtocolWindowContext,
   summarizeProtocolContext,
 };

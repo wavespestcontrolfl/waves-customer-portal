@@ -2848,6 +2848,8 @@ async function buildPlanForService(serviceId, options = {}) {
     inventory: inventorySummary,
     // Gate off, or not a bermuda removal visit: no field, the payload is the old one.
     ...step.field,
+    // A rounds visit: the step the plan read, so the completion attributes to the same row set (lawn-protocol-completion loadProtocolRows).
+    ...(rounds ? { roundStep: { round: rounds.round, month: rounds.month, spotMonth: rounds.spotMonth } } : {}),
     appointmentAssignment: {
       protocolKey: service.lawn_protocol_key || null,
       protocolVersion: service.lawn_protocol_version || null,
