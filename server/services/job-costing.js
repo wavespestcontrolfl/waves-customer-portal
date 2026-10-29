@@ -474,6 +474,19 @@ async function calcProductsCost(db, serviceRecordId) {
     logger.debug(`[job-costing] inventory movement cost error: ${err.message}`);
   }
 
+  // A line the completion refused for an implausible amount (deductProductInventory) wrote no movement and no cost: the
+  // ledger fallback below must not price it either.
+  const implausibleProductIds = new Set();
+  try {
+    let notes = (await db('service_records').where({ id: serviceRecordId }).first('structured_notes'))?.structured_notes;
+    if (typeof notes === 'string') notes = JSON.parse(notes);
+    for (const d of Array.isArray(notes?.inventoryDeductions) ? notes.inventoryDeductions : []) {
+      if (d?.status === 'not_deducted_implausible' && d.productId) implausibleProductIds.add(String(d.productId));
+    }
+  } catch (err) {
+    logger.debug(`[job-costing] implausible-amount read error: ${err.message}`);
+  }
+
   try {
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
@@ -485,6 +498,7 @@ async function calcProductsCost(db, serviceRecordId) {
       const qty = Number(r.quantity_applied) || 0;
       if (!qty || !r.product_id) continue;
       if (costedInventoryProductIds.has(r.product_id)) continue;
+      if (implausibleProductIds.has(String(r.product_id))) continue;
 
       // Price the amount the way the completion deduction prices an inventory
       // movement (inventory-cost.js): cost_per_unit in its own unit, else the

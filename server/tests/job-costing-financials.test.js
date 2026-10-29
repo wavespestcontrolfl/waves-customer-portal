@@ -821,7 +821,7 @@ describe('calcProductsCost — an application amount is priced per unit, never p
   // Chainable fake for exactly calcProductsCost's queries: the usage movements,
   // the application rows, and the catalog row. vendor_pricing must never be
   // read (the catalog's best_price already ranks the vendor rows).
-  function fakeProductsDb({ movements = [], applications = [], products = {} } = {}) {
+  function fakeProductsDb({ movements = [], applications = [], products = {}, record = null } = {}) {
     return (table) => {
       let productId = null;
       const chain = {
@@ -836,6 +836,7 @@ describe('calcProductsCost — an application amount is priced per unit, never p
         first: () => {
           if (table === 'vendor_pricing') throw new Error('vendor_pricing read');
           if (table === 'products_catalog') return Promise.resolve(products[productId] || null);
+          if (table === 'service_records') return Promise.resolve(record);
           return Promise.resolve(null);
         },
       };
@@ -885,6 +886,23 @@ describe('calcProductsCost — an application amount is priced per unit, never p
     const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
     expect(productsCost).toBe(0);
     expect(breakdown).toEqual([]);
+  });
+
+  test.each([
+    ['saved as an object', (notes) => notes],
+    ['saved as text', (notes) => JSON.stringify(notes)],
+  ])('a line the completion refused as an implausible amount is not priced from the ledger (%s)', async (_label, save) => {
+    const db = fakeProductsDb({
+      applications: [
+        { product_id: 'p-jug', quantity_applied: 1000000, quantity_unit: 'fl_oz' },
+        { product_id: 'p-bag', quantity_applied: 16.968, quantity_unit: 'lb' },
+      ],
+      products: { 'p-jug': JUG, 'p-bag': { inventory_unit: 'lb', unit_size_oz: 800, best_price: 44.23, cost_per_unit: null } },
+      record: { structured_notes: save({ inventoryDeductions: [{ productId: 'p-jug', status: 'not_deducted_implausible' }, { productId: 'p-bag', status: 'deducted' }] }) },
+    });
+    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
+    expect(productsCost).toBe(15.01);
+    expect(breakdown).toEqual([expect.objectContaining({ product_id: 'p-bag' })]);
   });
 
   test('a product an inventory movement already costed is not costed again', async () => {
