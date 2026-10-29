@@ -591,11 +591,13 @@ describe('a part payment (GATE_IB_RECORD_PAYMENT_PARTIAL + GATE_PARTIAL_PAYMENTS
     expect(text).toMatch(/Part payment of \$40\.00 by check, reference 1042, as of today, on invoice WPC-2099-0001; \$77\.00 will still be owed\. The invoice stays open \(sent\)/);
     expect(text).toMatch(/amount owed this card priced from is \$117\.00/);
     expect(text).toMatch(/reminders continue for the rest: the reminder sequence is not stopped/);
-    expect(text).toMatch(/No receipt is sent\. To send one/);
+    expect(text).toMatch(/No receipt is sent for a part payment, and none can be sent yet/);
     expect(text).toMatch(/No card is charged/);
     expect(text).toMatch(/half now/);
     expect(text).not.toMatch(/→ paid/);
     expect(card.effects.filter((e) => e.kind === 'comms')).toHaveLength(1);
+    // A receipt needs the bill paid in full: the card must not offer one now (Codex #7017 r1).
+    expect(card.effects.find((e) => e.kind === 'comms').text).toBe('No receipt is sent for a part payment, and none can be sent yet: a receipt becomes available once the rest is paid and the invoice is paid in full.');
     // The card lines the operator sees.
     const lines = cardLines('record_payment', card).map((l) => l.text).join('\n');
     expect(lines).toMatch(/Record a PART payment on invoice WPC-2099-0001 for Robin Sample: \$40\.00 by check \(reference 1042\)/);
@@ -678,6 +680,8 @@ describe('a part payment (GATE_IB_RECORD_PAYMENT_PARTIAL + GATE_PARTIAL_PAYMENTS
     const res = await confirm(card, { ...PART, note: 'n' });
     expect(res).toMatchObject({ success: true, partial: true, status: 'sent', method: 'check', amount: 40, still_owed: 77, sent_to_customer: false });
     expect(res.note).toMatch(/Part payment of \$40\.00 by check recorded on WPC-2099-0001; \$77\.00 is still owed and the invoice stays open, with its reminders running\. No receipt was sent/);
+    expect(res.note).toMatch(/No receipt was sent: a receipt becomes available once the rest is paid\.$/);
+    expect(res.note).not.toMatch(/resend the receipt/);
     expect(Invoices.recordPaymentFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.recordPaymentFromBar).toHaveBeenCalledWith({
       invoiceId: INV,

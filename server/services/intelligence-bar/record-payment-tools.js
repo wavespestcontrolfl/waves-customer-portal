@@ -263,7 +263,7 @@ function partEffects({ invoice, dueCents, partCents, method, reference, note }) 
       ? [{ kind: 'operational', text: 'An open pay-page card session exists for this invoice: it is cancelled first so it cannot be charged later. A card payment already in flight stops the recording.' }]
       : []),
     { kind: 'operational', text: 'The invoice is not paid in full, so no linked visit is completed, no review ask is enrolled, no payment plan is completed and no billing pause is cleared by this step.' },
-    { kind: 'comms', text: 'No receipt is sent. To send one, ask the bar to resend the receipt after recording, or use the Invoices page.' },
+    { kind: 'comms', text: 'No receipt is sent for a part payment, and none can be sent yet: a receipt becomes available once the rest is paid and the invoice is paid in full.' },
   ];
   return effects;
 }
@@ -417,7 +417,7 @@ function partReport(plan, json, base) {
   logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} part payment on invoice ${plan.invoice_id}`);
   return {
     ...base, success: true, partial: true, status: json.invoice?.status || plan.status, method: plan.method, amount: plan.amount, still_owed: remaining, sent_to_customer: false,
-    note: `Part payment of ${money(plan.amount * 100)} by ${plan.method} recorded on ${plan.invoice_number}; ${money(remaining * 100)} is still owed and the invoice stays open, with its reminders running. No receipt was sent. To send one, ask the bar to resend the receipt, or use the Invoices page.`,
+    note: `Part payment of ${money(plan.amount * 100)} by ${plan.method} recorded on ${plan.invoice_number}; ${money(remaining * 100)} is still owed and the invoice stays open, with its reminders running. No receipt was sent: a receipt becomes available once the rest is paid.`,
   };
 }
 
