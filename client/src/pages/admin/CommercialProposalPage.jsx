@@ -13,6 +13,7 @@ import ProposalProjectCosting from '../../components/estimates/ProposalProjectCo
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
 import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
+import useIsMobile from '../../hooks/useIsMobile';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -124,9 +125,22 @@ const PROGRAM_FAMILY_OPTIONS = [
 const programRowIsPriced = (p) => String(p.label || '').trim()
   && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
 
-// Standard / Not stated / Custom for each fixed agreement term (owner 2026-10-28 builder scope). Standard is the
-// agreement's own text, compared the way online signing compares it; Not stated leaves it blank so the agreement
-// governs. Both sign online. Custom is typed wording, which online signing refuses.
+// The common program cadences as one pick (owner 2026-10-28 builder scope); Custom shows the 1–52 visits-per-year box.
+const PROGRAM_FREQUENCY_PRESETS = [
+  { perYear: 12, label: 'Monthly' },
+  { perYear: 6, label: 'Every 2 months' },
+  { perYear: 4, label: 'Quarterly' },
+];
+const programFrequencyChoice = (p) => {
+  const preset = PROGRAM_FREQUENCY_PRESETS.find((f) => String(p.frequencyPerYear).trim() !== '' && Number(p.frequencyPerYear) === f.perYear);
+  return p.freqCustom || !preset ? 'custom' : String(preset.perYear);
+};
+
+// Standard / Custom for each fixed agreement term (owner 2026-10-28 builder scope, plans-only follow-up). Standard is the
+// agreement's own text, compared the way online signing compares it, and signs online. Custom is typed wording, which
+// online signing refuses. A blank term (an older proposal) is not a choice any more: the select shows "Not stated (old
+// proposal)" until the operator picks Standard or Custom. The four terms only apply to a proposal with a recurring
+// service, so the picks are hidden (values kept) when annual recurring is 0.
 const TERM_CHOICE_KEYS = ['initialTermMonths', 'renewal', 'priceAdjustment', 'cancellation'];
 const standardTermText = (key) => String(AGREEMENT_TERMS[key]);
 function termChoiceOf(key, value) {
@@ -140,6 +154,7 @@ const termChoicesOf = (terms) => Object.fromEntries(TERM_CHOICE_KEYS.map((key) =
 const PAYMENT_TERM_LABELS = {
   [AUTOPAY_PAYMENT_TERMS]: 'Auto Pay', [INVOICE_PAYMENT_TERMS]: 'Net-30', net15: 'Net-15', due_on_receipt: 'Due on receipt',
 };
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const formatPct = (pct) => String(roundMoney(pct));
 
 
@@ -227,6 +242,27 @@ function canMarkProposalWon(est) {
 }
 
 const LABEL = 'text-11 uppercase tracking-label text-zinc-500';
+// A field label shown only below md, where the desktop column headers are hidden.
+const PHONE_LABEL = `${LABEL} mb-1 block md:hidden`;
+
+// A section that folds to its title and a one-line summary (owner 2026-10-28 builder scope: less scrolling on a
+// phone). Visibility only: the body stays mounted while folded, so folding never drops or resets anything.
+function FoldCard({ title, summary, open, onToggle, bodyClassName, children }) {
+  return (
+    <Card>
+      {/* Folded, the card is only this header: no divider line under it. */}
+      <CardHeader style={open ? undefined : { borderBottomWidth: 0 }}>
+        <button type="button" className="flex w-full items-center gap-2 text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring" aria-expanded={open} onClick={onToggle}>
+          <CardTitle className="shrink-0">{title}</CardTitle>
+          {/* The space keeps title and summary apart in the button's spoken name. */}
+          {!open && summary && <>{' '}<span className="min-w-0 truncate text-13 text-zinc-500">{summary}</span></>}
+          <span className="ml-auto shrink-0 text-zinc-400">{open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</span>
+        </button>
+      </CardHeader>
+      <CardBody className={bodyClassName} hidden={!open}>{children}</CardBody>
+    </Card>
+  );
+}
 
 export default function CommercialProposalPage() {
   return <EstimateSendProvider><CommercialProposalEditor /></EstimateSendProvider>;
@@ -303,6 +339,14 @@ function CommercialProposalEditor() {
   // load, then the operator's pick (a Custom pick keeps its box open even
   // while the text still reads like the standard).
   const [termChoices, setTermChoices] = useState(() => termChoicesOf({}));
+  // Folded sections: the itemization starts open, optional sections folded.
+  const [openSections, setOpenSections] = useState({
+    scope: false, programs: true, corrective: false, responsibilities: false, terms: false, additionalTerms: false,
+  });
+  const toggleSection = (key) => setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  // Below lg the sidebar drops under the form, so a bottom bar keeps the
+  // totals and Save in reach.
+  const isPhone = useIsMobile(1024);
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
   const [prospectBrief, setProspectBrief] = useState(null);
@@ -545,6 +589,27 @@ function CommercialProposalEditor() {
       : proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState, taxRate })),
     [programsMode, buildings, correctiveWork, programsState, taxRate],
   );
+
+  // One-line summaries for the folded sections.
+  const programsAnnual = roundMoney(programsState.filter(programRowIsPriced)
+    .reduce((sum, p) => sum + roundMoney(roundMoney(p.pricePerApplication) * Math.round(Number(p.frequencyPerYear))), 0));
+  const scopeLabels = scopeItems.filter((item) => item.label.trim() && item.value.trim()).map((item) => item.label.trim());
+  const scopeSummary = scopeLabels.length ? scopeLabels.join(' · ') : 'None added';
+  const namedWork = correctiveWork.filter((w) => String(w.label || '').trim());
+  const correctiveSummary = namedWork.length
+    ? `${plural(namedWork.length, 'item')} · ${money(namedWork.reduce((sum, w) => sum + roundMoney(w.amount), 0))}`
+    : 'None';
+  const responsibilityCount = responsibilitiesText.split('\n').filter((line) => line.trim()).length;
+  const responsibilitiesSummary = responsibilityCount ? plural(responsibilityCount, 'line') : 'None';
+  // The fixed terms apply to a recurring program only (same number the sidebar shows as "Annual recurring").
+  const hasRecurring = Number(totals.annualRecurring) > 0;
+  const termKinds = Object.values(termChoices);
+  const termsSummary = [
+    PAYMENT_TERM_LABELS[commercialTerms.paymentTerms] || 'Payment not set',
+    !hasRecurring ? 'One-time work, no term'
+      : termKinds.includes('custom') ? 'Custom terms' : termKinds.every((kind) => kind === 'none') ? 'Terms not stated' : 'Standard terms',
+    validThrough ? `Valid through ${validThrough}` : null,
+  ].filter(Boolean).join(' · ');
 
   // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived
   // from what the estimator priced/knows. Fills only sections that are
@@ -825,16 +890,50 @@ function CommercialProposalEditor() {
     generatedRespByFamilyRef.current = Object.keys(nextProvenance).length ? nextProvenance : null;
   };
 
-  // Standard / Not stated / Custom for one fixed term. Custom starts from the
-  // current wording (the standard text when there was none), so the operator
-  // edits it instead of retyping it.
+  // One program field edit. Builder-only keys (isNew, taxTouched, freqCustom)
+  // ride on the row; the payload maps named fields only, so they never save.
+  const patchProgram = (idx, patch) => {
+    markEdit();
+    setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+  const patchCorrective = (idx, patch) => {
+    markEdit();
+    setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+  // Visits per year, from the preset pick or the Custom box. Keeps the
+  // generated cadence bullet in sync — a stale "4 scheduled service visits
+  // per year" line beside a changed frequency is a wrong promise (codex
+  // 1A-ii r6).
+  const setProgramFrequency = (idx, nextFreq, freqCustom) => {
+    markEdit();
+    setProgramsState((prev) => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const n = Math.round(Number(nextFreq));
+      const synced = Number.isFinite(n) && n >= 1
+        ? it.inclusionsText.replace(/^\d+ scheduled applications? per year$/m, `${n} scheduled application${n === 1 ? '' : 's'} per year`)
+        : it.inclusionsText;
+      return { ...it, frequencyPerYear: nextFreq, inclusionsText: synced, freqCustom };
+    }));
+  };
+  const addProgram = () => {
+    markEdit();
+    setProgramsState((prev) => [...prev, {
+      id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '',
+      taxable: defaultTaxable('pest'), note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [],
+      isNew: true,
+    }]);
+    setOpenSections((prev) => ({ ...prev, programs: true }));
+  };
+  // Standard / Custom for one fixed term (a blank old term is the only 'none',
+  // and only until this pick). Custom starts from the current wording (the
+  // standard text when there was none), so the operator edits it instead of
+  // retyping it.
   const chooseTerm = (key, choice) => {
     markEdit();
     setTermChoices((prev) => ({ ...prev, [key]: choice }));
     setCommercialTerms((prev) => {
       const standard = standardTermText(key);
       if (choice === 'standard') return { ...prev, [key]: standard };
-      if (choice === 'none') return { ...prev, [key]: '' };
       return { ...prev, [key]: prev[key] || standard };
     });
   };
@@ -1239,6 +1338,15 @@ function CommercialProposalEditor() {
       <div className="flex flex-col lg:flex-row gap-5 items-start">
         {/* Main column */}
         <div className="flex-1 min-w-0 w-full space-y-5">
+          {!locked && (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
+                {generating ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+                Generate from estimate
+              </Button>
+              <span className="text-12 text-zinc-500">Fills the empty sections from the estimate. It never replaces what is already filled in.</span>
+            </div>
+          )}
           <Card>
             <CardHeader>
               <CardTitle>Proposal details</CardTitle>
@@ -1304,7 +1412,7 @@ function CommercialProposalEditor() {
               <CardHeader>
                 <button
                   type="button"
-                  className="flex w-full items-center gap-2 text-left"
+                  className="flex w-full items-center gap-2 text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring"
                   onClick={() => setBriefOpen((v) => !v)}
                 >
                   <ClipboardList size={15} className="text-zinc-500" />
@@ -1390,157 +1498,190 @@ function CommercialProposalEditor() {
             </Card>
           )}
 
-          {!locked && (
-            <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
-              {generating ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
-              Generate from estimate
-            </Button>
-          )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Property scope</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-2">
-              <div className="text-12 text-zinc-500">
-                Optional — facts the proposal was scoped against (buildings, units, turf sq ft,
-                device counts). Shown on the proposal when filled in.
+          <FoldCard
+            title="Property scope" open={openSections.scope} onToggle={() => toggleSection('scope')}
+            summary={scopeSummary} bodyClassName="space-y-2"
+          >
+            <div className="text-12 text-zinc-500">
+              Optional — facts the proposal was scoped against (buildings, units, turf sq ft,
+              device counts). Shown on the proposal when filled in.
+            </div>
+            {scopeItems.map((item, idx) => (
+              <div key={idx} className="flex gap-2 items-center">
+                <Input
+                  size="sm" className="w-32 sm:w-48 shrink-0" placeholder="Label (e.g. Units)" maxLength={80}
+                  value={item.label} disabled={!!locked}
+                  onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                />
+                <Input
+                  size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)" maxLength={160}
+                  value={item.value} disabled={!!locked}
+                  onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
+                />
+                {!locked && (
+                  <Button variant="ghost" size="sm" title="Remove row"
+                    onClick={() => { markEdit(); setScopeItems((prev) => prev.filter((_, i) => i !== idx)); }}>
+                    <Trash2 size={14} />
+                  </Button>
+                )}
               </div>
-              {scopeItems.map((item, idx) => (
-                <div key={idx} className="flex gap-2 items-center">
-                  <Input
-                    size="sm" className="w-48 shrink-0" placeholder="Label (e.g. Units)" maxLength={80}
-                    value={item.label} disabled={!!locked}
-                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
-                  />
-                  <Input
-                    size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)" maxLength={160}
-                    value={item.value} disabled={!!locked}
-                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
-                  />
-                  {!locked && (
-                    <Button variant="ghost" size="sm" title="Remove row"
-                      onClick={() => { markEdit(); setScopeItems((prev) => prev.filter((_, i) => i !== idx)); }}>
-                      <Trash2 size={14} />
-                    </Button>
-                  )}
-                </div>
-              ))}
-              {!locked && (
-                <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setScopeItems((prev) => [...prev, { label: '', value: '' }]); }}>
-                  <Plus size={14} /> Add scope row
-                </Button>
-              )}
-            </CardBody>
-          </Card>
+            ))}
+            {!locked && (
+              <Button variant="ghost" size="sm"
+                onClick={() => { markEdit(); setScopeItems((prev) => [...prev, { label: '', value: '' }]); }}>
+                <Plus size={14} /> Add scope row
+              </Button>
+            )}
+          </FoldCard>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Service programs</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-3">
+          {programsState.length === 0 ? (
+            !locked && (
+              <div className="flex flex-wrap items-center gap-3 rounded-md border border-hairline border-zinc-200 bg-white px-4 py-3">
+                <span className="flex-1 min-w-[200px] text-13 text-zinc-600">
+                  Price by service program (a price per application) instead of building line items?
+                </span>
+                <Button variant="secondary" size="sm" onClick={addProgram}>
+                  <Plus size={14} /> Add program
+                </Button>
+              </div>
+            )
+          ) : (
+            <FoldCard
+              title="Service programs" open={openSections.programs} onToggle={() => toggleSection('programs')}
+              summary={`${plural(programsState.length, 'program')} · ${money(programsAnnual)}/yr`}
+              bodyClassName="space-y-3"
+            >
               <div className="text-12 text-zinc-500">
                 Per-service programs with per-application pricing — when any program is priced, programs
                 replace the building line items as the recurring itemization (use &ldquo;Covers&rdquo; for
                 building labels). Annual totals derive from price × frequency.
               </div>
-              {programsState.map((p, idx) => (
-                <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
-                  <div className="flex flex-wrap gap-2 items-center">
-                    <Select
-                      size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family" aria-label="Service family"
-                      onChange={(e) => changeProgramFamily(idx, e.target.value)}
-                    >
-                      {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </Select>
-                    <Input
-                      size="sm" className="flex-1 min-w-[180px]" placeholder="Program name (e.g. Quarterly pest program)" maxLength={120}
-                      value={p.label} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
-                    />
-                    <Input
-                      size="sm" className="w-20 shrink-0" type="number" min="1" max="52" step="1" title="Visits per year"
-                      value={p.frequencyPerYear} disabled={!!locked}
-                      onChange={(e) => {
-                        markEdit();
-                        const nextFreq = e.target.value;
-                        setProgramsState((prev) => prev.map((it, i) => {
-                          if (i !== idx) return it;
-                          // Keep the generated cadence bullet in sync — a
-                          // stale "4 scheduled service visits per year" line
-                          // beside a changed frequency is a wrong promise
-                          // (codex 1A-ii r6).
-                          const n = Math.round(Number(nextFreq));
-                          const synced = Number.isFinite(n) && n >= 1
-                            ? it.inclusionsText.replace(/^\d+ scheduled applications? per year$/m, `${n} scheduled application${n === 1 ? '' : 's'} per year`)
-                            : it.inclusionsText;
-                          return { ...it, frequencyPerYear: nextFreq, inclusionsText: synced };
-                        }));
-                      }}
-                    />
-                    <Input
-                      size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Price per application"
-                      value={p.pricePerApplication} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, pricePerApplication: e.target.value } : it))); }}
-                    />
-                    <Input
-                      size="sm" className="w-20 shrink-0" type="number" min="5" max="480" step="5"
-                      title="Visit length in minutes (sizes the first visit a customer books online; over 90, the office books it)" placeholder="min"
-                      aria-label="Visit length in minutes"
-                      value={p.visitMinutes ?? ''} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, visitMinutes: e.target.value } : it))); }}
-                    />
-                    <div className="flex items-center gap-1 shrink-0" title="Taxable program">
-                      <Switch checked={p.taxable} disabled={!!locked} aria-label="Taxable program"
-                        onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v, taxTouched: true } : it))); }} />
-                      <span className="text-12 text-zinc-500">Tax</span>
+              {programsState.map((p, idx) => {
+                const freqChoice = programFrequencyChoice(p);
+                return (
+                  <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
+                    <div className="flex flex-wrap gap-2 items-end">
+                      <label className="block w-32 shrink-0">
+                        <span className={LABEL}>Service</span>
+                        <Select
+                          size="sm" className="mt-1" value={p.service} disabled={!!locked} aria-label="Service family"
+                          onChange={(e) => changeProgramFamily(idx, e.target.value)}
+                        >
+                          {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                        </Select>
+                      </label>
+                      <label className="block flex-1 min-w-[180px]">
+                        <span className={LABEL}>Program name</span>
+                        <Input
+                          size="sm" className="mt-1" placeholder="e.g. Quarterly pest program" maxLength={120}
+                          value={p.label} disabled={!!locked}
+                          onChange={(e) => patchProgram(idx, { label: e.target.value })}
+                        />
+                      </label>
+                      <label className="block w-36 shrink-0">
+                        <span className={LABEL}>Frequency</span>
+                        <Select
+                          size="sm" className="mt-1" value={freqChoice} disabled={!!locked} aria-label="Program frequency"
+                          onChange={(e) => (e.target.value === 'custom'
+                            ? patchProgram(idx, { freqCustom: true })
+                            : setProgramFrequency(idx, Number(e.target.value), false))}
+                        >
+                          {PROGRAM_FREQUENCY_PRESETS.map((f) => <option key={f.perYear} value={String(f.perYear)}>{f.label}</option>)}
+                          <option value="custom">Custom</option>
+                        </Select>
+                      </label>
+                      {freqChoice === 'custom' && (
+                        <label className="block w-24 shrink-0">
+                          <span className={LABEL}>Visits / yr</span>
+                          <Input
+                            size="sm" className="mt-1" type="number" min="1" max="52" step="1" title="Visits per year" aria-label="Visits per year"
+                            value={p.frequencyPerYear} disabled={!!locked}
+                            onChange={(e) => setProgramFrequency(idx, e.target.value, true)}
+                          />
+                        </label>
+                      )}
+                      <label className="block w-40 shrink-0">
+                        <span className={LABEL}>Price per application</span>
+                        <Input
+                          size="sm" className="mt-1" type="number" min="0" step="0.01" title="Price per application" aria-label="Price per application"
+                          value={p.pricePerApplication} disabled={!!locked}
+                          onChange={(e) => patchProgram(idx, { pricePerApplication: e.target.value })}
+                        />
+                      </label>
+                      <label className="block w-28 shrink-0">
+                        <span className={LABEL}>Visit minutes</span>
+                        <Input
+                          size="sm" className="mt-1" type="number" min="5" max="480" step="5"
+                          title="Visit length in minutes (sizes the first visit a customer books online; over 90, the office books it)"
+                          aria-label="Visit length in minutes"
+                          value={p.visitMinutes ?? ''} disabled={!!locked}
+                          onChange={(e) => patchProgram(idx, { visitMinutes: e.target.value })}
+                        />
+                      </label>
+                      <div className="flex h-11 md:h-7 items-center gap-2 shrink-0">
+                        <Switch
+                          checked={p.taxable} disabled={!!locked} aria-label="Taxable program"
+                          onChange={(v) => patchProgram(idx, { taxable: v, taxTouched: true })}
+                        />
+                        <span className="text-13 text-zinc-600">Taxable</span>
+                      </div>
+                      <span className="flex h-11 md:h-7 items-center text-13 text-zinc-700 tabular-nums shrink-0">
+                        {money(roundMoney((Number(p.pricePerApplication) || 0) * (Math.round(Number(p.frequencyPerYear)) || 0)))}/yr
+                      </span>
+                      {!locked && (
+                        <Button variant="ghost" size="sm" title="Remove program" aria-label="Remove program"
+                          onClick={() => removeProgram(idx)}>
+                          <Trash2 size={14} />
+                        </Button>
+                      )}
                     </div>
-                    <span className="text-12 text-zinc-500 tabular-nums shrink-0">
-                      {money(roundMoney((Number(p.pricePerApplication) || 0) * (Math.round(Number(p.frequencyPerYear)) || 0)))}/yr
-                    </span>
-                    {!locked && (
-                      <Button variant="ghost" size="sm" title="Remove program"
-                        onClick={() => removeProgram(idx)}>
-                        <Trash2 size={14} />
-                      </Button>
-                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <label className="block">
+                        <span className={LABEL}>Includes</span>
+                        <Textarea
+                          className="mt-1" rows={3} value={p.inclusionsText} disabled={!!locked}
+                          placeholder={'What this program includes — one per line'}
+                          onChange={(e) => patchProgram(idx, { inclusionsText: e.target.value })}
+                        />
+                      </label>
+                      <label className="block">
+                        <span className={LABEL}>Not included</span>
+                        <Textarea
+                          className="mt-1" rows={3} value={p.exclusionsText} disabled={!!locked}
+                          placeholder={'Not included / quoted separately — one per line'}
+                          onChange={(e) => patchProgram(idx, { exclusionsText: e.target.value })}
+                        />
+                      </label>
+                    </div>
+                    <label className="block">
+                      <span className={LABEL}>Covers (optional)</span>
+                      <Input
+                        size="sm" className="mt-1" placeholder="Comma-separated names, add a note with | (e.g. Tower A | Exterior only, Clubhouse)" maxLength={400}
+                        value={p.coversText} disabled={!!locked}
+                        onChange={(e) => patchProgram(idx, { coversText: e.target.value })}
+                      />
+                    </label>
+                    {/* Customer-visible on every proposal surface — a loaded
+                        note must be editable here, not silently round-tripped
+                        out of sight (codex 1A-ii r15). */}
+                    <label className="block">
+                      <span className={LABEL}>Program note (optional, shown on the proposal)</span>
+                      <Input
+                        size="sm" className="mt-1" maxLength={300}
+                        value={p.note} disabled={!!locked}
+                        onChange={(e) => patchProgram(idx, { note: e.target.value })}
+                      />
+                    </label>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <Textarea
-                      rows={3} value={p.inclusionsText} disabled={!!locked}
-                      placeholder={'What this program includes — one per line'}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, inclusionsText: e.target.value } : it))); }}
-                    />
-                    <Textarea
-                      rows={3} value={p.exclusionsText} disabled={!!locked}
-                      placeholder={'Not included / quoted separately — one per line'}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, exclusionsText: e.target.value } : it))); }}
-                    />
-                  </div>
-                  <Input
-                    size="sm" placeholder="Covers (optional) — comma-separated names, add a note with | (e.g. Tower A | Exterior only, Clubhouse)" maxLength={400}
-                    value={p.coversText} disabled={!!locked}
-                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, coversText: e.target.value } : it))); }}
-                  />
-                  {/* Customer-visible on every proposal surface — a loaded
-                      note must be editable here, not silently round-tripped
-                      out of sight (codex 1A-ii r15). */}
-                  <Input
-                    size="sm" placeholder="Program note (optional, shown on the proposal)" maxLength={300}
-                    value={p.note} disabled={!!locked}
-                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, note: e.target.value } : it))); }}
-                  />
-                </div>
-              ))}
+                );
+              })}
               {!locked && (
-                <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '', taxable: defaultTaxable('pest'), note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [], isNew: true }]); }}>
+                <Button variant="ghost" size="sm" onClick={addProgram}>
                   <Plus size={14} /> Add program
                 </Button>
               )}
-            </CardBody>
-          </Card>
+            </FoldCard>
+          )}
 
           {programsMode && (
             <div className="flex flex-wrap items-center gap-3 text-13 text-zinc-600 bg-zinc-50 border border-hairline border-zinc-200 rounded px-3 py-2">
@@ -1596,44 +1737,62 @@ function CommercialProposalEditor() {
                   </div>
 
                   {b.lineItems.map((li, lii) => (
-                    <div key={lii} className={`grid grid-cols-2 ${showUnitColumn ? 'md:grid-cols-[repeat(14,minmax(0,1fr))]' : 'md:grid-cols-12'} gap-2 items-center border-b border-hairline border-zinc-100 md:border-0 pb-2 md:pb-0`}>
-                      <Input
-                        className={`col-span-2 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-4'}`} size="sm" placeholder="Service description"
-                        value={li.description} disabled={!!locked}
-                        onChange={(e) => updateLine(bi, lii, { description: e.target.value })}
-                      />
-                      <Input
-                        className={`col-span-1 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-1'}`} size="sm" type="number" min="0.0001" step="0.0001" title="Quantity" aria-label="Quantity"
-                        value={li.quantity} disabled={!!locked}
-                        onChange={(e) => updateLine(bi, lii, { quantity: e.target.value })}
-                      />
-                      {showUnitColumn && <Select className="col-span-1 md:col-span-2" size="sm" value={li.unit || ''} disabled={!!locked || !bidToolsEnabled} aria-label="Quantity unit"
-                        onChange={(e) => updateLine(bi, lii, { unit: e.target.value })}>
-                        <option value="">No unit</option>
-                        {Object.entries(PROPOSAL_UNITS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-                      </Select>}
-                      <Input
-                        className="col-span-1 md:col-span-2" size="sm" type="number" min="0" step="0.0001" title="Unit price" aria-label="Unit price"
-                        value={li.unitPrice} disabled={!!locked}
-                        onChange={(e) => updateLine(bi, lii, { unitPrice: e.target.value })}
-                      />
-                      <Select
-                        className="col-span-1 md:col-span-2" size="sm" value={li.frequency} disabled={!!locked}
-                        onChange={(e) => updateLine(bi, lii, { frequency: e.target.value })}
-                      >
-                        {FREQUENCY_OPTIONS.map((f) => (
-                          <option key={f.value} value={f.value}>{f.label}</option>
-                        ))}
-                      </Select>
-                      <div className="col-span-1 md:col-span-1 flex md:justify-center items-center gap-1" title="Taxable line">
+                    <div key={lii} className={`grid grid-cols-2 ${showUnitColumn ? 'md:grid-cols-[repeat(14,minmax(0,1fr))]' : 'md:grid-cols-12'} gap-2 items-end md:items-center border-b border-hairline border-zinc-100 md:border-0 pb-2 md:pb-0`}>
+                      <label className={`block col-span-2 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-4'}`}>
+                        <span className={PHONE_LABEL}>Service description</span>
+                        <Input
+                          size="sm" placeholder="Service description"
+                          value={li.description} disabled={!!locked}
+                          onChange={(e) => updateLine(bi, lii, { description: e.target.value })}
+                        />
+                      </label>
+                      <label className={`block col-span-1 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-1'}`}>
+                        <span className={PHONE_LABEL}>Qty</span>
+                        <Input
+                          size="sm" type="number" min="0.0001" step="0.0001" title="Quantity" aria-label="Quantity"
+                          value={li.quantity} disabled={!!locked}
+                          onChange={(e) => updateLine(bi, lii, { quantity: e.target.value })}
+                        />
+                      </label>
+                      {showUnitColumn && (
+                        <label className="block col-span-1 md:col-span-2">
+                          <span className={PHONE_LABEL}>Unit</span>
+                          <Select size="sm" value={li.unit || ''} disabled={!!locked || !bidToolsEnabled} aria-label="Quantity unit"
+                            onChange={(e) => updateLine(bi, lii, { unit: e.target.value })}>
+                            <option value="">No unit</option>
+                            {Object.entries(PROPOSAL_UNITS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                          </Select>
+                        </label>
+                      )}
+                      <label className="block col-span-1 md:col-span-2">
+                        <span className={PHONE_LABEL}>Unit price</span>
+                        <Input
+                          size="sm" type="number" min="0" step="0.0001" title="Unit price" aria-label="Unit price"
+                          value={li.unitPrice} disabled={!!locked}
+                          onChange={(e) => updateLine(bi, lii, { unitPrice: e.target.value })}
+                        />
+                      </label>
+                      <label className="block col-span-1 md:col-span-2">
+                        <span className={PHONE_LABEL}>Frequency</span>
+                        <Select
+                          size="sm" value={li.frequency} disabled={!!locked} aria-label="Frequency"
+                          onChange={(e) => updateLine(bi, lii, { frequency: e.target.value })}
+                        >
+                          {FREQUENCY_OPTIONS.map((f) => (
+                            <option key={f.value} value={f.value}>{f.label}</option>
+                          ))}
+                        </Select>
+                      </label>
+                      <div className="col-span-1 md:col-span-1 flex h-11 md:h-auto md:justify-center items-center gap-2" title="Taxable line">
                         <Switch checked={li.taxable} disabled={!!locked} aria-label="Taxable line"
                           onChange={(v) => updateLine(bi, lii, { taxable: v })} />
-                        <span className="md:hidden text-12 text-zinc-500">Taxable</span>
+                        <span className="md:hidden text-13 text-zinc-600">Taxable</span>
                       </div>
                       <div
                         className={`col-span-1 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-1'} text-right text-13 tabular-nums text-zinc-700`}
                         title={li.frequency === 'one_time' ? 'One-time amount' : `${money(lineAnnual(li))} per year`}
                       >
+                        <span className={PHONE_LABEL}>Amount</span>
                         {money(lineAmount(li))}
                         {li.frequency !== 'one_time' && (
                           <span className="text-11 text-zinc-400">/{FREQUENCY_OPTIONS.find((f) => f.value === li.frequency)?.perYear === 12 ? 'mo' : 'visit'}</span>
@@ -1641,7 +1800,7 @@ function CommercialProposalEditor() {
                       </div>
                       <div className="col-span-1 md:col-span-1 flex justify-end">
                         {!locked && b.lineItems.length > 1 && (
-                          <Button variant="ghost" size="sm" onClick={() => removeLine(bi, lii)} title="Remove line">
+                          <Button variant="ghost" size="sm" onClick={() => removeLine(bi, lii)} title="Remove line" aria-label="Remove line">
                             <Trash2 size={14} />
                           </Button>
                         )}
@@ -1701,200 +1860,208 @@ function CommercialProposalEditor() {
             </div>
           )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Corrective work (one-time)</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-3">
-              <div className="text-12 text-zinc-500">
-                Optional — one-time remediation separated from the recurring programs.
-                Amounts count toward the one-time and first-year totals.
-              </div>
-              {correctiveWork.map((w, idx) => (
-                <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
-                  <div className="flex gap-2 items-center">
+          <FoldCard
+            title="Corrective work (one-time)" open={openSections.corrective} onToggle={() => toggleSection('corrective')}
+            summary={correctiveSummary} bodyClassName="space-y-3"
+          >
+            <div className="text-12 text-zinc-500">
+              Optional — one-time remediation separated from the recurring programs.
+              Amounts count toward the one-time and first-year totals.
+            </div>
+            {correctiveWork.map((w, idx) => (
+              <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
+                <div className="flex flex-wrap gap-2 items-end">
+                  <label className="block flex-1 min-w-[200px]">
+                    <span className={LABEL}>Work description</span>
                     <Input
-                      size="sm" className="flex-1" placeholder="Work description (e.g. Initial German roach cleanout — Units 2 & 4)" maxLength={160}
+                      size="sm" className="mt-1" placeholder="e.g. Initial German roach cleanout — Units 2 & 4" maxLength={160}
                       value={w.label} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                      onChange={(e) => patchCorrective(idx, { label: e.target.value })}
                     />
+                  </label>
+                  <label className="block w-28 shrink-0">
+                    <span className={LABEL}>Amount</span>
                     <Input
-                      size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Amount"
+                      size="sm" className="mt-1" type="number" min="0" step="0.01" title="Amount" aria-label="Amount"
                       value={w.amount} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, amount: e.target.value } : it))); }}
+                      onChange={(e) => patchCorrective(idx, { amount: e.target.value })}
                     />
-                    <div className="flex items-center gap-1 shrink-0" title="Taxable line">
-                      <Switch checked={w.taxable} disabled={!!locked}
-                        onChange={(v) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
-                      <span className="text-12 text-zinc-500">Tax</span>
-                    </div>
-                    {!locked && (
-                      <Button variant="ghost" size="sm" title="Remove work item"
-                        onClick={() => { markEdit(); setCorrectiveWork((prev) => prev.filter((_, i) => i !== idx)); }}>
-                        <Trash2 size={14} />
-                      </Button>
+                  </label>
+                  <div className="flex h-11 md:h-7 items-center gap-2 shrink-0">
+                    <Switch
+                      checked={w.taxable} disabled={!!locked} aria-label="Taxable work"
+                      onChange={(v) => patchCorrective(idx, { taxable: v })}
+                    />
+                    <span className="text-13 text-zinc-600">Taxable</span>
+                  </div>
+                  {!locked && (
+                    <Button variant="ghost" size="sm" title="Remove work item" aria-label="Remove work item"
+                      onClick={() => { markEdit(); setCorrectiveWork((prev) => prev.filter((_, i) => i !== idx)); }}>
+                      <Trash2 size={14} />
+                    </Button>
+                  )}
+                </div>
+                <label className="block">
+                  <span className={LABEL}>What it includes</span>
+                  <Textarea
+                    className="mt-1" rows={2} value={w.includesText} disabled={!!locked}
+                    placeholder={'One per line\ne.g. Crack & crevice treatment in both kitchens\nFollow-up inspection at 2 weeks'}
+                    onChange={(e) => patchCorrective(idx, { includesText: e.target.value })}
+                  />
+                </label>
+              </div>
+            ))}
+            {!locked && (
+              <Button variant="ghost" size="sm"
+                onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: defaultTaxable('other'), includesText: '' }]); }}>
+                <Plus size={14} /> Add corrective work
+              </Button>
+            )}
+          </FoldCard>
+
+          <FoldCard
+            title="Customer responsibilities" open={openSections.responsibilities} onToggle={() => toggleSection('responsibilities')}
+            summary={responsibilitiesSummary}
+          >
+            <Textarea
+              rows={3} value={responsibilitiesText} disabled={!!locked} aria-label="Customer responsibilities"
+              placeholder={'Optional — one per line\ne.g. Provide unit access with 24-hour tenant notice\nReport pest activity through the Waves app or office line'}
+              onChange={(e) => { setResponsibilitiesText(e.target.value); touch(); }}
+            />
+          </FoldCard>
+
+          <FoldCard
+            title="Commercial terms" open={openSections.terms} onToggle={() => toggleSection('terms')}
+            summary={termsSummary}
+          >
+            {(bidToolsEnabled || validThrough) && <label className="block mb-4 text-14">
+              Valid through (Eastern time)
+              <Input type="date" value={validThrough} disabled={!!locked || !bidToolsEnabled} className="mt-1 max-w-xs"
+                onChange={(e) => { setValidThrough(e.target.value); markEdit(); }} />
+              <span className="block mt-1 text-zinc-600">Prices remain valid through the end of this date, including resends. Leave blank for the standard seven days after sending. For a bid hold, enter the date required by the solicitation.</span>
+            </label>}
+            <div className="text-12 text-zinc-500 mb-2">
+              Optional — structured terms shown as their own section on the proposal.
+              Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block">
+                <span className={LABEL}>Payment terms</span>
+                {/* Canonical payer vocabulary only (server rejects free
+                    text) — billing derives due dates from these tokens,
+                    which only exists for invoice-mode proposals. Auto Pay
+                    (GATE_COMMERCIAL_AUTOPAY) is the one term for a proposal
+                    that does NOT bill by invoice: the customer's Auto Pay
+                    collects after each service, and the server refuses it
+                    beside Bill by invoice. */}
+                {/* Stays ENABLED when a stored term exists on a
+                    non-invoice proposal so the operator can CLEAR the
+                    stale term (the PUT rejects setting a new one). */}
+                <Select
+                  size="sm" className="mt-1" value={commercialTerms.paymentTerms}
+                  disabled={!!locked || (!estimate?.billByInvoice && !autopayEnabled && !commercialTerms.paymentTerms)}
+                  onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
+                >
+                  <option value="">Not set</option>
+                  {!estimate?.billByInvoice && (autopayEnabled || commercialTerms.paymentTerms === AUTOPAY_PAYMENT_TERMS) && (
+                    <option value={AUTOPAY_PAYMENT_TERMS}>Auto Pay</option>
+                  )}
+                  {/* Net-15 and Due on receipt have no signed-agreement
+                      wording (owner 2026-10-28 builder scope), so they are
+                      not offered; a proposal already on one shows it so it
+                      can be changed. */}
+                  {['due_on_receipt', 'net15'].includes(commercialTerms.paymentTerms) && (
+                    <option value={commercialTerms.paymentTerms} disabled={!estimate?.billByInvoice}>
+                      {PAYMENT_TERM_LABELS[commercialTerms.paymentTerms]} (no online signing)
+                    </option>
+                  )}
+                  <option value="net30" disabled={!estimate?.billByInvoice}>Net-30</option>
+                </Select>
+                {!estimate?.billByInvoice && (
+                  <span className="mt-1 block text-11 text-zinc-400">
+                    {autopayEnabled
+                      ? 'Auto Pay charges the saved card or bank account after each service. Net terms require Bill by invoice.'
+                      : 'Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.'}
+                  </span>
+                )}
+              </label>
+              {/* maxLength mirrors normalizeCommercialTerms' clamps so a
+                  contractual sentence can never silently truncate on save
+                  (codex #3297 r2). */}
+              {!hasRecurring && (
+                <p className="text-12 text-zinc-500 sm:col-span-2">
+                  One-time work: no term applies. Term picks show when the proposal has a recurring program.
+                </p>
+              )}
+              {hasRecurring && [
+                ['initialTermMonths', 'Initial term', undefined],
+                ['renewal', 'Renewal', 120],
+                ['priceAdjustment', 'Price adjustment', 160],
+                ['cancellation', 'Cancellation', 160],
+              ].map(([key, label, maxLength]) => {
+                const choice = termChoices[key];
+                return (
+                  <div key={key}>
+                    <label className="block">
+                      <span className={LABEL}>{label}</span>
+                      <Select size="sm" className="mt-1" value={choice} disabled={!!locked}
+                        onChange={(e) => chooseTerm(key, e.target.value)}>
+                        <option value="standard">{key === 'initialTermMonths' ? `${AGREEMENT_TERMS.initialTermMonths} months (standard)` : 'Standard'}</option>
+                        {choice === 'none' && <option value="none">Not stated (old proposal)</option>}
+                        <option value="custom">Custom</option>
+                      </Select>
+                    </label>
+                    {choice === 'standard' && key !== 'initialTermMonths' && (
+                      <p className="mt-1 text-12 text-zinc-500">{standardTermText(key)}</p>
+                    )}
+                    {choice === 'none' && (
+                      <p className="mt-1 text-12 text-zinc-500">
+                        Not on the proposal. Pick Standard or Custom.
+                      </p>
+                    )}
+                    {choice === 'custom' && (key === 'initialTermMonths' ? (
+                      <Input
+                        size="sm" className="mt-1" type="number" min="0" max="60" step="1"
+                        aria-label="Initial term in months" placeholder="Months (0 = month-to-month)"
+                        value={commercialTerms[key]} disabled={!!locked}
+                        onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                      />
+                    ) : (
+                      <Textarea
+                        className="mt-1" rows={2} maxLength={maxLength} aria-label={`${label} wording`}
+                        value={commercialTerms[key]} disabled={!!locked}
+                        onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                      />
+                    ))}
+                    {/* GATE_COMMERCIAL_PROPOSAL_SIGN on (the status line exists): typed
+                        wording that differs from the standard blocks online signing. */}
+                    {choice === 'custom' && commercialAgreement && termChoiceOf(key, commercialTerms[key]) === 'custom' && (
+                      <p className="mt-1 text-12 text-zinc-500">Custom wording turns off online signing for this proposal.</p>
                     )}
                   </div>
-                  <Textarea
-                    rows={2} value={w.includesText} disabled={!!locked}
-                    placeholder={'What it includes — one per line\ne.g. Crack & crevice treatment in both kitchens\nFollow-up inspection at 2 weeks'}
-                    onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, includesText: e.target.value } : it))); }}
-                  />
-                </div>
-              ))}
-              {!locked && (
-                <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: defaultTaxable('other'), includesText: '' }]); }}>
-                  <Plus size={14} /> Add corrective work
-                </Button>
-              )}
-            </CardBody>
-          </Card>
+                );
+              })}
+              <label className="block sm:col-span-2">
+                <span className={LABEL}>Property access</span>
+                <Input
+                  size="sm" className="mt-1" maxLength={200} value={commercialTerms.accessRequirements} disabled={!!locked}
+                  placeholder="e.g. Office provides keys for common areas; tenants notified by property manager"
+                  onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
+                />
+              </label>
+            </div>
+          </FoldCard>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Customer responsibilities</CardTitle>
-            </CardHeader>
-            <CardBody>
-              <Textarea
-                rows={3} value={responsibilitiesText} disabled={!!locked}
-                placeholder={'Optional — one per line\ne.g. Provide unit access with 24-hour tenant notice\nReport pest activity through the Waves app or office line'}
-                onChange={(e) => { setResponsibilitiesText(e.target.value); touch(); }}
-              />
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Commercial terms</CardTitle>
-            </CardHeader>
-            <CardBody>
-              {(bidToolsEnabled || validThrough) && <label className="block mb-4 text-14">
-                Valid through (Eastern time)
-                <Input type="date" value={validThrough} disabled={!!locked || !bidToolsEnabled} className="mt-1 max-w-xs"
-                  onChange={(e) => { setValidThrough(e.target.value); markEdit(); }} />
-                <span className="block mt-1 text-zinc-600">Prices remain valid through the end of this date, including resends. Leave blank for the standard seven days after sending. For a bid hold, enter the date required by the solicitation.</span>
-              </label>}
-              <div className="text-12 text-zinc-500 mb-2">
-                Optional — structured terms shown as their own section on the proposal.
-                Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <label className="block">
-                  <span className={LABEL}>Payment terms</span>
-                  {/* Canonical payer vocabulary only (server rejects free
-                      text) — billing derives due dates from these tokens,
-                      which only exists for invoice-mode proposals. Auto Pay
-                      (GATE_COMMERCIAL_AUTOPAY) is the one term for a proposal
-                      that does NOT bill by invoice: the customer's Auto Pay
-                      collects after each service, and the server refuses it
-                      beside Bill by invoice. */}
-                  {/* Stays ENABLED when a stored term exists on a
-                      non-invoice proposal so the operator can CLEAR the
-                      stale term (the PUT rejects setting a new one). */}
-                  <Select
-                    size="sm" className="mt-1" value={commercialTerms.paymentTerms}
-                    disabled={!!locked || (!estimate?.billByInvoice && !autopayEnabled && !commercialTerms.paymentTerms)}
-                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
-                  >
-                    <option value="">Not set</option>
-                    {!estimate?.billByInvoice && (autopayEnabled || commercialTerms.paymentTerms === AUTOPAY_PAYMENT_TERMS) && (
-                      <option value={AUTOPAY_PAYMENT_TERMS}>Auto Pay</option>
-                    )}
-                    {/* Net-15 and Due on receipt have no signed-agreement
-                        wording (owner 2026-10-28 builder scope), so they are
-                        not offered; a proposal already on one shows it so it
-                        can be changed. */}
-                    {['due_on_receipt', 'net15'].includes(commercialTerms.paymentTerms) && (
-                      <option value={commercialTerms.paymentTerms} disabled={!estimate?.billByInvoice}>
-                        {PAYMENT_TERM_LABELS[commercialTerms.paymentTerms]} (no online signing)
-                      </option>
-                    )}
-                    <option value="net30" disabled={!estimate?.billByInvoice}>Net-30</option>
-                  </Select>
-                  {!estimate?.billByInvoice && (
-                    <span className="mt-1 block text-11 text-zinc-400">
-                      {autopayEnabled
-                        ? 'Auto Pay charges the saved card or bank account after each service. Net terms require Bill by invoice.'
-                        : 'Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.'}
-                    </span>
-                  )}
-                </label>
-                {/* maxLength mirrors normalizeCommercialTerms' clamps so a
-                    contractual sentence can never silently truncate on save
-                    (codex #3297 r2). */}
-                {[
-                  ['initialTermMonths', 'Initial term', undefined],
-                  ['renewal', 'Renewal', 120],
-                  ['priceAdjustment', 'Price adjustment', 160],
-                  ['cancellation', 'Cancellation', 160],
-                ].map(([key, label, maxLength]) => {
-                  const choice = termChoices[key];
-                  return (
-                    <div key={key}>
-                      <label className="block">
-                        <span className={LABEL}>{label}</span>
-                        <Select size="sm" className="mt-1" value={choice} disabled={!!locked}
-                          onChange={(e) => chooseTerm(key, e.target.value)}>
-                          <option value="standard">{key === 'initialTermMonths' ? `${AGREEMENT_TERMS.initialTermMonths} months (standard)` : 'Standard'}</option>
-                          <option value="none">Not stated</option>
-                          <option value="custom">Custom</option>
-                        </Select>
-                      </label>
-                      {choice === 'standard' && key !== 'initialTermMonths' && (
-                        <p className="mt-1 text-12 text-zinc-500">{standardTermText(key)}</p>
-                      )}
-                      {choice === 'none' && (
-                        <p className="mt-1 text-12 text-zinc-500">
-                          Left off the proposal.{commercialAgreement ? ' The agreement the customer signs online still states its own.' : ''}
-                        </p>
-                      )}
-                      {choice === 'custom' && (key === 'initialTermMonths' ? (
-                        <Input
-                          size="sm" className="mt-1" type="number" min="0" max="60" step="1"
-                          aria-label="Initial term in months" placeholder="Months (0 = month-to-month)"
-                          value={commercialTerms[key]} disabled={!!locked}
-                          onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
-                        />
-                      ) : (
-                        <Textarea
-                          className="mt-1" rows={2} maxLength={maxLength} aria-label={`${label} wording`}
-                          value={commercialTerms[key]} disabled={!!locked}
-                          onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
-                        />
-                      ))}
-                      {/* GATE_COMMERCIAL_PROPOSAL_SIGN on (the status line exists): typed
-                          wording that differs from the standard blocks online signing. */}
-                      {choice === 'custom' && commercialAgreement && termChoiceOf(key, commercialTerms[key]) === 'custom' && (
-                        <p className="mt-1 text-12 text-zinc-500">Custom wording turns off online signing for this proposal.</p>
-                      )}
-                    </div>
-                  );
-                })}
-                <label className="block sm:col-span-2">
-                  <span className={LABEL}>Property access</span>
-                  <Input
-                    size="sm" className="mt-1" maxLength={200} value={commercialTerms.accessRequirements} disabled={!!locked}
-                    placeholder="e.g. Office provides keys for common areas; tenants notified by property manager"
-                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
-                  />
-                </label>
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Additional terms</CardTitle>
-            </CardHeader>
-            <CardBody>
-              <Textarea
-                rows={4} value={terms} disabled={!!locked}
-                placeholder="e.g. Net-30 billing to the management company; 12-month term with 30-day written cancellation; written service report delivered after every visit; as-needed interior unit treatments billed per visit at the listed rate."
-                onChange={(e) => { setTerms(e.target.value); touch(); }}
-              />
-            </CardBody>
-          </Card>
+          <FoldCard
+            title="Additional terms" open={openSections.additionalTerms} onToggle={() => toggleSection('additionalTerms')}
+            summary={terms.trim() ? terms.trim().split('\n')[0] : 'None'}
+          >
+            <Textarea
+              rows={4} value={terms} disabled={!!locked} aria-label="Additional terms"
+              placeholder="e.g. Net-30 billing to the management company; 12-month term with 30-day written cancellation; written service report delivered after every visit; as-needed interior unit treatments billed per visit at the listed rate."
+              onChange={(e) => { setTerms(e.target.value); touch(); }}
+            />
+          </FoldCard>
         </div>
 
         {/* Sidebar: totals + actions */}
@@ -1983,6 +2150,35 @@ function CommercialProposalEditor() {
           )}
         </div>
       </div>
+
+      {/* Below lg the sidebar sits under the whole form, so this bar keeps
+          the first-year total and Save in reach while scrolling. Sticky
+          inside the admin content column (#admin-main), whose bottom padding
+          insets the sticky edge (WebKit, Chromium and Firefox alike). The
+          offset cancels the padding's breathing room so no page shows under
+          the bar (AdminLayoutV2 MAIN_PADDING): on a phone the padding is the
+          56px tab bar + safe area + 16px, so -16px seats the bar on the tab
+          bar; from md the shell pads 24px with no tab bar, so -24px seats it
+          on the window edge. */}
+      {isPhone && (
+        <div className="sticky -bottom-4 md:-bottom-6 z-30 -mx-4 mt-5 border-t border-hairline border-zinc-200 bg-white px-4 py-2">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <div className={LABEL}>First-year total</div>
+              <div className="text-14 tabular-nums text-zinc-900">
+                <span className="font-medium">{money(totals.firstYearTotal)}</span>
+                <span className="text-12 text-zinc-500"> · {money(totals.monthlyEquivalent)}/mo</span>
+              </div>
+            </div>
+            {!locked && (
+              <Button variant="primary" size="sm" onClick={save} disabled={saving}>
+                {saving ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                {saving ? 'Saving…' : dirty || !savedOnce ? 'Save' : 'Saved'}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

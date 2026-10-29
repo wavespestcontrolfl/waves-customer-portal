@@ -345,7 +345,8 @@ const SCOPE_SNAPSHOT = {
   phone_keyed: ['get_partner_call_history'],
   email_keyed: ['check_email_suppression'],
   address_keyed: ['lookup_property'],
-  route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments'],
+  // unblock_sender (the blocklist is not one customer's record): refused inside a customer-scoped task rather than classed as none.
+  route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments', 'unblock_sender'],
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
@@ -386,8 +387,12 @@ const SCOPE_SNAPSHOT = {
     'create_payment_plan', 'cancel_payment_plan',
     // create_invoice carries customer_id: the draft invoice is that customer's own.
     'create_invoice',
+    // compose_email carries customer_id when it names a customer (validateRecordTarget); a typed address is held to the task customer's own by validateComposeRecipient.
+    'compose_email',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
+    // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.
+    'resolve_dispatch_alert',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

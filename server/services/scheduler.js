@@ -7138,7 +7138,7 @@ function initScheduledJobs() {
 
   // Customer health scoring is consolidated into the single nightly Customer
   // Intelligence Pipeline (3AM ET): detect signals → score (customer-health.js,
-  // the sole canonical engine) → enrich (upsell/next-action/LTV) → outreach.
+  // the sole canonical engine) → enrich (upsell/next-action/LTV).
   // The former 2AM (customer-health-v2 → unread customers.health_score) and
   // 2:15AM (standalone v3) jobs were removed to end the three-writer collision.
 
@@ -7294,7 +7294,6 @@ function initScheduledJobs() {
     try {
       const SignalDetector = require('./customer-intelligence/signal-detector');
       const HealthScorer = require('./customer-intelligence/health-scorer');
-      const RetentionEngine = require('./customer-intelligence/retention-engine');
 
       // Step 1: Detect signals. Isolated so a detection failure doesn't skip
       // tonight's scoring — this is now the only nightly health-score refresh,
@@ -7320,42 +7319,7 @@ function initScheduledJobs() {
       const enrichResult = await HealthScorer.enrichAllCustomers();
       logger.info(`Enrichment: ${enrichResult.enriched} enriched, ${enrichResult.upsells} upsells`);
 
-      // Step 3: Generate retention outreach for at-risk customers. high +
-      // critical = the canonical engine's at-risk band (vocab:
-      // low/moderate/high/critical). scored_at is a timestamp under the
-      // canonical engine, so match on its date.
-      step = 'step 3 (retention outreach)';
-      const today = etDateString();
-      // Real customers only: health scores cover leads too, and a never-
-      // paying new_lead must not consume an outreach draft or fire a churn
-      // alert (Copeman, 2026-07-11). Same predicate the engine itself guards
-      // with — this just skips the pointless per-lead calls.
-      const { CUSTOMER_STAGES } = require('./customer-stages');
-      const atRisk = await db('customer_health_scores as chs')
-        .join('customers as c', 'c.id', 'chs.customer_id')
-        .whereRaw('chs.scored_at::date = ?', [today])
-        .whereIn('chs.churn_risk', ['high', 'critical'])
-        .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-        .whereNull('c.deleted_at')
-        .select('chs.customer_id');
-
-      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
-      // customer, keyed on the churn band the owner ruled unusable
-      // (2026-08-29; win-back is a manual send). The engine itself enforces
-      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
-      // skip only saves the per-customer reads and logs the count.
-      const { customerIntelAiLive } = require('../config/feature-gates');
-      const intelAiOn = customerIntelAiLive();
-      let outreachGenerated = 0;
-      if (!intelAiOn) {
-        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
-      }
-      for (const c of intelAiOn ? atRisk : []) {
-        const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
-        if (result) outreachGenerated++;
-      }
-
-      logger.info(`Customer intelligence complete: ${outreachGenerated} outreach generated`);
+      logger.info('Customer intelligence complete');
     } catch (err) {
       logger.error(`Customer intelligence pipeline failed at ${step}: ${err.message}`);
     }
@@ -8025,6 +7989,14 @@ function initScheduledJobs() {
           logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
         } catch (err) {
           logger.error(`Document request reminders failed: ${err.message}`);
+        }
+        // Mark accepted consumer notice catch-up (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE): re-sends an FDACS-13692
+        // a restart lost after the accept. After the reminders: a reminder that already reached the customer since the
+        // accept counts as delivered, so the same notice never goes out twice in one run.
+        try {
+          await require('./estimate-consumer-notice').reconcileManualAcceptConsumerNotices();
+        } catch (err) {
+          logger.error(`Mark accepted consumer notice catch-up failed: ${err.message}`);
         }
       });
     } catch (err) {

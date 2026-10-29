@@ -906,7 +906,6 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) reportDelivery = awaiting();
   else if (projectBacked) {
     const ds = project ? String(project.delivery_status || 'not_sent').toLowerCase() : null;
-    const hold = project?.report_hold_status ? String(project.report_hold_status).toLowerCase() : null;
     const channels = parseJsonObjectSafe(project?.delivery_channels);
     const channelOk = Object.fromEntries(Object.entries(channels).map(([k, v]) => [k, v?.ok === true]));
     // Only CUSTOMER report channels count (never a payer/AP leg), and a WDO
@@ -916,12 +915,9 @@ function deriveCloseoutFacts(inputs) {
     const anyChannelOk = isWdo ? channelOk.email === true : (channelOk.email === true || channelOk.sms === true);
     const evidence = {
       projectId: project?.id || null, deliveryStatus: ds, lastDeliveryAt: isoOrNull(project?.last_delivery_at),
-      reportHoldStatus: hold, channelOk, source: 'projects.delivery_status',
+      channelOk, source: 'projects.delivery_status',
     };
     if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', evidence);
-    // Payment hold FIRST: the combined payer-invoice send stamps
-    // delivery_status 'sent' while the report itself is still held.
-    else if (hold === 'held' || hold === 'releasing') reportDelivery = fact('pending', 'project_report_on_hold', evidence);
     else if (ds === 'sent' || ds === 'legacy_sent') reportDelivery = fact('done', `project_delivery_${ds}`, evidence);
     // 'partial' = at least one channel reached the customer (done) OR the
     // required channel failed (WDO email-only) — the channel ledger decides.

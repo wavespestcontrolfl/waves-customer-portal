@@ -107,6 +107,20 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
   const rowOf = (id) => mockPg('bid_kit_items').where({ id }).first();
   const mine = (rows) => rows.filter((r) => r.name.endsWith(tag));
 
+  test('bid products: only active ticked catalog rows that no visit applied in the 12 months, same columns, sorted', async () => {
+    const applied = await catalogRow('Applied ticked', { bid_list: true });
+    await catalogRow('Bid bravo', { bid_list: true, category: 'Termiticide' });
+    await catalogRow('Bid alpha', { bid_list: true, category: 'Termiticide' });
+    await catalogRow('Inactive ticked', { bid_list: true, active: false });
+    await catalogRow('Unticked');
+    const oldApplied = await catalogRow('Applied long ago', { bid_list: true });
+    await apply(applied); await apply(oldApplied, { daysAgo: 400 });
+    const { rows, bidRows } = await lib.readProductList();
+    expect(mine(rows).map((r) => r.name)).toEqual([`Applied ticked ${tag}`]);
+    // Category first (Insecticide, then Termiticide), then name.
+    expect(mine(bidRows).map((r) => r.name)).toEqual([`Applied long ago ${tag}`, `Bid alpha ${tag}`, `Bid bravo ${tag}`]);
+    expect(mine(bidRows)[0]).toMatchObject({ product_id: oldApplied.id, epa_reg_number: '100-200', uses: 0 });
+  });
   test('reads each product applied in the last 12 months once, with its use count; older products and unapplied ones are left out', async () => {
     const a = await catalogRow('Alpha');
     const b = await catalogRow('Bravo', { category: null });

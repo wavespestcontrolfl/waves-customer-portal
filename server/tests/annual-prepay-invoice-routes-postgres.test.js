@@ -24,7 +24,6 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 // Fire-and-forget side effects of apply-credit that would outlive the
 // rolled-back test transaction.
-jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => null) }));
 jest.mock('../services/stripe', () => ({
   ...jest.requireActual('../services/stripe'),

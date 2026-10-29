@@ -6973,7 +6973,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ['Price adjustment', proposalForCard.commercialTerms.priceAdjustment],
         ['Cancellation', proposalForCard.commercialTerms.cancellation],
         ['Property access', proposalForCard.commercialTerms.accessRequirements],
-      ].filter(([, value]) => value != null) : [];
+      ].filter(([label, value]) => value != null
+        // One-time-only proposal: the four fixed agreement terms do not apply (owner 2026-10-28).
+        && (Number(proposalCardTotals.annualRecurring) > 0
+          || !['Initial term', 'Renewal', 'Price adjustment', 'Cancellation'].includes(label))) : [];
       const proposalStructuredTermsHtml = proposalTermRows.length ? `
     <div class="proposal-section-title">Service terms</div>
     <div class="proposal-structured-terms">
@@ -15626,7 +15629,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
           coverageTermSynced = true;
         } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
-        require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
         // termSyncPending keeps the durable job UNRESOLVED on a sync
         // failure (Codex r18): credit coverage has no Stripe webhook, so
         // without the sweep retry only the daily reconciliation would

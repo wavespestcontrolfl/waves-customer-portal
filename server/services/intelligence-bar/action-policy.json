@@ -1967,6 +1967,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "compose_email": {
+    "module": "compose-email-tools.js",
+    "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "send_email_reply": {
     "module": "email-tools.js",
     "domain": "email",
@@ -2198,5 +2206,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "resolve_dispatch_alert": {
+    "module": "dispatch-alert-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "unblock_sender": {
+    "module": "unblock-sender-tools.js",
+    "domain": "email",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "route_wide"
   }
 }

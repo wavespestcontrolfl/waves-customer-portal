@@ -58,10 +58,15 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'schedule_invoice_send',
   'create_payment_plan',
   'cancel_payment_plan',
+  // compose_email previews carry the recipient's name and address and the whole message.
+  'compose_email',
   // create_invoice previews name the customer and city.
   'create_invoice',
   // set_customer_bill_to previews name the customer, the payer and the invoices.
   'set_customer_bill_to',
+  // resolve_dispatch_alert previews name the customer and technician; unblock_sender previews carry the blocked address.
+  'resolve_dispatch_alert',
+  'unblock_sender',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

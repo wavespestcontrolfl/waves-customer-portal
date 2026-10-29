@@ -134,14 +134,13 @@ describe('project email service', () => {
     }));
   });
 
-  test('a slot-1 contact whose email switch is off is skipped for the holder: reports, invoice-bearing variants and prep guides alike (codex #6363 r6 P1)', async () => {
+  test('a slot-1 contact whose email switch is off is skipped for the holder: reports, the invoice-bearing variant and prep guides alike (codex #6363 r6 P1)', async () => {
     contactDeclinesChannel.mockResolvedValue(true);
     const withContact = customer({ service_contact_email: 'service@example.com', service_contact_name: 'Sam Service', service_contact_phone: '+19415550202' });
     await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
     await ProjectEmail.sendProjectReportWithInvoice({ project: project(), customer: withContact, reportUrl: 'https://x', payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
-    await ProjectEmail.sendProjectInvoiceBeforeReport({ project: project(), customer: withContact, payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
     await ProjectEmail.sendPrepGuide({ project: project(), customer: withContact });
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(4);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(3);
     for (const [args] of EmailTemplates.sendTemplate.mock.calls) {
       expect(args.to).toBe('primary@example.com');
       expect(args.payload.first_name).toBe('Taylor');

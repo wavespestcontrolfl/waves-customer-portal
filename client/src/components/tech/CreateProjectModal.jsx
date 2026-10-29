@@ -456,7 +456,7 @@ export default function CreateProjectModal({
   // legacy project editor. WDO adds its canvas signature here; pre-treatment
   // already carries its typed applicator attestation in the saved certificate.
   // Shape: { project, requiresSignature, applicator, signature,
-  //          reportHoldAvailable, billingReason, invoiceStatus, noCharge }.
+  //          billingReason, invoiceStatus, noCharge }.
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
@@ -464,8 +464,7 @@ export default function CreateProjectModal({
     signStep?.noCharge
     || ['prepaid_covered', 'not_billable'].includes(signStep?.billingReason)
     // An existing invoice that already settled ('paid', or credit-covered
-    // 'prepaid' — the same statuses the hold release treats as settled money)
-    // has nothing left to collect: offer the send-report path instead of
+    // 'prepaid') has nothing left to collect: offer the send-report path instead of
     // charge/invoice actions that /send-with-invoice would 409.
     || (signStep?.billingReason === 'invoice_exists'
       && ['paid', 'prepaid'].includes(String(signStep?.invoiceStatus || '').toLowerCase())),
@@ -475,14 +474,10 @@ export default function CreateProjectModal({
   // hand the parent stale signed/unsigned state (Codex P2).
   const [signBusy, setSignBusy] = useState(false);
   // Invoice-first official-document completion is two durable server actions:
-  // deliver the invoice/arm the customer-side hold, then close the service.
+  // deliver the invoice with the report, then close the service.
   // Keep its own lock so no sign-step exit can unmount either request.
   const [completionBusy, setCompletionBusy] = useState(false);
   const [completionAction, setCompletionAction] = useState(null);
-  // Mobile parity with the admin drawer's "Hold report until invoice is paid"
-  // checkbox — the sheet previously FORCED the hold whenever it was available,
-  // with no way to send invoice + report together. Default ON (same as admin).
-  const [mobileHoldReport, setMobileHoldReport] = useState(true);
 
   function requestClose() {
     if (photoQueue.length && !confirm('Discard unsaved report edits?')) return;
@@ -1577,7 +1572,6 @@ export default function CreateProjectModal({
           requiresSignature: projectType === WDO_PROJECT_TYPE,
           applicator: detail?.wdo_applicator || { name: '', idCardNo: '' },
           signature: detail?.wdo_signature || null,
-          reportHoldAvailable: detail?.report_payment_hold_available === true,
           billingReason: detailPayload?.closeoutPreview?.billing?.reason || null,
           invoiceStatus: detailPayload?.closeoutPreview?.billing?.invoiceStatus || null,
           noCharge: projectType === WDO_PROJECT_TYPE && wdoFeeIsExplicitZero(findings.inspection_fee),
@@ -1613,14 +1607,13 @@ export default function CreateProjectModal({
     return payload;
   }
 
-  async function sendInvoiceAndFinish(forceNoHold = false) {
+  async function sendInvoiceAndFinish() {
     const requiresSignature = signStep?.requiresSignature !== false;
     if (!allowInvoiceCompletion
       || !signStep?.project?.id
       || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
     const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
     const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
-    const holdRequested = !forceNoHold && signStep.reportHoldAvailable === true;
     setCompletionBusy(true);
     setCompletionAction('invoice');
     setError(null);
@@ -1631,7 +1624,7 @@ export default function CreateProjectModal({
           `/admin/projects/${signStep.project.id}/send-with-invoice`,
           {
             method: 'POST',
-            body: { dry_run: true, ...(holdRequested ? { hold_report_until_paid: true } : {}) },
+            body: { dry_run: true },
           },
         );
         const preview = await readProjectAction(previewResponse, `Could not prepare the ${documentLabel} invoice`);
@@ -1639,9 +1632,7 @@ export default function CreateProjectModal({
           style: 'currency',
           currency: 'USD',
         });
-        const deliveryExplanation = holdRequested
-          ? `The customer receives the invoice and payment link now. Their ${documentLabel} stays locked until payment, then emails and unlocks automatically.`
-          : `The customer receives the invoice, payment link, and ${documentLabel} now.`;
+        const deliveryExplanation = `The customer receives the invoice, payment link, and ${documentLabel} now.`;
         if (!confirm(`Send the ${amount} invoice now and finish this service?\n\n${deliveryExplanation}`)) return;
 
         const sendResponse = await adminFetch(
@@ -1650,7 +1641,6 @@ export default function CreateProjectModal({
             method: 'POST',
             body: {
               ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
-              ...(holdRequested ? { hold_report_until_paid: true } : {}),
             },
           },
         );
@@ -1672,7 +1662,7 @@ export default function CreateProjectModal({
       const closed = await readProjectAction(
         closeResponse,
         invoiceDelivery
-          ? `The invoice was sent and the ${documentLabel} was ${invoiceDelivery.report_held ? 'held' : 'delivered'}, but the service could not be closed. Tap Finish service to retry.`
+          ? `The invoice was sent and the ${documentLabel} was delivered, but the service could not be closed. Tap Finish service to retry.`
           : `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`,
       );
       finishSignStep({
@@ -1681,16 +1671,6 @@ export default function CreateProjectModal({
         invoice: invoiceDelivery.invoice || null,
       });
     } catch (e) {
-      if (holdRequested && e.payload?.code === 'hold_statement_accrued') {
-        // NET-terms payer invoices accrue to a consolidated statement, so
-        // there is no individual pay-before-report lifecycle to wait on. The
-        // server refuses the hold before creating an invoice; retry the same
-        // combined delivery without the hold and keep that mode in the UI if
-        // closeout itself needs a retry.
-        setSignStep(prev => (prev ? { ...prev, reportHoldAvailable: false } : prev));
-        await sendInvoiceAndFinish(true);
-        return;
-      }
       setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
     } finally {
       setCompletionBusy(false);
@@ -2028,9 +2008,7 @@ export default function CreateProjectModal({
             </div>
             <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
               {signStep.invoiceDelivery
-                ? signStep.invoiceDelivery.report_held
-                  ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} is locked until payment; finish the service without sending anything again.`
-                  : `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} were delivered; finish the service without sending anything again.`
+                ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} were delivered; finish the service without sending anything again.`
                 : signStep.reportOnlyDelivery
                   ? `The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} was delivered; finish the service without sending anything again.`
                 : signStep.cardCompletion?.charged
@@ -2042,22 +2020,14 @@ export default function CreateProjectModal({
                 : signStep.requiresSignature === false
                   ? allowInvoiceCompletion
                     ? savedCard
-                      ? signStep.reportHoldAvailable && mobileHoldReport
-                        ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and keep the certificate locked until payment.`
-                        : `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and certificate together.`
-                      : signStep.reportHoldAvailable && mobileHoldReport
-                        ? 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
-                        : 'Applicator attestation saved — send the invoice and certificate now.'
+                      ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and certificate together.`
+                      : 'Applicator attestation saved — send the invoice and certificate now.'
                     : 'Applicator attestation saved — ready for office invoice delivery.'
                   : signStep.signature?.signed
                     ? allowInvoiceCompletion
                       ? savedCard
-                        ? signStep.reportHoldAvailable && mobileHoldReport
-                          ? `Signed — charge ${savedCardLabel} now, or send the invoice and keep the report locked until payment.`
-                          : `Signed — charge ${savedCardLabel} now, or send the invoice and report together.`
-                        : signStep.reportHoldAvailable && mobileHoldReport
-                          ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
-                          : 'Signed — send the invoice and report now.'
+                        ? `Signed — charge ${savedCardLabel} now, or send the invoice and report together.`
+                        : 'Signed — send the invoice and report now.'
                       : 'Signed — saved for office review and invoice delivery.'
                     : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
             </div>
@@ -2161,27 +2131,10 @@ export default function CreateProjectModal({
               && !reportOnlyCompletion
               && !signStep.cardCompletion?.charged
               && !signStep.cardCompletion?.blocked
-              && !signStep.invoiceDelivery
-              && signStep.reportHoldAvailable
-              && (signStep.requiresSignature === false || signStep.signature?.signed) && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: P.muted, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={mobileHoldReport}
-                  onChange={e => setMobileHoldReport(e.target.checked)}
-                  disabled={signBusy || completionBusy}
-                />
-                Hold {signStep.requiresSignature === false ? 'certificate' : 'report'} until invoice is paid
-              </label>
-            )}
-            {allowInvoiceCompletion
-              && !reportOnlyCompletion
-              && !signStep.cardCompletion?.charged
-              && !signStep.cardCompletion?.blocked
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
               <button
                 type="button"
-                onClick={() => sendInvoiceAndFinish(!mobileHoldReport)}
+                onClick={() => sendInvoiceAndFinish()}
                 disabled={signBusy || completionBusy}
                 style={{
                   minHeight: 52,
@@ -2201,9 +2154,7 @@ export default function CreateProjectModal({
                   ? signStep.invoiceDelivery ? 'Finishing service…' : 'Sending invoice…'
                   : signStep.invoiceDelivery
                     ? 'Finish service'
-                    : signStep.reportHoldAvailable && mobileHoldReport
-                      ? `Send invoice & hold ${signStep.requiresSignature === false ? 'certificate' : 'report'}`
-                      : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
+                    : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
               </button>
             )}
             <button

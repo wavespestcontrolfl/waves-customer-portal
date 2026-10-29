@@ -18,7 +18,11 @@ export const PAYMENT_TERM_LABELS = {
   net30: 'Net-30',
 };
 
-export function commercialTermRows(commercialTerms) {
+// The four fixed agreement terms (initial term, renewal, price adjustment, cancellation) apply to a recurring
+// program only (owner 2026-10-28): pass { recurring: false } for a one-time-only proposal and they are dropped.
+// Without the second argument the rows are exactly as stored.
+const FIXED_TERM_LABELS = new Set(['Initial term', 'Renewal', 'Price adjustment', 'Cancellation']);
+export function commercialTermRows(commercialTerms, { recurring } = {}) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
   return [
     ['Payment', PAYMENT_TERM_LABELS[commercialTerms.paymentTerms] || null],
@@ -29,7 +33,7 @@ export function commercialTermRows(commercialTerms) {
     ['Price adjustment', commercialTerms.priceAdjustment],
     ['Cancellation', commercialTerms.cancellation],
     ['Property access', commercialTerms.accessRequirements],
-  ].filter(([, value]) => value != null);
+  ].filter(([label, value]) => value != null && !(recurring === false && FIXED_TERM_LABELS.has(label)));
 }
 
 // Authored terms govern (codex #3281 r1): canned inclusions stacks must not

@@ -327,3 +327,156 @@ describe('createPickerTravel', () => {
     expect(again.travel.lookup(legs[2])).toMatchObject({ minutes: 14, source: 'google_road' });
   });
 });
+
+// GATE_DRIVE_CLOCK (owner 2026-10-28): a Google leg carries the park minutes
+// when it is READ, once, on every path; the caches keep Google's own minutes.
+describe('GATE_DRIVE_CLOCK park minutes on Google legs', () => {
+  const CLOCK = 'GATE_DRIVE_CLOCK';
+  const FROM = { lat: '27.5000', lng: '-82.4000' };
+  const TO = { lat: 27.52, lng: -82.41 };
+  const plus = (n) => {
+    const d = new Date(`${DATE}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const leg = (date, departureMin = 9 * 60) => ({ date, from: FROM, to: TO, departureMin });
+  // Inner sources like createSchedulingTravel's: lookupRaw = Google's own
+  // minutes, lookup = the same with the park minutes added by the gate.
+  const realSources = (fetchImpl) => {
+    const RouteOptimizer = require('../services/route-optimizer');
+    const budget = () => ({ resetAt: 0, requests: 0, elements: 0, maxRequests: 100, maxElements: 100 });
+    return {
+      traffic: () => RouteOptimizer.createSchedulingTravel({ fetchImpl, sharedBudget: budget(), maxRequests: 100, maxElements: 100 }),
+      plain: () => RouteOptimizer.createSchedulingTravel({ fetchImpl, sharedBudget: budget(), maxRequests: 100, maxElements: 100, traffic: false }),
+    };
+  };
+  const matrix = (duration) => jest.fn(async (_url, init) => ({ ok: true, json: async () => (
+    JSON.parse(init.body).destinations.map((_d, i) => ({ originIndex: 0, destinationIndex: i, status: {}, condition: 'ROUTE_EXISTS', duration }))
+  ) }));
+  const fakeAnswering = () => {
+    const model = { minutes: 99, source: 'conservative_model', reason: 'request_budget' };
+    const source = (answer) => () => {
+      let bought = false;
+      return {
+        preload: async () => { bought = true; },
+        lookup: () => (bought ? answer : model),
+        diagnostics: () => ({ requests: 0, elements: bought ? 1 : 0 }),
+      };
+    };
+    return {
+      traffic: source({ minutes: 17, source: 'google_traffic', reason: null }),
+      plain: source({ minutes: 14, source: 'google_road', reason: null }),
+    };
+  };
+
+  // The drive clock needs the calibrated model on, as it is live.
+  const savedCalibration = process.env.GATE_DRIVE_TIME_CALIBRATION;
+  beforeEach(() => {
+    process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  });
+  afterEach(() => {
+    if (savedCalibration === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    else process.env.GATE_DRIVE_TIME_CALIBRATION = savedCalibration;
+    _test.roadCache.clear();
+    _test.plainCache.clear();
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    delete process.env[CLOCK];
+    delete process.env.DRIVE_CLOCK_PARK_MINUTES;
+    delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
+    delete process.env.PICKER_ROAD_PLAIN_DAYS;
+  });
+
+  test('both modes: raw off, +4 on, exactly once however often it is read, caches stay raw', async () => {
+    const travel = createPickerTravel({ spender: 'staff-1', factories: fakeAnswering(), now: () => NOW.getTime() });
+    await travel.preload([leg(plus(1)), leg(plus(3))]);
+    expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 17, source: 'google_traffic' });
+    process.env[CLOCK] = 'true';
+    for (let i = 0; i < 3; i += 1) {
+      expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 21, source: 'google_traffic' });
+      expect(travel.lookup(leg(plus(3)))).toMatchObject({ minutes: 18, source: 'google_road' });
+    }
+    expect([..._test.roadCache.values()].map((v) => v.minutes)).toEqual([17]);
+    expect([..._test.plainCache.values()].map((v) => v.minutes)).toEqual([14]);
+    delete process.env[CLOCK];
+    expect(travel.lookup(leg(plus(1))).minutes).toBe(17);
+    expect(travel.lookup(leg(plus(3))).minutes).toBe(14);
+  });
+
+  test('through the real travel source: Google 11 reads 15 once, and the cache holds 11', async () => {
+    process.env[CLOCK] = 'true';
+    const travel = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime() });
+    await travel.preload([leg(plus(1)), leg(plus(3))]);
+    expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 15, source: 'google_traffic' });
+    expect(travel.lookup(leg(plus(1))).minutes).toBe(15);
+    expect(travel.lookup(leg(plus(3)))).toMatchObject({ minutes: 15, source: 'google_road' });
+    expect([..._test.roadCache.values()].map((v) => v.minutes)).toEqual([11]);
+    expect([..._test.plainCache.values()].map((v) => v.minutes)).toEqual([11]);
+    // A second request reads the process cache: still once.
+    const again = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime() });
+    expect(again.lookup(leg(plus(1))).minutes).toBe(15);
+    process.env.DRIVE_CLOCK_PARK_MINUTES = '2';
+    expect(again.lookup(leg(plus(1))).minutes).toBe(13);
+    delete process.env[CLOCK];
+    expect(again.lookup(leg(plus(1))).minutes).toBe(11);
+  });
+
+  test('a cache-only read adds it once', async () => {
+    await createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime() })
+      .preload([leg(plus(1))]);
+    process.env[CLOCK] = 'true';
+    const save = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime(), cacheOnly: true });
+    await save.preload([leg(plus(1))]);
+    expect(save.lookup(leg(plus(1)))).toMatchObject({ minutes: 15, source: 'google_traffic' });
+  });
+
+  test('a model leg (later day, or unbought) never gets the park minutes', () => {
+    process.env[CLOCK] = 'true';
+    const travel = createPickerTravel({ spender: 'staff-1', factories: fakeAnswering(), now: () => NOW.getTime() });
+    // Later than the road days, and a road day nobody bought.
+    expect(travel.lookup(leg(plus(20)))).toMatchObject({ minutes: 99, source: 'conservative_model' });
+    expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 99, source: 'conservative_model' });
+  });
+
+  test('a same-place Google leg stays 0', async () => {
+    process.env[CLOCK] = 'true';
+    const here = { date: plus(1), from: TO, to: TO, departureMin: 9 * 60 };
+    const travel = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('0s')), now: () => NOW.getTime() });
+    await travel.preload([here]);
+    expect(travel.lookup(here)).toMatchObject({ minutes: 0, source: 'google_traffic' });
+  });
+
+  describe('best-times chips (priceChipsOnRoads)', () => {
+    const { priceChipsOnRoads } = require('../services/scheduling/hint-road-times');
+    const { GAP_LEGS } = require('../services/scheduling/find-time');
+    const chip = () => ({
+      date: DATE, start_time: '10:00', drive_in_minutes: 5, detour_minutes: 3,
+      [GAP_LEGS]: { prev: FROM, next: { lat: 27.6, lng: -82.5 }, newStop: TO, prevIsHome: false, prevEndMin: 700, durationMinutes: 60 },
+    });
+    // The three legs of the chip, answered 20, 10 and 12 minutes by Google.
+    const factory = () => ({
+      preload: async () => {},
+      lookup: (l) => ({ minutes: l.to === TO ? 20 : (l.from === TO ? 10 : 12), source: 'google_traffic', reason: null }),
+      diagnostics: () => ({ requests: 3, elements: 3 }),
+    });
+    const price = () => priceChipsOnRoads([chip()], { paid: true, now: () => NOW.getTime(), travelFactory: factory });
+    beforeEach(() => { process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true'; });
+    afterEach(() => { delete process.env.GATE_BEST_TIMES_ROAD_TIMES; });
+
+    test('off: Google minutes as they came', async () => {
+      const [priced] = await price();
+      expect(priced).toMatchObject({ drive_in_minutes: 20, detour_minutes: 18, drive_source: 'google' });
+    });
+
+    test('on: +4 on each leg once, on a fresh lookup and again on the cached read', async () => {
+      process.env[CLOCK] = 'true';
+      const [fresh] = await price();
+      expect(fresh).toMatchObject({ drive_in_minutes: 24, detour_minutes: 18 + 4, drive_source: 'google' });
+      expect([..._test.roadCache.values()].map((v) => v.minutes).sort()).toEqual([10, 12, 20]);
+      // Cached now: no travel source is built at all, and the minutes agree.
+      const cached = await priceChipsOnRoads([chip()], { paid: true, now: () => NOW.getTime(), travelFactory: () => { throw new Error('no lookup expected'); } });
+      expect(cached[0]).toMatchObject({ drive_in_minutes: 24, detour_minutes: 22 });
+    });
+  });
+});
+

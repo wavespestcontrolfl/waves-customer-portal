@@ -58,8 +58,8 @@ async function allState(h, s) {
  * target_clarification_required), the case records a target_resolution failure and runs again with a CONTROL wording the
  * route does recognise, so every later stage (card, confirm, ledger, receipt) is still measured.
  */
-async function stockTurn(ctx, h, { prompt, control, rounds, actor = h.actors.owner, sessionId, sessionKey, requestKey }) {
-  const run = (text, key, reqKey) => ctx.turn(actor, { prompt: text, page: { route: '/admin/inventory' }, context: 'procurement', sessionId, sessionKey: key, rounds, requestKey: reqKey });
+async function stockTurn(ctx, h, { prompt, control, rounds, actor = h.actors.owner, sessionId, sessionKey, requestKey, thread }) {
+  const run = (text, key, reqKey) => ctx.turn(actor, { prompt: text, page: { route: '/admin/inventory' }, context: 'procurement', sessionId, sessionKey: key, rounds, requestKey: reqKey, thread });
   const turn = await run(prompt, sessionKey, requestKey);
   const clarification = turn.toolCalls.find((t) => t.result && t.result.code === 'target_clarification_required');
   const answer = String((turn.body && (turn.body.response || turn.body.answer || turn.body.message || turn.body.text)) || '');
@@ -153,23 +153,33 @@ CASES['W10-dev-02'] = async (ctx, h, cast, c) => {
 };
 
 CASES['W10-dev-03'] = async (ctx, h, cast, c) => {
-  const s = await seedStockSet(cast, h);
-  const first = await stockTurn(ctx, h, { prompt: c.request, control: `Receive restock request ${s.taurusReq.id}`, rounds: receiveOpenRequest(s.taurus.id, 2, 'qt') });
-  await commitStock(ctx, first, { card: c.expected.card, tool: 'update_restock_request', label: 'receipt' });
-  const afterFirst = await movesOf(h, s.taurus);
-  await checkRequestReceived(ctx, h, s.taurusReq);
-  ctx.check(afterFirst.length === 1 && Number(afterFirst[0].quantity) === 64, 'read_back', 'first_movement_wrong', `movements ${afterFirst.map((m) => m.quantity).join(',')}`);
-  // "that was 2 gallons, not 2 quarts": a correcting movement for the 1.5 gallon difference with its own receipt; the first is not edited.
-  const second = await stockTurn(ctx, h, { prompt: c.corrections[0].request, control: 'Add 1.5 gallons of Taurus SC that arrived', sessionId: first.sessionId, sessionKey: 'fix', rounds: adjust({ product_name: 'Taurus SC', movement_type: 'correction', quantity: 1.5, unit: 'gal', note: 'Correction: 2 gal received, not 2 qt' }) });
-  await commitStock(ctx, second, { card: c.corrections[0].expected.card, tool: 'adjust_stock', label: 'correction' });
-  ctx.check(second.body.taskId !== first.body.taskId, 'receipt', 'correction_without_own_receipt', 'the correction shares the first movement\'s task and receipt');
-  const moves = await movesOf(h, s.taurus);
-  // The complete first movement (quantity, unit, entered amount in its metadata, stock before and after) is untouched.
-  ctx.check(moves.length === 2 && JSON.stringify(moves[0]) === JSON.stringify(afterFirst[0]), 'side_effect', 'first_movement_edited_or_replaced', `movements ${moves.map((m) => m.quantity).join(',')}; the first movement differs from its first read-back`);
-  const supplierOrders = await h.db('vendor_orders').where({ restock_request_id: s.taurusReq.id }).count('* as n').first();
-  ctx.check(Number(supplierOrders.n) === 0, 'side_effect', 'vendor_order_placed_by_correction', `${supplierOrders.n} vendor orders for the request after the correction`);
-  ctx.check((await stockOf(h, s.taurus)).onHand === TAURUS_BASE + 2 * GAL, 'read_back', 'on_hand_wrong_after_correction', `on hand ${(await stockOf(h, s.taurus)).onHand}, expected ${TAURUS_BASE + 2 * GAL}`);
-  ctx.markCompleted();
+  // The correction names no product: it reads the receipt the operator described one turn earlier on the saved conversation
+  // (the way the client sends thread_id and thread_seq), so this case runs with saved conversations on and puts the switch back.
+  const savedThreads = process.env.GATE_IB_THREADS;
+  process.env.GATE_IB_THREADS = 'true';
+  try {
+    const s = await seedStockSet(cast, h);
+    const first = await stockTurn(ctx, h, { prompt: c.request, control: `Receive restock request ${s.taurusReq.id}`, rounds: receiveOpenRequest(s.taurus.id, 2, 'qt') });
+    await commitStock(ctx, first, { card: c.expected.card, tool: 'update_restock_request', label: 'receipt' });
+    const afterFirst = await movesOf(h, s.taurus);
+    await checkRequestReceived(ctx, h, s.taurusReq);
+    ctx.check(afterFirst.length === 1 && Number(afterFirst[0].quantity) === 64, 'read_back', 'first_movement_wrong', `movements ${afterFirst.map((m) => m.quantity).join(',')}`);
+    ctx.check(!!first.body.threadId, 'harness', 'no_saved_conversation_to_continue', 'the first answer returned no thread id');
+    // "that was 2 gallons, not 2 quarts": a correcting movement for the 1.5 gallon difference with its own receipt; the first is not edited.
+    const second = await stockTurn(ctx, h, { prompt: c.corrections[0].request, control: 'Add 1.5 gallons of Taurus SC that arrived', sessionId: first.sessionId, sessionKey: 'fix', thread: { id: first.body.threadId, seq: first.body.threadSeq }, rounds: adjust({ product_name: 'Taurus SC', movement_type: 'correction', quantity: 1.5, unit: 'gal', note: 'Correction: 2 gal received, not 2 qt' }) });
+    await commitStock(ctx, second, { card: c.corrections[0].expected.card, tool: 'adjust_stock', label: 'correction' });
+    ctx.check(second.body.taskId !== first.body.taskId, 'receipt', 'correction_without_own_receipt', 'the correction shares the first movement\'s task and receipt');
+    const moves = await movesOf(h, s.taurus);
+    // The complete first movement (quantity, unit, entered amount in its metadata, stock before and after) is untouched.
+    ctx.check(moves.length === 2 && JSON.stringify(moves[0]) === JSON.stringify(afterFirst[0]), 'side_effect', 'first_movement_edited_or_replaced', `movements ${moves.map((m) => m.quantity).join(',')}; the first movement differs from its first read-back`);
+    const supplierOrders = await h.db('vendor_orders').where({ restock_request_id: s.taurusReq.id }).count('* as n').first();
+    ctx.check(Number(supplierOrders.n) === 0, 'side_effect', 'vendor_order_placed_by_correction', `${supplierOrders.n} vendor orders for the request after the correction`);
+    ctx.check((await stockOf(h, s.taurus)).onHand === TAURUS_BASE + 2 * GAL, 'read_back', 'on_hand_wrong_after_correction', `on hand ${(await stockOf(h, s.taurus)).onHand}, expected ${TAURUS_BASE + 2 * GAL}`);
+    ctx.markCompleted();
+  } finally {
+    if (savedThreads === undefined) delete process.env.GATE_IB_THREADS; else process.env.GATE_IB_THREADS = savedThreads;
+    await h.db('ib_threads').where({ admin_actor_id: h.actors.owner.id }).del().catch(() => {});
+  }
 };
 
 CASES['W10-dev-04'] = async (ctx, h, cast, c) => {

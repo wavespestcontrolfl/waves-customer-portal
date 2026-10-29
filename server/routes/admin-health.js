@@ -93,14 +93,17 @@ async function ensureHealthTables() {
   } catch (e) { logger.error('[health] Column check error:', e.message); }
 }
 
+// The safety net runs only in front of the routes that WRITE (rescore, alert updates and actions). The
+// reads (dashboard, scores, alerts, quiet) never create a table or add a column: the migrations own the
+// tables, so a read has no side effect and the Intelligence Bar's general read can reach /scores/:customerId.
 let _healthTablesChecked = false;
-router.use(async (req, res, next) => {
+async function ensureHealthTablesOnce(req, res, next) {
   if (!_healthTablesChecked) {
     _healthTablesChecked = true;
     try { await ensureHealthTables(); } catch (e) { console.error('[health] Auto-create error:', e.message); }
   }
   next();
-});
+}
 
 // =========================================================================
 // GET /dashboard — Summary stats for the health dashboard
@@ -372,7 +375,7 @@ router.get('/scores/:customerId', async (req, res) => {
 // =========================================================================
 // POST /rescore/:customerId — Trigger rescore for one customer
 // =========================================================================
-router.post('/rescore/:customerId', async (req, res) => {
+router.post('/rescore/:customerId', ensureHealthTablesOnce, async (req, res) => {
   try {
     const result = await healthService.scoreCustomer(req.params.customerId);
     if (!result) return res.status(404).json({ error: 'Customer not found or scoring failed' });
@@ -386,7 +389,7 @@ router.post('/rescore/:customerId', async (req, res) => {
 // =========================================================================
 // POST /rescore-all — Batch rescore all customers (async)
 // =========================================================================
-router.post('/rescore-all', async (req, res) => {
+router.post('/rescore-all', ensureHealthTablesOnce, async (req, res) => {
   try {
     // Return immediately, run in background
     res.json({ message: 'Batch rescore started', status: 'processing' });
@@ -426,7 +429,7 @@ router.get('/alerts', async (req, res) => {
 // =========================================================================
 // PUT /alerts/:id — Update alert
 // =========================================================================
-router.put('/alerts/:id', async (req, res) => {
+router.put('/alerts/:id', ensureHealthTablesOnce, async (req, res) => {
   try {
     const { status, resolutionNotes, resolvedBy } = req.body;
     const alert = await alertService.updateAlert(req.params.id, { status, resolutionNotes, resolvedBy });
@@ -440,7 +443,7 @@ router.put('/alerts/:id', async (req, res) => {
 // =========================================================================
 // POST /alerts/:id/action — Execute a recommended action
 // =========================================================================
-router.post('/alerts/:id/action', async (req, res) => {
+router.post('/alerts/:id/action', ensureHealthTablesOnce, async (req, res) => {
   try {
     const { actionIndex } = req.body;
     const result = await alertService.executeAction(req.params.id, actionIndex);

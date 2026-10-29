@@ -78,6 +78,8 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
   ibBookingProposal: (...args) => mockIbBookingProposal(...args),
   ibBookingOverlapProposal: (...args) => mockIbBookingOverlapProposal(...args),
+  ibBookingPropertyProposal: async () => ({ stamp: null }),
+  bookingPropertyLabel: () => null,
   CARD_CANCEL_REFUSED_MESSAGE: CARD_CANCEL_REFUSED_MESSAGE_MOCK,
 }));
 jest.mock('../services/appointment-cancel-impact', () => ({
