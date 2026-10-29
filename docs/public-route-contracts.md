@@ -6323,6 +6323,9 @@ error code, limiter or token changes, and no message is sent.
 - Cost: no Google call (drive times are the default route-optimizer estimate,
   asked with `providerTravel: false` so capacity mode buys no road times; the
   pin is read from the customer row, never geocoded).
+- The assistant's offers are append-only (`appendOnly`, find-time `capacityPlacement: false`), even
+  with `GATE_BOOK_CAPACITY_COMMIT` on: its commit stores no route order. `/book`
+  and the other callers are unchanged.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

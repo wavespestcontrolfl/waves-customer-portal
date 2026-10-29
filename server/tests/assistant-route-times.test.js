@@ -173,7 +173,7 @@ describe('serveAssistantTimes — the assistant', () => {
     expect(out.engine).toBe('old');
     expect(out.result).toEqual({ zone: 'Zone A', days: OLD_DAYS });
     await out.settled;
-    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false });
+    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false, appendOnly: true });
     // old: 11/02 09:00, 11/02 14:00, 11/03 10:00. new: 11/02 09:00, 11/02 11:00, 11/04 13:00.
     const lines = infoLines();
     expect(lines).toHaveLength(1);
@@ -513,7 +513,7 @@ describe('no geocode, ever: a customer without a stored pin is served the old li
     process.env[GATE] = 'true';
     const out = await routeTimes.serveAssistantTimes({ customerId: 'cust-1', loadOld: () => oldFinder() });
     expect(out.engine).toBe('route_times');
-    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false });
+    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false, appendOnly: true });
     Object.values(geocoders).forEach((spy) => expect(spy).not.toHaveBeenCalled());
   });
 });

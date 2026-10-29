@@ -16,11 +16,12 @@ const db = require('../models/db');
 const findTime = require('../services/scheduling/find-time');
 
 describe('availabilityForPin -> buildBookingAvailability -> findAvailableSlots', () => {
-  const saved = { cap: process.env.GATE_SCHEDULING_CAPACITY, self: process.env.GATE_SELF_BOOKING };
+  const saved = { cap: process.env.GATE_SCHEDULING_CAPACITY, self: process.env.GATE_SELF_BOOKING, commit: process.env.GATE_BOOK_CAPACITY_COMMIT };
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_SCHEDULING_CAPACITY = 'true'; // capacity mode forced on: the mode that buys road times
     process.env.GATE_SELF_BOOKING = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true'; // insertion offers live for /book
     const builder = {
       first: jest.fn().mockResolvedValue({ advance_days_min: 1, advance_days_max: 14, slot_duration_minutes: 60, day_start: '08:00', day_end: '17:00' }),
       whereNot: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
@@ -35,6 +36,7 @@ describe('availabilityForPin -> buildBookingAvailability -> findAvailableSlots',
   afterAll(() => {
     if (saved.cap === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = saved.cap;
     if (saved.self === undefined) delete process.env.GATE_SELF_BOOKING; else process.env.GATE_SELF_BOOKING = saved.self;
+    if (saved.commit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT; else process.env.GATE_BOOK_CAPACITY_COMMIT = saved.commit;
   });
 
   test('the assistant\'s call asks find-time for the model-only clock; /book\'s own call does not', async () => {
@@ -48,6 +50,22 @@ describe('availabilityForPin -> buildBookingAvailability -> findAvailableSlots',
     expect(findTime.findAvailableSlots.mock.calls[0][0].providerTravel).toBeUndefined();
   });
 
+  test('with insertion offers live, the assistant\'s call is append-only (find-time gets capacityPlacement false); /book\'s own call still gets the gate\'s value', async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    await availabilityForPin({ lat: 27.4, lng: -82.4, serviceKey: 'pest_control', providerTravel: false, appendOnly: true });
+    expect(findTime.findAvailableSlots.mock.calls[0][0].capacityPlacement).toBe(false);
+
+    findTime.findAvailableSlots.mockClear();
+    await availabilityForPin({ lat: 27.4, lng: -82.4, serviceKey: 'pest_control' });
+    expect(findTime.findAvailableSlots.mock.calls[0][0].capacityPlacement).toBe(true);
+
+    // Gate off: the default stays false, nothing else changes.
+    delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+    findTime.findAvailableSlots.mockClear();
+    await availabilityForPin({ lat: 27.4, lng: -82.4, serviceKey: 'pest_control' });
+    expect(findTime.findAvailableSlots.mock.calls[0][0].capacityPlacement).toBe(false);
+  });
+
   test('the assistant adapter is the only caller that passes it', () => {
     const fs = require('fs');
     const path = require('path');
@@ -55,7 +73,7 @@ describe('availabilityForPin -> buildBookingAvailability -> findAvailableSlots',
     const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { if (!['node_modules', 'tests'].includes(entry.name)) walk(full); return; }
-      if (entry.name.endsWith('.js') && /availabilityForPin\(\{[^}]*providerTravel:\s*false/.test(fs.readFileSync(full, 'utf8'))) hits.push(entry.name);
+      if (entry.name.endsWith('.js') && /availabilityForPin\(\{[^}]*providerTravel:\s*false[^}]*appendOnly:\s*true/.test(fs.readFileSync(full, 'utf8'))) hits.push(entry.name);
     });
     walk(path.join(__dirname, '..'));
     expect(hits).toEqual(['assistant-route-times.js']);

@@ -2134,7 +2134,10 @@ function bookingOfferWindow(config, today) {
 // tag either way, so a gate flip between this mint and /confirm can't be
 // redeemed under the wrong policy.
 function buildFunnelAvailability(args) {
-  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+  // `appendOnly` (the portal assistant's availabilityForPin call alone): its commit, confirmBooking, stores an
+  // unassigned visit with no certified route order, so a mid-route insertion offer could not be honored.
+  // Undefined for every other caller: the gate's value, as before.
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() && !args.appendOnly });
 }
 
 // The customer a /book offer may be made to, or null. The ONE eligibility
@@ -2185,7 +2188,7 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false, providerTravel }) {
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, providerTravel, appendOnly }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2210,6 +2213,7 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, prov
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
     providerTravel,
+    appendOnly,
   });
 }
 

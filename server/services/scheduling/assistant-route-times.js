@@ -126,7 +126,12 @@ async function buildRouteDays({ customerId, serviceKey }) {
   if (!pin) return { days: null, reason: 'no_stored_pin' };
   // providerTravel: false: the model-only road clock. This path never buys Google road times
   // (capacity mode would otherwise draw on the allowance customer booking shares).
-  const availability = await booking.availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey, providerTravel: false });
+  // appendOnly: append-only offers (find-time gets capacityPlacement false). The assistant's commit (confirmBooking) inserts an
+  // unassigned visit with no certified route order, so a mid-route insertion offer would be accepted
+  // without the order that justified it.
+  const availability = await booking.availabilityForPin({
+    lat: pin.lat, lng: pin.lng, serviceKey, providerTravel: false, appendOnly: true,
+  });
   return availability ? { days: availability.days || [], customer } : { days: null, reason: 'unavailable' };
 }
 
