@@ -524,6 +524,21 @@ postgres('payroll commission ledger', () => {
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(0);
     });
 
+    it('never counts cash or Zelle a visit\'s prepaid stamp recorded: only the technician attests it', async () => {
+      const { cust, est } = await soldWorld();
+      const inv = await mintedInvoice(cust, est, { subtotal: '600.00', total: '600.00' });
+      const v = await visit(cust, est);
+      // admin-schedule.js POST /:id/prepaid, then completion: the payment row it writes has no processor behind it.
+      await payment(cust, null, '2026-09-16', '600.00', {
+        description: `Invoice WPC-T0 — cash (prepaid at visit)`,
+        metadata: JSON.stringify({ invoice_id: inv, scheduled_service_id: v, source: 'scheduled_service_prepaid', method: 'cash', note: null }),
+      });
+      // The office records a check on the same invoice (record-payment, admin only): that one counts.
+      await payment(cust, inv, '2026-09-17', '100.00', { description: 'Invoice WPC-T0 — check' });
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(1000);
+      expect(await entries()).toHaveLength(1);
+    });
+
     it('counts a paid payment, and not a disputed one, a refunded one with no refund amount, or any other status', async () => {
       const { cust, est } = await soldWorld();
       const inv = await mintedInvoice(cust, est, { subtotal: '700.00' });

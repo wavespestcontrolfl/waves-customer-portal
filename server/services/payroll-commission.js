@@ -427,6 +427,11 @@ function paidInvoices(payment, invoices, customerInvoices, totals) {
 // Payment statuses that are cash Waves collected (a disputed row counts as refunded in full until the dispute is won,
 // when the row returns to 'paid'). Every other status counts 0 and is not loaded.
 const COUNTED_STATUSES = ['paid', 'refunded', 'disputed'];
+// A payment the visit's prepaid stamp records (admin-schedule.js POST /:id/prepaid, then completion): cash or Zelle the
+// technician assigned to the visit can mark on their own, with no processor settlement and no independent approval, so
+// the selling technician could earn on money only they attest. It is not counted; the owner adds a manual commission
+// pay line once the cash is confirmed. Office-recorded payments (record-payment, admin only) and processor payments count.
+const SELF_ATTESTED_SOURCE = 'scheduled_service_prepaid';
 
 /**
  * The base of a payment (the card surcharge is not in base) the row shows as refunded, in cents: the refunded cash
@@ -487,6 +492,7 @@ async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd
     })
     .whereBetween('p.payment_date', [sale.accepted_on, to])
     .whereIn('p.status', COUNTED_STATUSES)
+    .whereRaw("COALESCE(p.metadata->>'source', '') <> ?", [SELF_ATTESTED_SOURCE])
     .whereNotIn('p.id', skipIds)
     .select(paymentColumns(trx));
 }
