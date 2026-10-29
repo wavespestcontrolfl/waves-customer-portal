@@ -17,7 +17,7 @@ jest.setTimeout(60000);
   let executeCommsTool;
   let scheduleCustomerSms;
   let TWILIO_NUMBERS;
-  const created = { customers: [], technicians: [] };
+  const created = { customers: [], technicians: [], decisions: [] };
   const sendDate = () => require('../utils/datetime-et').etDateString(require('../utils/datetime-et').addETDays(new Date(), 3));
 
   beforeAll(() => {
@@ -43,6 +43,7 @@ jest.setTimeout(60000);
       await db('sms_log').where({ customer_id: id }).del();
       await db('customers').where({ id }).del();
     }
+    if (created.decisions.length) await db('agent_decisions').whereIn('id', created.decisions).del();
     if (created.technicians.length) await db('technicians').whereIn('id', created.technicians).del();
     await db.destroy();
   });
@@ -61,6 +62,16 @@ jest.setTimeout(60000);
     created.customers.push(id);
     return { id, phone };
   }
+
+  // A pending house-voice suggestion on the customer's thread: the inbound text and the decision that answers it.
+  async function pendingSuggestion(c) {
+    const inbound = await db('sms_log').insert({ customer_id: c.id, direction: 'inbound', from_phone: c.phone, to_phone: TWILIO_NUMBERS.getOutboundNumber(), message_body: 'Synthetic customer question', status: 'received', message_type: 'manual' }).returning('id');
+    const id = randomUUID();
+    await db('agent_decisions').insert({ id, workflow: 'sms_house_voice_suggest', agent_name: 'synthetic', decision_version: 'v1', status: 'pending_review', entity_type: 'sms_log', entity_id: String(inbound[0].id || inbound[0]), sms_log_id: inbound[0].id || inbound[0], customer_id: c.id, suggested_message: 'Synthetic suggested reply' });
+    created.decisions.push(id);
+    return id;
+  }
+  const decisionStatus = async (id) => (await db('agent_decisions').where({ id }).first('status')).status;
 
   const rowsFor = (customerId) => db('sms_log').where({ customer_id: customerId, direction: 'outbound' }).select('*');
   const input = (customerId, over = {}) => ({ customer_id: customerId, message: 'Hi, this is a synthetic scheduled text.', send_date: sendDate(), send_time: '10:00', ...over });
@@ -145,6 +156,59 @@ jest.setTimeout(60000);
     await db('customers').where({ id: c.id }).update({ phone: '+12025550998' });
     expect(await confirm(ctx, inputs, card)).toMatchObject({ code: 'preview_changed', preview_changed: true });
     expect(await rowsFor(c.id)).toHaveLength(0);
+  });
+
+  test('a suggested reply waiting on the thread: no card, and nothing is parked or queued', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const decision = await pendingSuggestion(c);
+    expect(await executeScheduleSmsTool('schedule_sms', input(c.id), ctx)).toMatchObject({ code: 'suggestion_pending' });
+    expect(await rowsFor(c.id)).toHaveLength(0);
+    expect(await decisionStatus(decision)).toBe('pending_review');
+  });
+
+  test('a suggestion that arrives after the card: Confirm refuses inside the lock, queues nothing and parks nothing', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const inputs = input(c.id);
+    const card = await executeScheduleSmsTool('schedule_sms', inputs, ctx);
+    expect(card.preview).toBe(true);
+    const decision = await pendingSuggestion(c);
+    const result = await confirm(ctx, inputs, card);
+    // Re-derived at Confirm before the writer runs: refused as a changed card, nothing written.
+    expect(result).toMatchObject({ code: 'suggestion_pending', preview_changed: true, error: expect.stringMatching(/suggested reply waiting/) });
+    expect(await rowsFor(c.id)).toHaveLength(0);
+    expect(await decisionStatus(decision)).toBe('pending_review');
+  });
+
+  test('a suggestion that lands while Confirm waits on the thread lock is still refused', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const inputs = input(c.id);
+    const card = await executeScheduleSmsTool('schedule_sms', inputs, ctx);
+    // The drafter's publish holds the same thread lock the writer takes: Confirm waits, then sees the suggestion.
+    const { lockSuggestThread } = require('../services/sms-suggest-mode');
+    const publish = await db.transaction();
+    await lockSuggestThread(publish, c.phone.replace(/\D/g, '').slice(-10));
+    const pending = confirm(ctx, inputs, card);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const inbound = await publish('sms_log').insert({ customer_id: c.id, direction: 'inbound', from_phone: c.phone, to_phone: TWILIO_NUMBERS.getOutboundNumber(), message_body: 'Synthetic question', status: 'received', message_type: 'manual' }).returning('id');
+    const decisionId = randomUUID();
+    await publish('agent_decisions').insert({ id: decisionId, workflow: 'sms_house_voice_suggest', agent_name: 'synthetic', decision_version: 'v1', status: 'pending_review', entity_type: 'sms_log', entity_id: String(inbound[0].id || inbound[0]), sms_log_id: inbound[0].id || inbound[0], customer_id: c.id, suggested_message: 'Synthetic suggested reply' });
+    created.decisions.push(decisionId);
+    await publish.commit();
+    expect(await pending).toMatchObject({ failed: true, code: 'suggestion_pending' });
+    expect(await rowsFor(c.id)).toHaveLength(0);
+    expect(await decisionStatus(decisionId)).toBe('pending_review');
+  });
+
+  test('another customer\'s suggestion does not block this customer', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const other = await customer();
+    await pendingSuggestion(other);
+    const card = await executeScheduleSmsTool('schedule_sms', input(c.id), ctx);
+    expect(card.preview).toBe(true);
   });
 
   test('list_queued_messages lists the row and cancel_queued_message cancels it', async () => {

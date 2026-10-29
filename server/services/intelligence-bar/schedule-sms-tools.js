@@ -30,7 +30,9 @@
  *                  queues one text.
  *
  * The queued row is the page's own row shape (message_type manual, admin_user_id, metadata human_authored), so
- * list_queued_messages lists it and cancel_queued_message can cancel it.
+ * list_queued_messages lists it and cancel_queued_message can cancel it. That holds only while no Agent Review
+ * suggestion is pending on the customer's thread: the writer would park it and stamp parked_decision_ids on the text,
+ * which the bar's list and cancel refuse. So the card is refused (and Confirm re-checks under the lock) while one waits.
  */
 const crypto = require('crypto');
 const db = require('../../models/db');
@@ -72,7 +74,11 @@ const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
 const digits = (value) => String(value || '').replace(/\D/g, '');
 const digest = (value) => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, 32);
 const last4 = (phone) => digits(phone).slice(-4) || null;
+const last10 = (phone) => (digits(phone).length >= 10 ? digits(phone).slice(-10) : null);
+const threadHasPendingSuggestion = (phoneLast10, dbh) => require('../sms-suggest-mode').threadHasPendingSuggestion(phoneLast10, dbh);
 const nameOf = (c) => [c?.first_name, c?.last_name].filter(Boolean).join(' ').trim() || c?.company_name || null;
+
+const SUGGESTION_PENDING_REFUSAL = 'This customer has a suggested reply waiting on their thread (Agent Review). Scheduling a text now would tie it to that suggestion, and the bar could not cancel it. Handle the suggested reply on the Communications page first, then ask again. Nothing was scheduled.';
 
 const NIGHT_TIME_REFUSAL = 'A text from the bar can only be scheduled for a time from 8:00 AM to 8:00 PM Eastern. That time is outside it (8:00 PM to 8:00 AM is refused, because "at 9" could mean morning or evening). Ask the operator for a time from 8 AM to 8 PM, and ask AM or PM if they did not say. Nothing was scheduled.';
 
@@ -144,6 +150,9 @@ async function buildPlan(input) {
   if (linkRefusal) return refusal(`${linkRefusal.error}. Nothing was scheduled.`, linkRefusal.status === 503 ? 'link_unverified' : 'link_not_schedulable');
   const blocked = await require('./comms-tools').sendSmsProposalRefusal({ customer_id: customer.id, phone: customer.phone, message, message_type: 'manual' });
   if (blocked) return { ...blocked, error: `${blocked.error || 'This text cannot go out.'} Nothing was scheduled.`, code: blocked.code || 'send_blocked' };
+  // A suggested reply waiting on this thread would be parked by the queued text, which then cannot be listed or
+  // cancelled from the bar (it is tied to an Agent Review suggestion). So the bar does not schedule over one.
+  if (await threadHasPendingSuggestion(last10(customer.phone))) return refusal(SUGGESTION_PENDING_REFUSAL, 'suggestion_pending');
   const name = nameOf(customer);
   const when = sendTimeInWords(time.at);
   const plan = {
@@ -199,7 +208,11 @@ function underLockFor(plan, pinned) {
       return { refuse: { status: 409, code: 'preview_changed', error: 'The customer or their phone number changed after the card was shown. Nothing was scheduled.' } };
     }
     const existing = await alreadyQueued(trx, { customerId, to, from, message, sendAt });
-    return existing ? { existing: { id: existing.id, scheduledFor: existing.scheduled_for } } : null;
+    if (existing) return { existing: { id: existing.id, scheduledFor: existing.scheduled_for } };
+    // A suggestion that arrived after the card: the writer parks every pending one on this thread (its publish takes
+    // the same thread lock, so none can land between this read and that park). Refuse instead, nothing written.
+    if (await threadHasPendingSuggestion(last10(to), trx)) return { refuse: { status: 409, code: 'suggestion_pending', error: SUGGESTION_PENDING_REFUSAL } };
+    return null;
   };
 }
 
@@ -267,4 +280,5 @@ module.exports = {
   cardLines,
   sendTimeInWords,
   NIGHT_TIME_REFUSAL,
+  SUGGESTION_PENDING_REFUSAL,
 };

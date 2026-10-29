@@ -30,6 +30,7 @@ const gates = require('../services/intelligence-bar/write-gates');
 const { buildContract, previewFingerprint, CUSTOMER_CONTACT_TOOL_NAMES } = require('../services/intelligence-bar/authorization-contract');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const suggestMode = require('../services/sms-suggest-mode');
 
 const CUST = '00000000-0000-4000-8000-0000000000c1';
 const PHONE = '+19415550142';
@@ -39,6 +40,7 @@ const TEXT = 'Hi Robin, we are on our way tomorrow morning. Reply with any quest
 const base = { customer_id: CUST, message: TEXT, send_date: '2099-01-05', send_time: '10:00' };
 
 let customers;
+let mockPending;
 // A small knex stand-in: plain-object where / whereNull filter the seeded customers. Any write throws.
 function makeDb() {
   return (table) => {
@@ -76,8 +78,9 @@ beforeEach(() => {
   mockProposalRefusal.mockResolvedValue(null);
   mockResolveCustomer.mockResolvedValue(null);
   mockQueue.mockResolvedValue({ status: 200, body: { success: true, id: 'sms-1', scheduledFor: '2099-01-05T15:00:00.000Z' } });
+  mockPending = jest.spyOn(suggestMode, 'threadHasPendingSuggestion').mockResolvedValue(false);
 });
-afterEach(() => envGate(false));
+afterEach(() => { envGate(false); jest.restoreAllMocks(); });
 
 describe('registration', () => {
   test('a two-step external action, admin only, never owner-direct, and a customer-contact card', () => {
@@ -235,6 +238,35 @@ describe('inputs the card refuses', () => {
     mockProposalRefusal.mockResolvedValueOnce({ success: false, blocked: true, code: 'NO_CONSENT_RECORD', error: 'The customer opted out of texts.' });
     expect(await preview()).toMatchObject({ code: 'NO_CONSENT_RECORD', error: expect.stringMatching(/opted out.*Nothing was scheduled/) });
     expect(mockProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ customer_id: CUST, phone: PHONE, message_type: 'manual' }));
+  });
+});
+
+describe('a suggested reply waiting on the thread (Agent Review)', () => {
+  test('no card: the queued text would park the suggestion and the bar could not cancel it', async () => {
+    mockPending.mockResolvedValueOnce(true);
+    const result = await preview();
+    expect(result).toMatchObject({ code: 'suggestion_pending', error: expect.stringMatching(/suggested reply waiting.*Communications page.*Nothing was scheduled/) });
+    expect(result.preview).toBeUndefined();
+    expect(mockPending).toHaveBeenCalledWith('9415550142', undefined);
+  });
+
+  test('Confirm refuses a suggestion that arrived after the card, inside the writer\'s lock, with nothing queued', async () => {
+    const card = await preview();
+    await confirm(card);
+    const { underLock } = mockQueue.mock.calls[0][2];
+    const trx = (table) => { const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, first: async () => (table === 'customers' ? { phone: PHONE } : null) }; return b; };
+    mockPending.mockResolvedValueOnce(true);
+    expect(await underLock(trx)).toMatchObject({ refuse: { status: 409, code: 'suggestion_pending' } });
+    expect(mockPending).toHaveBeenLastCalledWith('9415550142', trx);
+    mockPending.mockResolvedValueOnce(false);
+    expect(await underLock(trx)).toBeNull();
+  });
+
+  test('the writer\'s refusal is reported as not scheduled, not as drift', async () => {
+    mockQueue.mockResolvedValueOnce({ status: 409, body: { error: 'This customer has a suggested reply waiting on their thread (Agent Review).', code: 'suggestion_pending' } });
+    const result = await confirm(await preview());
+    expect(result).toMatchObject({ failed: true, code: 'suggestion_pending', error: expect.stringMatching(/was not scheduled/) });
+    expect(result.preview_changed).toBeUndefined();
   });
 });
 
