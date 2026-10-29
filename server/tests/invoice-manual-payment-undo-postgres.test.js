@@ -55,6 +55,7 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     await database('meta_conversion_uploads').whereIn('invoice_id', invoiceIds).del();
     await database('audit_log').whereIn('resource_id', [...invoiceIds, ...ids]).del();
     await database('receipt_delivery_jobs').whereIn('invoice_id', invoiceIds).del();
+    await database('messaging_audit_log').whereIn('invoice_id', invoiceIds.map(String)).del();
     await database('invoice_followup_sequences').whereIn('invoice_id', invoiceIds).del();
     await database('review_requests').whereIn('customer_id', ids).del();
     await database('activity_log').whereIn('customer_id', ids).del();
@@ -65,6 +66,11 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
   });
 
   afterAll(async () => { await database.destroy(); });
+
+  // One messaging_audit_log row about the invoice (synthetic recipient), as messaging/audit.js writes it.
+  const auditRow = (invoiceId, over = {}) => ({
+    invoice_id: String(invoiceId), to_hash: 'synthetic', to_last4: '0000', audience: 'customer', purpose: 'billing', channel: 'sms', body_hash: 'synthetic', ...over,
+  });
 
   async function makeInvoice(over = {}) {
     const [customer] = await database('customers')
@@ -225,6 +231,8 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     }],
     ['a refund on the ledger row', 'payment_row', async (id) => database('payments').where({ customer_id: (await row(id)).customer_id }).update({ refund_amount: 10 })],
     ['an ad conversion upload', 'synced', (id) => database('meta_conversion_uploads').insert({ invoice_id: id, conversion_type: 'purchase', event_id: `synthetic-${id}`, event_name: 'Purchase' })],
+    ['a receipt text a provider took', 'customer_message', (id) => database('messaging_audit_log').insert(auditRow(id, { provider: 'twilio', provider_message_id: `SMsynthetic${id.slice(0, 8)}`, sent_at: new Date() }))],
+    ['a receipt text held for quiet hours (it can still send)', 'customer_message', (id) => database('messaging_audit_log').insert(auditRow(id, { blocked_code: 'QUIET_HOURS_HOLD' }))],
   ])('refuses and changes nothing after %s', async (_name, code, happen) => {
     const invoice = await makeInvoice();
     await record(invoice.id);
@@ -235,6 +243,14 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
 
     expect(await row(invoice.id)).toEqual(before);
     expect(await database('activity_log').where({ customer_id: invoice.customer_id, action: 'invoice_payment_undone' })).toHaveLength(0);
+  });
+
+  it('a receipt text the pipeline refused for good (an opt-out) does not block Undo', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id);
+    await database('messaging_audit_log').insert(auditRow(invoice.id, { blocked_code: 'SMS_OPTED_OUT', blocked_reason: 'Customer opted out of texts' }));
+    await undo(invoice.id);
+    expect((await row(invoice.id)).status).not.toBe('paid');
   });
 
   it('refuses the Zelle reconciler\'s automatic settlement', async () => {

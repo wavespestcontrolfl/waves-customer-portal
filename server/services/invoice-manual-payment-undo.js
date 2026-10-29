@@ -47,6 +47,16 @@ const {
 const UNDO_NOTE_KEY = 'manualPaymentUndo';
 const TOO_LATE = 'This payment can only be undone on the day it was recorded, before any receipt or reminder.';
 
+// A send the messaging pipeline refused for good never left: no provider saw it and nothing waits to retry it (an opt-out, a
+// suppression, no consent, a channel the customer turned off). Such a row does not block Undo. A hold that can still send later
+// (quiet hours, a lookup that failed, an in-flight leg) and any row a provider saw still refuse.
+const DEFINITIVE_NON_SEND_CODES = Object.freeze([
+  'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'EMAIL_OPTED_OUT', 'CONTACT_DECLINED',
+  'SUPPRESSED_OPT_OUT', 'SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OTHER', 'DNC_SUPPRESSED',
+  'NO_CONSENT_RECORD', 'NO_MARKETING_CONSENT', 'NON_MOBILE_SMS_RECIPIENT', 'REASSIGNED_NUMBER_RISK',
+  'CHANNEL_NOT_SELECTED', 'CHANNEL_EMAIL_ONLY', 'IDENTITY_TRUST_TOO_LOW', 'MISSING_REQUIRED_IDS', 'EMOJI_FOR_CUSTOMER',
+]);
+
 // Things that must NOT have happened since the payment (:since) or must not exist at all. One row from the query = refused.
 // Each probe names the side effect of recordManualPayment, or of what followed it, that Undo cannot take back.
 const AFTER_PAYMENT_PROBES = [
@@ -57,7 +67,13 @@ const AFTER_PAYMENT_PROBES = [
     sql: `SELECT 1 FROM invoices WHERE id = :invoiceId AND (receipt_sent_at IS NOT NULL OR receipt_sms_sent_at IS NOT NULL)
           UNION ALL SELECT 1 FROM receipt_delivery_jobs WHERE invoice_id = :invoiceId`,
   },
-  { code: 'customer_message', message: TOO_LATE, sql: 'SELECT 1 FROM messaging_audit_log WHERE invoice_id = CAST(:invoiceId AS text) AND created_at >= :since' },
+  // Every text or email about the invoice since the payment, except one the pipeline refused for good (DEFINITIVE_NON_SEND_CODES).
+  {
+    code: 'customer_message',
+    message: TOO_LATE,
+    sql: `SELECT 1 FROM messaging_audit_log WHERE invoice_id = CAST(:invoiceId AS text) AND created_at >= :since
+            AND NOT (COALESCE(blocked_code, '') = ANY(CAST(:definitiveNonSendCodes AS text[])) AND provider IS NULL AND provider_message_id IS NULL AND sent_at IS NULL)`,
+  },
   {
     code: 'review_ask',
     message: 'A review request was already started by this payment, so it cannot be undone here.',
@@ -159,6 +175,7 @@ async function manualPaymentUndoRefusal(conn, invoice) {
     paymentId: payment.id,
     since: new Date(sinceMs),
     descriptionPrefix: `Invoice ${invoice.invoice_number} — `,
+    definitiveNonSendCodes: [...DEFINITIVE_NON_SEND_CODES],
   };
   for (const probe of AFTER_PAYMENT_PROBES) {
     const { rows } = await conn.raw(probe.sql, bindings);
