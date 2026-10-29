@@ -255,14 +255,169 @@ describe('second-tech-handover arguments and source', () => {
     expect(parseArgs(['--from', OWNER]).lines).toEqual(['general', 'rodent', 'mosquito']);
   });
 
-  test('the file has no write path', () => {
+  test('the planner file has no write path: --execute hands off to the execute file', () => {
     const src = fs.readFileSync(script, 'utf8');
-    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
-    expect(src.split('\n')[1]).toBe('// READ-ONLY');
+    // crypto's hash .update() is not a database write.
+    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n').replace(/createHash\('sha256'\)\.update\(/g, 'createHash(');
+    expect(src.split('\n')[1]).toMatch(/^\/\/ MUTATES \(dry-run default/);
     expect(code).not.toMatch(/\.(insert|update|del|delete|truncate|upsert)\s*\(/);
     expect(code).not.toMatch(/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|TRUNCATE|DROP\s+TABLE|ALTER\s+TABLE)\b/i);
     expect(code).toMatch(/SET TRANSACTION READ ONLY/);
-    expect(code).not.toMatch(/--execute/);
+    expect(code).toMatch(/require\('\.\/second-tech-handover-execute'\)\.main\(args\)/);
+  });
+});
+
+describe('second-tech-handover PLAN ID', () => {
+  const HIRE_ROW = { id: HIRE, work_days: [1, 2, 3, 4] };
+  const build = (parents, visits, o = {}) => plan(parents, visits, { to: HIRE_ROW, ...o });
+  const fixture = () => {
+    const s = parent();
+    return { s, vs: [MON, TUE, WED, THU, FRI].map((d) => visit(s, d)) };
+  };
+
+  test('the same plan gives the same 64-character id, whatever order the rows arrive in', () => {
+    const { s, vs } = fixture();
+    const a = build([s], vs);
+    const b = build([s], [...vs].reverse());
+    expect(a.planId).toMatch(/^[0-9a-f]{64}$/);
+    expect(b.planId).toBe(a.planId);
+    expect(a.ids.moves).toHaveLength(4);
+  });
+
+  test('the id changes when a visit, its date, the target, the start or the lines change', () => {
+    const { s, vs } = fixture();
+    const base = build([s], vs).planId;
+    // one fewer visit to move (it was completed)
+    expect(build([s], vs.map((v, i) => (i === 0 ? { ...v, status: 'completed' } : v))).planId).not.toBe(base);
+    // a visit's date moved (still a target work day)
+    expect(build([s], vs.map((v, i) => (i === 0 ? { ...v, scheduled_date: '2099-07-13' } : v))).planId).not.toBe(base);
+    // a different hire
+    expect(build([s], vs, { to: { id: OTHER, work_days: [1, 2, 3, 4] } }).planId).not.toBe(base);
+    // the hire's day off changes which visits move
+    expect(build([s], vs, { to: { id: HIRE, work_days: [1, 2, 3, 4, 5] } }).planId).not.toBe(base);
+    // a later start
+    expect(build([s], vs, { start: TUE }).planId).not.toBe(base);
+    // a narrower line set
+    expect(build([s], vs, { lines: ['rodent'] }).planId).not.toBe(base);
+  });
+
+  test('a series that only changes template (no visit to move) is part of the id', () => {
+    const { s, vs } = fixture();
+    const extra = parent();
+    expect(build([s, extra], vs).planId).not.toBe(build([s], vs).planId);
+  });
+
+  test('the id is in the dry-run text and in --json, and the list shows every change as ids only', () => {
+    const { printPlan } = require(script);
+    const { s, vs } = fixture();
+    const p = build([s], vs);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      printPlan(p, { list: false });
+      expect(log.mock.calls[0][0]).toContain(`PLAN ID: ${p.planId}`);
+    } finally {
+      log.mockRestore();
+    }
+    expect(JSON.parse(JSON.stringify(p)).planId).toBe(p.planId);
+  });
+});
+
+describe('second-tech-handover execute flags and refusals', () => {
+  const PLAN = 'a'.repeat(64);
+  const exit = () => jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+  const quiet = () => jest.spyOn(console, 'error').mockImplementation(() => {});
+
+  test('parseArgs reads --execute, --plan, --rollback and --out-dir', () => {
+    expect(parseArgs(['--from', OWNER, '--to', HIRE, '--execute', '--plan', PLAN, '--out-dir', '/tmp/x'])).toMatchObject({
+      execute: true, plan: PLAN, outDir: '/tmp/x', rollback: null,
+    });
+    expect(parseArgs(['--rollback', '/tmp/f.json'])).toMatchObject({ rollback: '/tmp/f.json', execute: false, from: null });
+    expect(parseArgs(['--from', OWNER]).execute).toBe(false);
+  });
+
+  test('--execute without --to, without --plan, or with a bad plan id exits 2 before any connection', () => {
+    const ex = exit(); const err = quiet();
+    try {
+      expect(() => parseArgs(['--from', OWNER, '--execute', '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--execute'])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--execute', '--plan', 'abc'])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', HIRE, '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--from', OWNER, '--to', OWNER, '--execute', '--plan', PLAN])).toThrow('exit 2');
+      expect(() => parseArgs(['--rollback', '/tmp/f.json', '--execute', '--plan', PLAN])).toThrow('exit 2');
+    } finally {
+      ex.mockRestore(); err.mockRestore();
+    }
+  });
+
+  const { executeHandover, rollbackHandover, restartWindowReason, checkTarget, summaryCard, Refusal } = require('../../ops/agents/second-tech-handover-execute.js');
+  const base = { from: OWNER, to: HIRE, start: START, planId: PLAN, now: new Date('2099-07-01T16:00:00Z') };
+
+  test('executeHandover refuses with no connection used: no --to, same technician, no plan id', async () => {
+    await expect(executeHandover(null, { ...base, to: null })).rejects.toMatchObject({ code: 'NO_TARGET' });
+    await expect(executeHandover(null, { ...base, to: OWNER })).rejects.toMatchObject({ code: 'SAME_TECHNICIAN' });
+    await expect(executeHandover(null, { ...base, planId: null })).rejects.toMatchObject({ code: 'NO_PLAN_ID' });
+    await expect(executeHandover(null, { ...base, planId: 'abc' })).rejects.toBeInstanceOf(Refusal);
+  });
+
+  test('the target must be assignable and have an explicit work-days list', () => {
+    const ok = { id: HIRE, employment_status: 'active', field_dispatchable: true, work_days: [1, 2, 3, 4] };
+    expect(() => checkTarget(ok)).not.toThrow();
+    expect(() => checkTarget(null)).toThrow(/no technician row/);
+    expect(() => checkTarget({ ...ok, employment_status: 'prospective' })).toThrow(/not assignable/);
+    expect(() => checkTarget({ ...ok, field_dispatchable: false })).toThrow(/not assignable/);
+    for (const work_days of [null, [], '{}', [0, 1, 2, 3, 4, 5, 6]]) {
+      expect(() => checkTarget({ ...ok, work_days })).toThrow(/no work days set/);
+    }
+    expect(() => checkTarget({ ...ok, work_days: '{1,2,3,4}' })).not.toThrow();
+  });
+
+  test('restart windows: 03:50-04:20 ET daily and 06:40-07:02 ET Mondays', () => {
+    // 2099-07-06 is a Monday; EDT = UTC-4.
+    const et = (day, hhmm) => new Date(`${day}T${hhmm}:00-04:00`);
+    expect(restartWindowReason(et('2099-07-07', '03:49'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-07', '03:50'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:10'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:20'))).toMatch(/04:10 auto-dispatch/);
+    expect(restartWindowReason(et('2099-07-07', '04:21'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-07', '06:50'))).toBeNull(); // Tuesday
+    expect(restartWindowReason(et('2099-07-06', '06:39'))).toBeNull();
+    expect(restartWindowReason(et('2099-07-06', '06:40'))).toMatch(/Monday/);
+    expect(restartWindowReason(et('2099-07-06', '07:02'))).toMatch(/Monday/);
+    expect(restartWindowReason(et('2099-07-06', '07:03'))).toBeNull();
+  });
+
+  test('both writers refuse inside a restart window before touching the database', async () => {
+    const inWindow = new Date('2099-07-07T04:10:00-04:00');
+    await expect(executeHandover(null, { ...base, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
+    const file = path.join(require('os').tmpdir(), `handover-unit-${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, plan_id: PLAN, from: OWNER, to: HIRE, series: [], visits: [] }));
+    try {
+      await expect(rollbackHandover(null, { file, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
+      await expect(rollbackHandover(null, { file: `${file}.missing` })).rejects.toMatchObject({ code: 'BAD_ROLLBACK_FILE' });
+    } finally {
+      fs.unlinkSync(file);
+    }
+  });
+
+  test('the summary card carries counts only', () => {
+    expect(summaryCard({ visits: 12, customers: 9, series: 7 })).toEqual({
+      type: 'series_handover',
+      message: 'You now have 12 visits across 9 customers. They are on your schedule.',
+      payload: { headline: 'Visits moved to your schedule', visits: 12, customers: 9, series: 7 },
+    });
+    expect(summaryCard({ visits: 1, customers: 1, series: 1 }).message).toBe('You now have 1 visit across 1 customer. They are on your schedule.');
+  });
+
+  test('the execute file reaches no sender: no per-visit notice, push, text, email or board broadcast', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover-execute.js'), 'utf8');
+    const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+    expect(src.split('\n')[0]).toBe('// MUTATES');
+    for (const banned of [
+      'tech-visit-notifications', 'dispatch-assignment', 'push-notifications', 'twilio', 'sendgrid', 'sms', 'notification-service',
+      'admin-alert', 'visit-groups', 'appointment-reminders', 'rebooker', 'sockets', 'notifyAssignmentChange',
+    ]) expect(code.toLowerCase()).not.toContain(banned.toLowerCase());
+    // The one message is the hire's card, through the tech feed's own writer.
+    expect(code.match(/sendTechNotification\(/g)).toHaveLength(1);
   });
 });
 

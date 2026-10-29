@@ -1,20 +1,24 @@
 #!/usr/bin/env node
-// READ-ONLY
+// MUTATES (dry-run default: only `--execute --plan <id>` or `--rollback <file>` writes, through second-tech-handover-execute.js)
 //
 // second-tech-handover.js — plans the ONE-TIME handover of service lines to the
 // new technician (second-tech plan, build 6; owner 2026-10-25: "move every pest,
 // rodent and mosquito series to the new tech the weekend before the first solo
 // week ... skip lawn, the termite-bait customers and any old grouped visits").
 //
-// THIS SCRIPT ONLY PLANS. It has no write path: every query is a SELECT inside a
-// read-only transaction on a read-only session. A later PR adds `--execute`
-// after the owner has read this output.
+// WITHOUT `--execute` THIS SCRIPT ONLY PLANS. This file has no write path: every
+// query here is a SELECT inside a read-only transaction on a read-only session. The
+// dry run prints a PLAN ID. `--execute --plan <id>` hands the same flags to
+// second-tech-handover-execute.js, which recomputes the plan inside its write
+// transaction and writes only when the PLAN ID is identical (header there).
 //
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
 //     [--lines general,rodent,mosquito] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
+//   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
+//   ... --rollback <file the execute wrote> [--out-dir <dir>]
 //
 //   --from   the owner's technician row (required).
 //   --to     the hire's row. Optional: the row may not exist yet. Without it the
@@ -24,7 +28,13 @@
 //   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
 //            shrub and termite / WDO are never movable here.
 //   --list   adds the series ids and visit ids that would change. Ids only.
-//   --json   machine-readable output.
+//   --json   machine-readable output (includes planId).
+//   --execute  write the plan the dry run printed (needs --to and --plan).
+//   --plan   the PLAN ID line of the dry run: sha256 over the sorted (series id, visit id,
+//            visit date, from technician) rows the run would change plus --from, --to,
+//            --start and --lines. A different id refuses the run, with no writes.
+//   --rollback  restore the rows a prior execute changed (the rollback file it wrote).
+//   --out-dir  where execute writes its rollback file (default ~/handover-runs).
 //
 //   PG_CA_FILE  REQUIRED for the public proxy: a pinned copy of the database's own
 //            root certificate (Railway's Postgres signs its server certificate with a
@@ -84,6 +94,7 @@
 //
 // Output carries counts, technician ids the operator typed, series ids and visit
 // ids only — no customer names, addresses, phones or emails are selected.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -122,8 +133,11 @@ function defaultStart(now = new Date()) {
 }
 
 const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito] [--list] [--json]\n'
+  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
+  + '       node ops/agents/second-tech-handover.js --rollback <rollback file> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --list-techs';
-const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json' };
+const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute' };
+const PLAN_ID = /^[0-9a-f]{64}$/;
 const technicianFlag = (name) => (v) => (UUID.test(v)
   ? { [name]: v.toLowerCase() }
   : `--${name} needs a technician uuid, got ${JSON.stringify(v)}`);
@@ -137,10 +151,26 @@ const VALUE_FLAGS = {
     const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
     return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and termite are never handed over), got ${JSON.stringify(v)}`;
   },
+  '--plan': (v) => (PLAN_ID.test(v) ? { plan: v.toLowerCase() } : `--plan needs the 64-character PLAN ID the dry run printed, got ${JSON.stringify(v)}`),
+  '--rollback': (v) => ({ rollback: v }),
+  '--out-dir': (v) => ({ outDir: v }),
 };
 
+// Flag combinations that are refused before any connection: [broken?, message].
+const ARG_RULES = [
+  [(a) => a.rollback && (a.execute || a.plan), '--rollback stands alone: do not combine it with --execute or --plan'],
+  [(a) => !a.listTechs && !a.rollback && !a.from, '--from <technician uuid> is required (use --list-techs to see ids)'],
+  [(a) => a.from && a.to && a.from === a.to, '--from and --to are the same technician'],
+  [(a) => a.execute && !a.to, '--execute needs --to <the hire\'s technician uuid>'],
+  [(a) => a.execute && !a.plan, '--execute needs --plan <PLAN ID>: run the dry run first and pass the id it printed'],
+  [(a) => a.plan && !a.execute, '--plan only goes with --execute'],
+];
+
 function parseArgs(argv) {
-  const args = { from: null, to: null, start: null, lines: [...MOVABLE_LINES], list: false, listTechs: false, json: false };
+  const args = {
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], list: false, listTechs: false, json: false,
+    execute: false, plan: null, rollback: null, outDir: null,
+  };
   const fail = (msg) => { console.error(msg); process.exit(2); };
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
@@ -156,8 +186,8 @@ function parseArgs(argv) {
     if (typeof out === 'string') fail(out);
     Object.assign(args, out);
   }
-  if (!args.listTechs && !args.from) fail('--from <technician uuid> is required (use --list-techs to see ids)');
-  if (args.from && args.to && args.from === args.to) fail('--from and --to are the same technician');
+  const broken = ARG_RULES.find(([bad]) => bad(args));
+  if (broken) fail(broken[1]);
   return args;
 }
 
@@ -209,6 +239,21 @@ function targetWorkDays(to) {
 }
 
 /**
+ * The PLAN ID: sha256 over the sorted rows a run would change, plus the flags that
+ * shaped it. One row per series whose template moves (series id, no visit) and one per
+ * visit that moves (series id, visit id, visit date, from technician). Same plan, same
+ * id; a different visit, date, target, start or line set gives a different one.
+ */
+function planIdOf({ from, to, start, lines, retemplate, moves }) {
+  const rows = [
+    ...retemplate.map((seriesId) => [seriesId, '', '', from]),
+    ...moves.map((m) => [m.series_id, m.visit_id, m.date, from]),
+  ].map((r) => JSON.stringify(r)).sort();
+  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows });
+  return crypto.createHash('sha256').update(body).digest('hex');
+}
+
+/**
  * Build the plan. Pure: no database, no clock beyond `today`.
  *   from      technician id the lines move away from
  *   to        { id, work_days } | null   (null = target not set)
@@ -252,7 +297,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     stays_off_day: { visits: 0, by_weekday: {} },
     skipped: {},
     notices_to_suppress: 0,
-    ids: { retemplate: [], series: [], visits: [] },
+    ids: { retemplate: [], series: [], visits: [], moves: [] },
   };
   const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set() });
   // One visit stays: its series counts once per reason.
@@ -312,6 +357,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
       const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
       byLine.visits += 1;
       plan.ids.visits.push(v.id);
+      plan.ids.moves.push({ series_id: p.id, visit_id: v.id, date: v.scheduled_date });
     }
     if (moved) {
       plan.series.with_visits_to_move += 1;
@@ -324,6 +370,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
   for (const s of Object.values(plan.skipped)) delete s._ids;
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
+  plan.planId = planIdOf({ from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves });
   plan.series_note = 'retemplate = series whose technician template moves (future visits seed to the target); with_visits_to_move = series with at least one visit that changes now';
   return plan;
 }
@@ -441,11 +488,12 @@ function weekdayLine(map) {
 
 function printPlan(plan, { list }) {
   const out = [];
-  out.push('Second-technician handover plan (READ-ONLY: nothing was changed)');
+  out.push('Second-technician handover plan (DRY RUN: nothing was changed)');
   out.push(`  from:    ${plan.from}`);
   out.push(`  target:  ${plan.target}`);
   out.push(`  first solo day: ${plan.start}   (plan read on ${plan.today})`);
   out.push(`  lines:   ${plan.lines.join(', ')}`);
+  out.push(`  PLAN ID: ${plan.planId}`);
   const src = {
     assumed_mon_thu: 'ASSUMED Mon-Thu, because --to is not set',
     technician_row: 'from the target technician row',
@@ -480,6 +528,7 @@ function printPlan(plan, { list }) {
   if (!any) out.push('  none');
   out.push('');
   out.push(`Per-visit technician notices the execute step must suppress: ${plan.notices_to_suppress}`);
+  out.push('  (--execute sends none of them: it writes through no notifying path, then sends the hire ONE summary card)');
   if (list) {
     out.push('');
     out.push(`Series whose technician template changes (${plan.ids.retemplate.length}):`);
@@ -567,6 +616,8 @@ function readOnlyConn(connectionString) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // The only write path lives in its own file, so this one stays a reader.
+  if (args.execute || args.rollback) return require('./second-tech-handover-execute').main(args);
   const conn = process.env.DATABASE_PUBLIC_URL;
   if (!conn) {
     console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/second-tech-handover.js --from <uuid>');
@@ -601,9 +652,9 @@ async function main() {
 }
 
 module.exports = {
-  MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
+  MOVABLE_LINES, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
-  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
+  buildPlan, planIdOf, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };
 
 if (require.main === module) {
