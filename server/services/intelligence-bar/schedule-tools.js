@@ -193,7 +193,7 @@ async function executeScheduleTool(toolName, input, actionContext = {}) {
       case 'move_stops_to_day': return await moveStopsToDay(input, actionContext);
       case 'swap_tech_assignments': return await swapTechAssignments(input, actionContext);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
-      case 'find_available_slots': return await findAvailableSlotsTool(input);
+      case 'find_available_slots': return await findAvailableSlotsTool(input, actionContext);
       case 'get_day_summary': return await getDaySummary(input.date);
       case 'get_zone_density': return await getZoneDensity(input.date);
       case 'cancel_and_reschedule_far_out': return await cancelAndRescheduleFarOut(input);
@@ -2221,7 +2221,7 @@ async function getZoneDensity(date) {
 }
 
 
-async function findAvailableSlotsTool(input) {
+async function findAvailableSlotsTool(input, actionContext = {}) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, service_name, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
@@ -2268,7 +2268,15 @@ async function findAvailableSlotsTool(input) {
   const dateFrom = date_from || today;
   const dateTo = date_to || weekOut;
 
-  const result = await findAvailableSlots({
+  // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the new stop is checked
+  // by the dispatcher's arrival-window route check instead of the gap search.
+  // Only an admin caller's search may buy Google road times (the acting
+  // user's technician id is the spender); anyone else stays on the estimate.
+  // Needs the stop's coordinates; without them the old search runs.
+  const rankedDays = require('../scheduling/route-ranked-days');
+  const routeChecked = rankedDays.routeRankedDaysLive() && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+
+  let result = await findAvailableSlots({
     // Staff tool: tech start points apply (GATE_TECH_START_POINTS).
     techStartPoints: true,
     lat, lng,
@@ -2277,6 +2285,10 @@ async function findAvailableSlotsTool(input) {
     dateFrom,
     dateTo,
     technicianId: technician_id,
+    ...(routeChecked ? {
+      arrivalWindow: { prospective: { lat: Number(lat), lng: Number(lng), estimated_duration_minutes: durationMinutes } },
+      ...rankedDays.staffRoadCheckOptions(actionContext),
+    } : {}),
     // Every feasible slot comes back, so each day's count is real; the
     // operator's top N is cut in describeSlotSearch.
     topN: SLOT_SEARCH_ALL,
@@ -2289,6 +2301,14 @@ async function findAvailableSlotsTool(input) {
     includeBlackoutDates: true,
   });
   if (result.error) return result;
+  // The arrival search lists no searched days; the per-day rows still cover
+  // every day asked about, with its refusal reasons.
+  if (routeChecked && !result.searched_dates) {
+    const enumerateDates = require('../scheduling/find-time')._internals?.enumerateDates;
+    if (typeof enumerateDates === 'function') {
+      result = { ...result, searched_dates: enumerateDates(dateFrom, dateTo, { includeWeekends: true }) };
+    }
+  }
   return describeSlotSearch(result, {
     dateFrom, dateTo, today, durationMinutes, durationSource, service, technicianId: technician_id,
     topN: top_n || 10,
