@@ -14,6 +14,8 @@ test('only calibrated timing with known durations produces a lateness card', () 
   expect(buildRouteQualityAlerts(day(late), 'calibrated')).toEqual([{ techId: 'tech', payload: {
     date: '2040-09-10', departureMinutes: 480, issues: [expect.stringContaining('modeled after')],
   } }]);
+  // The GPS-fitted drive clock (GATE_DRIVE_CLOCK) times a day too.
+  expect(buildRouteQualityAlerts(day(late), 'drive_clock')).toEqual(buildRouteQualityAlerts(day(late), 'calibrated'));
   const unknown = buildRouteQualityAlerts(day({ ...late, defaultDurations: ['job'] }), 'calibrated');
   expect(unknown[0].payload).toEqual({ date: '2040-09-10', issues: [expect.stringContaining('needs a service duration')] });
 });
