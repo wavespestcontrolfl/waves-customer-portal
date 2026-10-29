@@ -973,6 +973,7 @@ module.exports = {
   outcomeUnanswered,
   calledBackSql,
   visitUnderwaySql,
+  VISIT_UNDERWAY_RESOLUTION,
   CALLED_BACK_SQL,
   UNKNOWN_CALLER_MIN_SECONDS,
   // Exported so missed-call-text-back.js shares the exact same "what counts
