@@ -2339,6 +2339,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY 7:40 AM-6:40 PM ET — Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES, dark; needs GATE_BID_DESK):
+  // Charlotte County's emailed notices carry no date, so an open Charlotte County bid with a bid number and no due date
+  // reads it from the county's public bid list (one GET). The run first checks the database and calls the county only
+  // while such a bid is waiting. A failed read is a failed run in job health and writes nothing. No AI call; it sends
+  // nothing to anyone and rings no bell. The gate is read per run, so a flip or an unset needs no restart.
+  cron.schedule('0 40 7-18 * * *', async () => {
+    if (!require('../config/feature-gates').bidDeskCharlotteDatesLive()) return;
+    try {
+      const lockRes = await runExclusive('bid-desk-charlotte', async () => {
+        const result = await require('./bid-desk/charlotte-county').runCharlotteDates();
+        if (result.filled > 0) logger.info(`[bid-desk-charlotte] ${result.filled} due date(s) filled`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`bid-desk-charlotte run skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('bid-desk-charlotte').catch(() => {});
+        await recordJobEnd('bid-desk-charlotte', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[bid-desk-charlotte] run failed: ${require('./bid-desk/charlotte-county').safeError(err)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
