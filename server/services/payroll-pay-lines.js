@@ -24,6 +24,7 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { PayrollError } = require('./payroll-w4');
 const { lineOvertimePremium, weeksOfLine } = require('./payroll-regular-rate');
+const { markPayoutsPaid, reopenPayoutsOfRun } = require('./payroll-review-bonuses');
 const { payrollPayLinesLive } = require('../config/feature-gates');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
@@ -304,9 +305,11 @@ async function priceLines(conn, byTech, { lock = false } = {}) {
 /**
  * Finalize: marks the lines each check paid as 'paid' with that check. `byTech` is the
  * map openLinesFor returned for the evaluation the run was finalized from (its rows
- * are locked). A line that is no longer open means the lines moved: refuse.
+ * are locked). A line that is no longer open means the lines moved: refuse. The review
+ * bonus payouts behind the lines it paid become 'paid' too (payroll-review-bonuses.js);
+ * that part is not behind any gate.
  */
-async function markLinesPaid(trx, runId, byTech) {
+async function markLinesPaid(trx, runId, byTech, actorId = null) {
   if (!byTech || !byTech.size) return;
   const checks = await trx('payroll_checks').where({ run_id: runId }).select('id', 'technician_id');
   for (const check of checks) {
@@ -317,10 +320,12 @@ async function markLinesPaid(trx, runId, byTech) {
       .update({ status: 'paid', check_id: check.id, updated_at: trx.fn.now() });
     if (changed !== ids.length) throw new PayrollError(409, 'A pay line changed while the run was finalized. Review the new numbers.');
   }
+  await markPayoutsPaid(trx, runId, actorId);
 }
 
-/** Void: every line a check of this run paid goes back to open. */
+/** Void: every line a check of this run paid goes back to open, and its review bonus payout back to earned. */
 async function reopenLinesOfRun(trx, runId) {
+  await reopenPayoutsOfRun(trx, runId);
   await trx('payroll_pay_lines')
     .whereIn('check_id', trx('payroll_checks').where({ run_id: runId }).select('id'))
     .update({ status: 'open', check_id: null, updated_at: trx.fn.now() });

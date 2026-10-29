@@ -28,6 +28,12 @@
  *   still counts for March 12). Wages and taxes follow the pay date.
  * - No full SSN, EIN, bank or routing number is held or shown. Every form field
  *   that needs one reads "Enter from your records".
+ * - Family employee (GATE_PAYROLL_FAMILY_EMPLOYEE): a check that stored
+ *   unemployment_exempt = true (the employee is the owner's parent or spouse) is
+ *   read whatever the gate says now. Form 940 line 4 lists its pay as exempt (box 4e)
+ *   and line 5 leaves it out; the RT-6 wages, monthly employee counts and wage
+ *   list leave it out (F.S. 443.1216(13)(d)); Form 941, the W-2 and the W-3 count it
+ *   like any wages. A check that stored nothing (null) is not exempt.
  * - A year or quarter with no checks returns zeros, not an error.
  */
 const db = require('../models/db');
@@ -81,7 +87,7 @@ function socialSecurityWageBaseCents(year) {
 
 // One stored check as plain numbers, with the three wage splits the forms need.
 function normalize(row, wageBaseCents) {
-  const { gross, capWages, excessWages, flReemployment, snapshot } = rt6CheckInputs(row);
+  const gross = num(row.gross_cents);
   const ytd = num(row.ytd_gross_before_cents);
   const threshold = RATES.additionalMedicareThresholdCents;
   return {
@@ -98,16 +104,16 @@ function normalize(row, wageBaseCents) {
     ssEmployer: num(row.employer_social_security_cents),
     medicareEmployer: num(row.employer_medicare_cents),
     futa: num(row.futa_cents),
-    flReemployment,
+    // GATE_PAYROLL_FAMILY_EMPLOYEE: an exempt check (stored true) is no Form 940 taxable pay and no
+    // RT-6 pay. `rt6` holds this check's RT-6 inputs (zeros when exempt); gross above is real pay.
+    unemploymentExempt: row.unemployment_exempt === true,
+    rt6: rt6CheckInputs(row),
     // GATE_PAYROLL_PAY_LINES: the employer HSA money (not wages) and the qualified overtime
     // the check stored (null on a check made with the gate off).
     hsaEmployer: num(row.hsa_employer_cents),
     qualifiedOvertime: row.qualified_overtime_cents == null ? null : num(row.qualified_overtime_cents),
     ssWages: Math.min(gross, max0(wageBaseCents - ytd)),
     addlMedicareWages: max0(ytd + gross - threshold) - max0(ytd - threshold),
-    capWages,
-    excessWages,
-    snapshot,
   };
 }
 
@@ -294,7 +300,7 @@ function form941(year, quarter, quarterChecks, depositsCents, history, periodChe
 // RT-6 line 5 (rt6Tax) lives in payroll-rt6.js, shared with the Tax page calendar.
 function formRt6(year, quarter, quarterChecks, periodChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
-  const { gross, excess, checkTax, rateBp, distinct, tax } = rt6Tax(quarterChecks);
+  const { gross, excess, checkTax, rateBp, distinct, tax } = rt6Tax(quarterChecks.map((c) => c.rt6));
   const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(periodChecks, year, month)));
   rows.push(
     cents('2', 'Gross wages', gross),
@@ -310,11 +316,12 @@ function formRt6(year, quarter, quarterChecks, periodChecks) {
     }),
   );
   const byEmployee = new Map();
-  for (const c of quarterChecks) {
+  // An exempt family employee is not on the wage list.
+  for (const c of quarterChecks.filter((q) => !q.unemploymentExempt)) {
     const e = byEmployee.get(c.technicianId) || { name: c.name, grossCents: 0, taxableCents: 0 };
     e.name = c.name;
-    e.grossCents += c.gross;
-    e.taxableCents += c.capWages;
+    e.grossCents += c.rt6.gross;
+    e.taxableCents += c.rt6.capWages;
     byEmployee.set(c.technicianId, e);
   }
   const employees = [...byEmployee.values()]
@@ -342,7 +349,7 @@ function floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid) {
   const dueDate = rollIrs(`${year + 1}-01-31`);
   const open = [];
   for (const q of [1, 2, 3, 4]) {
-    const owed = rt6Tax(quarterChecksOf(yearChecks, q)).tax;
+    const owed = rt6Tax(quarterChecksOf(yearChecks, q).map((c) => c.rt6)).tax;
     if (owed <= 0) continue;
     const prefix = `payroll:rt6:${year}-Q${q}`;
     const paid = rt6Paid
@@ -359,10 +366,14 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
   // are exempt from FUTA (line 4, box 4a fringe benefits). Read from the checks whatever the
   // gate says now, so turning GATE_PAYROLL_PAY_LINES off never changes a paid year; zero when
   // no check holds any.
-  const exempt = sum(yearChecks, 'hsaEmployer');
-  const total = sum(yearChecks, 'gross') + exempt;
+  const hsa = sum(yearChecks, 'hsaEmployer');
+  // GATE_PAYROLL_FAMILY_EMPLOYEE: pay for services by the owner's parent or spouse is exempt from
+  // FUTA (26 U.S.C. 3306(c)(5); line 4, box 4e) and never counts toward an employee's $7,000.
+  const family = yearChecks.reduce((acc, c) => acc + (c.unemploymentExempt ? c.gross : 0), 0);
+  const exempt = hsa + family;
+  const total = sum(yearChecks, 'gross') + hsa;
   const byEmployee = new Map();
-  for (const c of yearChecks) byEmployee.set(c.technicianId, (byEmployee.get(c.technicianId) || 0) + c.gross);
+  for (const c of yearChecks) byEmployee.set(c.technicianId, (byEmployee.get(c.technicianId) || 0) + (c.unemploymentExempt ? 0 : c.gross));
   const line5 = [...byEmployee.values()].reduce((acc, gross) => acc + max0(gross - RATES.futaAndStateWageBaseCents), 0);
   const line6 = exempt + line5;
   const line7 = total - line6;
@@ -387,7 +398,12 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
     text('1a', 'State where you paid wages', 'FL'),
     cents('3', 'Total payments to all employees', total),
     cents('4', 'Payments exempt from FUTA tax', exempt, exempt > 0
-      ? { note: 'Employer HSA contributions through the cafeteria plan: check box 4a, fringe benefits. They are also in line 3.' }
+      ? {
+        note: [
+          hsa > 0 && 'Employer HSA contributions through the cafeteria plan: check box 4a, fringe benefits. They are also in line 3.',
+          family > 0 && 'Pay to your parent or spouse: check box 4e, other. It is also in line 3.',
+        ].filter(Boolean).join(' '),
+      }
       : undefined),
     cents('5', 'Payments of more than $7,000 to each employee', line5),
     cents('6', 'Subtotal (lines 4 + 5)', line6),
@@ -501,7 +517,8 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
   // the 12th, whenever it was paid (Codex #6770 r2: a March 9 week paid in
   // April still counts for March 12). periodRows: the finalized checks whose
   // week can hold a 12th of the quarter; without them, every check given.
-  const periodChecks = (periodRows || [...priorRows, ...rows]).map((r) => ({ technicianId: r.technician_id, weekStart: r.week_start }));
+  const periodChecks = (periodRows || [...priorRows, ...rows])
+    .map((r) => ({ technicianId: r.technician_id, weekStart: r.week_start, unemploymentExempt: r.unemployment_exempt === true }));
   const line12Of = (y, q) => quarterTaxes(allChecks.filter((c) => c.payDate.startsWith(`${y}-`) && quarterOfMonth(monthOf(c)) === q)).line12;
   const quarterEnd = `${year}-${pad(quarter * 3)}`;
   const dayCents = new Map();
@@ -522,7 +539,8 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
     quarter,
     employer: { name: WAVES_BUSINESS_NAME, address: WAVES_ADDRESS_LINE, ein: FROM_RECORDS },
     f941: form941(year, quarter, quarterChecks, depositTotal(deposits941), history, periodChecks),
-    rt6: formRt6(year, quarter, quarterChecks, periodChecks),
+    // Florida: an exempt family employee is not a covered employee on the RT-6.
+    rt6: formRt6(year, quarter, quarterChecks, periodChecks.filter((c) => !c.unemploymentExempt)),
     f940: form940(year, yearChecks, depositTotal(deposits940), rt6Paid),
     w2,
     w3: w3Totals(w2),
@@ -532,6 +550,9 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
 // The employer HSA money and the stored qualified overtime: null on a check drafted with
 // GATE_PAYROLL_PAY_LINES off, read whatever the gate says now so a paid year never changes.
 const PAY_LINE_CHECK_COLUMNS = ['hsa_employer_cents', 'qualified_overtime_cents'];
+// GATE_PAYROLL_FAMILY_EMPLOYEE: whether the check was exempt from FUTA and RT-6 and the wages it
+// counted; null on a check drafted with the gate off. Read whatever the gate says now.
+const UNEMPLOYMENT_COLUMNS = ['unemployment_exempt', 'unemployment_wages_cents'];
 
 const CHECK_COLUMNS = [
   'technician_id', 'employee_name', 'gross_cents', 'overtime_premium_cents', 'federal_income_tax_cents',
@@ -567,6 +588,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
     .select(
       ...CHECK_COLUMNS,
       ...PAY_LINE_CHECK_COLUMNS,
+      ...UNEMPLOYMENT_COLUMNS,
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );
@@ -589,7 +611,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
     .where({ status: 'finalized' })
     .where('week_start', '>=', addStaffWorkDays(`${year}-${pad(firstMonth)}-12`, -6))
     .where('week_start', '<=', `${year}-${pad(firstMonth + 2)}-12`)
-    .select('technician_id', conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"));
+    .select('technician_id', 'unemployment_exempt', conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"));
   const quarterMonths = [1, 2, 3].map((n) => `${year}-${pad((quarter - 1) * 3 + n)}`);
   const deposits941 = await paidDeposits(conn, '941_deposit', quarterMonths);
   const deposits940 = await paidDeposits(conn, '940_deposit', [String(year)]);

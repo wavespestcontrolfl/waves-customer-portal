@@ -2936,7 +2936,7 @@ describe('completion route wiring (source contracts)', () => {
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:
     // void + re-create to consolidate, or send individually to the AP).
-    expect(source).toMatch(/if \(isBackfillCompletion && invoice\?\.payer_id && !invoice\.payer_statement_id\) \{[\s\S]{0,400}isEnabled\('payerStatements'\)[\s\S]{0,400}\['net15', 'net30'\]\.includes\(payerRow\?\.payment_terms\)[\s\S]{0,600}payer-statement accrual SKIPPED[\s\S]{0,400}void \+ re-create/);
+    expect(source).toMatch(/if \(isBackfillCompletion && invoice\?\.payer_id && !invoice\.payer_statement_id\) \{[\s\S]{0,400}isEnabled\('payerStatements'\)[\s\S]{0,400}require\('\.\/payer'\)\.isNetPaymentTerm\(payerRow\?\.payment_terms\)[\s\S]{0,600}payer-statement accrual SKIPPED[\s\S]{0,400}void \+ re-create/);
 
     // createFromService threads the option through to create() untouched.
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
@@ -2947,7 +2947,7 @@ describe('completion route wiring (source contracts)', () => {
     // And create() honors it at BOTH accrual sites: the NET-terms preflight
     // transaction wrap and the statement get-or-create/attach itself.
     expect(invoiceSource).toMatch(/if \(!skipAccrual && database === db && require\("\.\.\/config\/feature-gates"\)\.isEnabled\("payerStatements"\)\) \{/);
-    expect(invoiceSource).toMatch(/if \(!skipAccrual\s*\n\s*&& resolvedPayerId\s*\n\s*&& \['net15', 'net30'\]\.includes\(resolvedPaymentTerms\)/);
+    expect(invoiceSource).toMatch(/if \(!skipAccrual\s*\n\s*&& resolvedPayerId\s*\n\s*&& PayerService\.isNetPaymentTerm\(resolvedPaymentTerms\)/);
     // Attachment is create-only — payer_statement_id is stamped exclusively
     // from the accrual result on the insert, so skipping accrual IS staying
     // off every statement (nothing later attaches an existing invoice).

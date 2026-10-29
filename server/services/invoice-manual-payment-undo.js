@@ -19,6 +19,13 @@
  * A payment is undoable only after recordManualPayment wrote its completion marker (MANUAL_PAYMENT_EFFECTS_DONE_ACTION, the last thing it does,
  * after the reminder stop, pause clear, review ask, closeout and receipt). A crash or a lost marker leaves a payment un-undoable here.
  *
+ * A PART payment (GATE_PARTIAL_PAYMENTS; the invoice stays open with invoices.amount_paid > 0) is undone by the same writer and the same
+ * rules, from the marker with `partial: true`: it subtracts exactly that payment's amount from amount_paid (refused if it would go below 0),
+ * cancels that payments row, restores the notes and recorded-at/by it overwrote, and re-arms nothing (a part payment stopped nothing).
+ * It is refused once the customer opened a payment page for the remainder (a live session was priced for the smaller amount) or a payment
+ * plan was set up. Undoing the FINAL payment of a part-paid invoice restores amount_paid from the marker (the paid flip reset it to 0).
+ * Only the latest part can be undone: undoing it moves the invoice's edit time past the earlier part's payment, so that one is refused.
+ *
  * Every rule runs again under the invoice row lock, in the order the payment writer locks (the per-customer combined-session
  * lock, the receipt-claim lock, then the invoice). The payment writer's effects and what Undo does about each:
  *   paid flip + operator note            reversed exactly from the marker
@@ -40,8 +47,9 @@ const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { undoManualPaymentLive } = require('../config/feature-gates');
 const { lockInvoiceReceiptClaim } = require('./receipt-delivery-queue');
+const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const {
-  VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, MANUAL_PAYMENT_EFFECTS_DONE_ACTION, PAID_FIELDS, refusal,
+  VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, MANUAL_PAYMENT_EFFECTS_DONE_ACTION, PAID_FIELDS, PART_FIELDS, refusal,
 } = require('./invoice-manual-payment');
 
 const UNDO_NOTE_KEY = 'manualPaymentUndo';
@@ -126,16 +134,28 @@ const AFTER_PAYMENT_PROBES = [
   },
 ];
 
+// Only for a part payment: a plan set up after it was sized from the remainder, which undoing would leave short.
+const PART_PAYMENT_PLAN_PROBE = {
+  code: 'payment_plan_active',
+  message: 'A payment plan was set up for this invoice after the part payment, so it cannot be undone here.',
+  sql: "SELECT 1 FROM payment_plans WHERE invoice_id = :invoiceId AND status = 'active'",
+};
+
 const ms = (value) => (value ? new Date(value).getTime() : null);
 
-// The marker belonging to the payment now on the invoice: the newest one, whose created_at is the same transaction instant as
-// payment_recorded_at. An older marker (a payment already undone, or replaced) never matches.
+// The marker belonging to the payment now on the invoice: the one whose created_at is the same transaction instant as
+// payment_recorded_at. An older marker (a payment already undone, or replaced) never matches. Newest first, a few deep: after the
+// latest part of a part-paid invoice is undone, payment_recorded_at is the earlier part's instant again.
 async function markerFor(conn, invoice) {
-  const marker = await conn('audit_log')
+  const recorded = ms(invoice.payment_recorded_at);
+  if (recorded == null) return null;
+  const markers = await conn('audit_log')
     .where({ action: MANUAL_PAYMENT_RECORDED_ACTION, resource_type: 'invoices', resource_id: invoice.id })
     .orderBy('created_at', 'desc')
-    .first('created_at', 'metadata');
-  return marker && ms(marker.created_at) === ms(invoice.payment_recorded_at) ? marker.metadata : null;
+    .limit(10)
+    .select('created_at', 'metadata');
+  const match = markers.find((marker) => ms(marker.created_at) === recorded);
+  return match ? match.metadata : null;
 }
 
 // Why this invoice's payment cannot be undone, or null. `conn` is the pool (describe) or the transaction holding the invoice lock
@@ -143,12 +163,31 @@ async function markerFor(conn, invoice) {
 async function manualPaymentUndoRefusal(conn, invoice) {
   const notEligible = (code, message) => ({ refusal: { code, message }, marker: null, payment: null });
   const manualOnly = 'Only an invoice paid by cash, check, Zelle, Venmo, PayPal or another off-card tender recorded by the office can be undone.';
-  if (invoice.status !== 'paid' || !VALID_PAYMENT_METHODS.includes(invoice.payment_method)
+  // A part payment: the invoice is still open and holds money received (amount_paid). Anything else is the full-payment case.
+  const isPart = invoice.status !== 'paid' && Number(invoice.amount_paid) > 0;
+  if (isPart) {
+    if (INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoice.status) || invoice.stripe_charge_id || invoice.processor) {
+      return notEligible('not_manual_paid', manualOnly);
+    }
+    // The remainder was priced for a payment page the customer opened after the part payment: undoing now would leave a session for less
+    // than what is owed.
+    if (invoice.stripe_payment_intent_id) {
+      return notEligible('payment_session', 'The customer opened a payment page for this invoice after the part payment, so it cannot be undone here.');
+    }
+    // A saved-card charge for the rest that is submitted or unresolved keeps its own claim row even when a crash rolled the invoice
+    // write back: if it settles after this Undo, the settle books the invoice paid without the part. Read only, never released here.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true });
+    } catch (err) {
+      if (!['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) throw err;
+      return notEligible('card_charge_pending', 'A card charge for the rest of this invoice is still being settled, so the part payment cannot be undone now. Try again later.');
+    }
+  } else if (invoice.status !== 'paid' || !VALID_PAYMENT_METHODS.includes(invoice.payment_method)
     || invoice.stripe_payment_intent_id || invoice.stripe_charge_id || invoice.processor) {
     return notEligible('not_manual_paid', manualOnly);
   }
   const marker = await markerFor(conn, invoice);
-  if (!marker || marker.automated) return notEligible('not_recorded_by_office', manualOnly);
+  if (!marker || marker.automated || Boolean(marker.partial) !== isPart) return notEligible('not_recorded_by_office', manualOnly);
   // recordManualPayment releases its transaction before it stops reminders, clears a billing pause and enrolls a review. Until its
   // completion marker for THIS payment exists those effects may still be running, so a reversal now would be followed by them.
   const effectsDone = await conn('audit_log')
@@ -166,7 +205,8 @@ async function manualPaymentUndoRefusal(conn, invoice) {
     .whereNull('processor').whereNull('stripe_payment_intent_id').whereNull('refunded_at')
     .whereRaw('COALESCE(refund_amount, 0) = 0')
     .first();
-  if (!payment || ms(payment.created_at) !== sinceMs) {
+  if (!payment || ms(payment.created_at) !== sinceMs
+    || (isPart && Math.round(Number(invoice.amount_paid) * 100) < Math.round(Number(payment.amount) * 100))) {
     return notEligible('payment_row', 'The payment record for this invoice changed after it was recorded, so it cannot be undone here.');
   }
   const bindings = {
@@ -177,22 +217,28 @@ async function manualPaymentUndoRefusal(conn, invoice) {
     descriptionPrefix: `Invoice ${invoice.invoice_number} — `,
     definitiveNonSendCodes: [...DEFINITIVE_NON_SEND_CODES],
   };
-  for (const probe of AFTER_PAYMENT_PROBES) {
+  for (const probe of isPart ? [...AFTER_PAYMENT_PROBES, PART_PAYMENT_PLAN_PROBE] : AFTER_PAYMENT_PROBES) {
     const { rows } = await conn.raw(probe.sql, bindings);
     if (rows.length) return notEligible(probe.code, probe.message);
   }
-  return { refusal: null, marker, payment };
+  return { refusal: null, marker, payment, isPart };
 }
 
 // The Invoices page asks this before it offers the action: the same rules the writer re-runs under the lock.
 async function describeManualPaymentUndo(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) throw refusal(404, 'Invoice not found');
-  const { refusal: refused, payment } = await manualPaymentUndoRefusal(db, invoice);
+  const { refusal: refused, payment, marker, isPart } = await manualPaymentUndoRefusal(db, invoice);
   if (refused) return { eligible: false, ...refused };
   return {
     eligible: true,
-    payment: { id: payment.id, amount: Number(payment.amount), method: invoice.payment_method, recordedAt: invoice.payment_recorded_at },
+    payment: {
+      id: payment.id,
+      amount: Number(payment.amount),
+      method: isPart ? marker.method : invoice.payment_method,
+      recordedAt: invoice.payment_recorded_at,
+      part: isPart,
+    },
   };
 }
 
@@ -236,7 +282,7 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
     await lockInvoiceReceiptClaim(trx, invoiceId);
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!locked) throw refusal(404, 'Invoice not found');
-    const { refusal: refused, marker, payment } = await manualPaymentUndoRefusal(trx, locked);
+    const { refusal: refused, marker, payment, isPart } = await manualPaymentUndoRefusal(trx, locked);
     if (refused) throw refusal(409, refused.message, { code: refused.code });
     // The caller confirmed the payment it was shown. Another operator may have undone it and recorded a different one since.
     if (String(payment.id) !== String(paymentId)) {
@@ -245,11 +291,30 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
 
     const since = new Date(ms(locked.payment_recorded_at));
     const undone = {
-      at: new Date().toISOString(), by: undoneBy, reason: cleanReason, method: locked.payment_method, amount: Number(payment.amount),
+      at: new Date().toISOString(), by: undoneBy, reason: cleanReason, method: isPart ? marker.method : locked.payment_method, amount: Number(payment.amount),
+      ...(isPart ? { part: true } : {}),
     };
-    const [restored] = await trx('invoices').where({ id: invoiceId, status: 'paid' })
-      .update({ ...Object.fromEntries(PAID_FIELDS.map((field) => [field, marker.previous?.[field] ?? null])), updated_at: trx.fn.now() })
-      .returning('*');
+    let restored;
+    if (isPart) {
+      // Subtract exactly this payment from the money received; the status and the tender were never touched by the part.
+      const remainingPaidCents = Math.round(Number(locked.amount_paid) * 100) - Math.round(Number(payment.amount) * 100);
+      if (remainingPaidCents < 0) throw refusal(409, 'The payment record for this invoice changed after it was recorded, so it cannot be undone here.', { code: 'payment_row' });
+      [restored] = await trx('invoices').where({ id: invoiceId, status: locked.status })
+        .update({
+          ...Object.fromEntries(PART_FIELDS.map((field) => [field, marker.previous?.[field] ?? null])),
+          amount_paid: remainingPaidCents / 100,
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+    } else {
+      // A marker written before partial payments has no amount_paid: the column is NOT NULL and was 0.
+      [restored] = await trx('invoices').where({ id: invoiceId, status: 'paid' })
+        .update({
+          ...Object.fromEntries(PAID_FIELDS.map((field) => [field, marker.previous?.[field] ?? (field === 'amount_paid' ? 0 : null)])),
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+    }
     if (!restored) throw refusal(409, 'Invoice status changed before the payment could be undone');
     // History stays: the ledger row is kept as 'canceled' (the status Stripe-canceled payments already carry) with what happened.
     await trx('payments').where({ id: payment.id }).update({
@@ -257,12 +322,13 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
       metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [UNDO_NOTE_KEY]: undone })]),
       updated_at: trx.fn.now(),
     });
-    await reopenPaymentFailedBells(trx, invoiceId, since);
+    // A part payment closed no bell; the full payment's settlement did.
+    if (!isPart) await reopenPaymentFailedBells(trx, invoiceId, since);
     await trx('activity_log').insert({
       customer_id: locked.customer_id,
       admin_user_id: undoneByTechnicianId,
       action: 'invoice_payment_undone',
-      description: `Manual payment undone for ${locked.invoice_number} ($${undone.amount.toFixed(2)} via ${undone.method}) — ${undoneBy} — ${cleanReason.slice(0, 120)}`,
+      description: `${isPart ? 'Part payment' : 'Manual payment'} undone for ${locked.invoice_number} ($${undone.amount.toFixed(2)} via ${undone.method}) — ${undoneBy} — ${cleanReason.slice(0, 120)}`,
       metadata: JSON.stringify({ invoice_id: invoiceId, payment_id: payment.id, ...undone }),
     });
     await recordAuditEvent({
@@ -275,19 +341,22 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
       critical: true,
       trx,
     });
-    return { restored, payment, undone };
+    return { restored, payment, undone, isPart };
   });
 
   // Reminders resume on the normal schedule. After commit: resumeSequence reads the invoice and stops on a terminal one, so it must see
   // the restored status. A completed row re-arms at its stored step (a step already sent never fires again); an office stop stays stopped.
+  // A part payment stopped nothing, so there is nothing to re-arm (remindersRearmed stays true: nothing is waiting).
   let remindersRearmed = true;
-  try {
-    const FollowUps = require('./invoice-followups');
-    await FollowUps.resumeSequenceIfSystemResumable(invoiceId);
-    await FollowUps.scheduleForInvoice(invoiceId);
-  } catch (err) {
-    remindersRearmed = false;
-    logger.warn(`[invoice-manual-payment-undo] reminder re-arm failed for invoice ${invoiceId}: ${err.message}`);
+  if (!done.isPart) {
+    try {
+      const FollowUps = require('./invoice-followups');
+      await FollowUps.resumeSequenceIfSystemResumable(invoiceId);
+      await FollowUps.scheduleForInvoice(invoiceId);
+    } catch (err) {
+      remindersRearmed = false;
+      logger.warn(`[invoice-manual-payment-undo] reminder re-arm failed for invoice ${invoiceId}: ${err.message}`);
+    }
   }
   return {
     invoice: await db('invoices').where({ id: invoiceId }).first(),

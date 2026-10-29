@@ -104,6 +104,7 @@ it('with Auto Pay on, an empty proposal without Bill by invoice opens on Auto Pa
   expect(f.payment).not.toBeDisabled();
   expect(screen.getByRole('option', { name: 'Auto Pay' })).toBeInTheDocument();
   expect(screen.getByRole('option', { name: 'Net-30' })).toBeDisabled();
+  expect(screen.getByRole('option', { name: 'Net-60' })).toBeDisabled();
   expect(screen.getByText(/Auto Pay charges the saved card or bank account after each service\. Net terms require Bill by invoice\./)).toBeInTheDocument();
 });
 
@@ -113,6 +114,23 @@ it('with Auto Pay on, a Bill-by-invoice proposal still opens on Net 30 and offer
   openTerms();
   expect(screen.queryByRole('option', { name: 'Auto Pay' })).not.toBeInTheDocument();
   expect(screen.getByRole('option', { name: 'Net-30' })).not.toBeDisabled();
+  expect(screen.getByRole('option', { name: 'Net-60' })).not.toBeDisabled();
+});
+
+// Owner 2026-10-29 "lets create the option net-60, just to have it": a Bill-by-invoice choice beside Net-30 that saves
+// the payer token, and a proposal saved on it loads on it.
+it('Net-60 is a Bill-by-invoice choice that saves as net60 and loads back as Net-60', async () => {
+  const f = await mount({ billByInvoice: true });
+  await waitFor(() => expect(f.payment).toHaveValue('net30'));
+  openTerms();
+  fireEvent.change(f.payment, { target: { value: 'net60' } });
+  expect(f.payment).toHaveValue('net60');
+  expect((await savedTerms()).paymentTerms).toBe('net60');
+  cleanup();
+  const g = await mount({ billByInvoice: true, commercialTerms: { paymentTerms: 'net60' } });
+  await waitFor(() => expect(g.payment).toHaveValue('net60'));
+  openTerms();
+  expect(screen.getByRole('option', { name: 'Net-60' })).not.toBeDisabled();
 });
 
 it('with Auto Pay off, no Auto Pay choice is offered, but a proposal already on Auto Pay keeps it', async () => {

@@ -86,6 +86,25 @@ describe('the page path is unchanged', () => {
     expect(args).not.toHaveProperty('requireSelfPay');
   });
 
+  test('an amount typed on the page reaches the settlement in whole cents; a bad amount is the page\'s 400 and reaches none', async () => {
+    await viaPage({ ...BODY, amount: 45.5 });
+    expect(recordManualPayment.mock.calls[0][1].amountCents).toBe(4550);
+    await viaPage({ ...BODY, amount: '120' });
+    expect(recordManualPayment.mock.calls[1][1].amountCents).toBe(12000);
+    recordManualPayment.mockClear();
+    for (const amount of [0, -3, 'abc', 10.005]) {
+      const res = await viaPage({ ...BODY, amount });
+      expect(res.status).toBe(400);
+      expect(res.json.error).toBe('amount must be a dollar amount above $0.00, with at most two decimals');
+    }
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
+  test('a part payment answer carries what is still owed', async () => {
+    recordManualPayment.mockResolvedValueOnce({ invoice: PAID, receipt: null, partial: { amount: 40, remaining: 60 } });
+    expect(await viaPage({ ...BODY, amount: 40 })).toEqual({ status: 200, json: { ok: true, invoice: PAID, receipt: null, partial: { amount: 40, remaining: 60 } } });
+  });
+
   test('a lost-race 409 answers as before, with no preview code', async () => {
     const err = Object.assign(new Error('Invoice status changed before payment could be recorded'), { statusCode: 409, currentStatus: 'paid' });
     recordManualPayment.mockRejectedValueOnce(err);
@@ -121,6 +140,14 @@ describe('the bar shim runs the same handler', () => {
     expect(args.via).toBe('both'); // the handler's own default for a send it will not make
     await viaBar({ method: 'check' });
     expect(recordManualPayment.mock.calls[1][1].sendReceipt).toBe(false);
+  });
+
+  test('the bar never passes a part amount: an amount in its body is dropped, so the settlement is whole-balance only', async () => {
+    await viaBar({ ...BODY, amount: 10 });
+    const [, args] = recordManualPayment.mock.calls[0];
+    expect(args).not.toHaveProperty('amountCents');
+    expect(args.expectedAmountCents).toBe(APPROVED.expectedAmountCents);
+    expect(args.requireSelfPay).toBe(true);
   });
 
   test('a card pin refusal answers 409 with the PREVIEW_CHANGED code; any other 409 carries none', async () => {

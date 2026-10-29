@@ -11,17 +11,20 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { buttonViolations } = require('./admin-alert-compose');
 
-// kind -> its handler { live() -> boolean, run({ row, item, technicianId, claimedVersion }) }. A run answers
-// { ok: true, message, resolution, closed? } or { ok: false, code, message, close? }: `closed` says the step
+// kind -> its handler { live() -> boolean, run({ row, item, technicianId, claimedVersion }), visibleItems? }. A run
+// answers { ok: true, message, resolution, closed? } or { ok: false, code, message, close? }: `closed` says the step
 // already closed the row itself (fenced), `close` is the resolution for a row whose record was already
-// answered elsewhere. Required at call time: serving the bell list loads no
-// emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
+// answered elsewhere. The optional `visibleItems(rows)` answers, when the bell list is served, which of each row's
+// stored buttons its record allows now (Map row id -> item ids; a row it leaves out serves none); the tap still
+// checks again. Required at call time: serving the bell list loads no emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
 // for that kind first (section 2, part 9).
 const KINDS = {
   // Owner 2026-10-29 "ok go": Confirm is offered only when the tap sends nothing and moves no money.
   referral_inbound: () => require('./referral-inbound-bell').buttonHandler,
   // Owner 2026-10-29 "ok go" (PR 2): close-only buttons. The step is the bell's own Done with the button's note.
   close_note: () => closeNoteHandler,
+  // Owner 2026-10-29 "bid buttons, as a trial": No bid, and Bid once the due date is confirmed. The Bid desk's save step.
+  bid_decision: () => require('./bid-desk/alert-buttons').buttonHandler,
 };
 
 // Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back
@@ -76,16 +79,39 @@ function kindLive(kind) {
 
 // The bell list with each open row's `actions` ({ id, label, prompt? }) added: for the admin role only, never on
 // a `live:` overlay row, and only while the row's kind is on. A tap sends back only the action id.
-function withAlertButtons(rows, { role } = {}) {
+async function withAlertButtons(rows, { role } = {}) {
   if (role !== 'admin' || !Array.isArray(rows)) return rows;
   const live = new Map();
-  return rows.map((row) => {
-    if (row?.done_at != null || String(row?.id || '').startsWith('live:')) return row;
+  const byKind = new Map();
+  const served = rows.map((row) => {
+    if (row?.done_at != null || String(row?.id || '').startsWith('live:')) return null;
     const buttons = storedButtons(row);
-    if (!buttons) return row;
+    if (!buttons) return null;
     if (!live.has(buttons.kind)) live.set(buttons.kind, kindLive(buttons.kind));
-    if (!live.get(buttons.kind)) return row;
-    return { ...row, actions: buttons.items.map(({ id, label, prompt }) => ({ id, label, ...(prompt ? { prompt } : {}) })) };
+    if (!live.get(buttons.kind)) return null;
+    if (!byKind.has(buttons.kind)) byKind.set(buttons.kind, []);
+    byKind.get(buttons.kind).push({ id: row.id, metadata: parseMetadata(row.metadata) });
+    return buttons;
+  });
+  // kind -> Map(row id -> item ids) for a kind that checks its records at serve time; no entry = every stored button.
+  const allowed = new Map();
+  for (const [kind, kindRows] of byKind) {
+    const { visibleItems } = KINDS[kind]();
+    if (typeof visibleItems !== 'function') continue;
+    try {
+      allowed.set(kind, await visibleItems(kindRows));
+    } catch (err) {
+      logger.warn(`[alert-buttons] ${kind} button check failed: ${err.message}`);
+      allowed.set(kind, new Map());
+    }
+  }
+  return rows.map((row, i) => {
+    const buttons = served[i];
+    if (!buttons) return row;
+    const ids = allowed.get(buttons.kind)?.get(row.id);
+    const items = allowed.has(buttons.kind) ? buttons.items.filter((item) => (ids || []).includes(item.id)) : buttons.items;
+    if (!items.length) return row;
+    return { ...row, actions: items.map(({ id, label, prompt }) => ({ id, label, ...(prompt ? { prompt } : {}) })) };
   });
 }
 

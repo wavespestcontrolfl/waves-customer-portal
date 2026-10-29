@@ -6484,7 +6484,7 @@ const InvoiceService = {
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
       const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
-      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+      if (pre.payerId && PayerSvc.isNetPaymentTerm(pre.paymentTerms)) {
         return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
     }
@@ -6686,7 +6686,7 @@ const InvoiceService = {
     let accruedStatementId = null;
     if (!skipAccrual
       && resolvedPayerId
-      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && PayerService.isNetPaymentTerm(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
       // TOCTOU guard: the transaction wrap at the top was decided from a preflight
       // resolve. If the payer/terms flipped to NET between that preflight and this
@@ -11202,6 +11202,12 @@ const InvoiceService = {
     // that claimed, delivered, and released entirely before the row lock.
     let preSendState = null;
     if (isRetotal) {
+      // Plain words first for the common case of a part payment (amount_paid, payment_recorded_at both set by the Invoices page).
+      if (Math.round(Number(existing.amount_paid || 0) * 100) > 0) {
+        throw new Error(
+          "This invoice has a part payment on it, so its amounts cannot be edited. Undo the part payment first (the same day only), or issue a new invoice instead",
+        );
+      }
       if (existing.payment_recorded_at) {
         throw new Error(
           "Cannot edit amounts on an invoice with payment already applied — refund it or issue a new invoice instead",
@@ -11774,6 +11780,13 @@ const InvoiceService = {
     // refunding) would hide collected money. Account-CREDIT prepayment sets neither
     // signal (it only moves the credit ledger), so this still lets credit-covered
     // invoices void. Mirrors the cancelled-service auto-void money guard.
+    // A part payment (invoices.amount_paid, owner 2026-10-29) is money received on this invoice: plain words for the office. Its payments row and
+    // payment_recorded_at below would refuse it too; this is the readable reason.
+    if (Math.round(Number(current.amount_paid || 0) * 100) > 0) {
+      throw new Error(
+        "Cannot void an invoice with a part payment on it. Undo the part payment first (the same day only), or ask for help",
+      );
+    }
     const voidAppliedPayment = await db("payments")
       .whereIn("status", ["paid", "processing"])
       .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [current.id])

@@ -267,10 +267,10 @@ describe('agreement terms: online signing only when EVERY structured term agrees
   };
   // [label, authored commercialTerms, conflicting field, the builder line's ask]
   const CONFLICTS = [
-    ['payment terms unset (no terms at all)', undefined, 'paymentTerms', 'payment terms Net 30'],
-    ['terms authored without a payment term', { initialTermMonths: 12 }, 'paymentTerms', 'payment terms Net 30'],
-    ['due on receipt', { paymentTerms: 'due_on_receipt' }, 'paymentTerms', 'payment terms Net 30'],
-    ['Net-15', { paymentTerms: 'net15' }, 'paymentTerms', 'payment terms Net 30'],
+    ['payment terms unset (no terms at all)', undefined, 'paymentTerms', 'payment terms Net 30 or Net 60'],
+    ['terms authored without a payment term', { initialTermMonths: 12 }, 'paymentTerms', 'payment terms Net 30 or Net 60'],
+    ['due on receipt', { paymentTerms: 'due_on_receipt' }, 'paymentTerms', 'payment terms Net 30 or Net 60'],
+    ['Net-15', { paymentTerms: 'net15' }, 'paymentTerms', 'payment terms Net 30 or Net 60'],
     ['a 6-month initial term', { ...ALIGNED, initialTermMonths: 6 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
     ['a 24-month initial term', { ...ALIGNED, initialTermMonths: 24 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
     ['a zero-month (month-to-month) initial term', { ...ALIGNED, initialTermMonths: 0 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
@@ -364,7 +364,7 @@ describe('agreement terms: online signing only when EVERY structured term agrees
   });
 });
 
-describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () => {
+describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY), Net 30 or Net 60', () => {
   const NOTE = (detail) => `Online signing needs the proposal terms to match the agreement: ${detail}.`;
   // Version 2 as the migration builds it: version 1's paragraph replaced by the slot.
   const { V1_PAYMENT: V1, V2_PAYMENT: V2 } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
@@ -375,6 +375,7 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
     template: { ...TEMPLATE, active_version_id: 'ver-2' },
   });
   const autopay = (overrides = {}, proposal = {}) => estimateRow(overrides, { commercialTerms: { paymentTerms: 'autopay' }, ...proposal });
+  const net60 = (overrides = {}) => estimateRow(overrides, { commercialTerms: { paymentTerms: 'net60' } });
   const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
   const ORIGINAL_AUTOPAY_GATE = process.env.GATE_COMMERCIAL_AUTOPAY;
   beforeEach(() => {
@@ -386,12 +387,33 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
     else process.env.GATE_COMMERCIAL_AUTOPAY = ORIGINAL_AUTOPAY_GATE;
   });
 
-  test('the two paragraphs are the owner-approved texts, word for word (autopay 2026-10-24, Net 30 2026-06-24)', () => {
+  test('the three paragraphs are the owner-approved texts, word for word (autopay 2026-10-24, Net 30 2026-06-24, Net 60 2026-10-29)', () => {
     expect(AGREEMENT_PAYMENT_TEXT).toBe(require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_PAYMENT_TEXT);
     expect(AGREEMENT_PAYMENT_TEXT).toEqual({
       autopay: "You authorize Waves to charge the card or bank account on file after each service is completed, plus applicable tax. You may change the payment method any time, and cancel autopay with 30 days' written notice, after which invoices are due Net 30.",
       net30: 'Services are invoiced on Net 30 terms \u2014 payment is due within thirty (30) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
+      net60: 'Services are invoiced on Net 60 terms \u2014 payment is due within sixty (60) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
     });
+  });
+
+  test('Net 60 signs online like Net 30, with or without the Auto Pay gate, and prints its own paragraph in the payment slot', async () => {
+    expect(signEligibility(net60())).toMatchObject({ ok: true });
+    const { proposal, totals } = signableProposal(net60());
+    expect(buildAgreementValues(net60(), proposal, totals).agreement.payment_terms).toBe(AGREEMENT_PAYMENT_TEXT.net60);
+    const estimate = net60();
+    const { database, state } = slotDb(estimate);
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: true, status: 201 });
+    expect(state.contracts[0].contract_text_snapshot).toContain(`Billing and payment: ${AGREEMENT_PAYMENT_TEXT.net60}`);
+    expect(state.contracts[0].contract_text_snapshot).not.toContain(AGREEMENT_PAYMENT_TEXT.net30);
+    delete process.env.GATE_COMMERCIAL_AUTOPAY;
+    expect(signEligibility(net60())).toMatchObject({ ok: true });
+  });
+
+  test('Net 60 is never issued on the version-1 template, whose fixed paragraph says Net 30', async () => {
+    const estimate = net60();
+    const { database, state } = makeDb({ estimate });
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 409, code: 'template_unavailable' });
+    expect(state.contracts).toHaveLength(0);
   });
 
   test('an Auto Pay agreement prints the Auto Pay paragraph in the payment slot', async () => {
@@ -422,13 +444,13 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
     expect(signEligibility(autopay())).toMatchObject({ ok: true });
     expect(await agreementCtaFor(autopay(), slotDb(autopay()).database)).toEqual({ canSign: true, state: 'none' });
     expect(signEligibility(autopay({ bill_by_invoice: true }))).toMatchObject({
-      ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Auto Pay, or Net 30 with Bill by invoice'),
+      ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Auto Pay, or Net 30 or Net 60 with Bill by invoice'),
     });
     expect(signEligibility(estimateRow({}, { commercialTerms: { paymentTerms: 'net15' } }))).toMatchObject({
-      note: NOTE('payment terms Auto Pay, or Net 30 with Bill by invoice'),
+      note: NOTE('payment terms Auto Pay, or Net 30 or Net 60 with Bill by invoice'),
     });
     delete process.env.GATE_COMMERCIAL_AUTOPAY;
-    expect(signEligibility(autopay())).toMatchObject({ ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Net 30') });
+    expect(signEligibility(autopay())).toMatchObject({ ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Net 30 or Net 60') });
   });
 
   test('changing the payment term after issue supersedes the open agreement (the fingerprint covers it)', async () => {
@@ -540,6 +562,15 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
       Object.assign(state.contracts[0], { status: 'signed', signed_at: new Date() });
       await handleAgreementSigned({ contractId: 'contract-1', database });
       expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Net 30 by invoice.');
+    });
+
+    test('Net 60: the alert says Net 60 by invoice', async () => {
+      const estimate = net60();
+      const { database, state } = slotDb(estimate);
+      await ensureAgreement({ estimate, req, database });
+      Object.assign(state.contracts[0], { status: 'signed', signed_at: new Date() });
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Net 60 by invoice.');
     });
   });
 

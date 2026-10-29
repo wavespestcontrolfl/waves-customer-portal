@@ -58,6 +58,13 @@
  * PUT    /technicians/:id/flsa-coverage     { covered: true | false | null } whether federal overtime law
  *                                    covers the employee; W-2 box 12 code TT is filled only for true.
  *
+ * Family employee (GATE_PAYROLL_FAMILY_EMPLOYEE, also dark; off answers 404 { enabled: false }).
+ * PUT    /technicians/:id/family-employment { relationship: 'parent' | 'spouse', entity:
+ *                                    'sole_proprietorship' | 'single_member_llc', exemptFrom (YYYY-MM-DD) },
+ *                                    or { relationship: null } to clear all three. W-2 employees only (409
+ *                                    otherwise). A pay run dated on or after exemptFrom skips federal and
+ *                                    Florida unemployment tax for that employee and nothing else.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -65,12 +72,15 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive } = require('../config/feature-gates');
+const {
+  payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
+} = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
 const payrollTimeOff = require('../services/payroll-time-off');
 const payrollPayLines = require('../services/payroll-pay-lines');
+const payrollFamilyEmployee = require('../services/payroll-family-employee');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -180,6 +190,18 @@ router.put('/technicians/:id/flsa-coverage', payLinesOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set overtime coverage', err); }
+});
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE off: the same answer the payroll routes give when their gate is off.
+const familyEmployeeOnly = (req, res, next) => {
+  if (!(typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/family-employment', familyEmployeeOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollFamilyEmployee.setFamilyEmployment(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set family employee', err); }
 });
 
 router.get('/technicians', async (req, res) => {

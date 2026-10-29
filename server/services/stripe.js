@@ -2881,7 +2881,9 @@ const StripeService = {
             // `total` here is the CASH charged (amount due + surcharge); add back
             // applied account credit so the invoice keeps its real total rather
             // than collapsing to the reduced cash amount with credit_applied set.
-            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
+            // Earlier part payments stay in the bill too; they reset once this charge pays it (an ACH debit still clearing keeps them).
+            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100,
+            ...(status === 'paid' ? { amount_paid: 0 } : {}),
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
 
@@ -3394,6 +3396,21 @@ const StripeService = {
       throw new Error(
         'This payment is one share of a combined balance charge. Refund the FULL charge from the Stripe dashboard (every included invoice reopens), or issue account credit for a per-invoice adjustment.',
       );
+    }
+
+    // An invoice paid partly by hand (a part payment, GATE_PARTIAL_PAYMENTS) was not covered by this one charge: a refund of it here would
+    // settle the invoice as refunded while the part stays collected, and the refund math below assumes one payment covered the bill.
+    if (refundRowMeta.invoice_id) {
+      const partPayment = await db('payments')
+        .where({ status: 'paid' })
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(refundRowMeta.invoice_id)])
+        .whereRaw("metadata::jsonb ->> 'partial_payment' = 'true'")
+        .first('id');
+      if (partPayment) {
+        throw new Error(
+          'This invoice was also paid in part by hand (a part payment), so a card refund here would not match the bill. Handle the refund by hand, and ask for help.',
+        );
+      }
     }
 
     const paidCents = Math.round(parseFloat(payment.amount) * 100);
@@ -6321,10 +6338,12 @@ const StripeService = {
           // applied account credit so the invoice keeps its real total (credit +
           // cash) — without this, total would collapse to the reduced cash amount
           // and the credit_applied math (amount due) would double-count.
-          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
+          // Earlier part payments stay in the bill too; they reset once this charge pays it (an ACH debit still clearing keeps them).
+          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100,
         };
         if (paymentStatus === 'paid') {
           invoiceUpdates.paid_at = new Date().toISOString();
+          invoiceUpdates.amount_paid = 0;
         }
 
         const invoiceRowsUpdated = await trx('invoices')

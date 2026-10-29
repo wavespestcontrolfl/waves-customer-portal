@@ -8,6 +8,9 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/referral-inbound-bell', () => ({
   buttonHandler: { live: jest.fn(() => true), run: jest.fn() },
 }));
+jest.mock('../services/bid-desk/alert-buttons', () => ({
+  buttonHandler: { live: jest.fn(() => true), run: jest.fn(), visibleItems: jest.fn() },
+}));
 jest.mock('../config/feature-gates', () => ({ alertCloseButtonsLive: jest.fn(() => true) }));
 jest.mock('../services/sms-operational-actions', () => ({ settleCommitmentsForDoneAlert: jest.fn(async () => 1) }));
 
@@ -42,6 +45,8 @@ const NotificationService = require('../services/notification-service');
 const gates = require('../config/feature-gates');
 const { settleCommitmentsForDoneAlert } = require('../services/sms-operational-actions');
 const { buttonHandler } = require('../services/referral-inbound-bell');
+const { buttonHandler: bidHandler } = require('../services/bid-desk/alert-buttons');
+const logger = require('../services/logger');
 const { withAlertButtons, runAlertButton, closeNoteButtons } = require('../services/admin-alert-buttons');
 
 const ID = '00000000-0000-4000-8000-0000000000a1';
@@ -71,8 +76,8 @@ beforeEach(() => {
 });
 
 describe('withAlertButtons: what the bell list serves', () => {
-  test('an admin gets each open row\'s buttons as actions, without the args', () => {
-    const [served, plain] = withAlertButtons([row(), { id: 'n2', metadata: { area: 'Comms' } }], { role: 'admin' });
+  test('an admin gets each open row\'s buttons as actions, without the args', async () => {
+    const [served, plain] = await withAlertButtons([row(), { id: 'n2', metadata: { area: 'Comms' } }], { role: 'admin' });
     expect(served.actions).toEqual([
       { id: 'confirm', label: 'Confirm Lea Quill', prompt: 'Make Lea Quill the referrer of Ames Fenn?' },
       { id: 'dismiss', label: 'Not a referral' },
@@ -80,8 +85,8 @@ describe('withAlertButtons: what the bell list serves', () => {
     expect(plain).not.toHaveProperty('actions');
   });
 
-  test('a string metadata column is read the same way', () => {
-    const [served] = withAlertButtons([row({ metadata: JSON.stringify({ buttons: BUTTONS }) })], { role: 'admin' });
+  test('a string metadata column is read the same way', async () => {
+    const [served] = await withAlertButtons([row({ metadata: JSON.stringify({ buttons: BUTTONS }) })], { role: 'admin' });
     expect(served.actions).toHaveLength(2);
   });
 
@@ -91,15 +96,44 @@ describe('withAlertButtons: what the bell list serves', () => {
     ['a live overlay row', [row({ id: 'live:ar_overdue' })], { role: 'admin' }],
     ['a kind this server does not know', [row({ metadata: { buttons: { ...BUTTONS, kind: 'mystery' } } })], { role: 'admin' }],
     ['stored buttons that break the shape', [row({ metadata: { buttons: { ...BUTTONS, items: [{ id: 'x', label: '' }] } } })], { role: 'admin' }],
-  ])('no buttons for %s', (_name, rows, opts) => {
-    expect(withAlertButtons(rows, opts)[0]).not.toHaveProperty('actions');
+  ])('no buttons for %s', async (_name, rows, opts) => {
+    expect((await withAlertButtons(rows, opts))[0]).not.toHaveProperty('actions');
   });
 
-  test('no buttons while the kind is off, and the gate is read once per list', () => {
+  test('no buttons while the kind is off, and the gate is read once per list', async () => {
     buttonHandler.live.mockReturnValue(false);
-    const served = withAlertButtons([row(), row({ id: 'n3' })], { role: 'admin' });
+    const served = await withAlertButtons([row(), row({ id: 'n3' })], { role: 'admin' });
     expect(served.every((r) => !('actions' in r))).toBe(true);
     expect(buttonHandler.live).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a kind that checks its records when the list is served (visibleItems)', () => {
+    const BID = { kind: 'bid_decision', items: [{ id: 'no_bid', label: 'No bid' }, { id: 'bid', label: 'Bid' }] };
+    const bidRow = (id, over = {}) => row({ id, metadata: { buttons: BID, bidId: `bid-${id}` }, ...over });
+
+    beforeEach(() => bidHandler.live.mockReturnValue(true));
+
+    test('each row serves only the buttons its record allows now, from one check for the whole list', async () => {
+      bidHandler.visibleItems.mockResolvedValue(new Map([['b1', ['no_bid', 'bid']], ['b2', ['no_bid']], ['b3', []]]));
+      const served = await withAlertButtons([bidRow('b1'), bidRow('b2'), bidRow('b3'), bidRow('b4'), row()], { role: 'admin' });
+      expect(served.map((r) => r.actions?.map((a) => a.id))).toEqual([['no_bid', 'bid'], ['no_bid'], undefined, undefined, ['confirm', 'dismiss']]);
+      expect(bidHandler.visibleItems).toHaveBeenCalledTimes(1);
+      expect(bidHandler.visibleItems).toHaveBeenCalledWith(['b1', 'b2', 'b3', 'b4'].map((id) => ({ id, metadata: { buttons: BID, bidId: `bid-${id}` } })));
+    });
+
+    test('a failed check serves none of that kind\'s buttons, and the other kinds are untouched', async () => {
+      bidHandler.visibleItems.mockRejectedValue(new Error('connection reset'));
+      const served = await withAlertButtons([bidRow('b1'), row()], { role: 'admin' });
+      expect(served[0]).not.toHaveProperty('actions');
+      expect(served[1].actions).toHaveLength(2);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('bid_decision button check failed'));
+    });
+
+    test('a kind that is off is not checked', async () => {
+      bidHandler.live.mockReturnValue(false);
+      await withAlertButtons([bidRow('b1')], { role: 'admin' });
+      expect(bidHandler.visibleItems).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -197,10 +231,10 @@ describe('close-only buttons (close_note): the bell\'s own Done with the button\
     mockRow = closeRow();
   });
 
-  test('served while the gate is on, never while it is off', () => {
-    expect(withAlertButtons([closeRow()], { role: 'admin' })[0].actions).toEqual([{ id: 'called_back', label: 'Called back' }]);
+  test('served while the gate is on, never while it is off', async () => {
+    expect((await withAlertButtons([closeRow()], { role: 'admin' }))[0].actions).toEqual([{ id: 'called_back', label: 'Called back' }]);
     gates.alertCloseButtonsLive.mockReturnValue(false);
-    expect(withAlertButtons([closeRow()], { role: 'admin' })[0]).not.toHaveProperty('actions');
+    expect((await withAlertButtons([closeRow()], { role: 'admin' }))[0]).not.toHaveProperty('actions');
   });
 
   test('a tap marks the row done by the person with the note, on the claimed version, then settles the follow-up', async () => {

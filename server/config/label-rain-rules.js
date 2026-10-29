@@ -6,16 +6,22 @@
 // every rule so a reader can check the words.
 //
 //   duringRain     the label says "Do not make applications during rain" (or "during times of
-//                  precipitation"). Judged on the start hour: a caution, and a hold only at the
-//                  reschedule tier (reschedule-rules.js weather.rain).
+//                  precipitation"). Judged on the start hour: a caution above the caution tier
+//                  (reschedule-rules.js weather.rain). Never a hold: owner 2026-10-29, the card
+//                  warns and the technician checks the site, so the dose always shows.
 //   dryBeforeRain  the label ADVISES hours to dry before rain ("Avoid making applications when rainfall
 //                  is expected before the product has sufficient time to dry (minimum 4 hours)"). A
 //                  caution only, never a hold.
 //   waterIn        rain or irrigation after the application helps (granules, root-zone products). No
 //                  rain check.
-// A product not listed gets the Waves rule for its service (reschedule-rules.js serviceSensitivity),
-// or none when it is not a tank spray. olderLabel: EPA lists only a label filed before the
-// registration moved to its current company, so the current wording may differ.
+//   heat           a label temperature line (owner 2026-10-29, plan page "Spray Weather Warnings",
+//                  step 2): a caution when the start hour or the next one reads above `aboveF`,
+//                  with the label's words (`text`) and what to do (`action`).
+// A tank spray whose label gives no dry time (not listed, or listed with the during-rain line only)
+// gets the Waves rule for its service (reschedule-rules.js serviceSensitivity) as its dry time; none
+// when it is not a tank spray. olderLabel: EPA lists only a label filed before the registration moved
+// to its current company, so the current wording may differ. `label` is the EPA PPLS file, or the
+// company's current label URL (the catalog's label_url) with the date it was read.
 //
 // Keys are products_catalog.epa_reg_number exactly as stored.
 const DRY_4H = 'Avoid making applications when rainfall is expected before the product has sufficient time to dry (minimum 4 hours).';
@@ -36,6 +42,20 @@ const LABEL_RAIN_RULES = Object.freeze({
   '53883-335': { product: 'Tekko Pro IGR', label: '053883-00335-20250522.pdf', duringRain: { page: 5, quote: 'Do not make applications during rain.' }, dryBeforeRain: { hours: 4, page: 5, quote: DRY_4H } },
   '53883-90': { product: 'Permethrin SFR', label: '053883-00090-20251212.pdf', duringRain: { page: 7, quote: 'DO NOT make applications during rain.' }, dryBeforeRain: { hours: 4, page: 7, quote: DRY_4H } },
   '101563-363': { product: 'Scion Insecticide', label: '000279-03612-20220915.pdf', olderLabel: true, duringRain: { page: 7, quote: 'Do not make applications during rain.' } },
+  // Read from the current Envu label (the catalog's label_url) on 2026-10-29; the PPLS copy is a 2019 Bayer label.
+  '101563-141': {
+    product: 'Celsius WG',
+    label: 'https://bynder.envu.com/m/65d25e1e68990f59/original/Digital_TO_Celsius-WG_label_NA_US_EN.pdf',
+    read: '2026-10-29',
+    heat: {
+      aboveF: 90,
+      page: 5,
+      quote: 'DO NOT use a spray adjuvant at temperatures above 90 degrees.',
+      text: 'no surfactant above 90°F',
+      action: 'Leave the NIS out of the tank. Spot sprays on St. Augustine may slow its growth for a while (label).',
+      also: { page: 4, quote: 'Spot treatments to St. Augustinegrass turf at temperatures above 90 degrees may cause temporary growth regulation.' },
+    },
+  },
   '81880-24': { product: 'Sedgehammer Plus', label: '081880-00024-20200828.pdf', dryBeforeRain: { hours: 4, page: 6, quote: 'Avoid applications when rainfall is forecasted to occur within 4 hours.' } },
   '81880-1-10163': { product: 'Sedgehammer 75%', label: '081880-00001-20260901.pdf', dryBeforeRain: { hours: 4, page: 6, quote: 'Avoid applications when rainfall is forecasted to occur within 4 hours.' } },
   '101563-327': { product: 'Blindside Herbicide', label: '000279-03411-20100921.pdf', olderLabel: true, dryBeforeRain: { hours: 24, page: 5, quote: 'Best weed control results will be obtained when no rainfall or irrigation occurs within 24 hours after application.' } },

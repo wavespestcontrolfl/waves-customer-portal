@@ -10,7 +10,7 @@
  *       transaction, with the locked row). Either run throws a 409 refusal (`drift: true`, which the route answers as
  *       PREVIEW_CHANGED and the card reports as preview_changed) when:
  *         - the invoice is not what the card showed: its status, and the columns that decide what the payment records or completes
- *           (customer, visit link, service record, completion packet, payer links, total, credit). Before the lock the edit time
+ *           (customer, visit link, service record, completion packet, payer links, total, credit, money already received). Before the lock the edit time
  *           is compared too; under the lock it cannot be (the combined-session release rewrites it), which is safe because the
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
@@ -24,8 +24,9 @@
  */
 const { etDateString } = require('../../utils/datetime-et');
 
-const PINNED_COLUMNS = ['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
-const MONEY_COLUMNS = new Set(['total', 'credit_applied']);
+// amount_paid: a part payment recorded from the Invoices page after the card was shown changes what the card's whole-balance payment settles.
+const PINNED_COLUMNS = ['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied', 'amount_paid'];
+const MONEY_COLUMNS = new Set(['total', 'credit_applied', 'amount_paid']);
 const columnValue = (row, key) => (MONEY_COLUMNS.has(key) ? String(Math.round((Number(row[key]) || 0) * 100)) : String(row[key] ?? ''));
 const pinnedColumnsOf = (invoice) => Object.fromEntries(PINNED_COLUMNS.map((key) => [key, invoice[key] ?? null]));
 
