@@ -616,6 +616,20 @@ async function pagerHealthy(conn, now = new Date()) {
   return Number.isFinite(last) && last >= settled.getTime();
 }
 
+// What an emptied list says about the promises it last showed. One that is
+// still owed (open, still the pager's, not snoozed or superseded) with no
+// follow-up on record left the list unkept, usually by aging past the
+// rolling 24 hours, so the close never calls it followed up (call audit
+// 2026-10-29: two unkept lists had closed as "followed up").
+async function emptiedResolution(conn, rows, shown, now) {
+  const left = (rows || []).filter((r) => shown.includes(String(r.id)) && isPagerScope(r) && r.status === 'open');
+  const owed = left.length ? await commitments.stillOpenIds(conn, left.map((r) => r.id), { now }) : new Set();
+  const stillOwed = left.filter((r) => owed.has(r.id));
+  const kept = stillOwed.length ? await followedUpIds(conn, stillOwed) : new Set();
+  const unkept = stillOwed.filter((r) => !kept.has(r.id)).length;
+  return unkept ? `${unkept} not followed up; still open in Owed` : 'Every listed promise was followed up';
+}
+
 async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) {
@@ -697,6 +711,20 @@ async function runInner({ now = new Date() } = {}) {
   const heldFollowed = await followedUpIds(db, heldOver).catch(() => new Set());
   const carried = heldOver.filter((r) => !heldFollowed.has(r.id));
   const onList = [...missed, ...carried].sort((a, b) => a.sla_due_at - b.sla_due_at);
+  // An emptied list's close is worked out before the publishing transaction
+  // (a failed read there would abort it); a failed lookup leaves the list
+  // for the next tick and fails job health like any unverified call.
+  let emptiedText = null;
+  if (!onList.length && shown.length) {
+    emptiedText = await emptiedResolution(db, rows, shown, now).catch((err) => {
+      logger.warn(`[followup-sla] emptied-list check failed: ${err.message}`);
+      return null;
+    });
+    if (emptiedText === null) {
+      rows.filter((r) => shown.includes(String(r.id)) && r.call_log_id).forEach((r) => unverified.add(r.call_log_id));
+      return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };
+    }
+  }
   // Publish in ONE transaction that first locks and reloads every listed
   // promise: if staff changed any of them since the scan (a new deadline,
   // a dismissal, a snooze — anything that moves updated_at) or it closed,
@@ -753,7 +781,7 @@ async function runInner({ now = new Date() } = {}) {
     const patch = ids.length
       ? { title: next.title, body: next.body, detail: next.detail, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
       : {
-        ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Every listed promise was followed up', at: now, keepExisting: true, conn: trx }),
+        ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: emptiedText, at: now, keepExisting: true, conn: trx }),
         metadata: JSON.stringify({ ...meta, emptied: true }),
       };
     // Same items, same words, same link: nothing to write (an emptied patch
