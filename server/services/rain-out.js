@@ -958,6 +958,21 @@ function routeHourOption({ start, drive }, todayStr) {
   };
 }
 
+// The visit's saved service location, by the staff finder's rule
+// (day-stops serviceLocationSelects + resolveServiceLocation): its own pin,
+// else its stamped service address (geocode cache only, never a paid lookup),
+// else the customer's pin. A secondary property never searches from home.
+async function visitServiceLocation(service) {
+  if (!service.service_address_line1) {
+    return { lat: service.lat ?? service.customer_latitude, lng: service.lng ?? service.customer_longitude };
+  }
+  const { resolveServiceLocation } = require('./scheduling/day-stops');
+  return resolveServiceLocation({
+    lat: service.lat, lng: service.lng, address_line1: service.service_address_line1,
+    city: service.service_address_city, state: service.service_address_state, zip: service.service_address_zip,
+  }, undefined, { cacheOnly: true });
+}
+
 // True when the finder judged today's route and refused every hour for a
 // real reason (arrival window, return time, an overcommitted day); only
 // route_unverified refusals (or none) mean it could not judge the route.
@@ -979,10 +994,13 @@ async function routeSameDayOptions(service, now = new Date()) {
     SAME_DAY_FIRST_START_MINUTES,
   );
   try {
+    const location = await visitServiceLocation(service);
+    // No usable pin: the route cannot be judged, so the guesses stay.
+    if (location?.lat == null || location?.lng == null) return null;
     const { findAvailableSlots } = require('./scheduling/find-time');
     const result = await findAvailableSlots({
-      lat: service.customer_latitude,
-      lng: service.customer_longitude,
+      lat: location.lat,
+      lng: location.lng,
       durationMinutes: RESCHEDULE_WINDOW_MINUTES,
       dateFrom: todayStr,
       dateTo: todayStr,

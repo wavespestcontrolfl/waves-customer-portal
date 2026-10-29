@@ -418,6 +418,41 @@ describe('rain-out service', () => {
       expect(finder).not.toHaveBeenCalled();
     });
 
+    // Codex #6932 r4: the visit's saved service location, as the staff finder reads it.
+    test('gate on: a visit at a secondary property searches from its own pin, not the customer\'s home', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', lat: 27.1, lng: -82.3 });
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.1, lng: -82.3 }));
+    });
+
+    test('gate on: a stamped address with no pin is resolved from the geocode cache only', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      const dayStops = require('../services/scheduling/day-stops');
+      const resolve = jest.spyOn(dayStops, 'resolveServiceLocation').mockResolvedValue({ lat: 27.2, lng: -82.35, source: 'address_geocoded_now' });
+      try {
+        finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+        await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', service_address_zip: '34285' });
+        expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ address_line1: '9 Rental Way', zip: '34285' }), undefined, { cacheOnly: true });
+        expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.2, lng: -82.35 }));
+        // No cached pin: the route cannot be judged, so the guesses stay and no finder runs.
+        resolve.mockResolvedValue({ lat: null, lng: null, source: null });
+        finder.mockClear();
+        const options = await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice' });
+        expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+        expect(finder).not.toHaveBeenCalled();
+      } finally {
+        resolve.mockRestore();
+      }
+    });
+
+    test('gate on: no stamped address searches from the customer\'s pin', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
+      await sameDay();
+      expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.4 }));
+    });
+
     test('gate on: the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
       process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
       finder.mockResolvedValue({ slots: [], rejections_by_date: { '2026-06-11': { arrival_window: 2, route_unverified: 1 } } });
