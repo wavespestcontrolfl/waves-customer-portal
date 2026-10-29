@@ -92,4 +92,13 @@ function lawnRoundsCoverageError(coverageCadence, coverageServiceType) {
   };
 }
 
-module.exports = { visitsPerYearForCadence, prepayCoverageCadenceForPattern, lawnRoundsCoverageError };
+// The same check for an edit that may send only one of the two fields: the
+// stored term supplies whichever one was not submitted (undefined = keep the
+// stored value), so a partial edit cannot pair rounds with another service.
+function lawnRoundsCoverageErrorForEdit({ submittedCadence, submittedServiceType, storedTerm } = {}) {
+  const cadence = submittedCadence !== undefined ? submittedCadence : storedTerm?.coverage_cadence;
+  const serviceType = submittedServiceType !== undefined ? submittedServiceType : storedTerm?.coverage_service_type;
+  return lawnRoundsCoverageError(cadence, serviceType);
+}
+
+module.exports = { visitsPerYearForCadence, prepayCoverageCadenceForPattern, lawnRoundsCoverageError, lawnRoundsCoverageErrorForEdit };

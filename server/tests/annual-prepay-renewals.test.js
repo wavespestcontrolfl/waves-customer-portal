@@ -253,6 +253,22 @@ describe('annual prepay renewal helpers', () => {
     expect(lawnRoundsCoverageError(null, 'Tree & Shrub Care')).toBeNull();
   });
 
+  test('a partial edit is judged on the stored term plus the submitted fields (Codex #7008 r6)', () => {
+    const { lawnRoundsCoverageErrorForEdit } = require('../services/prepay-cadence');
+    const treeTerm = { coverage_cadence: 'every_6_weeks', coverage_service_type: 'Tree & Shrub Care (Every 6 Weeks)' };
+    const lawnRoundsTerm = { coverage_cadence: 'lawn_rounds_9', coverage_service_type: 'Lawn Care' };
+    // Only the cadence sent: rounds onto a stored tree & shrub term is refused.
+    expect(lawnRoundsCoverageErrorForEdit({ submittedCadence: 'lawn_rounds_9', submittedServiceType: undefined, storedTerm: treeTerm }))
+      .toEqual(expect.objectContaining({ code: 'LAWN_ROUNDS_NOT_LAWN' }));
+    // Only the service sent: tree & shrub onto a stored rounds term is refused.
+    expect(lawnRoundsCoverageErrorForEdit({ submittedCadence: undefined, submittedServiceType: 'Tree & Shrub Care', storedTerm: lawnRoundsTerm }))
+      .toEqual(expect.objectContaining({ code: 'LAWN_ROUNDS_NOT_LAWN' }));
+    // Lawn stays lawn; a new term with both fields; leaving rounds is fine.
+    expect(lawnRoundsCoverageErrorForEdit({ submittedCadence: undefined, submittedServiceType: 'Lawn Care (Every 6 Weeks)', storedTerm: lawnRoundsTerm })).toBeNull();
+    expect(lawnRoundsCoverageErrorForEdit({ submittedCadence: 'lawn_rounds_9', submittedServiceType: 'Lawn Care', storedTerm: null })).toBeNull();
+    expect(lawnRoundsCoverageErrorForEdit({ submittedCadence: 'every_6_weeks', submittedServiceType: undefined, storedTerm: lawnRoundsTerm })).toBeNull();
+  });
+
   test('normalizes annual prepay cadences to their month spacing', () => {
     expect(_private.normalizeCoverageCadence('Bi-Monthly')).toBe('bimonthly');
     expect(_private.normalizeCoverageCadence('Semi-Annual')).toBe('semiannual');

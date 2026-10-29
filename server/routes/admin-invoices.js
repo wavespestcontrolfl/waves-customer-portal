@@ -2246,12 +2246,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const resolvedCadence = coverageCadence !== undefined
       ? (cleanOptionalText(coverageCadence) || null)
       : undefined;
-    // Lawn rounds is the lawn plan's own calendar: refuse it for any other
-    // covered service (Codex #7008 r6; the same check as Customer 360).
-    if (resolvedCadence !== undefined && resolvedServiceType !== undefined) {
-      const lawnRoundsRefusal = require('../services/prepay-cadence').lawnRoundsCoverageError(resolvedCadence, resolvedServiceType);
-      if (lawnRoundsRefusal) return res.status(400).json(lawnRoundsRefusal);
-    }
 
     // Mirror the client guard server-side: a service type with no valid visit
     // count is incomplete coverage. The term would store the service type but
@@ -2346,6 +2340,26 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           throw moved;
         }
         const termCustomerId = lockedInvoiceRow.customer_id;
+
+        // Lawn rounds is the lawn plan's own calendar (Codex #7008 r6; the same
+        // check as Customer 360). Judge the EFFECTIVE pair, the submitted fields
+        // over this invoice's stored term, so a partial edit cannot pair rounds
+        // with another service.
+        if (resolvedCadence !== undefined || resolvedServiceType !== undefined) {
+          const storedTerm = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('coverage_cadence', 'coverage_service_type');
+          const refusal = require('../services/prepay-cadence').lawnRoundsCoverageErrorForEdit({
+            submittedCadence: resolvedCadence, submittedServiceType: resolvedServiceType, storedTerm,
+          });
+          if (refusal) {
+            const refused = new Error(refusal.error);
+            refused.statusCode = 400;
+            refused.isOperational = true;
+            refused.code = refusal.code;
+            throw refused;
+          }
+        }
 
         if (coverageEnabled) {
           const ownTerm = await trx('annual_prepay_terms')

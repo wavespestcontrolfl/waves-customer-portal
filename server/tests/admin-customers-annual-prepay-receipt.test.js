@@ -328,7 +328,8 @@ describe('lawn rounds cadence covers a lawn plan only (Codex #7008 r6)', () => {
     const customers = fs.readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
     expect(customers.match(/lawnRoundsCoverageError\(coverageCadence, coverageServiceType\)/g) || []).toHaveLength(2);
     const invoices = fs.readFileSync(require.resolve('../routes/admin-invoices'), 'utf8');
-    expect(invoices).toMatch(/lawnRoundsCoverageError\(resolvedCadence, resolvedServiceType\)/);
+    // The invoices page judges the stored term plus the submitted fields, inside the transaction.
+    expect(invoices).toMatch(/lawnRoundsCoverageErrorForEdit\(\{\s*submittedCadence: resolvedCadence, submittedServiceType: resolvedServiceType, storedTerm,/);
   });
 });
 
