@@ -244,6 +244,17 @@ async function bookedVisitsByCustomer(conn, customerIds) {
   return new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
 }
 
+// When a bell last became news. A refresh that changes content and rings (notifyAdmin's
+// refreshOnDedupe, the default for ringOnRefresh) stamps `metadata.rungAt` and clears the done
+// fields, but keeps `created_at` unless the emitter also asked for `bumpOnRefresh`; a quiet refresh
+// stamps nothing. So the evidence boundary of a bell that can refresh is the later of the two, or
+// contact that predates the new request would settle it (Codex on #6961). Null when neither parses.
+function bellEventAt(row) {
+  const times = [row.created_at, parseMeta(row.metadata).rungAt].map((v) => (v ? new Date(v) : null))
+    .filter((d) => d && !Number.isNaN(d.getTime()));
+  return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
+}
+
 // What a customer-contact bell is about, for the witnesses: the text, call or
 // email it names, or the lead's own phone. Nothing here reads the customer's
 // account at large.
@@ -278,7 +289,8 @@ async function loadContact(rows, data, conn) {
     if (!cls || (cls.gate ? cls.gate() === 'off' : data.contactMode === 'off')) continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data) : null;
     if (!refs) continue;
-    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    // A lead_contacted bell can be refreshed with new content: its boundary is its latest event.
+    const bellAt = cls.key === 'lead_contacted' ? bellEventAt(row) : (row.created_at ? new Date(row.created_at) : null);
     items.push({ id: row.id, kind: cls.contact, bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null, refs });
   }
   if (!items.length) return;
@@ -306,8 +318,8 @@ async function loadLeadHandoffs(rows, data, conn) {
     if (cls?.key !== 'lead_contacted') continue;
     const lead = data.leads.get(refsFromRow(row).leadId);
     const customerId = lead?.customer_id ? uuidOrNull(String(lead.customer_id)) : null;
-    const bellAt = row.created_at ? new Date(row.created_at) : null;
-    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
+    const bellAt = bellEventAt(row);
+    if (!customerId || !bellAt) continue;
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
     if (await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id')) data.quoteHandedOff.add(String(row.id));
   }
@@ -425,6 +437,8 @@ function subjectFor(row, data, todayET) {
     todayET,
     // When the bell was raised: a new lead is judged only by what came after.
     bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null,
+    // The bell's latest event (its creation, or the last ringing refresh): the lead_contacted boundary.
+    eventAt: bellEventAt(row),
     // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
     visitOf: (id) => data.visits.get(id),
     // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
@@ -723,15 +737,15 @@ function leadContacted(s) {
 
 // A lead_contacted Leads bell (GATE_LEAD_CONTACTED_CLOSE): the emitters promise "done when
 // the lead is contacted" and nothing closed it. Judged only by what came AFTER the bell
-// (its created_at; a refresh moves it): a person's text or call back reached the lead (the
+// (its latest event, bellEventAt: created_at or the last ringing refresh's rungAt): a person's text or call back reached the lead (the
 // lead contact kind's witnesses), a live top-level visit was booked for the lead's customer,
 // or an estimate was handed off (loadLeadHandoffs). A lead row that is gone is unknown.
 const LEAD_CONTACTED = 'lead_contacted';
 function leadContactedMovedOn(s) {
-  if (!s.lead || !s.bellAt) return null;
+  if (!s.lead || !s.eventAt) return null;
   const c = s.contact;
   if (c && (contactAfter(c, c.textAt) || contactAfter(c, c.backAt))) return 'Lead was contacted';
-  if (s.leadBookedAt && new Date(s.leadBookedAt).getTime() > s.bellAt.getTime()) return 'A visit was booked';
+  if (s.leadBookedAt && new Date(s.leadBookedAt).getTime() > s.eventAt.getTime()) return 'A visit was booked';
   return s.quoteHandedOff ? 'Estimate was sent' : null;
 }
 

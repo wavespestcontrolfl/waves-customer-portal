@@ -832,6 +832,48 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       }
     }, 30000);
 
+    test('lead_contacted: a bell refreshed with new content (rungAt) is judged from that refresh — a reply, a booking or an estimate handoff between the first ring and the refresh never closes it; the same facts after the refresh do', async () => {
+      process.env.GATE_LEAD_CONTACTED_CLOSE = 'true';
+      const now = new Date();
+      const bellAt = mins(now, -300); // first ring (created_at is kept by a refresh without bumpOnRefresh)
+      const early = mins(now, -200); // T1: after the first ring, before the refresh
+      const rungAt = mins(now, -120); // T2: the refresh with new content
+      const late = mins(now, -60); // after T2
+      const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+      let phoneN = 8301;
+      const leadBell = async (withRefresh = true) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone);
+        const lead = await insert('leads', { first_name: 'Lead', phone, status: 'new', customer_id: customer.id });
+        const row = await bell({ category: 'lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
+          metadata: { dedupeKey: `sms-lead:${lead.id}`, doneWhen: 'lead_contacted', leadId: lead.id, customerId: customer.id, ...(withRefresh ? { rungAt: rungAt.toISOString() } : {}) } });
+        return { customer, phone, lead, row };
+      };
+      const visit = (c, createdAt) => insert('scheduled_services', { customer_id: c.customer.id, scheduled_date: etDateString(new Date(Date.now() + 7 * DAY)),
+        service_type: 'General Pest Control', status: 'confirmed', created_at: createdAt });
+      const estimate = (c, at) => insert('estimates', { status: 'accepted', customer_id: c.customer.id, estimate_data: delivered(at) });
+      const facts = { text: (c, at) => staffText(c.customer, c.phone, at), visit, estimate };
+      const reasons = { text: 'Lead was contacted', visit: 'A visit was booked', estimate: 'Estimate was sent' };
+      const cases = {};
+      for (const kind of Object.keys(facts)) {
+        cases[kind] = { earlyOnly: await leadBell(), afterRefresh: await leadBell() };
+        await facts[kind](cases[kind].earlyOnly, early);
+        await facts[kind](cases[kind].afterRefresh, early);
+        await facts[kind](cases[kind].afterRefresh, late);
+      }
+      // Control: the same early reply on a bell that was never refreshed does close it.
+      const never = await leadBell(false);
+      await staffText(never.customer, never.phone, early);
+
+      await sweep();
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      for (const kind of Object.keys(facts)) {
+        expect(await state(cases[kind].earlyOnly)).toBeNull();
+        expect(await state(cases[kind].afterRefresh)).toEqual(['relevance', reasons[kind]]);
+      }
+      expect(await state(never)).toEqual(['relevance', 'Lead was contacted']);
+    }, 30000);
+
     test('rollback: gate off puts back, unread, what the contact classes closed in the window', async () => {
       const t0 = mins(new Date(), -120);
       const customer = await customerWith('+15555558051');

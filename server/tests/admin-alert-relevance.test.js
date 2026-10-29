@@ -1584,6 +1584,37 @@ describe('customer-contact classes', () => {
         expect((await judged(row(), { textAt: at(20) })).reason).toBeNull();
       });
 
+      test('a refreshed bell is judged from its LATEST event: contact, a booking or a handoff that predates the refresh (rungAt) never settles the new request; one after it does', async () => {
+        f5('true');
+        // The bell rang at T0 (note's created_at) and was refreshed with new content at T0+60 (a ringing refresh stamps rungAt
+        // and keeps created_at). An evidence boundary of T0 would let the earlier reply close it.
+        const refreshed = () => leadAlert({ rungAt: at(60).toISOString() });
+        const bundleAt = (over) => ({ anchor: at(60), ...over });
+        const asked = async (row, over) => {
+          mockBundles = new Map([[String(row.id), bundle(bundleAt(over))]]);
+          const data = await loadSubjects([row]);
+          return judge(classify(row), subjectFor(row, data, TODAY));
+        };
+        // The witnesses are asked from the refresh, not from the first ring.
+        await asked(refreshed(), {});
+        expect(mockLoadContactBundles.mock.calls.pop()[0][0].bellAt).toEqual(at(60));
+        // A later created_at (bumpOnRefresh) wins over an older rungAt; a bad stamp is ignored.
+        mockLoadContactBundles.mockClear();
+        await loadSubjects([leadAlert({ rungAt: at(-30).toISOString() }), { ...leadAlert({ rungAt: 'not a date' }), id: uid(95) }]);
+        expect(mockLoadContactBundles.mock.calls[0][0].map((i) => i.bellAt)).toEqual([T0, T0]);
+        // A text or call back: the bundle's own anchor is the boundary (contactAfter), so earlier contact is not "after".
+        expect((await asked(refreshed(), { textAt: at(30), backAt: at(30) })).reason).toBeNull();
+        expect((await asked(refreshed(), { textAt: at(90) })).reason).toBe('Lead was contacted');
+        // A visit booked before the refresh does not count; one after it does.
+        mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: at(30) }];
+        expect((await asked(refreshed(), {})).reason).toBeNull();
+        expect((await asked(leadAlert(), {})).reason).toBe('A visit was booked');
+        mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: at(90) }];
+        expect((await asked(refreshed(), {})).reason).toBe('A visit was booked');
+        mockTables.scheduled_services = [];
+        // The estimate handoff is asked from the same boundary (SQL; proved in the Postgres suite).
+      });
+
       test('with the contact gate off, only this class reads witnesses (not the new-lead bell), and only while its gate is on', async () => {
         const mine = leadAlert();
         const intake = { ...leadNote(), id: uid(79) };
