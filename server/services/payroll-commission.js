@@ -77,9 +77,16 @@ const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-t
 
 const SOURCE_TYPE = 'commission_payment';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-// Same pattern as acceptedEstimateIdFromNotes (setup-fee-alert-reconcile.js), kept here so payroll does not
-// load the notification stack.
-const MINTED_NOTE_RE = /accepted estimate #([0-9a-f-]{8,})/i;
+// The acceptance mint's own stamp (estimate-public.js, estimate-converter.js): every line of that invoice is the estimate's.
+const AUTO_MINT_RE = /Auto-generated from accepted estimate #([0-9a-f-]{8,})/gi;
+// Any invoice that names the estimate in its notes, as acceptedEstimateIdFromNotes (setup-fee-alert-reconcile.js) reads
+// it (the office bills a missed setup fee or first application that way), kept here so payroll does not load the
+// notification stack.
+const NAMED_ESTIMATE_RE = /accepted estimate #([0-9a-f-]{8,})/gi;
+// The lines the office or the completion mint bills for an accepted estimate with no line id: its one-time setup fees
+// and its first application (invoice.js lineIsBaseApplication).
+const SETUP_FEE_RE = /one-time setup fee/i;
+const FIRST_APPLICATION_RE = /^first (service )?application$/i;
 const INVOICE_NUMBER_RE = /^[A-Za-z0-9-]+$/;
 const DESCRIPTION_RE = /^Invoice ([A-Za-z0-9-]+) — /;
 const ADDON_CLIENT_RE = /^scheduled_([0-9a-f-]+)_addon_(.+)$/i;
@@ -192,21 +199,30 @@ function lineBelongs(net, lineage) {
 }
 
 /**
- * The estimate's share of one invoice as { own, all } cents (share = own / all): 1 for an invoice minted from the
- * estimate; for another invoice the value (after discounts, see lineNets) of the lines that belong to it over all lines;
- * an invoice with no line ids counts whole when every visit it bills is the estimate's.
+ * The estimate's share of one invoice as { own, all } cents (share = own / all), from what `proof` shows about it:
+ *  - proof.mint (the acceptance mint, stamped "Auto-generated from accepted estimate #<id>"): every line is the
+ *    estimate's, share 1.
+ *  - Otherwise the value (after discounts, see lineNets) of the estimate's lines over all lines. A line with a line id is
+ *    the estimate's when lineBelongs. A line with no line id is the estimate's when no line of the invoice has an id and
+ *    the invoice is the estimate's own (proof.own: its prepay term or first application invoice) or bills only its
+ *    visits; or when it is a setup fee or first application line (net.named) and the invoice carries the estimate's
+ *    setup fee claim or names the estimate in its notes (proof.named). A completion invoice that carries a setup fee
+ *    can also carry another estimate's add-on, so it is never counted whole.
  */
-function shareOf(invoice, minted, lineage, linkedVisitIds) {
-  if (minted) return { own: 1n, all: 1n };
+function shareOf(invoice, proof, lineage, linkedVisitIds) {
+  if (proof.mint) return { own: 1n, all: 1n };
   const lines = Array.isArray(invoice.line_items) ? invoice.line_items.filter(Boolean) : [];
   const nets = lineNets(lines);
-  if (nets.some((net) => net.clientId)) {
-    const sum = (list) => list.reduce((total, net) => total + net.net, 0n);
-    return { own: sum(nets.filter((net) => net.clientId && lineBelongs(net, lineage))), all: sum(nets) };
-  }
-  const whole = linkedVisitIds.length > 0 && linkedVisitIds.every((id) => lineage.visitIds.has(id));
-  return whole ? { own: 1n, all: 1n } : { own: 0n, all: 1n };
+  const unnamedMine = proof.own || (linkedVisitIds.length > 0 && linkedVisitIds.every((id) => lineage.visitIds.has(id)));
+  if (!nets.length) return unnamedMine ? { own: 1n, all: 1n } : { own: 0n, all: 1n };
+  const identified = nets.some((net) => net.clientId);
+  const mine = (net) => (net.clientId ? lineBelongs(net, lineage) : (!identified && unnamedMine) || (proof.named && net.named));
+  const sum = (list) => list.reduce((total, net) => total + net.net, 0n);
+  return { own: sum(nets.filter(mine)), all: sum(nets) };
 }
+
+/** The estimate ids a note names through `pattern` (lower case). */
+const namedIn = (notes, pattern) => [...String(notes || '').matchAll(pattern)].map((match) => match[1].toLowerCase());
 
 // The frozen dollars and the canonical sort key a saved discount line replays with: invoice.js storedDiscountDollars
 // and frozenSortKeyFields.
@@ -262,11 +278,16 @@ function lineNets(lines) {
     lines: positives.map((line, i) => ({ gross: Math.max(0, Number(line.amount) || 0), terms: lineTerms[i] })),
     documentTerms,
   });
-  return positives.map((line, i) => ({
-    clientId: typeof line.client_id === 'string' && line.client_id ? line.client_id : null,
-    serviceKey: line.service_key || null,
-    net: payrollUnits(stacked.lines[i].net),
-  }));
+  return positives.map((line, i) => {
+    const clientId = typeof line.client_id === 'string' && line.client_id ? line.client_id : null;
+    const description = String(line.description || '').trim();
+    return {
+      clientId,
+      serviceKey: line.service_key || null,
+      named: !clientId && (line.category === 'Setup fee' || SETUP_FEE_RE.test(description) || FIRST_APPLICATION_RE.test(description)),
+      net: payrollUnits(stacked.lines[i].net),
+    };
+  });
 }
 
 /** The customer's invoices that carry part of the estimate: Map invoice id -> invoice row plus its share and cash figures. */
@@ -281,17 +302,24 @@ async function estimateInvoices(trx, sale, lineage) {
     trx('setup_fee_claims').where({ estimate_id: String(sale.estimate_id) }).select('invoice_id'),
     trx('annual_prepay_terms').where({ source_estimate_id: String(sale.estimate_id) }).select('prepay_invoice_id'),
   ]);
-  const mintedIds = new Set([...claims.map((c) => c.invoice_id), ...terms.map((t) => t.prepay_invoice_id), ...lineage.firstApplicationInvoiceIds]);
+  const claimIds = new Set(claims.map((c) => c.invoice_id));
+  const ownIds = new Set([...terms.map((t) => t.prepay_invoice_id), ...lineage.firstApplicationInvoiceIds]);
+  const estimateId = String(sale.estimate_id).toLowerCase();
   const result = new Map();
   for (const invoice of invoices) {
     const preTax = payrollUnits(invoice.subtotal) - payrollUnits(invoice.discount_amount);
     if (preTax <= 0n) continue;
-    const noted = MINTED_NOTE_RE.exec(String(invoice.notes || ''));
-    const minted = mintedIds.has(invoice.id) || Boolean(noted && noted[1].toLowerCase() === String(sale.estimate_id).toLowerCase());
+    const proof = {
+      mint: namedIn(invoice.notes, AUTO_MINT_RE).includes(estimateId),
+      own: ownIds.has(invoice.id),
+      named: claimIds.has(invoice.id) || namedIn(invoice.notes, NAMED_ESTIMATE_RE).includes(estimateId),
+    };
     const linked = [invoice.scheduled_service_id, ...packetRows.filter((p) => p.invoice_id === invoice.id).map((p) => p.scheduled_service_id)].filter(Boolean);
-    const share = shareOf(invoice, minted, lineage, linked);
+    const share = shareOf(invoice, proof, lineage, linked);
     if (share.own <= 0n || share.all <= 0n) continue;
-    result.set(invoice.id, { ...invoice, minted, preTax, tax: payrollUnits(invoice.tax_amount), totalCents: payrollUnits(invoice.total), share });
+    result.set(invoice.id, {
+      ...invoice, minted: proof.mint || proof.own, preTax, tax: payrollUnits(invoice.tax_amount), totalCents: payrollUnits(invoice.total), share,
+    });
   }
   return result;
 }

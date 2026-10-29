@@ -353,6 +353,50 @@ postgres('payroll commission ledger', () => {
     });
   });
 
+  describe('an invoice that carries more than one sale', () => {
+    it('counts a setup fee claim invoice line by line: $150 of the first sale, $240 of another sale\'s add-on', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      const beta = await readyTech('Sample Beta');
+      await approvedWeek(alpha, W1);
+      await approvedWeek(beta, W1);
+      const cust = await customer('Dana', 'Sample');
+      const plan = await estimate(cust, alpha);
+      const addOnSale = await estimate(cust, beta);
+      const first = await visit(cust, plan);
+      const [addon] = await trx('scheduled_service_addons').insert({
+        scheduled_service_id: first, service_name: 'Sample add-on', area_addon_scope: JSON.stringify({ sourceEstimateId: addOnSale }),
+      }).returning('id');
+      // The first visit's completion invoice also bills the plan's claimed setup fee (complete-scheduled-service.js), and
+      // the other sale's add-on rides the same visit.
+      const inv = await invoice(cust, {
+        subtotal: '390.00', scheduled_service_id: first,
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${first}_primary`, description: 'Sample pest control', amount: 100 },
+          { description: 'One-time setup fee', quantity: 1, unit_price: 50, amount: 50, category: 'Setup fee', secure_claim: true },
+          { client_id: `scheduled_${first}_addon_${idOf(addon)}`, description: 'Sample add-on', amount: 240 },
+        ]),
+      });
+      await trx('setup_fee_claims').insert({ invoice_id: inv, scheduled_service_id: first, amount: '50.00', estimate_id: plan });
+      await payment(cust, inv, '2026-09-16', '390.00');
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1500);
+      expect(commissionOf(created.body.run, 'Sample Beta')).toBe(2400);
+    });
+
+    it('counts only the setup fee and first application lines of an office invoice that names the sale', async () => {
+      const { cust, est } = await soldWorld();
+      const inv = await invoice(cust, {
+        subtotal: '149.00', notes: `Missed setup fee for accepted estimate #${est}`,
+        line_items: JSON.stringify([
+          { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+          { description: 'Sample product', quantity: 1, unit_price: 50, amount: 50 },
+        ]),
+      });
+      await payment(cust, inv, '2026-09-16', '149.00');
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(990);
+    });
+  });
+
   describe('a sold add-on whose row Update Details replaces', () => {
     const KEY = 'sample_addon_service';
     // Host visit with a sold $240 add-on row; returns a way to bill $600 + $240 on the host visit as the add-on row stood then.
