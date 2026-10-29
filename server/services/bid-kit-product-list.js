@@ -526,8 +526,8 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
     }
     item = await settlePending(item);
     const { rows, unmatched, bidRows } = await readProductList();
-    if (!rows.length) {
-      logger.warn('[bid-kit] product list sync found no applied products; the file was left alone');
+    if (!rows.length && !bidRows.length) {
+      logger.warn('[bid-kit] product list sync found no applied or bid products; the file was left alone');
       return { skipped: 'no_products' };
     }
     const snapshots = [...rows.map((row) => snapshotOf(row)), ...bidRows.map((row) => snapshotOf(row, { bid: true }))];

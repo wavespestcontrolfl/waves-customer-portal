@@ -402,6 +402,15 @@ describe('runBidKitProductListSync', () => {
     expect(await run()).toEqual({ skipped: 'no_products' });
     expect(files.putFile).not.toHaveBeenCalled();
   });
+  test('a list with only bid products (no applied products) still rebuilds', async () => {
+    setList([]);
+    mockTables.bid_products = [product(7, { name: 'Termidor SC', uses: 0 })];
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('bid_products');
+    const rows = store.replaceFile.mock.calls[0][3].details.product_list_sync.rows;
+    expect(rows).toEqual([expect.objectContaining({ id: ID(7), bid: 1, name: 'Termidor SC' })]);
+  });
   test('first run: replaces the file, does not sign it off, one bell', async () => {
     store.listItems.mockResolvedValue([itemRow({ details: null })]);
     const result = await run();
@@ -862,7 +871,9 @@ describe('bid products: the PDF', () => {
     expect(intro).toContain('(ET). Every pesticide');
     expect(intro).not.toContain('bid work');
     const [a, b] = await Promise.all([build(), build({ bidRows: [] })]);
-    const strip = (buf) => buf.toString('latin1').replace(/\/(CreationDate|ModDate)\s*\([^)]*\)/g, '').replace(/\/ID\s*\[[^\]]*\]/g, '');
+    // PDFKit writes the creation date as an indirect string object, so the inline /CreationDate pattern alone misses it:
+    // blank every PDF date string too, or two builds that straddle a second differ.
+    const strip = (buf) => buf.toString('latin1').replace(/\/(CreationDate|ModDate)\s*\([^)]*\)/g, '').replace(/\(D:\d{14}[^)]*\)/g, '(D:)').replace(/\/ID\s*\[[^\]]*\]/g, '');
     expect(strip(b)).toBe(strip(a));
     const text = textOf(await PDFDocument.load(a));
     expect(text).not.toContain('bid work');
