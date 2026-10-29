@@ -202,6 +202,6 @@ function breaksAlertRules(text) {
 }
 
 module.exports = {
-  AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS, MAX_BUTTONS, MAX_BUTTON_LABEL_CHARS,
+  AREAS, SEVERITIES, WHO, SUBJECT_TYPES, DONE_WHEN, MAX_HEADLINE_CHARS, MAX_WHY_CHARS, MAX_BUTTONS, MAX_BUTTON_LABEL_CHARS,
   composeAdminAlert, buttonViolations, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence, breaksAlertRules,
 };
