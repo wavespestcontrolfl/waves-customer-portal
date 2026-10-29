@@ -1236,6 +1236,33 @@ async function findWindowSlideMarker(term, conn) {
   };
 }
 
+// The round anchor a lawn_rounds_9 term's dates are placed from: the
+// recurring_round_anchor_date stored on the parent of the series the term
+// covers, or null (plain walk from the term anchor). Shared by the payment-time
+// seeder and the invoice/PDF schedule, so both list the same dates.
+// existingRows are the term's in-window eligible visits; the parent is the
+// first one's recurring_parent_id (or the visit itself) and is read by id,
+// scoped to the term's customer, when it is not among them (it can predate
+// the window). A failed read logs a warning and returns null.
+async function seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn = db, cols = null } = {}) {
+  if (coverageCadence !== LAWN_ROUNDS_9 || !Array.isArray(existingRows) || !existingRows.length) return null;
+  const parentId = existingRows[0].recurring_parent_id || existingRows[0].id;
+  let parentRow = existingRows.find((row) => String(row.id) === String(parentId));
+  if (!parentRow) {
+    try {
+      const scheduledCols = cols || await scheduledServiceColumns();
+      if (!scheduledCols.recurring_round_anchor_date) return null;
+      parentRow = await conn('scheduled_services')
+        .where({ id: parentId, customer_id: term?.customer_id })
+        .first('id', 'recurring_round_anchor_date');
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term?.id}: series round anchor lookup failed (${err.message}) — placing rounds from the term anchor`);
+      return null;
+    }
+  }
+  return dateOnly(parentRow?.recurring_round_anchor_date) || null;
+}
+
 async function ensureCoverageRowsForTerm(term, conn = db, {
   today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
 } = {}) {
@@ -1375,26 +1402,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (effectiveTermEnd < termEnd) effectiveTermEnd = termEnd;
   }
   // A rounds term tied to an existing series places its dates from that
-  // series' stored round anchor (the series parent's recurring_round_anchor_date,
-  // when set), so a gap-fill lands on the dates the series itself would extend to.
-  if (coverageCadence === LAWN_ROUNDS_9 && existingRows.length) {
-    const parentId = existingRows[0].recurring_parent_id || existingRows[0].id;
-    let parentRow = existingRows.find((row) => String(row.id) === String(parentId));
-    // existingRows holds only in-window eligible visits, so a parent that
-    // predates the term window (or is closed) is not among them: read it by id,
-    // scoped to this customer. A failed read keeps the plain anchor.
-    if (!parentRow && cols.recurring_round_anchor_date) {
-      try {
-        parentRow = await conn('scheduled_services')
-          .where({ id: parentId, customer_id: term.customer_id })
-          .first('id', 'recurring_round_anchor_date');
-      } catch (err) {
-        logger.warn(`[annual-prepay] term ${term.id}: series round anchor lookup failed (${err.message}) — placing rounds from the term anchor`);
-      }
-    }
-    const storedRoundAnchor = dateOnly(parentRow?.recurring_round_anchor_date);
-    if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
-  }
+  // series' stored round anchor, so a gap-fill lands on the dates the series
+  // itself would extend to.
+  const storedRoundAnchor = await seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn, cols });
+  if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
   const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
   if (!targetDates.length) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
@@ -11641,6 +11652,7 @@ module.exports = {
     coverageCadenceMonths,
     coverageCadenceDays,
     coverageCadenceSchedule,
+    seriesRoundAnchorForTerm,
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,

@@ -791,6 +791,52 @@ describe('annual prepay renewal helpers', () => {
       });
     });
 
+    describe('seriesRoundAnchorForTerm (the shared resolver)', () => {
+      const term = { id: 'term-s', customer_id: 'customer-r' };
+      const resolve = (over = {}) => _private.seriesRoundAnchorForTerm({
+        term, coverageCadence: 'lawn_rounds_9', cols: ROUNDS_COLS, ...over,
+      });
+
+      test('the parent is among the in-window rows: its stored anchor, no read', async () => {
+        setDbQueues({});
+        const rows = [
+          { id: 'svc-c', recurring_parent_id: 'svc-p', scheduled_date: '2026-09-08' },
+          { id: 'svc-p', scheduled_date: '2026-07-14', recurring_round_anchor_date: '2026-01-13T00:00:00.000Z' },
+        ];
+        await expect(resolve({ existingRows: rows })).resolves.toBe('2026-01-13');
+      });
+
+      test('a visit with no parent id is its own parent', async () => {
+        await expect(resolve({ existingRows: [{ id: 'svc-p', scheduled_date: '2026-07-14', recurring_round_anchor_date: '2026-01-13' }] }))
+          .resolves.toBe('2026-01-13');
+      });
+
+      test('the parent outside the window is read by id, scoped to the customer', async () => {
+        const lookup = query({ first: { id: 'svc-old', recurring_round_anchor_date: '2026-01-13' } });
+        setDbQueues({ scheduled_services: [lookup] });
+        await expect(resolve({ existingRows: [{ id: 'svc-c', recurring_parent_id: 'svc-old', scheduled_date: '2026-08-11' }] }))
+          .resolves.toBe('2026-01-13');
+        expect(lookup.where).toHaveBeenCalledWith({ id: 'svc-old', customer_id: 'customer-r' });
+      });
+
+      test('no stored anchor, a missing column, a failed read, another cadence or no rows: null', async () => {
+        const child = [{ id: 'svc-c', recurring_parent_id: 'svc-old', scheduled_date: '2026-08-11' }];
+        setDbQueues({ scheduled_services: [query({ first: { id: 'svc-old', recurring_round_anchor_date: null } })] });
+        await expect(resolve({ existingRows: child })).resolves.toBeNull();
+        setDbQueues({});
+        await expect(resolve({ existingRows: child, cols: { scheduled_date: {} } })).resolves.toBeNull();
+        const failing = query({});
+        failing.first = jest.fn(async () => { throw new Error('db down'); });
+        setDbQueues({ scheduled_services: [failing] });
+        const logger = require('../services/logger');
+        logger.warn.mockClear();
+        await expect(resolve({ existingRows: child })).resolves.toBeNull();
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('series round anchor lookup failed'));
+        await expect(resolve({ existingRows: child, coverageCadence: 'every_6_weeks' })).resolves.toBeNull();
+        await expect(resolve({ existingRows: [] })).resolves.toBeNull();
+      });
+    });
+
     test('a 9-visit term with no stored cadence still seeds the 42-day series (infer keeps every_6_weeks)', async () => {
       const inserts = Array.from({ length: 9 }, (_, i) => query({ returning: [{ id: `svc-e${i}`, scheduled_date: '2026-06-15' }] }));
       setDbQueues({
