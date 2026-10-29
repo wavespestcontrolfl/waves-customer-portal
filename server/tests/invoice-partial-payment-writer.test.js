@@ -355,3 +355,110 @@ describe('an open card dispute (pre-push P0)', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
+
+// The Intelligence Bar card's part payment (owner 2026-10-29, GATE_IB_RECORD_PAYMENT_PARTIAL): the same writer, a bar-only internal marker
+// (barApprovedPart, set by admin-invoices.js cardPinsOf from the card's own approval, never a request body), both gates, the card's fence.
+describe('a part payment approved on the Intelligence Bar card', () => {
+  beforeEach(() => { process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = 'true'; });
+  afterAll(() => { delete process.env.GATE_IB_RECORD_PAYMENT_PARTIAL; });
+
+  // What the route hands the writer for a bar part: the card's amount owed is both owedCentsSeen and expectedAmountCents.
+  const barPart = (over = {}) => ({
+    method: 'check', reference: '1042', amountCents: 4000, owedCentsSeen: 10000, expectedAmountCents: 10000,
+    requireSelfPay: true, settlementFence: jest.fn(async () => true), barApprovedPart: true, sendReceipt: false, ...over,
+  });
+
+  test('records the part like the page: amount_paid grows, status stays, one payments row, the fence runs before the lock and under it', async () => {
+    const { calls } = harness({ after: openInvoice({ amount_paid: '40.00' }) });
+    const args = barPart();
+    const out = await recordManualPayment('inv-1', args);
+    expect(out.partial).toEqual({ amount: 40, remaining: 60 });
+    expect(out.receipt).toBeNull();
+    expect(calls.invoiceUpdate).not.toHaveProperty('status');
+    expect(calls.invoiceUpdate.amount_paid.bindings).toEqual([40]);
+    expect(calls.paymentsInsert).toMatchObject({ amount: 40, status: 'paid' });
+    expect(args.settlementFence).toHaveBeenCalledTimes(2);
+    expect(args.settlementFence.mock.calls[0][1]).toBeUndefined(); // before the lock: the plain connection
+    expect(args.settlementFence.mock.calls[1][1]).toMatchObject({ id: 'inv-1' }); // under the lock: the locked row
+    expect(FollowUps.stopOnPayment).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['this bar part gate is off', () => { process.env.GATE_IB_RECORD_PAYMENT_PARTIAL = 'false'; }, {}, /from the Intelligence Bar are not turned on/],
+    ['this bar part gate is unset', () => { delete process.env.GATE_IB_RECORD_PAYMENT_PARTIAL; }, {}, /from the Intelligence Bar are not turned on/],
+    ['the Invoices page part gate is off', () => { process.env.GATE_PARTIAL_PAYMENTS = 'false'; }, {}, /Part payments are not turned on/],
+    ['the caller is automated', () => {}, { automated: true }, /entered by hand/],
+    ['the card carries no settlement fence', () => {}, { settlementFence: null }, /entered by hand/],
+    ['the self-pay fence is missing', () => {}, { requireSelfPay: false }, /entered by hand/],
+    ['no expected figure rides with it', () => {}, { expectedAmountCents: null }, /entered by hand/],
+    ['the expected figure is the part, not the amount owed the card showed', () => {}, { expectedAmountCents: 4000 }, /entered by hand/],
+  ])('refused when %s: 400 before any transaction', async (_label, arrange, extra, message) => {
+    arrange();
+    harness();
+    const err = await refusalOf(recordManualPayment('inv-1', barPart(extra)));
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toMatch(message);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('without the bar marker a fenced caller is still refused, with both gates on (the Zelle notice and any other caller)', async () => {
+    harness();
+    for (const extra of [{ barApprovedPart: false }, { barApprovedPart: undefined }]) {
+      const err = await refusalOf(recordManualPayment('inv-1', barPart(extra)));
+      expect(err.statusCode).toBe(400);
+      expect(err.message).toBe('A part payment can only be entered by hand on the Invoices page.');
+    }
+    // The Zelle reconciler and notice Apply: automated, or an expected figure of their own, even if they somehow named the marker.
+    const zelle = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', amountCents: 4000, owedCentsSeen: 10000, automated: true, expectedAmountCents: 10000, requireSelfPay: true, settlementFence: async () => true }));
+    expect(zelle.statusCode).toBe(400);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('every page refusal still applies to a bar part (Auto Pay, a plan, a payer, an annual prepay invoice, a dispute)', async () => {
+    for (const [setup, arrange, message] of [
+      [{ plan: { id: 'plan-1' } }, () => {}, /payment plan/],
+      [{ pre: openInvoice({ payer_id: 'payer-1' }) }, () => {}, /billed to a payer/],
+      [{}, () => customerOnAutopay.mockResolvedValue(true), /on Auto Pay/],
+      [{}, () => resolveInvoiceTermId.mockResolvedValue('term-1'), /annual prepay invoice/],
+      [{ dispute: { id: 'pay-disputed' } }, () => {}, /card dispute/],
+    ]) {
+      harness(setup);
+      arrange();
+      const err = await refusalOf(recordManualPayment('inv-1', barPart()));
+      expect(err.statusCode).toBe(409);
+      expect(err.message).toMatch(message);
+      customerOnAutopay.mockResolvedValue(false);
+      resolveInvoiceTermId.mockResolvedValue(null);
+    }
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the amount owed moved after the card (a payment or an edit): refused 409 before the lock, and on the locked row', async () => {
+    harness({ pre: openInvoice({ amount_paid: '40.00' }) });
+    let err = await refusalOf(recordManualPayment('inv-1', barPart()));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/changed to \$60\.00 since the page loaded/);
+    const h = harness({ pre: openInvoice(), locked: openInvoice({ amount_paid: '40.00' }) });
+    err = await refusalOf(recordManualPayment('inv-1', barPart()));
+    expect(err.statusCode).toBe(409);
+    expect(h.calls.paymentsInsert).toBeNull();
+    expect(h.calls.invoiceUpdate).toBeNull();
+  });
+
+  test('a fence that refuses under the lock stops the part: nothing written', async () => {
+    const h = harness();
+    const fence = jest.fn(async (_conn, locked) => { if (locked) throw Object.assign(new Error('The invoice changed after the confirmation card was shown — nothing was recorded'), { statusCode: 409, drift: true }); return true; });
+    const err = await refusalOf(recordManualPayment('inv-1', barPart({ settlementFence: fence })));
+    expect(err.drift).toBe(true);
+    expect(h.calls.paymentsInsert).toBeNull();
+  });
+
+  test('the marker on a whole-balance call changes nothing: it is the card\'s full payment path', async () => {
+    const { calls } = harness({ after: openInvoice({ status: 'paid', amount_paid: 0 }) });
+    const out = await recordManualPayment('inv-1', barPart({ amountCents: 10000 }));
+    expect(out.partial).toBeUndefined();
+    expect(calls.invoiceUpdate).toMatchObject({ status: 'paid' });
+  });
+});
