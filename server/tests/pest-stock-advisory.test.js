@@ -78,6 +78,59 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
     await expect(deductProductInventory(trx, args)).rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
     expect(trx.writes).toEqual([]);
   });
+
+  describe('an amount no visit uses', () => {
+    const huge = (productInput, product = args.product) => ({ ...args, product, productInput, allowNegative: true });
+
+    test.each([
+      ['volume', { totalAmount: 1000000, amountUnit: 'fl_oz' }, 'fl_oz'],
+      ['weight', { totalAmount: 501, amountUnit: 'lb' }, 'lb'],
+      ['count', { totalAmount: 501, amountUnit: 'each' }, 'each'],
+      ['weight sold in a different unit', { totalAmount: 501, amountUnit: 'lb' }, 'oz'],
+    ])('a %s line over the ceiling moves no stock and no cost, and the completion goes on', async (_name, productInput, inventoryUnit) => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, huge(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+      expect(trx.writes).toEqual([]);
+      expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, stockBefore: 1, remainingStock: 1 });
+      expect(result.movementId).toBeUndefined();
+      expect(result.costUsed).toBeUndefined();
+      expect(result.warning).toBe(`${productInput.totalAmount} ${productInput.amountUnit.replace('_', ' ')} of ${args.product.name} is too much for one visit, so stock was not changed. Check the amount.`);
+    });
+
+    test('an amount at the ceiling is still an ordinary overdraw', async () => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, huge({ totalAmount: 2560, amountUnit: 'fl_oz' }));
+      expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -2559 });
+      expect(trx.writes).toHaveLength(2);
+    });
+
+    test('a plausible overdraw in another unit still goes negative', async () => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, huge({ totalAmount: 27.5, amountUnit: 'lb' }, { ...args.product, inventory_unit: 'lb' }));
+      expect(result).toMatchObject({ status: 'deducted_insufficient_stock', deductedAmount: 27.5 });
+      expect(trx.writes).toHaveLength(2);
+    });
+
+    test('a unit with no known dimension keeps today\'s behaviour', async () => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, huge({ totalAmount: 1000000, amountUnit: 'bags' }, { ...args.product, inventory_unit: 'bags' }));
+      expect(result.status).toBe('deducted_insufficient_stock');
+      expect(trx.writes).toHaveLength(2);
+    });
+
+    test('an amount the stock covers is never refused, whatever the size', async () => {
+      const trx = fakeTrx();
+      const result = await deductProductInventory(trx, huge({ totalAmount: 3000, amountUnit: 'fl_oz' }, { ...args.product, inventory_on_hand: 9000 }));
+      expect(result.status).toBe('deducted');
+    });
+
+    test('a visit that may not go negative keeps the hard refusal, whatever the size', async () => {
+      const trx = fakeTrx();
+      await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
+      expect(trx.writes).toEqual([]);
+    });
+  });
 });
 
 describe('the office alert for a product a pest visit took below zero', () => {
@@ -162,6 +215,51 @@ describe('the office alert for a product a pest visit took below zero', () => {
     const database = catalog({ taurus: '-3' });
     await expect(notifyOfficeOfStockShortfalls({ svc, record: record([shortfall('taurus', 'Taurus SC')]), database })).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('stock shortfall alert failed (non-blocking)'));
+  });
+});
+
+describe('the office alert for an amount no visit uses', () => {
+  const refused = (over = {}) => ({
+    productId: 'prod-1', productName: 'Taurus SC', status: 'not_deducted_implausible', amount: 1000000, amountUnit: 'fl_oz', ...over,
+  });
+  const run = async (svc, deductions) => {
+    await notifyOfficeOfStockShortfalls({ svc, record: { id: 'record-1', structured_notes: { inventoryDeductions: deductions } }, database: { transaction: jest.fn() } });
+  };
+
+  test('one alert says to check the amount entered; it asks nothing of stock', async () => {
+    const database = { transaction: jest.fn() };
+    await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', customer_id: 'customer-1', service_type: 'Lawn Care' }, record: { id: 'record-1', structured_notes: { inventoryDeductions: [refused()] } }, database });
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('inventory');
+    expect(spec).toEqual({
+      area: 'Inventory',
+      action: 'check Taurus SC amount',
+      why: 'Taurus SC amount looks too big for a lawn visit, so stock was not changed.',
+      severity: 'needs-you',
+      who: 'person',
+      link: '/admin/customers?customerId=customer-1',
+      subject: { type: 'check', id: 'stock-amount-check:record-1:prod-1' },
+      doneWhen: 'amount_checked',
+    });
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'stock-amount-check:record-1:prod-1', dedupeOpenOnly: true });
+    expect(opts.detail).toContain('1000000 fl oz was entered on a lawn visit');
+    expect(opts.detail).toContain('Check the amount entered');
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a name the alert rules refuse falls back to plain words', async () => {
+    await run({ id: 'visit-1', service_type: 'Quarterly Pest Control' }, [refused({ productName: 'Bait [old lot]' })]);
+    const [, spec] = compose.raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({ action: 'check a product amount', why: 'A product amount looks too big for a pest visit, so stock was not changed.' });
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a failed alert is logged and never fails the visit', async () => {
+    compose.raiseAdminAlert.mockRejectedValueOnce(new Error('notifications unavailable'));
+    await expect(run({ id: 'visit-1', service_type: 'Quarterly Pest Control' }, [refused()])).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('stock amount alert failed (non-blocking)'));
   });
 });
 

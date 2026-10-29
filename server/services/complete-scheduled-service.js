@@ -155,6 +155,7 @@ const { minutesFromElapsed } = require('../utils/duration-minutes');
 const {
   baseQuantityUnit,
   convertInventoryQuantity,
+  unitDefinition,
 } = require('../services/inventory-units');
 // Shared with job-costing's application-history fallback, so both price a
 // recorded amount the same way.
@@ -1640,6 +1641,28 @@ async function recordCountedUsage(trx, {
   };
 }
 
+// The most one product line may move stock by in a single advisory-stock visit, by unit dimension. The advisory lane
+// lets stock go negative, so a typo (a million fl oz) must not corrupt the count; real prod maxima sit far below these.
+const IMPLAUSIBLE_VISIT_AMOUNT = {
+  volume: { amount: 2560, unit: 'fl_oz' },
+  weight: { amount: 500, unit: 'lb' },
+  count: { amount: 500, unit: 'each' },
+};
+
+// The ceiling in the product's inventory unit, or null when its dimension is unknown (that line keeps today's behaviour).
+// A bare 'oz' on both sides could be volume or weight: it takes the looser ceiling.
+function implausibleVisitCeiling(amountUnit, inventoryUnit) {
+  const dimensionOf = (unit) => unitDefinition(unit)?.dimension || null;
+  const dims = [dimensionOf(amountUnit), dimensionOf(inventoryUnit)];
+  if (dims.some((dim) => !dim)) return null;
+  const known = dims.filter((dim) => dim !== 'ambiguous');
+  const dimensions = known.length ? [known[0]] : ['volume', 'weight'];
+  const ceilings = dimensions
+    .map((dim) => convertInventoryQuantity(IMPLAUSIBLE_VISIT_AMOUNT[dim].amount, IMPLAUSIBLE_VISIT_AMOUNT[dim].unit, inventoryUnit))
+    .filter((ceiling) => ceiling != null);
+  return ceilings.length ? Math.max(...ceilings) : null;
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -1712,6 +1735,19 @@ async function deductProductInventory(trx, {
     err.isOperational = true;
     err.code = 'waveguard_inventory_lockout';
     throw err;
+  }
+  // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
+  // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
+  const ceiling = insufficient && allowNegative ? implausibleVisitCeiling(amountUnit, inventoryUnit) : null;
+  if (ceiling != null && deductedAmount > ceiling) {
+    return {
+      ...snapshot,
+      status: 'not_deducted_implausible',
+      inventoryUnit,
+      stockBefore,
+      remainingStock: stockBefore,
+      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+    };
   }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
@@ -2264,6 +2300,38 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
       if (!created) logger.error(`[dispatch] stock shortfall alert NOT recorded for record ${record.id} (admin alert returned null)`);
     } catch (err) {
       logger.error(`[dispatch] stock shortfall alert failed (non-blocking): ${err.message}`);
+    }
+  }
+  // A line refused for an implausible amount moved no stock, so there is nothing to restock: the office checks the amount.
+  const refused = (Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [])
+    .filter((deduction) => deduction?.status === 'not_deducted_implausible' && deduction.productId);
+  for (const deduction of refused) {
+    try {
+      const fullName = deduction.productName || 'A product';
+      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
+      const namedWhy = `${name} amount looks too big for a ${visitLabel} visit, so stock was not changed.`;
+      const plain = breaksAlertRules(`check ${name} amount`) || breaksAlertRules(namedWhy) || namedWhy.length > MAX_WHY_CHARS;
+      const dedupeKey = `stock-amount-check:${record.id}:${deduction.productId}`;
+      const unit = String(deduction.amountUnit || '').replace(/_/g, ' ');
+      const created = await raiseAdminAlert('inventory', {
+        area: 'Inventory',
+        action: plain ? 'check a product amount' : `check ${name} amount`,
+        why: plain ? `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` : namedWhy,
+        severity: 'needs-you',
+        who: 'person',
+        link: svc.customer_id ? `/admin/customers?customerId=${svc.customer_id}` : `/admin/inventory?tab=products&productId=${deduction.productId}`,
+        subject: { type: 'check', id: dedupeKey },
+        doneWhen: 'amount_checked',
+      }, {
+        bell: true,
+        dedupeKey,
+        dedupeOpenOnly: true,
+        detail: `${fullName}: ${deduction.amount} ${unit} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
+        metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit, dedupeKey },
+      });
+      if (!created) logger.error(`[dispatch] stock amount alert NOT recorded for record ${record.id} (admin alert returned null)`);
+    } catch (err) {
+      logger.error(`[dispatch] stock amount alert failed (non-blocking): ${err.message}`);
     }
   }
 }
