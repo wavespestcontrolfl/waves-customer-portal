@@ -665,4 +665,24 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     expect(nodes.filter(node => node['Node Type'] === 'Seq Scan' && node['Relation Name'] === 'sms_log')
       .every(node => node['Actual Loops'] <= 1)).toBe(true);
   });
+  test('GATE_SMS_STAFF_ACTION_ANSWERS off and shadow: the reader runs the same SQL, with no staff-action CTE, join or filter', async () => {
+    await seed();
+    const sqlFor = async (mode) => {
+      if (mode === undefined) delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS; else process.env.GATE_SMS_STAFF_ACTION_ANSWERS = mode;
+      mockRawCalls.length = 0;
+      const rows = await loadPendingSmsConversations({ includeLegacyOnly: true });
+      return { sql: mockRawCalls.find(([statement]) => statement.includes('WITH canonical_sms AS'))[0], count: rows.length };
+    };
+    try {
+      const off = await sqlFor(undefined);
+      const shadow = await sqlFor('shadow');
+      const junk = await sqlFor('on');
+      expect(off.count).toBe(1);
+      expect(shadow).toEqual(off);
+      expect(junk).toEqual(off);
+      expect(off.sql).not.toMatch(/staff_action|staff_visit|staff_payment/);
+    } finally {
+      delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
+    }
+  });
 });

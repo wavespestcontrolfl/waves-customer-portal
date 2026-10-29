@@ -28,6 +28,11 @@
  *     only): the voicemail's customer, by customer id and never by phone, has a visit
  *     in a status that ran with completed_at after the call's start on the same
  *     Eastern day. Loaded only when the caller asks (`visitRan`).
+ *   - a staff action after a text (GATE_SMS_STAFF_ACTION_ANSWERS, sms items only): a visit
+ *     a person booked in the admin, or a payment a person recorded, for the text's customer
+ *     (by customer id, never by phone) within 24 hours after the text
+ *     (sms-staff-action-answers.js, the one definition the Messages reader shares). Loaded
+ *     only when the caller asks (`staffActions`).
  * read_at is never evidence. Read-only: nothing here writes, locks or sends.
  *
  * Each item is judged only by events AFTER its own anchor: the text, call or
@@ -44,6 +49,7 @@ const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staf
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
+const staffActionDef = require('./sms-staff-action-answers');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const asDate = (v) => {
@@ -278,6 +284,47 @@ async function visitsThatRan(conn, voiceIdents) {
   return ran;
 }
 
+// The earliest staff action (sms-staff-action-answers.js) after each sms item's text and
+// within 24 hours of it, by notification id: { at, kind }. By customer id only, so an item
+// with no customer id has none, and `enabled` false (the gate off) reads nothing. One query per kind
+// for the whole batch.
+async function staffActionsAfterTexts(conn, smsIdents, enabled) {
+  const found = new Map();
+  const withCustomer = enabled ? smsIdents.filter((i) => i.customerId) : [];
+  if (!withCustomer.length) return found;
+  const customerIds = unique(withCustomer.map((i) => i.customerId));
+  const from = new Date(Math.min(...withCustomer.map((i) => i.anchor.getTime())));
+  const to = new Date(Math.max(...withCustomer.map((i) => i.anchor.getTime())) + staffActionDef.STAFF_ACTION_WINDOW_HOURS * 60 * 60 * 1000);
+  const visits = await staffActionDef.visitFilter(conn('scheduled_services as ss')
+    .whereIn('ss.customer_id', customerIds).where('ss.created_at', '>', from).where('ss.created_at', '<=', to))
+    .select('ss.customer_id', 'ss.created_at as at');
+  const payments = await staffActionDef.paymentFilter(conn('invoices as inv')
+    .whereIn('inv.customer_id', customerIds).where('inv.payment_recorded_at', '>', from).where('inv.payment_recorded_at', '<=', to))
+    .select('inv.customer_id', 'inv.payment_recorded_at as at');
+  const rows = [
+    ...visits.map((r) => ({ ...r, kind: staffActionDef.KIND_VISIT })),
+    ...payments.map((r) => ({ ...r, kind: staffActionDef.KIND_PAYMENT })),
+  ];
+  for (const ident of withCustomer) {
+    const start = ident.anchor.getTime();
+    const end = start + staffActionDef.STAFF_ACTION_WINDOW_HOURS * 60 * 60 * 1000;
+    let best = null;
+    for (const row of rows) {
+      const at = asDate(row.at);
+      if (String(row.customer_id) !== ident.customerId || !at || at.getTime() <= start || at.getTime() > end) continue;
+      if (!best || at.getTime() < best.at.getTime()) best = { at, kind: row.kind };
+    }
+    if (best) found.set(String(ident.item.id), best);
+  }
+  return found;
+}
+
+// The bundle's staff-action fields: the earliest action found for the item, else both null.
+function staffActionFields(found, item) {
+  const action = found.get(String(item.id));
+  return { staffActionAt: action ? action.at : null, staffActionKind: action ? action.kind : null };
+}
+
 // An email a person answered: a Gmail SENT row in its thread that reaches the customer.
 async function attachEmailReplies(conn, idents, bundles) {
   const emailIdents = idents.filter((i) => i.item.kind === 'email' && i.customerId && i.email?.gmail_thread_id);
@@ -301,12 +348,13 @@ async function attachEmailReplies(conn, idents, bundles) {
  * @param {Array<{id, kind: 'sms'|'voice'|'email'|'lead', bellAt: Date|null, refs: object}>} items
  *   refs by kind: sms {sid, customerId}; voice {callLogId, customerId, phone};
  *   email {emailId, customerId}; lead {customerId, phone}.
- * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean}} deps
+ * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean, staffActions?: boolean}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
- *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt };
+ *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,
+ *     staffActionAt, staffActionKind (sms, with `staffActions`) };
  *   an item whose subject cannot be identified is absent (never judged).
  */
-async function loadContactBundles(items, { conn, bookedVisits, visitRan = false }) {
+async function loadContactBundles(items, { conn, bookedVisits, visitRan = false, staffActions = false }) {
   const bundles = new Map();
   if (!items.length) return bundles;
 
@@ -346,6 +394,7 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false 
   const replyRows = shared.size ? await ownReplyRows(conn, { customerIds, peers, since }) : [];
   const visits = await bookedVisits(customerIds);
   const ranVisits = visitRan ? await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice')) : new Map();
+  const staffActed = await staffActionsAfterTexts(conn, smsIdents, staffActions);
   for (const ident of idents) {
     const { item, customerId } = ident;
     // A shared phone: this customer's own evidence by customer id only (ownMatch).
@@ -361,6 +410,7 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false 
       quote: false,
       replyAt: null,
       visitRanAt: ranVisits.get(String(item.id)) || null,
+      ...staffActionFields(staffActed, item),
     };
     bundle.quote = await quoteHandedOff(conn, ident, bundle);
     bundles.set(String(item.id), bundle);

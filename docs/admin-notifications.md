@@ -144,6 +144,10 @@ customer's message by this rule.
    (`GATE_VOICEMAIL_VISIT_UNDERWAY`), and a Leads bell with `doneWhen: 'lead_contacted'` and a
    lead id closes once the lead was texted or called back, booked or quoted after the bell
    (`GATE_LEAD_CONTACTED_CLOSE`). Details in `docs/gates-and-env.md`.
+   A staff action also answers a text (`GATE_SMS_STAFF_ACTION_ANSWERS`, off / `shadow` / `true`,
+   rollback = unset): a visit a person booked in the admin, or a payment a person recorded,
+   for the text's customer (by customer id) within 24 hours after the text. In `true` the Messages
+   reader counts the text as answered too, so the Unanswered filter and the evening digest agree.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a

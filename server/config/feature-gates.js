@@ -130,6 +130,7 @@
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
@@ -4844,6 +4845,11 @@ const gates = {
   // for logGateStatus only; consumers read alertContactCloseMode() at CALL time. Kill switch: unset.
   alertContactClose: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase()),
 
+  // A staff action answers a text (owner 2026-10-29, "Stuck Alert Fixes" F1). Tri-state; the alert
+  // rule rides on GATE_ALERT_CONTACT_CLOSE, the Messages reader reads it alone. Registered for
+  // logGateStatus only; consumers read staffActionAnswersMode() at CALL time. Kill switch: unset.
+  smsStaffActionAnswers: ['shadow', 'true'].includes(String(process.env.GATE_SMS_STAFF_ACTION_ANSWERS || '').trim().toLowerCase()),
+
   // A voicemail bell closes once the customer's own visit ran later that day (owner 2026-10-29,
   // "Stuck Alert Fixes" F3). Tri-state; rides on GATE_ALERT_CONTACT_CLOSE. Registered for
   // logGateStatus only; consumers read voicemailVisitUnderwayMode() at CALL time. Kill switch: unset.
@@ -7363,6 +7369,18 @@ function voicemailVisitUnderwayMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_SMS_STAFF_ACTION_ANSWERS read at CALL time: 'shadow', 'true' or 'off'. A staff action for the
+// text's customer (by customer id, never by phone) within 24 hours after the text answers it: a visit a
+// person booked in the admin, or a payment a person recorded (services/sms-staff-action-answers.js).
+// 'shadow' (trimmed, any case) makes the admin text alert RECORD the would-close in audit_log and changes
+// nothing else; 'true' closes the alert and makes the Messages reader (Unanswered list, badge, evening
+// digest) count the text as answered. Anything else, unset included, is off: no query, and the reader's
+// SQL is byte-identical to before. The alert rule runs inside GATE_ALERT_CONTACT_CLOSE.
+function staffActionAnswersMode() {
+  const value = String(process.env.GATE_SMS_STAFF_ACTION_ANSWERS || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_LEAD_CONTACTED_CLOSE read at CALL time: 'shadow', 'true' or 'off'. The "lead_contacted" Leads
 // bells (call/reply to a lead) as a class of admin-alert-relevance.js: closed once a person's text or
 // call reached the lead, a visit was booked, or an estimate was handed off, each after the bell.
@@ -9028,6 +9046,8 @@ module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNot
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
 // GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.buildingUseTaxLive = buildingUseTaxLive;
+// GATE_SMS_STAFF_ACTION_ANSWERS reader, on its own line so gate PRs never conflict.
+module.exports.staffActionAnswersMode = staffActionAnswersMode;
 // GATE_PROMISE_RECORD_EVIDENCE reader, on its own line so gate PRs never conflict.
 module.exports.promiseRecordEvidenceMode = promiseRecordEvidenceMode;
 // GATE_STOCK_COUNT_AWARE_USAGE reader, on its own line so gate PRs never conflict.
