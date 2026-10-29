@@ -8064,6 +8064,14 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`Document request reminders failed: ${err.message}`);
         }
+        // Mark accepted consumer notice catch-up (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE): re-sends an FDACS-13692
+        // a restart lost after the accept. After the reminders: a reminder that already reached the customer since the
+        // accept counts as delivered, so the same notice never goes out twice in one run.
+        try {
+          await require('./estimate-consumer-notice').reconcileManualAcceptConsumerNotices();
+        } catch (err) {
+          logger.error(`Mark accepted consumer notice catch-up failed: ${err.message}`);
+        }
       });
     } catch (err) {
       logger.error(`Document lifecycle exclusive section failed: ${err.message}`);
