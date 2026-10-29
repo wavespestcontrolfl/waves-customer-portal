@@ -238,12 +238,15 @@ const BOX_MODE = { null: 'ui', true: 'list', false: 'strip' };
 // The request fields every find-time hint search shares; `undefined` drops
 // a field from the JSON.
 function hintRequestBody({
-  arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+  arrivalWindows, quickMove, moveScope, serviceId, propertyId, customerId, address, lat, lng,
   durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
 }) {
   return {
     hint: true,
     arrivalWindows,
+    // Quick Move: the server decides (GATE_PICKER_ROAD_CHECK) whether it
+    // gets Edit appointment's route check.
+    quickMove: quickMove || undefined,
     moveScope: moveScope || undefined,
     // Existing-visit surfaces pass serviceId so the server ranks at
     // the VISIT's stamped address (secondary/rental properties),
@@ -297,6 +300,8 @@ export function useBestTimes({
   // technician, so the list covers every technician's route.
   openTimes,
   techPick,
+  // Quick Move's sheet (RainOutSheet): see hintRequestBody.
+  quickMove = false,
 }) {
   const [pickedByTech, setPickedByTech] = useState([]);
   // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
@@ -411,7 +416,7 @@ export function useBestTimes({
           signal: controller.signal,
           body: JSON.stringify({
             ...hintRequestBody({
-              arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+              arrivalWindows, quickMove, moveScope, serviceId, propertyId, customerId, address, lat, lng,
               durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
             }),
             ...extra,

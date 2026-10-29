@@ -3792,6 +3792,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 router.sendEstimateNow = sendEstimateNow;
 
 // GET /api/admin/estimates/lead-auto-send/preview — read-only dry-run audit.
+// Uses the same config as the scan, including the created-after cutoff
+// (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER, read from the environment only, never
+// from the query string): unset or unparseable lists no candidates.
 router.get('/lead-auto-send/preview', async (req, res, next) => {
   try {
     const config = leadEstimateAutoSendConfigFromEnv({
@@ -4460,12 +4463,19 @@ router.get('/:id/proposal', async (req, res, next) => {
     // exemption -> 0, county rate, FL commercial default), in strict mode: a
     // failed customer / exemption / county lookup is null (no autofill), never
     // the unchecked default labelled as the customer's rate. Never throws the read.
+    // suggestedTaxSource names where the rate came from ("Sarasota County"); the
+    // builder shows it beside the rate. Null whenever the rate is null.
     let suggestedTaxRate = null;
+    let suggestedTaxSource = null;
     try {
-      const rate = await require('../services/estimate-converter')
-        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db, strict: true });
+      const { rate, source } = await require('../services/estimate-converter')
+        .resolveCommercialPrepayTax(estimate.customer_id ?? null, { database: db, strict: true, propertyId: estimate.property_id || undefined });
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
-    } catch (_) { suggestedTaxRate = null; }
+      suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
+    } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
+    const proposalGenerate = require('../services/estimate-proposal-generate');
+    // Never throws: a failed read is null, and the family defaults apply.
+    const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
     // A failed read leaves the line off; it never fails the builder's load.
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
@@ -4477,6 +4487,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       suggestedTaxRate,
+      suggestedTaxSource,
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
       commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),
@@ -4496,9 +4507,11 @@ router.get('/:id/proposal', async (req, res, next) => {
       // never catalog membership (codex 1A-ii r15 — a hand-authored line
       // matching a stock sentence must survive), so reopened proposals
       // prune exactly what their generation installed.
-      familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
-        await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
-      ),
+      familyRegistry: proposalGenerate.buildFamilyRegistry(taxabilityMap),
+      // Business-building Taxable rule per saved row that names a service (row id ->
+      // boolean): a residential proposal switched to Business building restores each
+      // such row to it, keeping service-specific rules (owner 2026-10-28, building use).
+      businessTaxRules: proposalGenerate.businessTaxRulesFor(proposal, taxabilityMap),
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
@@ -4725,6 +4738,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         && (scopeItems.length > 24 || scopeItems.some((item) => String(item?.label ?? '').length > 80 || String(item?.value ?? '').length > 160))) {
         return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
       }
+    }
+    // Building use (owner 2026-10-28): residential, nonresidential or unset. An unknown value gets a 400 rather than
+    // a silent drop, since it decides which rows the builder taxes.
+    if (incoming.buildingUse != null && String(incoming.buildingUse).trim() !== ''
+      && require('../services/estimate-proposal').normalizeBuildingUse(incoming.buildingUse) === null) {
+      return res.status(400).json({ error: 'Building use must be residential or nonresidential.' });
     }
     // Present-but-invalid term numbers get a 400, not a silent normalize:
     // cleanBoundedInt rounds fractions and drops out-of-range values, so

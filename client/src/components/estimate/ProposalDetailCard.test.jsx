@@ -151,6 +151,23 @@ describe('ProposalDetailCard', () => {
     expect(text).not.toContain('What your commercial pest service includes');
   });
 
+  it('a one-time-only proposal drops the four fixed agreement terms and keeps Payment and Property access', () => {
+    const terms = {
+      paymentTerms: 'net30', initialTermMonths: 12, renewal: 'Auto-renews yearly', priceAdjustment: 'At renewal',
+      cancellation: '30-day written notice', accessRequirements: 'Keys at the front desk',
+    };
+    const oneTime = { ...PROPOSAL.totals, annualRecurring: 0, monthlyEquivalent: 0, oneTime: 450 };
+    const dropped = render(<ProposalDetailCard proposal={{ ...PROPOSAL, totals: oneTime, commercialTerms: terms }} />).container.textContent;
+    expect(dropped).toContain('Net-30');
+    expect(dropped).toContain('Keys at the front desk');
+    for (const text of ['Initial term', '12 months', 'Renewal', 'Auto-renews yearly', 'Price adjustment', 'Cancellation', '30-day written notice']) {
+      expect(dropped).not.toContain(text);
+    }
+    const kept = render(<ProposalDetailCard proposal={{ ...PROPOSAL, commercialTerms: terms }} />).container.textContent;
+    expect(kept).toContain('Auto-renews yearly');
+    expect(kept).toContain('30-day written notice');
+  });
+
   it('demotes free-text terms to "Additional terms" only beside structured terms', () => {
     const structured = render(<ProposalDetailCard proposal={{
       ...PROPOSAL,

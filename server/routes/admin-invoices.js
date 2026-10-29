@@ -3131,9 +3131,6 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
     }
 
-    // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
-    // payment-held WDO report — nudge the release sweep.
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     try {
       const final = await db('invoices').where({ id }).first();
       await AnnualPrepayRenewals.syncTermForInvoicePayment(final);

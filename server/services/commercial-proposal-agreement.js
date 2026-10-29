@@ -144,13 +144,12 @@ function signableProposal(estimate) {
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
 const {
-  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS,
+  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText,
 } = require('../../shared/commercial-agreement-terms.cjs');
 
 const commercialAutopayLive = () => require('../config/feature-gates').commercialAutopayLive();
 
-// Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
-const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+// Case, whitespace and apostrophe style do not matter (normalizeTermText, shared with the builder's Standard choice).
 const matchesDefaultText = (key) => (value) => normalizeTermText(value) === normalizeTermText(AGREEMENT_TERMS[key]);
 
 // field -> { detail: what the builder line asks for, allowed(value): the value the agreement can sit beside }.
@@ -204,8 +203,9 @@ function signEligibility(estimate) {
 
 // Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
 // of narrative lines, a program's `visitMinutes`: scheduling only, it sizes the first visit and is not part of the
-// quote), so re-saving the same quote never changes it and any customer-visible change does.
-const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes']);
+// quote; the proposal's `buildingUse`: the operator's tax classification, whose effect on the quote is each row's
+// Taxable flag, hashed with the row), so re-saving the same quote never changes it and any customer-visible change does.
+const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes', 'buildingUse']);
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {

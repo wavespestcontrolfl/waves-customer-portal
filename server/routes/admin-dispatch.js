@@ -7461,22 +7461,18 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
-    // A decision-only card (a visit not closed out) is settled by its own
-    // decision routes; a bare resolve would close it and record nothing.
-    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
-    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
-      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
-    }
-    const row = await resolveAlert({
+    // One shared function (services/dispatch-alerts.js): the Intelligence Bar's
+    // resolve_dispatch_alert card runs the same resolve.
+    const { resolveAlertAsDispatcher } = require('../services/dispatch-alerts');
+    const result = await resolveAlertAsDispatcher({
       id: req.params.id,
       resolvedBy: req.technicianId,
     });
-    if (row) return res.json({ alert: row });
-
-    const existing = await db('dispatch_alerts').where({ id: req.params.id }).first();
-    if (!existing) return res.status(404).json({ error: 'alert not found' });
-    return res.json({ alert: existing });
+    if (result.outcome === 'decision_required') {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
+    if (result.outcome === 'not_found') return res.status(404).json({ error: 'alert not found' });
+    return res.json({ alert: result.alert });
   } catch (err) {
     logger.error(`[dispatch/alerts/resolve] failed for ${req.params.id}: ${err.message}`);
     next(err);

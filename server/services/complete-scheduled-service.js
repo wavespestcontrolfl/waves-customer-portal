@@ -251,7 +251,7 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   const explicit = normalizeServiceReportApplicationMethod(
     productInput.applicationMethod || productInput.method || product.application_method || product.method,
   );
-  // GATE_REPORT_CLEANUP_1020: a granular product is never stored with a broadcast spray method, whatever the sheet sent.
+  // A granular product is never stored with a broadcast spray method, whatever the sheet sent.
   if (explicit) return correctedGranularMethod(explicit, product);
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
@@ -1579,6 +1579,67 @@ function tankCleanoutWarnings(cleanout, selectedCalibration) {
   return [];
 }
 
+// Why a product line cannot come off stock before any conversion, or null when it can.
+function notDeductibleInputWarning(inventoryProduct, amount, amountUnit) {
+  if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) {
+    return 'No confirmed product amount was provided, so inventory was not deducted.';
+  }
+  if (inventoryProduct.inventory_on_hand == null || inventoryProduct.inventory_on_hand === '') {
+    return 'Product has no inventory_on_hand value, so inventory was not deducted.';
+  }
+  return null;
+}
+
+// The usage movement for a visit done before the product's latest count: the same quantity and cost a deduction
+// writes, with stock_before = stock_after and no products_catalog update (GATE_STOCK_COUNT_AWARE_USAGE).
+async function recordCountedUsage(trx, {
+  snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
+  amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
+}) {
+  const { unitCost, costUsed } = calculateInventoryCost({
+    product: inventoryProduct,
+    deductedAmount,
+    inventoryUnit,
+    amount,
+    amountUnit,
+  });
+  const [movement] = await trx('product_inventory_movements').insert({
+    product_id: inventoryProduct.id,
+    service_record_id: serviceRecord.id,
+    service_product_id: serviceProduct.id,
+    scheduled_service_id: scheduledService.id,
+    customer_id: scheduledService.customer_id,
+    technician_id: scheduledService.technician_id,
+    movement_type: 'usage',
+    quantity: deductedAmount,
+    unit: inventoryUnit,
+    unit_cost: unitCost,
+    cost_used: costUsed,
+    stock_before: stockBefore,
+    stock_after: stockBefore,
+    lot_number: productInput.lotNumber || productInput.lot_number || null,
+    metadata: {
+      enteredAmount: amount,
+      enteredUnit: amountUnit,
+      insufficientStock: false,
+      ...countHold,
+    },
+  }).returning('*');
+  return {
+    ...snapshot,
+    status: 'not_deducted_counted',
+    movementId: movement.id,
+    deductedAmount,
+    inventoryUnit,
+    unitCost,
+    costUsed,
+    stockBefore,
+    stockAfter: stockBefore,
+    remainingStock: stockBefore,
+    warning: require('./inventory-count-guard').COUNTED_USAGE_WARNING,
+  };
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -1605,19 +1666,8 @@ async function deductProductInventory(trx, {
     warning: null,
   };
 
-  if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) {
-    return {
-      ...snapshot,
-      warning: 'No confirmed product amount was provided, so inventory was not deducted.',
-    };
-  }
-
-  if (inventoryProduct.inventory_on_hand == null || inventoryProduct.inventory_on_hand === '') {
-    return {
-      ...snapshot,
-      warning: 'Product has no inventory_on_hand value, so inventory was not deducted.',
-    };
-  }
+  const notDeductibleWarning = notDeductibleInputWarning(inventoryProduct, amount, amountUnit);
+  if (notDeductibleWarning) return { ...snapshot, warning: notDeductibleWarning };
 
   const inventoryUnit = inventoryProduct.inventory_unit || amountUnit;
   const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
@@ -1636,6 +1686,15 @@ async function deductProductInventory(trx, {
       inventoryUnit,
       warning: 'Product inventory_on_hand is not numeric, so inventory was not deducted.',
     };
+  }
+  // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest physical count was already
+  // counted out of stock. Record the use (cost and forecasts keep seeing it); leave stock and the lockout alone.
+  const countHold = await require('./inventory-count-guard').stockHoldFor(trx, inventoryProduct.id, { scheduledService, serviceRecord });
+  if (countHold) {
+    return recordCountedUsage(trx, {
+      snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
+      amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
+    });
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
@@ -5219,7 +5278,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             svc.customer_id,
             svc.service_type,
             Number(invoiceAmount) || 0,
-            { database: db, skipCustomerExemption: visitIsPayerBilled },
+            { database: db, skipCustomerExemption: visitIsPayerBilled, propertyId: svc.property_id || undefined },
           );
           const r = Number(taxResult?.rate);
           if (Number.isFinite(r) && r >= 0 && r < 1) return r;
@@ -8496,7 +8555,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               (block) => !(
                 block.code === 'actual_inventory_insufficient_stock'
                 && block.productId != null
-                && ['deducted', 'deducted_insufficient_stock'].includes(
+                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted'].includes(
                   deductionStatusByProductId.get(String(block.productId)),
                 )
               ),
@@ -11427,6 +11486,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceRecordId: record.id,
         } });
       }
+      // GATE_SETUP_FEE_APPLICATION_SETTLED: the shared reconciler also knows
+      // the prepay-year and visit-add-on coverage this transaction does not,
+      // so it runs now rather than at the next daily sweep. The alert row
+      // stays the durable follow-up: a coverage regression reopens it.
+      if (require('../config/feature-gates').setupFeeApplicationSettledLive()) setupFeeReconcileAfterCommit = true;
       if (setupFeeReconcileAfterCommit) {
         // Multi-visit resolution deferred from the alert transaction
         // (Codex P0): the shared reconciler proves EVERY parked visit
@@ -12672,7 +12736,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   svc.customer_id,
                   svc.service_type,
                   Number(mintInvoiceAmount) || 0,
-                  currentPayerBilled ? { skipCustomerExemption: true } : {},
+                  { ...(currentPayerBilled ? { skipCustomerExemption: true } : {}), propertyId: svc.property_id || undefined },
                 );
                 const r = Number(rr?.rate);
                 if (!(Number.isFinite(r) && r >= 0 && r < 1)) {
@@ -14694,36 +14758,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // today's renders are byte-identical. Never throws.
         const { reserviceLineForCustomer } = require('../services/reservice-link');
         const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
-        // {past_due_line} for the with-invoice completion texts (EXPAND half —
-        // same rollout discipline as {reservice_line} above: supplied at every
-        // completion-family render site BEFORE any body carries the token, so
-        // neither deploy ordering can suppress a send). Computed only when the
-        // text will carry a pay link — a paid/prepaid or report-only
-        // completion supplies '' — and excluding the visit's own invoice
-        // (today's bill is not a past-due balance). '' unless
-        // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older
-        // open self-pay balance; never throws.
-        // Suppressed outside the 8AM-8PM send window (codex P1): a late
-        // completion's rendered body is FROZEN into the scheduled-SMS queue
-        // (dispatch_completion_deferred below) and replayed verbatim at the
-        // window open — a balance settled overnight (portal payment, sweep)
-        // would still be asserted at 8 AM with no recheck. The pay link
-        // tolerates that staleness (its target renders live paid state); a
-        // static sentence claiming money owed does not, so a deferred
-        // completion simply carries no balance line. The precheck MIRRORS
-        // the authoritative validator's gating (codex r3 P2): with
-        // GATE_SMS_SEND_WINDOW off the validator never defers — nighttime
-        // completions send immediately, no frozen replay exists, and the
-        // line rides; only a window that can actually hold suppresses. The
-        // residual precheck→handoff race is closed by the
-        // stripBalanceLineFromBody pass at the QUIET_HOURS_HOLD below.
-        const { isWithinSendWindowET } = require('../services/messaging/send-window');
-        const { isEnabled: gateEnabled } = require('../config/feature-gates');
-        const { pastDueSmsLineForCustomer } = require('../services/open-balance');
-        const completionSmsCanDefer = gateEnabled('smsSendWindow') && !isWithinSendWindowET();
-        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && !completionSmsCanDefer)
-          ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
-          : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -14732,7 +14766,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
             reserviceLine: completionReserviceLine,
-            pastDueLine: completionPastDueLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -14835,7 +14868,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -14852,7 +14885,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
             reservice_line: completionReserviceLine,
-            past_due_line: completionPastDueLine,
+            past_due_line: '',
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -14875,7 +14908,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -14942,7 +14975,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -15169,23 +15202,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 // completion retry despite a definite non-delivery.
                 completionSmsDeliveryUnverifiedAt: null,
               };
-              // The balance clause never rides a frozen replay body (codex
-              // P2, round 2): the send-window PREcheck at the line's compute
-              // site can pass at 19:5x while the authoritative validator at
-              // the provider handoff defers the send — this hold IS that
-              // deferral, so strip the clause here and the queued body
-              // matches what the precheck-suppressed path would have
-              // rendered. The pay link stays (its target renders live paid
-              // state); only the static balance sentence is removed.
-              const deferredReplayBody = require('../services/open-balance')
-                .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {
                 await trx('sms_log').insert({
                 customer_id: svc.customer_id,
                 direction: 'outbound',
                 from_phone: TWILIO_NUMBERS.getOutboundNumber(),
                 to_phone: svc.cust_phone,
-                message_body: deferredReplayBody,
+                message_body: sentSmsBody,
                 status: 'scheduled',
                 scheduled_for: new Date(smsResult.nextAllowedAt),
                 message_type: sentSmsType,
@@ -15875,13 +15898,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // #4127): the invoice event is the proof the service happened, and this
     // may be the referred customer's first qualifying visit — withholding
     // the credit here would delay it to a later completion or lose it. The
-    // credits post; the referrer's reward SMS / email stay suppressed so the
-    // closeout remains quiet.
+    // credits post; the closeout itself stays quiet, and the referrer's one
+    // thank-you email goes out at the next 9:00 AM ET as on every credit
+    // (referral-engine sendDueReferralRewardEmails, owner 2026-10-29).
     const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);
     if (referralVisitPerformed && !packetEffects) {
       try {
         const referralEngine = require('../services/referral-engine');
-        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id, notify: !issuedInvoiceCloseout });
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }

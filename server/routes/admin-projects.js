@@ -201,11 +201,10 @@ function pretreatSentSnapshot(project, projectCols) {
 }
 
 // Send with invoice: save the copy once the report leg reached the owner,
-// fenced on the send claim (a stale takeover owns the row otherwise). A held
-// report sent only the invoice, so it saves nothing (the release saves it).
+// fenced on the send claim (a stale takeover owns the row otherwise).
 // The row passed in is the post-claim re-read the send delivered.
-async function savePretreatSentCopy(project, projectCols, { reportReached, held, claimToken }) {
-  const copy = reportReached && !held ? pretreatSentSnapshot(project, projectCols) : {};
+async function savePretreatSentCopy(project, projectCols, { reportReached, claimToken }) {
+  const copy = reportReached ? pretreatSentSnapshot(project, projectCols) : {};
   if (!copy.pretreat_sent_snapshot) return;
   await db('projects').where({ id: project.id, delivery_claim_token: claimToken }).update(copy);
 }
@@ -303,18 +302,6 @@ const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
 const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Official termite documents use the same invoice-first customer delivery:
-// invoice now, report/certificate held until settlement, automatic release.
-// Ordinary service reports continue to send immediately and are never gated.
-const REPORT_PAYMENT_HOLD_PROJECT_TYPES = new Set([
-  'wdo_inspection',
-  'pre_treatment_termite_certificate',
-]);
-
-function supportsReportPaymentHold(projectType) {
-  return REPORT_PAYMENT_HOLD_PROJECT_TYPES.has(String(projectType || ''));
-}
-
 function isAdmin(req) {
   return req.techRole === 'admin';
 }
@@ -797,13 +784,10 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
   // passing silently, which is more than an arbitrary typo gets).
   // These two lines are main's, unchanged, and deliberately so: they decide
   // whether ALREADY-STORED records may still be sent, and tightening them
-  // retroactively broke paid customers. A held report whose pay link is
-  // already armed re-enters this function from releaseHeldProjectReport after
-  // payment — a newly-failing check there reverts the PAID report to held and
-  // never delivers it. Whether legacy "Other" records should be re-gated is a
-  // business decision about issued compliance documents, not a side effect of
-  // deleting two form inputs; it needs its own change with a record count and
-  // a migration for in-flight holds.
+  // retroactively broke paid customers. Whether legacy "Other" records should
+  // be re-gated is a business decision about issued compliance documents, not
+  // a side effect of deleting two form inputs; it needs its own change with a
+  // record count.
   const productName = app.product_name === 'Other' ? app.product_name_other : app.product_name;
   const rawMethod = app.treatment_method;
   const method = rawMethod === 'Other' ? app.treatment_method_other : rawMethod;
@@ -851,10 +835,8 @@ function pretreatWarrantyOk(value, typeCfg) {
   return (field?.options || []).includes(String(value || '').trim());
 }
 
-// Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
-// never on the automatic release of a paid held report: a certificate held
-// before these checks existed must still deliver once paid (see the note in
-// certApplicationChecks). The final exterior fields are not here: they fill
+// Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice)
+// (see the note in certApplicationChecks). The final exterior fields are not here: they fill
 // the notice's reference blank, and the later visit's full FBC 105.10 record
 // (area, concentration, gallons) is its own certificate.
 function pretreatStaffSendChecks(findings, typeCfg) {
@@ -1780,12 +1762,6 @@ router.get('/:id', async (req, res, next) => {
         wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
-        // Drives the "Hold report until paid" toggle in the drawer for both
-        // official termite documents. The columns ride on ...project above.
-        report_payment_hold_available: supportsReportPaymentHold(project.project_type)
-          && isEnabled('wdoReportPaymentHold')
-          && !project.sent_at
-          && project.status !== 'sent',
       },
       prepGuide,
       upcomingAppointment: upcomingAppointment ? {
@@ -2444,7 +2420,7 @@ router.put('/:id', async (req, res, next) => {
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     // Serialized with in-flight deliveries the same way photo mutations are:
-    // a findings/date edit landing while a send (or the payment-hold release)
+    // a findings/date edit landing while a send
     // is building would make the emailed signed PDF differ from the live
     // public report, or race the staleness bookkeeping.
     // The staleness refresh rides the SAME locked transaction, computed from
@@ -2722,7 +2698,7 @@ async function refreshWdoSignatureStaleness(req, before, after, { connection = d
 // already validated.
 // Pass columns = null to lock and return the FULL row (the findings-edit
 // path needs it to compute staleness from locked state).
-async function lockProjectForPhotoMutation(project, trx, what = 'the photo change', columns = ['wdo_signature', 'delivery_status', 'project_type', 'report_hold_status']) {
+async function lockProjectForPhotoMutation(project, trx, what = 'the photo change', columns = ['wdo_signature', 'delivery_status', 'project_type']) {
   const query = trx('projects').where({ id: project.id }).forUpdate();
   const cols = columns ? [...new Set([...columns, 'updated_at'])] : null;
   const locked = await (cols ? query.first(...cols) : query.first());
@@ -2731,12 +2707,8 @@ async function lockProjectForPhotoMutation(project, trx, what = 'the photo chang
     err.code = 'send_in_progress';
     throw err;
   };
-  // Two in-flight delivery claims to respect: the shared send claim
-  // (delivery_status) AND the payment-hold release sweep's claim
-  // (report_hold_status='releasing') — the release path builds and emails
-  // the FDACS addendum without ever setting delivery_status. The release
-  // claim needs no expiry here: the release sweep recovers its own stalls.
-  if (String(locked?.report_hold_status || '') === 'releasing') sendInProgress();
+  // The in-flight delivery claim to respect: the shared send claim
+  // (delivery_status).
   if (String(locked?.delivery_status || '') === 'sending') {
     // Mirror the send routes' 10-minute stale recovery: without it a
     // CRASHED send claim would 409 every edit/photo/signature change
@@ -3118,15 +3090,13 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
 // be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
-async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false }) {
   // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
   // inspection fee means nothing is billed for this visit. Refuse the
   // combined report+invoice send on EVERY path — before the explicit-id and
   // reuse checks, so no draft is minted, repriced, or attached — and point
   // the operator at the report-only send. Billing it anyway requires typing
-  // a non-zero fee first (the entry always wins). This also settles the
-  // no-charge × hold-until-paid interaction: with nothing to pay there is
-  // nothing to hold, so the hold send fails here with the same guidance.
+  // a non-zero fee first (the entry always wins).
   if (project.project_type === 'wdo_inspection'
     && resolveWdoInspectionFee(parseFindings(project)) === 0) {
     const err = new Error('This WDO inspection is recorded as no charge ($0 inspection fee) — use "Send report" to deliver the FDACS report without an invoice. To bill it, enter a non-zero inspection fee first.');
@@ -3224,32 +3194,6 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
     //
-    // Hold-until-paid must never CREATE a statement-accrued invoice as a side
-    // effect of a send the route is about to reject. This applies equally to
-    // WDO reports and pre-treatment certificates. Predict accrual before the
-    // type-specific create path runs; existing/reused invoices are guarded by
-    // payer_statement_id in the route after resolution.
-    if (holdRequested) {
-      let holdSsId = project.scheduled_service_id || null;
-      if (!holdSsId && project.service_record_id) {
-        const srLink = await trx('service_records')
-          .where({ id: project.service_record_id, customer_id: project.customer_id })
-          .first('scheduled_service_id').catch(() => null);
-        if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
-      }
-      const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
-        customerId: project.customer_id,
-        scheduledServiceId: holdSsId,
-      }).catch(() => null);
-      if (resolvedHoldPayer?.payerId
-        && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
-        && isEnabled('payerStatements')) {
-        const err = new Error('This service bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
-        err.code = 'hold_statement_accrued';
-        throw err;
-      }
-    }
-
     if (project.project_type === 'wdo_inspection') {
 
       // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
@@ -3491,11 +3435,8 @@ function normalizeInvoiceLineItemsForPdf(lineItems) {
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   // Hoisted so the outer catch can release the send claim on an unexpected
   // throw — otherwise a crash mid-send would 409 every later attempt for
-  // 10 minutes (the claim's stale-recovery window). The manual hold revert
-  // is hoisted with it and MUST run first in the catch: it is fenced on the
-  // claim token, which the send-claim revert clears.
+  // 10 minutes (the claim's stale-recovery window).
   let revertSendClaimOnError = null;
-  let revertManualHoldClaimOnError = null;
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -3570,8 +3511,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           recipient: previewRecipient.email || null,
           report_copies: previewCopies,
         },
-        releases_payment_hold: reportHoldColumnsPresent(projectCols)
-          && ['held', 'releasing'].includes(String(project.report_hold_status || '')),
       });
     }
 
@@ -3581,10 +3520,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // two copies and the project two identical archived filings. Claim the
     // row as 'sending' before any side effect (mirrors the send-with-invoice
     // invoice claim); a crashed claim self-recovers after 10 minutes.
-    // Ordering matters: this claim runs BEFORE the manual hold claim below —
-    // the hold claim refreshes projects.updated_at, which would permanently
-    // defeat this claim's staleness window on a crashed held send (every
-    // retry re-stamps updated_at, then 409s, forever).
     // A recovered STALE claim normalizes its revert target to 'failed' — an
     // abort must never write 'sending' back with a fresh updated_at, which
     // would re-lock retries for another 10 minutes per failure, indefinitely.
@@ -3616,44 +3551,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     };
     revertSendClaimOnError = revertSendClaim;
 
-    // Payment-hold mutual exclusion (Codex P2 on #2753): a manual send on a
-    // HELD report is the manual release, and it must take the SAME atomic
-    // claim the payment sweep takes — otherwise an admin click while the
-    // sweep is mid-delivery ('releasing') would email + archive the same
-    // FDACS filing twice. Already-releasing rows 409 instead of racing; a
-    // crashed claim un-sticks via the sweep's 10-minute stale recovery.
-    let manualHoldClaim = false;
-    if (reportHoldColumnsPresent(projectCols)
-      && ['held', 'releasing'].includes(String(project.report_hold_status || ''))) {
-      const claimed = await db('projects')
-        .where({ id: project.id, report_hold_status: 'held' })
-        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
-      if (!claimed) {
-        await revertSendClaim();
-        return res.status(409).json({
-          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
-          code: 'release_in_progress',
-        });
-      }
-      manualHoldClaim = true;
-    }
-    // Return the manual claim to 'held' on any abort so the sweep can retry
-    // and a later manual send isn't blocked behind a stale claim. Fenced on
-    // the delivery claim token: after a stale takeover the 'releasing' row
-    // may belong to a NEWER claimant, and resetting THEIR claim to 'held'
-    // would let the release sweep deliver concurrently with them. Losing the
-    // fence leaves the row for the sweep's 10-minute recovery — the safe
-    // direction. (Call sites revert the hold BEFORE the send claim so the
-    // token is still present when this runs.)
-    const revertManualHoldClaim = async () => {
-      if (!manualHoldClaim) return;
-      await db('projects')
-        .where({ id: project.id, report_hold_status: 'releasing', delivery_claim_token: sendClaimToken })
-        .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
-        .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
-    };
-    revertManualHoldClaimOnError = revertManualHoldClaim;
-
     await assertPretreatStillSendable(project.id, project.project_type);
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
@@ -3681,7 +3578,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       .where({ id: req.params.id, delivery_claim_token: sendClaimToken })
       .update(tokenUpdate);
     if (!stamped) {
-      await revertManualHoldClaim();
       logger.error(`[projects] send superseded before token stamp for ${project.id} — claim taken over by a newer request`);
       return res.status(409).json({
         error: 'This send was superseded by a newer request — refresh and check the report status.',
@@ -3701,7 +3597,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true }).email) {
-      await revertManualHoldClaim();
       await revertSendClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
@@ -3713,7 +3608,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
-      await revertManualHoldClaim();
       await revertSendClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
@@ -3732,7 +3626,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           sentByTechId: req.technicianId || null,
         });
       } catch (e) {
-        await revertManualHoldClaim();
         await revertSendClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
@@ -3752,7 +3645,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       .where({ id: project.id, delivery_claim_token: sendClaimToken })
       .update({ updated_at: db.fn.now() });
     if (!stillOwned) {
-      await revertManualHoldClaim();
       logger.error(`[projects] send superseded before delivery for ${project.id} — claim taken over; nothing emailed by this request`);
       return res.status(409).json({
         error: 'This send was superseded by a newer request — refresh and check the report status.',
@@ -3766,8 +3658,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const isResendSend = Boolean(project.sent_at || project.status === 'sent');
     if (emailRecipient.email) {
       try {
-        // Recipient-hashed idempotency key (same pattern as the hold release):
-        // the claim stops concurrent duplicates, this stops crash-retry
+        // Recipient-hashed idempotency key: the claim stops concurrent duplicates, this stops crash-retry
         // duplicates at the provider layer. A resend keys on the claim token —
         // deterministic within this attempt, distinct across attempts.
         const recipientHash = crypto.createHash('sha1')
@@ -3900,25 +3791,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           [JSON.stringify([wdoFiling])],
         );
       }
-      // A manual Send report on a payment-held project IS the release escape
-      // hatch (requireAdmin). The release fields ride the SAME row update as
-      // the sent stamp (Codex P2 on #2753): a separate follow-up write could
-      // fail/crash after the project was marked sent, leaving a delivered
-      // report 402ing publicly and the sweep primed to re-deliver it.
-      if (manualHoldClaim) {
-        deliveryUpdate.report_hold_status = 'released';
-        deliveryUpdate.report_hold_released_at = db.fn.now();
-        deliveryUpdate.report_hold_release_source = 'manual_send';
-        deliveryUpdate.report_hold_locked_at = null;
-        deliveryUpdate.report_hold_last_error = null;
-      }
-    }
-
-    // Nothing went out — return the manual claim so the sweep (or a retry
-    // of this endpoint) can deliver later. BEFORE the finalize: the finalize
-    // clears the delivery claim token this revert is fenced on.
-    if (manualHoldClaim && !delivered) {
-      await revertManualHoldClaim();
     }
 
     // Fenced finalize: only the request that still owns the claim may write
@@ -3970,9 +3842,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
   } catch (err) {
-    // Hold revert FIRST — it is fenced on the claim token, which the
-    // send-claim revert below clears.
-    if (revertManualHoldClaimOnError) await revertManualHoldClaimOnError().catch(() => {});
     if (revertSendClaimOnError) await revertSendClaimOnError().catch(() => {});
     next(err);
   }
@@ -4048,423 +3917,6 @@ function normalizeUsPhone(phone) {
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   if (digits.length === 10) return `+1${digits}`;
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Official termite document payment hold — release ("pay before delivery")
-// ---------------------------------------------------------------------------
-
-// Failed release deliveries retry on the sweep with exponential backoff,
-// capped at 6h. No terminal cap: a held report is a paid-for legal document,
-// so it keeps retrying (visibly — last_error shows in the drawer) until it
-// delivers or the operator releases it manually via Send report.
-function reportHoldBackoffMinutes(attempts) {
-  return Math.min(360, 5 * Math.pow(2, Math.max(0, attempts - 1)));
-}
-
-function reportHoldColumnsPresent(projectCols) {
-  return Boolean(projectCols.report_hold_status && projectCols.report_hold_attempts);
-}
-
-function reportHoldReleaseSmsKey(projectId, invoiceId) {
-  return `project_report_hold_release:${safeIdempotencySegment(projectId)}:${safeIdempotencySegment(invoiceId)}`;
-}
-
-async function acceptedProviderSmsForClaim(claimId) {
-  return db('sms_log')
-    .where({ direction: 'outbound' })
-    .whereIn('status', ['queued', 'sent', 'delivered'])
-    .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(claimId)])
-    .first('id');
-}
-
-// Persist a claim before calling Twilio. Its id is forwarded through the
-// messaging adapter and written onto Twilio's provider-side sms_log row. If
-// the process crashes after Twilio accepts but before the project release is
-// stamped, the next hold retry sees that sibling row and does not text twice.
-async function claimReportHoldReleaseSms({ projectId, invoiceId, customerId, toPhone, messageBody }) {
-  const releaseKey = reportHoldReleaseSmsKey(projectId, invoiceId);
-  let claim = await db('sms_log')
-    .whereRaw("metadata->>'report_hold_release_key' = ?", [releaseKey])
-    .first();
-
-  if (claim) {
-    const providerRow = await acceptedProviderSmsForClaim(claim.id);
-    if (providerRow || claim.status === 'sent') {
-      if (claim.status !== 'sent') {
-        await db('sms_log').where({ id: claim.id }).update({ status: 'sent', updated_at: db.fn.now() });
-      }
-      return { id: claim.id, alreadySent: true };
-    }
-    await db('sms_log').where({ id: claim.id }).update({
-      status: 'sending',
-      message_body: messageBody,
-      to_phone: toPhone,
-      updated_at: db.fn.now(),
-    });
-    return { id: claim.id, alreadySent: false };
-  }
-
-  claim = { id: crypto.randomUUID() };
-  await db('sms_log').insert({
-    id: claim.id,
-    customer_id: customerId || null,
-    direction: 'outbound',
-    from_phone: config.twilio?.phoneNumber || 'system',
-    to_phone: toPhone,
-    message_body: messageBody,
-    status: 'sending',
-    message_type: 'project_report_release',
-    metadata: JSON.stringify({ report_hold_release_key: releaseKey }),
-  });
-  return { id: claim.id, alreadySent: false };
-}
-
-async function finishReportHoldReleaseSmsClaim(claimId, sent) {
-  if (!claimId) return;
-  await db('sms_log').where({ id: claimId }).update({
-    status: sent ? 'sent' : 'failed',
-    updated_at: db.fn.now(),
-  });
-}
-
-/**
- * Deliver a payment-held project report. Called by the release sweep (and
- * payment-event nudges) once the linked invoice settles — this is the /send
- * WDO delivery with a system actor instead of an operator request.
- *
- * Claim discipline mirrors the receipt queue: held → releasing (atomic
- * UPDATE claim) → released on success, back to held with attempts+1 and
- * backoff on any failure. A crashed release is recovered by the sweep's
- * stale-claim pass (releasing + locked_at > 10 min → held).
- *
- * The FDACS PDF is rebuilt from LIVE data at release, so the signature gates
- * re-run here: findings edited (unsigned) while the report was held block
- * the release — 'held' with last_error — until the licensee re-signs, rather
- * than ever emailing content the licensee never saw.
- */
-async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } = {}) {
-  const projectCols = await db('projects').columnInfo().catch(() => ({}));
-  if (!reportHoldColumnsPresent(projectCols)) return { released: false, reason: 'hold_columns_missing' };
-
-  const claimed = await db('projects')
-    .where({ id: projectId, report_hold_status: 'held' })
-    .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
-  if (!claimed) return { released: false, reason: 'not_held' };
-
-  const project = await db('projects').where({ id: projectId }).first();
-  if (!project) return { released: false, reason: 'project_missing' };
-  const attemptsSoFar = Number(project.report_hold_attempts || 0);
-
-  // Revert the claim so the sweep retries later. `countAttempt: false` is for
-  // "not actually due yet" reverts (unsettled invoice) — not delivery failures.
-  const revertToHeld = async (reason, { countAttempt = true } = {}) => {
-    const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
-    const delayMinutes = countAttempt ? reportHoldBackoffMinutes(nextAttempts) : 2;
-    await db('projects')
-      .where({ id: projectId, report_hold_status: 'releasing' })
-      .update({
-        report_hold_status: 'held',
-        report_hold_locked_at: null,
-        report_hold_attempts: nextAttempts,
-        report_hold_next_attempt_at: new Date(Date.now() + delayMinutes * 60 * 1000),
-        report_hold_last_error: String(reason || 'release failed').slice(0, 500),
-        updated_at: db.fn.now(),
-      })
-      .catch((err) => logger.warn(`[projects] hold revert failed for ${projectId}: ${err.message}`));
-    // One activity entry when a hold FIRST gets stuck (not per retry) so the
-    // drawer surfaces the block without the sweep spamming the trail.
-    if (countAttempt && attemptsSoFar === 0) {
-      await logProjectActivity(
-        null,
-        project,
-        'project_report_release_blocked',
-        `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`,
-        { source },
-      ).catch(() => {});
-    }
-    return { released: false, reason: String(reason || 'release_failed') };
-  };
-
-  try {
-    // The hold releases on SETTLED money only — 'paid' or credit-covered
-    // 'prepaid'. ACH 'processing' stays held until the webhook settles it.
-    const invoice = project.invoice_id
-      ? await db('invoices').where({ id: project.invoice_id }).first().catch(() => null)
-      : null;
-    if (!invoice || !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
-      return await revertToHeld('invoice_not_settled', { countAttempt: false });
-    }
-
-    const customer = project.customer_id
-      ? await loadProjectCustomer(project.customer_id)
-      : null;
-    if (!customer) return await revertToHeld('customer_missing');
-
-    // Same gates as /send: never release a report the licensee hasn't signed
-    // off on in its current form, or one missing statutory content.
-    if (project.project_type === 'wdo_inspection') {
-      const sigState = wdoSignatureFreshness(project);
-      if (!sigState.signed) return await revertToHeld('Licensee signature required — re-sign to release the paid report');
-      if (!sigState.fresh) return await revertToHeld('Findings were edited after signing — the licensee must re-sign to release the paid report');
-      const contradiction = wdoSectionTwoContradiction(project);
-      if (contradiction) return await revertToHeld(contradiction);
-      const incomplete = wdoCoreFindingsIncomplete(project);
-      if (incomplete) return await revertToHeld(incomplete);
-    }
-    const readiness = evaluateProjectSendReadiness({ project, customer });
-    if (readiness.hardMissing.length > 0) {
-      return await revertToHeld(`Missing required compliance details: ${readiness.hardMissing.map((m) => m.label).join('; ')}`);
-    }
-    // Certificate fields are intentionally soft during an interactive send so
-    // an admin can explicitly override a thin draft. Automatic release has no
-    // operator present to make that judgment, so revalidate every required
-    // statutory field against the current (possibly edited) certificate.
-    if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
-      return await revertToHeld(`Missing required certificate details: ${readiness.missing.map((m) => m.label).join('; ')}`);
-    }
-
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
-    if (project.project_type === 'wdo_inspection' && !emailRecipient.email) {
-      return await revertToHeld('No email on file — the FDACS-13645 PDF is delivered by email');
-    }
-
-    // Token + portal stamps mirror /send (the hold send parked the report with
-    // portal_visible=false; the release is the real send, so recompute).
-    const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
-      logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
-      return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
-    });
-    const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
-    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
-    if (projectCols.portal_visibility) {
-      tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
-    }
-    if (projectCols.portal_attach_policy) {
-      tokenUpdate.portal_attach_policy = portalAttachment.completionProfile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
-    }
-    if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
-      tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
-    }
-    await db('projects').where({ id: projectId }).update(tokenUpdate);
-    const refreshed = await db('projects').where({ id: projectId }).first();
-    const reportPath = await projectReportPathForProject(db, refreshed, customer);
-    const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
-
-    // Build + archive the FDACS PDF before any channel send (fail-closed, same
-    // as /send): the archive is the only durable record of the filed document.
-    let wdoPdf = null;
-    let wdoFiling = null;
-    try {
-      wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
-      if (wdoPdf) {
-        wdoFiling = await archiveWdoFiling({
-          project: refreshed,
-          buffer: wdoPdf.buffer,
-          source: `report_hold_release:${source}`,
-          invoiceId: invoice.id,
-          sentByTechId: null,
-        });
-      }
-    } catch (err) {
-      return await revertToHeld(`FDACS PDF build/archive failed: ${err.message}`);
-    }
-
-    const typeLabel = getProjectType(refreshed.project_type)?.label || 'Service';
-    const firstName = customer.first_name || 'there';
-    const channels = {};
-
-    try {
-      // The recipient email is hashed into the key (same pattern as the payer
-      // AP leg): a retry after the operator corrects a blocked/bounced address
-      // must mint a NEW key and actually deliver, not dedupe into the old
-      // terminal result.
-      const recipientHash = crypto.createHash('sha1')
-        .update(String(emailRecipient.email || '').toLowerCase())
-        .digest('hex')
-        .slice(0, 12);
-      const result = await ProjectEmail.sendProjectReportReady({
-        project: refreshed,
-        customer,
-        reportUrl,
-        isResend: false,
-        attachments: wdoPdf ? [wdoPdf.attachment] : [],
-        idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${safeIdempotencySegment(invoice.id)}:${recipientHash}`,
-      });
-      channels.email = result.ok
-        ? { ok: true, messageId: result.messageId || null }
-        : { ok: false, error: result.reason || result.error || 'Email send blocked/failed' };
-    } catch (err) {
-      channels.email = { ok: false, error: err.message };
-    }
-
-    // The FDACS PDF is email-only, so the release is delivered only when the
-    // email succeeds (mirrors /send). SMS + third-party copies follow it.
-    const isWdo = refreshed.project_type === 'wdo_inspection';
-    if (isWdo && !channels.email?.ok) {
-      return await revertToHeld(`Report email failed: ${channels.email?.error || 'unknown'}`);
-    }
-
-    if (isWdo && channels.email?.ok) {
-      const copyPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-      const [copyBilling] = getInvoiceEmailRecipients(customer, copyPrefs || {});
-      const copies = await sendWdoReportCopies({
-        req: null,
-        project: refreshed,
-        customer,
-        reportUrl,
-        attachment: wdoPdf ? wdoPdf.attachment : null,
-        excludeEmails: [emailRecipient.email, customer?.email, copyBilling?.email],
-        isResend: false,
-      });
-      if (copies) channels.report_copies = copies;
-    }
-
-    const normalizedPhone = normalizeUsPhone(customer.phone);
-    if (!normalizedPhone) {
-      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    } else {
-      try {
-        const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
-          first_name: firstName,
-          project_type: typeLabel,
-          report_url: reportUrl,
-        }, {
-          workflow: 'project_report_ready',
-          entity_type: 'project',
-          entity_id: refreshed.id,
-        });
-        const smsClaim = await claimReportHoldReleaseSms({
-          projectId: refreshed.id,
-          invoiceId: invoice.id,
-          customerId: customer.id,
-          toPhone: normalizedPhone,
-          messageBody: smsBody,
-        });
-        if (smsClaim.alreadySent) {
-          channels.sms = { ok: true, deduplicated: true };
-        } else {
-          const result = await sendCustomerMessage({
-            to: normalizedPhone,
-            body: smsBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'support_resolution',
-            customerId: customer.id,
-            identityTrustLevel: 'phone_matches_customer',
-            entryPoint: 'project_report_hold_release',
-            metadata: {
-              original_message_type: 'project_report',
-              project_id: refreshed.id,
-              invoice_id: invoice.id,
-              scheduled_sms_log_id: smsClaim.id,
-            },
-          });
-          // Send-window hold: the claim row IS an sms_log row, so flip it
-          // onto the scheduled rail at the window open — the executor
-          // replays the exact body from the claim itself. Counted as a
-          // successful channel ONLY when the email leg already delivered
-          // (the customer holds the report; the text is the follow-up
-          // copy). An SMS-ONLY release must NOT mark a paid official
-          // report 'released' on a merely-queued text — it keeps the old
-          // failed path (revertToHeld → the payment-settled sweep retries
-          // inside the window), and the claim row stays 'failed' so
-          // nothing double-sends. If a queued email-backed replay later
-          // terminally blocks, the registry's onTerminal restores the
-          // hold when no email delivered (belt for future flows).
-          if (!result.sent
-            && result.code === 'QUIET_HOURS_HOLD'
-            && result.deferred
-            && result.nextAllowedAt
-            && channels.email?.ok) {
-            await db('sms_log').where({ id: smsClaim.id }).update({
-              status: 'scheduled',
-              scheduled_for: new Date(result.nextAllowedAt),
-              updated_at: db.fn.now(),
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-                entry_point: 'project_report_hold_release_deferred',
-                project_id: refreshed.id,
-                email_delivered: true,
-                original_block_code: result.code,
-                replay_purpose: 'support_resolution',
-                refresh_customer_phone: true,
-                resolve_from_by_customer: true,
-              })]),
-            });
-            channels.sms = { ok: true, scheduled: true };
-            logger.info(`[admin-projects] Report-release SMS for project ${refreshed.id} held outside the 8AM-8PM ET send window — claim rescheduled for ${result.nextAllowedAt}`);
-          } else {
-            await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
-            channels.sms = result.sent
-              ? { ok: true }
-              : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
-          }
-        }
-      } catch (err) {
-        channels.sms = { ok: false, error: err.message };
-      }
-    }
-
-    const availableChannels = [
-      customer.phone ? 'sms' : null,
-      emailRecipient.email ? 'email' : null,
-    ].filter(Boolean);
-    const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
-    // Non-WDO official documents can release by email OR SMS, but at least one
-    // real customer channel must succeed. Never mark a paid certificate as
-    // released when every delivery attempt failed (or no contact exists).
-    if (!isWdo && successfulChannelCount === 0) {
-      const reasons = availableChannels.length
-        ? availableChannels.map((ch) => channels[ch]?.error).filter(Boolean).join('; ')
-        : 'No customer email or phone on file';
-      return await revertToHeld(`Certificate delivery failed: ${reasons || 'unknown'}`);
-    }
-    const deliveryStatus = successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
-
-    const releaseUpdate = {
-      status: refreshed.status === 'closed' ? refreshed.status : 'sent',
-      sent_at: refreshed.sent_at || db.fn.now(),
-      ...pretreatSentSnapshot(refreshed, projectCols),
-      last_delivery_at: db.fn.now(),
-      delivery_channels: channels,
-      delivery_status: deliveryStatus,
-      report_hold_status: 'released',
-      report_hold_released_at: db.fn.now(),
-      report_hold_release_source: source,
-      report_hold_locked_at: null,
-      report_hold_last_error: null,
-      updated_at: db.fn.now(),
-    };
-    if (wdoFiling && projectCols.wdo_sent_filings) {
-      // Atomic jsonb append — never read-modify-write the filing index.
-      releaseUpdate.wdo_sent_filings = db.raw(
-        "coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb",
-        [JSON.stringify([wdoFiling])],
-      );
-    }
-    await db('projects').where({ id: projectId }).update(releaseUpdate);
-
-    await logProjectActivity(
-      null,
-      refreshed,
-      'project_report_released_after_payment',
-      `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} settled)`,
-      { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, channels, source },
-    ).catch(() => {});
-
-    logger.info(`[projects] hold release delivered ${projectId} token=${String(token).slice(0, 6)}… source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
-    return { released: true, channels, reportUrl };
-  } catch (err) {
-    logger.error(`[projects] hold release failed for ${projectId}: ${err.message}`);
-    return await revertToHeld(err.message);
-  }
-}
-
-// The invoice id rides in an idempotency key; strip anything exotic so the key
-// stays within email_messages' varchar bounds and charset.
-function safeIdempotencySegment(value) {
-  return String(value || '').replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -4696,26 +4148,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       .catch((err) => logger.warn(`[projects] combined-send delivery claim revert failed for ${projectId}: ${err.message}`));
     deliveryClaim = null;
   };
-  // Tracks a held→releasing claim taken for an UN-HELD delivery of a
-  // currently-held report (Codex P2 on #2753) — hoisted like claimedInvoice
-  // so the outer catch returns the row to 'held' on any abort. The revert
-  // matches status='releasing' only, so it no-ops after a successful release.
-  let heldReportClaim = null;
-  const revertHeldReportClaimOnAbort = async () => {
-    if (!heldReportClaim) return;
-    // Fenced on the delivery claim token (same reasoning as /send's manual
-    // hold revert): after a stale takeover the 'releasing' row may belong to
-    // a newer claimant — resetting THEIRS to 'held' would let the release
-    // sweep deliver concurrently. No provable ownership → leave the row for
-    // the sweep's 10-minute recovery. Call sites run this BEFORE the
-    // delivery-claim revert so the token is still present.
-    if (!deliveryClaim?.token) { heldReportClaim = null; return; }
-    await db('projects')
-      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing', delivery_claim_token: deliveryClaim.token })
-      .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
-      .catch((err) => logger.warn(`[projects] combined-send hold claim revert failed for ${heldReportClaim.projectId}: ${err.message}`));
-    heldReportClaim = null;
-  };
   // Seam-applied credit on the combined report+invoice send. Hoisted (with its
   // reversal) so the outer catch can return it on ANY abort, not just the
   // explicit WDO/no-delivery paths. Reverses ONLY this send's amount; on full
@@ -4841,49 +4273,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
     // Card-on-file completion needs a durable draft invoice id before the
     // explicit charge. This mode performs all report/readiness/billing checks
-    // but sends nothing and never arms a report hold.
+    // but sends nothing.
     const prepareInvoice = req.body?.prepare_invoice === true || req.body?.prepare_invoice === 'true';
-
-    // Payment hold ("pay before you get the report"): deliver the invoice +
-    // pay link ONLY, and park the report/certificate until the invoice settles
-    // (the release sweep then delivers it). Limited to the two official termite
-    // documents; ordinary service reports continue to deliver immediately.
-    const holdRequested = req.body?.hold_report_until_paid === true || req.body?.hold_report_until_paid === 'true';
-    if (holdRequested) {
-      if (!isEnabled('wdoReportPaymentHold')) {
-        return res.status(422).json({ error: 'Report payment hold is not enabled (GATE_WDO_REPORT_PAYMENT_HOLD)', code: 'hold_not_enabled' });
-      }
-      if (!supportsReportPaymentHold(project.project_type)) {
-        return res.status(422).json({ error: 'Hold-until-paid is available for WDO reports and pre-treatment certificates only', code: 'hold_not_supported' });
-      }
-      if (project.sent_at || project.status === 'sent') {
-        return res.status(422).json({ error: 'This report was already delivered — a payment hold can only apply before the first send', code: 'hold_after_send' });
-      }
-      // The automatic release re-validates every required certificate field
-      // with no operator present (releaseHeldProjectReport), and a readiness
-      // override accepted here is not persisted — so a hold armed over
-      // missing soft fields would collect payment and then never deliver.
-      // Refuse the hold up front (dry_run included, so the operator learns at
-      // preview): complete the certificate, or send it now without the hold.
-      if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
-        return res.status(422).json({
-          error: 'Hold-until-paid needs a complete certificate — the automatic release re-checks every required field, so a held certificate with missing details would never deliver. Fill in the missing fields, or send now without the hold.',
-          code: 'hold_requires_complete_certificate',
-          missing: readiness.missing,
-        });
-      }
-      const holdCols = await db('projects').columnInfo().catch(() => ({}));
-      if (!reportHoldColumnsPresent(holdCols)) {
-        return res.status(422).json({ error: 'Report hold columns are not migrated yet', code: 'hold_columns_missing' });
-      }
-    }
 
     const { invoice, created } = await resolveOrCreateProjectInvoice({
       project,
       customer,
       invoiceId: req.body?.invoice_id,
       dryRun: dryRun && !prepareInvoice,
-      holdRequested,
     });
 
     // Match the canonical invoice non-sendable statuses (invoice.js): don't
@@ -4891,17 +4288,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // a bank payment (ACH) already in flight ('processing').
     if (['paid', 'prepaid', 'void', 'processing', 'sending'].includes(invoice.status)) {
       return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
-    }
-
-    // Phase 2: an accrued invoice settles via the payer's consolidated monthly
-    // statement — holding the report on that cycle would park a legal document
-    // for weeks behind AR the homeowner doesn't control. Send normally (or
-    // collect payment first) instead.
-    if (holdRequested && invoice.payer_statement_id) {
-      return res.status(422).json({
-        error: 'This invoice bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices',
-        code: 'hold_statement_accrued',
-      });
     }
 
     if (prepareInvoice) {
@@ -4970,7 +4356,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         : [];
       return res.json({
         dry_run: true,
-        report_hold: holdRequested,
         invoice: {
           id: invoice.id,
           invoice_number: invoice.invoice_number,
@@ -5054,33 +4439,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
     });
     const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
-    // A held report must not surface in the customer portal's documents tab
-    // before payment — the release recomputes real portal attachment. If the
-    // hold falls through below (credit fully covered), this is re-stamped.
-    if (projectCols.portal_visible) tokenUpdate.portal_visible = holdRequested ? false : portalAttachment.portalAttached;
-    // Stamp the hold BEFORE any customer delivery (Codex P1 on #2753), in the
-    // same write that mints the token: a pre-existing report_token (from an
-    // earlier failed send / admin-shared draft link) would otherwise serve
-    // the FULL report for the whole invoice-send window, and a crash after
-    // the invoice email went out would leave the report never-held — pay
-    // link delivered, but nothing for the release sweep to ever deliver.
-    // Deliberately NOT reverted on a failed/aborted send: the operator
-    // declared pay-before-report, so the safe failure mode is "report stays
-    // gated, delivery_status shows the failure" — a retry re-sends the
-    // invoice, and Send report remains the manual escape hatch. If credit
-    // fully covers below (holdActive flips false), the un-held claim
-    // machinery takes over this freshly-held row and releases it atomically
-    // with that delivery.
-    if (holdRequested && reportHoldColumnsPresent(projectCols)) {
-      tokenUpdate.report_hold_status = 'held';
-      tokenUpdate.report_hold_at = db.fn.now();
-      tokenUpdate.report_hold_released_at = null;
-      tokenUpdate.report_hold_release_source = null;
-      tokenUpdate.report_hold_attempts = 0;
-      tokenUpdate.report_hold_next_attempt_at = null;
-      tokenUpdate.report_hold_locked_at = null;
-      tokenUpdate.report_hold_last_error = null;
-    }
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
     if (projectCols.portal_visibility) {
       tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
     }
@@ -5091,7 +4450,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
     }
     // Token-fenced like /send's stamp: a resumed stalled request must not
-    // overwrite the takeover owner's token/portal/hold fields.
+    // overwrite the takeover owner's token/portal fields.
     const stamped = await db('projects')
       .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
       .update(tokenUpdate);
@@ -5137,42 +4496,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       logger.warn(`[projects] account-credit auto-apply skipped for invoice ${invoice.id}: ${creditErr.message}`);
     }
 
-    // Hold resolution: if this send's credit application fully covered the
-    // invoice (now prepaid), payment is already settled — fall through to the
-    // normal combined send instead of holding a paid-for report.
-    let holdActive = holdRequested;
-    if (holdActive && ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
-      holdActive = false;
-      if (projectCols.portal_visible) {
-        await db('projects').where({ id: project.id }).update({ portal_visible: portalAttachment.portalAttached, updated_at: db.fn.now() });
-      }
-    }
-
-    // Un-held delivery of a currently-HELD report (operator unchecked the
-    // box on a resend, or this send's credit fully settled a hold request):
-    // take the SAME atomic held→releasing claim the payment sweep takes
-    // BEFORE any delivery work (Codex P2 on #2753). Flipping held→released
-    // only after emailing left a window where a just-settled invoice let the
-    // sweep claim the row and deliver the same FDACS filing concurrently.
-    if (!holdActive
-      && reportHoldColumnsPresent(projectCols)
-      && ['held', 'releasing'].includes(String(refreshed.report_hold_status || ''))) {
-      const claimedHold = await db('projects')
-        .where({ id: project.id, report_hold_status: 'held' })
-        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
-      if (!claimedHold) {
-        await db('invoices').where({ id: invoice.id, status: 'sending' })
-          .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
-        await reverseProjectCreditOnAbort();
-        await revertDeliveryClaimOnAbort(project.id);
-        return res.status(409).json({
-          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
-          code: 'release_in_progress',
-        });
-      }
-      heldReportClaim = { projectId: project.id };
-    }
-
     // Pay link (short URL, same shape as invoice-email).
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -5186,34 +4509,28 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const attachments = [];
     let wdoFiling = null;
     let wdoPdf = null;
-    // Hold mode sends NO report artifacts: the FDACS PDF is rebuilt from live
-    // (re-gated) data and archived at RELEASE time, when it is actually
-    // emailed — archiving here would record a filing that was never sent.
-    if (!holdActive) {
-      try {
-        wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
-        if (wdoPdf) {
-          attachments.push(wdoPdf.attachment);
-          // Archive the exact PDF being emailed BEFORE any channel send
-          // (fail-closed) — sends regenerate the PDF from live data, so this is
-          // the only durable record of the delivered legal filing.
-          wdoFiling = await archiveWdoFiling({
-            project: refreshed,
-            buffer: wdoPdf.buffer,
-            source: 'send_with_invoice',
-            invoiceId: invoice.id,
-            sentByTechId: req.technicianId || null,
-          });
-        }
-      } catch (e) {
-        await db('invoices').where({ id: invoice.id, status: 'sending' })
-          .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
-        await reverseProjectCreditOnAbort();
-        await revertHeldReportClaimOnAbort();
-        await revertDeliveryClaimOnAbort(project.id);
-        logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
-        return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+    try {
+      wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
+      if (wdoPdf) {
+        attachments.push(wdoPdf.attachment);
+        // Archive the exact PDF being emailed BEFORE any channel send
+        // (fail-closed) — sends regenerate the PDF from live data, so this is
+        // the only durable record of the delivered legal filing.
+        wdoFiling = await archiveWdoFiling({
+          project: refreshed,
+          buffer: wdoPdf.buffer,
+          source: 'send_with_invoice',
+          invoiceId: invoice.id,
+          sentByTechId: req.technicianId || null,
+        });
       }
+    } catch (e) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      await reverseProjectCreditOnAbort();
+      await revertDeliveryClaimOnAbort(project.id);
+      logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
+      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
     try {
       await require('../services/payer').attachToInvoice(invoice);
@@ -5248,7 +4565,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .catch((err) => logger.warn(`[projects] invoice claim release after superseded delivery failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       await reverseProjectCreditOnAbort();
-      await revertHeldReportClaimOnAbort();
       logger.error(`[projects] combined send superseded before delivery for ${project.id} — claim taken over; nothing sent by this request`);
       return res.status(409).json({
         error: 'This send was superseded by a newer request — refresh and check the report status.',
@@ -5263,34 +4579,23 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (and retries can't duplicate that text). For non-WDO the email is a bonus
     // (the report link rides in the SMS), so its failure doesn't block the text.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
-    if (holdActive && isPayerInvoice) {
-      // Payer-billed hold: the homeowner receives nothing until the payer's
-      // invoice settles — the release delivers their report. The payer AP leg
-      // below carries the invoice + pay link.
-      channels.email = { ok: false, skipped: true, error: 'Held — homeowner report delivers automatically once the payer invoice is paid' };
-    } else if (emailRecipient.email) {
+    if (emailRecipient.email) {
       try {
-        const result = holdActive
-          // Payment hold: invoice PDF + pay link ONLY — no report link, no
-          // FDACS attachment. The release sends the report once paid.
-          ? await ProjectEmail.sendProjectInvoiceBeforeReport({
-              project: refreshed, customer, payUrl, invoice, attachments,
+        const result = isPayerInvoice
+          // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
+          // report link) — never the invoice PDF or pay link.
+          ? await ProjectEmail.sendProjectReportReady({
+              project: refreshed, customer, reportUrl,
+              attachments: reportAttachments,
+              isResend: Boolean(project.sent_at || project.status === 'sent'),
             })
-          : isPayerInvoice
-            // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
-            // report link) — never the invoice PDF or pay link.
-            ? await ProjectEmail.sendProjectReportReady({
-                project: refreshed, customer, reportUrl,
-                attachments: reportAttachments,
-                isResend: Boolean(project.sent_at || project.status === 'sent'),
-              })
-            : await ProjectEmail.sendProjectReportWithInvoice({
-                project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-                // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
-                // attaches just the invoice PDF and delivers the report as a
-                // link. Drives the template's attachments sentence.
-                reportAttached: isWdoProject,
-              });
+          : await ProjectEmail.sendProjectReportWithInvoice({
+              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+              // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
+              // attaches just the invoice PDF and delivers the report as a
+              // link. Drives the template's attachments sentence.
+              reportAttached: isWdoProject,
+            });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
           : { ok: false, error: projectEmailFailureMessage(result) };
@@ -5338,20 +4643,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // key and actually delivers to the corrected inbox instead of returning
         // the old terminal (blocked/bounced) result.
         const payerEmailHash = require('crypto').createHash('sha1').update(billingCopyEmail).digest('hex').slice(0, 12);
-        const result = holdActive
-          // Payment hold: the payer AP inbox gets the invoice + pay link only;
-          // the held report (and its FDACS PDF) delivers at release.
-          ? await ProjectEmail.sendProjectInvoiceBeforeReport({
-              project: refreshed, customer, payUrl, invoice, attachments,
-              recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
-              idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:payer:${payerEmailHash}`,
-            })
-          : await ProjectEmail.sendProjectReportWithInvoice({
-              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-              reportAttached: isWdoProject,
-              recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
-              idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${payerEmailHash}`,
-            });
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+          reportAttached: isWdoProject,
+          recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
+          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${payerEmailHash}`,
+        });
         channels.payer_email = result.ok
           ? { ok: true, recipient: billingCopyEmail }
           : { ok: false, recipient: billingCopyEmail, error: projectEmailFailureMessage(result) };
@@ -5385,18 +4682,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
         billingCopyEmail = billingEmail;
         try {
-          const result = holdActive
-            ? await ProjectEmail.sendProjectInvoiceBeforeReport({
-                project: refreshed, customer, payUrl, invoice, attachments,
-                recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
-                idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
-              })
-            : await ProjectEmail.sendProjectReportWithInvoice({
-                project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-                reportAttached: isWdoProject,
-                recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
-                idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
-              });
+          const result = await ProjectEmail.sendProjectReportWithInvoice({
+            project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+            reportAttached: isWdoProject,
+            recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
+            idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
+          });
           channels.billing_email = result.ok
             ? { ok: true, recipient: billingEmail }
             : { ok: false, recipient: billingEmail, error: projectEmailFailureMessage(result) };
@@ -5410,9 +4701,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Third-party report copies — the FDACS "Report Sent to Requestor and
     // to:" line is a delivery claim; any emails the tech entered there get a
     // report-only copy (FDACS PDF + report link, never the invoice or pay
-    // link) once the customer email has succeeded. Held sends defer these to
-    // the release: nobody receives the report before payment.
-    if (isWdoProject && !holdActive && channels.email?.ok) {
+    // link) once the customer email has succeeded.
+    if (isWdoProject && channels.email?.ok) {
       const copies = await sendWdoReportCopies({
         req,
         project: refreshed,
@@ -5435,24 +4725,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const normalized = normalizeUsPhone(customer.phone);
     if (!normalized) {
       channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    } else if (holdActive && isPayerInvoice) {
-      // Payer-billed hold: no pay link for the homeowner (AR routes to the
-      // payer) and no report yet — nothing actionable to text.
-      channels.sms = { ok: false, skipped: true, error: 'Held — homeowner report delivers automatically once the payer invoice is paid' };
     } else if (isWdoProject && !channels.email?.ok) {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
       try {
         // Payer-billed: the homeowner still gets the report link (their
         // service) but NOT the pay link — AR routes to the payer's AP inbox.
-        // Held sends text the pay link only — the report link must not go out
-        // before payment.
-        const holdReleaseDelivery = emailRecipient.email ? 'emailed' : 'sent by text';
-        const smsBody = holdActive
-          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is ${holdReleaseDelivery} automatically as soon as it's paid.`
-          : isPayerInvoice
-            ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
-            : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
+        const smsBody = isPayerInvoice
+          ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
+          : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
@@ -5501,22 +4782,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // invoiceDelivered (below) is still gated on !accruedOnStatement, so the
     // accrued invoice itself is never finalized here.
     const payerLegOk = !isPayerInvoice || accruedOnStatement || !!channels.payer_email?.ok;
-    // Payment hold: the only deliverable is the INVOICE reaching its bill-to
-    // party (payer AP inbox, or the customer's invoice-before-report email) —
-    // there is no report leg yet. Payer holds skip the homeowner channels by
-    // design, so they never count against the delivery status.
-    const delivered = holdActive
-      ? (isPayerInvoice
-          ? !!channels.payer_email?.ok
-          : isWdoProject
-            ? !!channels.email?.ok
-            : successfulChannelCount > 0)
-      : (delivered_report && payerLegOk);
+    const delivered = delivered_report && payerLegOk;
     const anySuccess = successfulChannelCount > 0
       || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));
     const deliveryStatus = !delivered
       ? (anySuccess ? 'partial' : 'failed')
-      : ((holdActive && isPayerInvoice) || successfulChannelCount >= availableChannels.length ? 'sent' : 'partial');
+      : (successfulChannelCount >= availableChannels.length ? 'sent' : 'partial');
 
     // Finalize the invoice as delivered (it went out alongside the report).
     // markDeliverySent uses the canonical finalization semantics: it promotes
@@ -5564,30 +4835,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
-      await revertHeldReportClaimOnAbort();
     }
 
     // The sent copy follows the report leg alone: a report that reached the
     // owner is the copy even when a payer leg failed the send as a whole.
-    await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, held: holdActive, claimToken: deliveryClaimToken });
+    await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, claimToken: deliveryClaimToken });
 
     // Both delivered-branch finalizes are fenced on the claim token (same
     // contract as /send): zero rows = a stale takeover owns the row now.
     let finalized = !delivered;
-    if (delivered && holdActive) {
-      // Invoice is out. The hold itself was stamped BEFORE delivery (in the
-      // token update — see the Codex P1 note there), so this records only
-      // the delivery bookkeeping. The project stays in its pre-send
-      // lifecycle (no status='sent' / sent_at — the report has not been
-      // delivered) and the release sweep owns the next transition.
-      finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
-        last_delivery_at: db.fn.now(),
-        delivery_channels: channels,
-        delivery_status: deliveryStatus,
-        delivery_claim_token: null,
-        updated_at: db.fn.now(),
-      });
-    } else if (delivered) {
+    if (delivered) {
       finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
         // Resending a closed project's report must not regress its lifecycle
         // (closed_at stays set and closeout artifacts key on status='closed').
@@ -5605,20 +4862,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
             [JSON.stringify([wdoFiling])],
           ),
         } : {}),
-        // An explicit un-held (re)send while a hold was active IS the report
-        // delivery — the release fields ride the SAME sent-stamp update
-        // (atomic, Codex P2) so the sweep can't re-send it on payment and a
-        // crash can't leave a delivered report 402ing publicly.
-        ...(heldReportClaim ? {
-          report_hold_status: 'released',
-          report_hold_released_at: db.fn.now(),
-          report_hold_release_source: 'manual_send',
-          report_hold_locked_at: null,
-          report_hold_last_error: null,
-        } : {}),
       });
-      // Released atomically above — nothing left for the outer catch to revert.
-      heldReportClaim = null;
     }
     if (delivered && !finalized) {
       logger.error(`[projects] combined-send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
@@ -5631,18 +4875,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     await logProjectActivity(
       req, project,
+      delivered ? 'project_report_with_invoice_sent' : 'project_report_with_invoice_failed',
       delivered
-        ? (holdActive ? 'project_invoice_sent_report_held' : 'project_report_with_invoice_sent')
-        : (holdActive ? 'project_invoice_report_hold_failed' : 'project_report_with_invoice_failed'),
-      delivered
-        ? (holdActive
-          ? `Invoice sent, report held until paid: ${typeLabel} (${invoice.invoice_number})`
-          : `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`)
-        : (holdActive
-          ? `Invoice delivery failed (report hold not armed): ${typeLabel}`
-          : `Report + invoice delivery failed: ${typeLabel}`),
+        ? `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`
+        : `Report + invoice delivery failed: ${typeLabel}`,
       { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, invoice_created: created, channels,
-        ...(holdActive ? { report_hold: true } : {}),
         ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
     );
 
@@ -5654,7 +4891,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels,
       delivery_status: deliveryStatus,
       sent: delivered,
-      ...(holdRequested ? { report_held: delivered && holdActive } : {}),
     });
   } catch (err) {
     // Release the 'sending' claim on any abort so the invoice isn't stranded
@@ -5664,9 +4900,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
-    // Hold revert BEFORE the delivery-claim revert — the hold revert is
-    // fenced on the delivery token, which the claim revert clears.
-    await revertHeldReportClaimOnAbort();
     // Return the shared project delivery claim too (guarded: only reverts a
     // row still parked at 'sending', so a post-delivery throw can't clobber
     // the final delivery_status).
@@ -5679,7 +4912,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     await reverseProjectCreditOnAbort();
     // And return any held→releasing claim this send took, so the sweep isn't
     // blocked behind a stale claim until the 10-minute recovery.
-    await revertHeldReportClaimOnAbort();
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
     }
@@ -5687,11 +4919,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // derivable pricing) — surface the actionable reason as a 422 rather than an
     // opaque 500.
     if (err?.code === 'invoice_build_failed') {
-      return res.status(422).json({ error: err.message, code: err.code });
-    }
-    // Hold-until-paid on a would-be statement-accrued invoice — refused
-    // BEFORE the invoice was created (nothing to clean up).
-    if (err?.code === 'hold_statement_accrued') {
       return res.status(422).json({ error: err.message, code: err.code });
     }
     // The visit is already billed on a paid/in-flight invoice — block the
@@ -6245,14 +5472,9 @@ router._private = {
   publishedCertificateEditRejection,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
-  reportHoldBackoffMinutes,
   resolveWdoInspectionFee,
   wdoAddendumPhotoCaption,
   wdoFeeIsExplicitZero,
 };
 
 module.exports = router;
-// Payment-hold release — consumed by services/project-report-hold.js (the
-// sweep) via lazy require; lives here so it reuses the send path's WDO
-// helpers (PDF build, filing archive, copies, gates) without moving them.
-module.exports.releaseHeldProjectReport = releaseHeldProjectReport;

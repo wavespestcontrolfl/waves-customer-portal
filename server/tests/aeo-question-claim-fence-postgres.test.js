@@ -205,6 +205,22 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     }
   });
 
+  test('an id-scoped claim (written terminal drafts first) takes only those rows, best score first; every claim rule still holds', async () => {
+    const outside = decayRefresh(`${HUB}/termite/termite-bond/`, { score: 99 });
+    const written = decayRefresh(`${HUB}/pest-control/ghost-ants/`, { score: 70 });
+    const deferred = decayRefresh(`${HUB}/pest-control/fire-ants/`, { score: 80, available_at: new Date(Date.now() + 3600e3) });
+    const fenced = questionRefresh({ score: 95 });
+    await mockPg('opportunity_queue').insert([outside, written, deferred, fenced, categorySeed({ status: 'claimed', claimed_at: new Date() })]);
+    const scope = [written.id, deferred.id, fenced.id];
+    expect((await queue.claimNext({ minScore: 0, onlyIds: scope }))?.id).toBe(written.id);
+    // The deferred row waits out its window and the question row its route;
+    // the higher-scored row outside the scope is never taken by a scoped claim.
+    expect(await queue.claimNext({ minScore: 0, onlyIds: scope })).toBeNull();
+    expect(await queue.claimNext({ minScore: 0, onlyIds: [] })).toBeNull();
+    expect((await mockPg('opportunity_queue').where({ id: outside.id }).first()).status).toBe('pending');
+    expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(outside.id);
+  });
+
   test('unrelated routes and rows without a question are unaffected', async () => {
     await mockPg('opportunity_queue').insert([
       questionRefresh({ status: 'claimed', claimed_at: new Date() }),

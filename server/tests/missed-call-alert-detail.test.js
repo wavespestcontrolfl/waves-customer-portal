@@ -64,6 +64,10 @@ describe('copy', () => {
     expect(shortLineLabel('Lakewood Ranch GBP — Bradenton office (Pest)')).toBe('Bradenton office (Pest)');
     expect(shortLineLabel('GBP — Parrish')).toBe('Parrish');
     expect(shortLineLabel('Waves Main Line')).toBe('Waves Main Line');
+    // Website numbers' registry labels (twilio-numbers findByNumber) fit the line.
+    const TWILIO_NUMBERS = require('../config/twilio-numbers');
+    expect(shortLineLabel(TWILIO_NUMBERS.findByNumber('+19412998937').label)).toBe('Venice website (Pest)');
+    expect(shortLineLabel(TWILIO_NUMBERS.findByNumber('+19412838194').label)).toBe('Lakewood Ranch website');
     expect(shortLineLabel('unknown')).toBeNull();
     expect(shortLineLabel('')).toBeNull();
     expect(shortLineLabel(null)).toBeNull();

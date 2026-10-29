@@ -17,6 +17,9 @@ const {
   isAffirmativeSmsReaction,
   reactionQuotedTarget,
   isCourtesyOnly,
+  courtesyTailWould,
+  courtesyTailMode,
+  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
 } = require('../services/sms-intent');
@@ -352,6 +355,15 @@ router.post('/sms', async (req, res) => {
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
+    // GATE_SMS_COURTESY_TAIL=shadow: the results above are unchanged; record on the row
+    // when the courtesy-tail rule WOULD have closed this text ("Perfect. Go browns"), so
+    // the owner can read the real hit rate before flipping. The DB read only runs for
+    // texts the new rule matches while our last text is assumed to ask nothing.
+    let courtesyTailMetadata = {};
+    if (typeof courtesyTailMode === 'function' && courtesyTailMode() === 'shadow' && !courtesyOnly && !smsReaction && inboundMedia.length === 0
+      && courtesyTailWould(Body, { awaitingAnswer: false })) {
+      courtesyTailMetadata = courtesyTailShadowMetadata('shadow', courtesyTailWould(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) }));
+    }
     // Quiet tapback = explicitly affirmative (Liked/Loved/👍/undo) AND its
     // quoted target asked nothing. "Reacted 👍 to \"Does 9am work?\"" is the
     // ANSWER; "Disliked …" / "Questioned …" / ❓ express concern — all loud
@@ -491,7 +503,7 @@ router.post('/sms', async (req, res) => {
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: recruitingReply ? 'job_applicant_reply' : (quietReaction ? 'sms_reaction' : undefined),
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...courtesyTailMetadata, ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
     }).catch(() => {});
 
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
@@ -684,50 +696,6 @@ router.post('/sms', async (req, res) => {
       // and alert the owner now rather than waiting for the nightly pipeline.
       // (The alert is internal to the owner, unaffected by the SMS opt-out.)
       fireEventRescore('sms_opt_out');
-
-      // Opt-out COMBINED with an appointment ask (codex #3232 r45/r46):
-      // "STOP, and cancel tomorrow's service" — the durable reschedule
-      // flag and its INTERNAL bell still persist; only customer-facing
-      // SMS is suppressed by the opt-out. Service contacts resolve via
-      // the same all-slots unique lookup as the main flag path.
-      if (Body && rescheduleAsk) {
-        let optFlagCustomer = customer;
-        let optFlagEligible = Boolean(customer);
-        if (!customer) {
-          const key = phoneLookupKey(From);
-          if (key) {
-            const matches = await db('customers')
-              .whereNull('deleted_at')
-              .where(function anyPhoneSlot() {
-                for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
-                  this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
-                }
-              })
-              .limit(2)
-              .catch(() => []);
-            if (matches.length === 1) {
-              optFlagCustomer = matches[0];
-              optFlagEligible = true;
-            } else {
-              optFlagEligible = matches.length > 1;
-            }
-          }
-        }
-        if (optFlagEligible) {
-          const flagResult = await require('../services/reschedule-intent-flagger')
-            .flagInboundRescheduleIntent({
-              customer: optFlagCustomer,
-              phone: From,
-              body: Body,
-              smsLogId: null,
-              messageSid: MessageSid || null,
-            })
-            .catch(() => null);
-          if (flagResult?.flagged === true && typeof flagResult.fireBell === 'function') {
-            setImmediate(() => { flagResult.fireBell().catch(() => {}); });
-          }
-        }
-      }
 
       // NEVER on a wrong-number declaration (codex #3413 r25): "Wrong
       // number. The email is wrong; change it to …" invalidates the
@@ -1030,6 +998,7 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
+        ...courtesyTailMetadata,
       }),
     }).returning(['id', 'created_at']).catch(() => {
       sourcePersistenceFailed = true;
@@ -1306,61 +1275,6 @@ router.post('/sms', async (req, res) => {
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
 
-    // Reschedule/away flag persists AFTER the sms_log row and BEFORE the
-    // Twilio ack (codex r18): the webhook SID claim short-circuits
-    // retries, so any pre-log crash would lose the MESSAGE — strictly
-    // worse than losing the flag. The residual row-without-flag window is
-    // one awaited insert wide.
-    // The bell fires post-ack via flagResult.fireBell.
-    let rescheduleFlagResult = null;
-    if (Body && !smsReaction && rescheduleAsk) {
-      // No matched customer can mean a SHARED phone (findSingleCustomerByPhone
-      // deliberately returns null on multiple actives) — those requests are
-      // just as real, so persist an UNLINKED flag rather than dropping the
-      // durable guard entirely (codex #3232 r25). Unknown numbers (zero
-      // matches) stay in the lead lane.
-      // Reminders go to service contacts too (codex r45): a reschedule
-      // reply from service_contact*_phone must resolve to its customer,
-      // not read as an unknown sender. A UNIQUE match across all phone
-      // slots links the flag; multiple matches persist unlinked.
-      let flagCustomer = customer;
-      let flagEligible = Boolean(customer);
-      if (!customer) {
-        const key = phoneLookupKey(From);
-        if (key) {
-          const matches = await db('customers')
-            .whereNull('deleted_at')
-            .where(function anyPhoneSlot() {
-              for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
-                this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
-              }
-            })
-            .limit(2)
-            .catch(() => []);
-          if (matches.length === 1) {
-            flagCustomer = matches[0];
-            flagEligible = true;
-          } else {
-            flagEligible = matches.length > 1;
-          }
-        }
-      }
-      if (flagEligible) {
-        rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
-          .flagInboundRescheduleIntent({
-            customer: flagCustomer,
-            phone: From,
-            body: Body,
-            smsLogId: smsLogEntry?.id || null,
-            messageSid: MessageSid || null,
-          })
-          .catch((err) => {
-            logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
-            return null;
-          });
-      }
-    }
-
     // Customer-stated contact correction ("you spelled my name wrong, it's
     // …") — auto-applied behind GATE_CONTACT_CORRECTION, LINKED customers
     // only (a shared/unknown number could correct the wrong record). Cheap
@@ -1419,27 +1333,12 @@ router.post('/sms', async (req, res) => {
     // technician holding the line gets their own card below.
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || numberConfig.type === 'tech_line' || isTrackingLeadInbound;
 
-    // Reschedule/away flag — customer texts asking to move or miss a visit
-    // are invisible to the reminder/en-route automation (2026-08-05: a
-    // 12:30am "can we reschedule?" was followed by the visit running and
-    // invoicing on schedule). Detect-and-surface only; never mutates the
-    // appointment. Fire-and-forget: the flagger is fail-soft internally.
-    let rescheduleFlagged = false;
-    if (rescheduleFlagResult?.flagged === true && typeof rescheduleFlagResult.fireBell === 'function') {
-      // Suppress the generic alert only when the urgent one actually
-      // LANDED (bell/push/deliberate suppression).
-      rescheduleFlagged = await rescheduleFlagResult.fireBell().catch(() => false);
-    }
-
     // In-app + push notification for inbound SMS from known customers.
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    // A landed urgent reschedule alert counts as the admin notification
-    // for this message — the legacy owner-SMS forward must not re-alert
-    // (codex #3232 r4).
-    let knownInboundNotified = rescheduleFlagged;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
+    let knownInboundNotified = false;
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly) {
       try {
         const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadPreference: intakeLeadPreference });
         // suppressed counts as HANDLED: an internal-test/demo customer's

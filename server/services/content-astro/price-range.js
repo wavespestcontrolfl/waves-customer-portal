@@ -88,8 +88,6 @@ const CANONICAL_PRICE_PHRASES = Object.freeze({
   'dethatching': ['dethatching'],
   'lawn dethatching': ['dethatching'],
   'lawn plugging': ['lawn_plugging'],
-  'top dressing': ['top_dressing'],
-  'lawn top dressing': ['top_dressing'],
   'bed bug treatment': ['bed_bug_treatment'],
   'bed bug exterminator': ['bed_bug_treatment'],
   'flea treatment': ['flea_elimination'],

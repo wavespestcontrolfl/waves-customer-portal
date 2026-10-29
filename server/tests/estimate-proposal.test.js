@@ -17,6 +17,17 @@ describe('estimate-proposal', () => {
   });
 
   describe('normalizeProposal', () => {
+    // Owner 2026-10-28: the building use is kept only when picked, so a proposal saved before the pick keeps its shape.
+    it('keeps a picked building use and leaves the key off when unset or unknown', () => {
+      const withUse = (buildingUse) => normalizeProposal({ estimate_data: { proposal: {
+        enabled: true, buildingUse, buildings: [{ name: 'A', lineItems: [{ description: 'Pest', unitPrice: 100, frequency: 'monthly' }] }],
+      } } });
+      expect(withUse('residential').buildingUse).toBe('residential');
+      expect(withUse(' NonResidential ').buildingUse).toBe('nonresidential');
+      expect(withUse(undefined)).not.toHaveProperty('buildingUse');
+      expect(withUse('warehouse')).not.toHaveProperty('buildingUse');
+    });
+
     it('reads an authored multi-building proposal from estimate_data', () => {
       const estimate = {
         customer_name: 'Siesta Sands HOA',

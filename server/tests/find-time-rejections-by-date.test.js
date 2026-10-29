@@ -105,6 +105,20 @@ test('the capacity finder splits its refusal counts by date', async () => {
   expect(summed).toEqual(result.rejections);
 });
 
+// Codex #6932 r3: the capacity finder forwards the Quick Move's current-stop
+// continuation too; any other capacity caller keeps it off.
+test('the capacity finder forwards fromActiveStop only when asked', async () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots({ ...BASE, fromActiveStop: true });
+  expect(loadArrivalRouteContext.mock.calls.length).toBeGreaterThan(0);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots(BASE);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === false)).toBe(true);
+});
+
 test('an advisory caller spends none of the shared Google drive-time allowance', async () => {
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   const { createSchedulingTravel } = require('../services/route-optimizer');
@@ -116,4 +130,123 @@ test('an advisory caller spends none of the shared Google drive-time allowance',
   createSchedulingTravel.mockClear();
   await findAvailableSlots(BASE);
   expect(createSchedulingTravel).toHaveBeenCalledWith(undefined);
+});
+
+// GATE_PICKER_ROAD_CHECK (owner 2026-10-26, "Next 7 days"; 2026-10-27, "make
+// sure costs are appropriate"): the staff picker's route check drives the
+// road days on Google (hint-road-times.js roadWindows: today + 6 by default)
+// and checks later days on the model, with no Google re-check.
+test('the picker road check: Google on the road days, later days the model', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  const source = (context) => (context.travel ? 'google_traffic' : undefined);
+  enumerateArrivalPlacements.mockImplementation((context, opts) => {
+    if (opts.collectLegs) { opts.collectLegs.push({ date: context.date }); return { placements: [], evaluated: 0, rejections: {} }; }
+    return { placements: [
+      { windowStart: '09:00', windowEnd: '10:00', fit: { ...fit, detourMinutes: 9, travelSource: source(context) } },
+      { windowStart: '14:00', windowEnd: '15:00', fit: { ...fit, detourMinutes: 4, travelSource: source(context) } },
+    ], evaluated: 2, rejections: {} };
+  });
+  const [near, far] = [ymd(1), ymd(10)];
+  const pickerBudget = roads.createPickerBudget();
+  try {
+    const result = await findAvailableSlots({ ...BASE, dateFrom: near, dateTo: far, pickerRoadCheck: true, roadSpender: 'staff-1', pickerBudget });
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+    // One travel source, counted against the staff user, on the request's budget.
+    expect(spy).toHaveBeenCalledWith({ spender: 'staff-1', budget: pickerBudget });
+    const enumerated = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => !opts.collectLegs).map(([context]) => context);
+    expect(enumerated.find((context) => context.date === near).travel).toBe(roadTravel);
+    expect(enumerated.find((context) => context.date === far).travel).toBeUndefined();
+    const at = (date) => result.slots.filter((slot) => slot.date === date)
+      .map((slot) => [slot.start_time, slot.detour_minutes, slot.drive_source]).sort();
+    expect(at(near)).toEqual([['09:00', 9, 'google'], ['14:00', 4, 'google']]);
+    // A later day keeps the model's numbers: no Google re-check of its best hour.
+    expect(at(far)).toEqual([['09:00', 9, undefined], ['14:00', 4, undefined]]);
+    expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
+    // Three passes over the road days' routes, nothing more.
+    expect(roadTravel.preload).toHaveBeenCalledTimes(3);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  enumerateArrivalPlacements.mockReturnValue({ placements: [], evaluated: 0, rejections: {} });
+  process.env.PICKER_ROAD_TRAFFIC_DAYS = '2';
+  process.env.PICKER_ROAD_PLAIN_DAYS = '0';
+  // Eastern dates, as the finder counts days (the UTC `ymd` can run a day ahead).
+  const { etDateString } = require('../utils/datetime-et');
+  const etYmd = (n) => {
+    const d = new Date(`${etDateString(new Date())}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  try {
+    await findAvailableSlots({ ...BASE, dateFrom: etYmd(1), dateTo: etYmd(3), pickerRoadCheck: true, roadSpender: 'staff-1' });
+    const enumerated = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => !opts.collectLegs).map(([context]) => context);
+    expect(enumerated.filter((context) => context.travel === roadTravel).map((context) => context.date)).toEqual([etYmd(1)]);
+  } finally {
+    delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
+    delete process.env.PICKER_ROAD_PLAIN_DAYS;
+    spy.mockRestore();
+  }
+});
+
+// The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES) continues today's route
+// from the current stop on the model: no Google travel source, no re-check.
+test('fromActiveStop without the picker road check: the current stop, no Google', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '09:00', windowEnd: '10:00', fit: { ...fit, travelSource: undefined } }], evaluated: 1, rejections: {} });
+  try {
+    await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(3), fromActiveStop: true });
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+// Codex #6881 r2 (P1): with the road check off, no route gets the travel
+// source and nothing is preloaded or re-checked — the gate-off search is the
+// model, exactly as before, for staff and technicians alike.
+test('the picker road check off: no Google, no re-check', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  // A model-only fit carries no travelSource (only a road-checked one does).
+  const modelFit = { ...fit, travelSource: undefined };
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '09:00', windowEnd: '10:00', fit: modelFit }], evaluated: 1, rejections: {} });
+  try {
+    const result = await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(10) });
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === false)).toBe(true);
+    expect(result.slots.every((slot) => slot.drive_source === undefined)).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
 });

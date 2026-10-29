@@ -9,9 +9,10 @@
  * modules; this answers "did the Monday pricing sweep / GA4 sync /
  * mileage sync actually run?"
  *
- * Coverage note: only advisory-locked sweep jobs (runExclusive) report
- * here. Queue-claim jobs (FOR UPDATE SKIP LOCKED) are fleet-safe without
- * the lock and do not appear.
+ * Coverage note: advisory-locked sweep jobs (runExclusive) report every
+ * run. Queue-claim jobs (FOR UPDATE SKIP LOCKED) are fleet-safe without
+ * the lock and appear only if their tick records through cron-lock's
+ * recordLeaseFreeJobEnd (scheduled-sms-claim, scheduled-email-send).
  */
 
 const db = require('../../models/db');
@@ -82,7 +83,7 @@ async function getScheduledJobHealth() {
     jobs,
     total: jobs.length,
     unhealthy,
-    note: `One row per advisory-locked sweep job, recorded on every run. state=stuck means marked running for over ${STUCK_RUNNING_MINUTES} minutes — the process likely died mid-run (deploy restart); the next tick will overwrite it. state=stale means the last success is over ${STALE_SUCCESS_DAYS} days old — the job likely stopped firing entirely; also compare last_success_age_minutes to each job's own cadence (an hourly job that last succeeded yesterday is a problem this floor won't flag). Queue-claim jobs do not report here. Fixing a failing job means reading its error and the code — nothing is restartable from here.`,
+    note: `One row per job that records its runs: the advisory-locked sweeps, plus two queue-claim ticks, scheduled-sms-claim (scheduled texts, every 5 minutes) and scheduled-email-send (scheduled emails, every minute). state=stuck means marked running for over ${STUCK_RUNNING_MINUTES} minutes — the process likely died mid-run (deploy restart); the next tick will overwrite it. state=stale means the last success is over ${STALE_SUCCESS_DAYS} days old — the job likely stopped firing entirely; also compare last_success_age_minutes to each job's own cadence (an hourly job that last succeeded yesterday is a problem this floor won't flag). Other queue-claim jobs do not report here. Fixing a failing job means reading its error and the code — nothing is restartable from here.`,
   };
 }
 

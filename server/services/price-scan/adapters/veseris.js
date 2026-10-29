@@ -46,6 +46,8 @@ const adapter = makeAdapter({
     return q ? `https://veseris.com/default/catalogsearch/result/?q=${encodeURIComponent(q)}` : null;
   },
   productLinkSelectors: ['.product-item-link', '.product-item-info a.product', '.products a.product-item-link'],
+  searchMayLandOnProduct: true, // a single exact hit redirects straight to the product page
+  shortQueryFallback: true, // long catalog names find nothing; retry once with the first two words
   searchWaitMs: 8000, // Veseris search results render a beat after load — wait for the links
   settleMs: 1500, // and let the product page's price paint before snapshotting
   titleSelector: 'h1.page-title .base, h1.page-title, h1[itemprop="name"], h1',

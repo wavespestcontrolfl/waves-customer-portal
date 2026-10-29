@@ -123,7 +123,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue, aioGapSweepMonthlyLive } = require('../config/feature-gates');
-const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick, recordLeaseFreeJobEnd } = require('../utils/cron-lock');
 const { registerDeployKillRetry, retryDeployKilledJobs } = require('../utils/deploy-kill-retry');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 // Required HERE, at scheduler init (= process boot), not lazily inside the
@@ -137,6 +137,12 @@ const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
+// job_health row for the 5-minute tick's recovery + claim. Recorded the
+// lease-free way: every replica claims (FOR UPDATE SKIP LOCKED is the fence),
+// so cron-lock does not wrap the tick. A claim that keeps failing reads as a
+// failing job in the Agents queue, the Intelligence Bar and the Hermes
+// watchdog's page.
+const SCHEDULED_SMS_CLAIM_JOB = 'scheduled-sms-claim';
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -1099,6 +1105,19 @@ function initScheduledJobs() {
       await require('./email/scheduled-email-sender').runScheduledSweep();
     } catch (err) {
       logger.error(`[scheduled-email] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN, 9:00-11:45 AM ET — the referrer's one thank-you email for a
+  // referral credit, at the next 9:00 AM after it posts (owner 2026-10-29: email
+  // only, no reward text). Later ticks catch a missed 9:00 tick; a missed
+  // morning sends the next morning. The email's idempotency key makes each one
+  // go once across ticks and replicas.
+  cron.schedule('*/15 9-11 * * *', async () => {
+    try {
+      await runExclusive('referral-reward-email', () => require('./referral-engine').sendDueReferralRewardEmails());
+    } catch (err) {
+      logger.error(`[referral-reward-email] failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2071,45 +2090,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
+  // COMMS GUARDS — daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
   // deliberately unused elsewhere in this file (#3208 pool-timeout outage:
   // never share a minute with other jobs).
   // =========================================================================
-
-  // Reschedule/away texts whose visit never moved (kill:
-  // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:53am ET.
-  cron.schedule('30 53 6 * * *', async () => {
-    try {
-      const lockRes = await runExclusive('reschedule-intent-watcher', async () => {
-        const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
-        const result = await runRescheduleIntentWatcher();
-        logger.info(`[reschedule-intent-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
-        // Delivery-BLOCKING skips count as failures; expected skips
-        // (nothing_found / disabled / recent_send) stay healthy.
-        if (result?.skipped === 'query_failed' || result?.error
-            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
-          throw new Error(`reschedule-intent watcher did not complete (${result.skipped || 'send_failed'})`);
-        }
-      });
-      // A pool-exhausted tick returns {skipped} instead of throwing —
-      // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
-        // lease_held = another instance is running this watcher (deploy
-        // overlap) — that IS the daily run, not a miss (codex r18).
-        // job_health must record the missed daily run (codex r17) — the
-        // skip path returns before runExclusive's own bookkeeping.
-        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-        const t0 = Date.now();
-        await recordJobStart('reschedule-intent-watcher').catch(() => {});
-        await recordJobEnd('reschedule-intent-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
-        throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
-      }
-    } catch (err) {
-      logger.error(`Reschedule-intent watcher failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
 
   // Quotes promised on calls with no estimate sent since (kill:
   // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:11am ET.
@@ -2283,6 +2269,21 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[warranty-renewal-reminder] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 06:52 — technician ID-card and training reminders (GATE_TECH_TRAINING_DATES, dark): one admin bell per technician and
+  // deadline (ID card application, 4 classroom hours, renewal training; F.S. 482.091), closed when the date is entered. Admin bell
+  // only; it sends nothing to a technician or a customer. Gate off = returns before any query. The gate is read per tick, so a flip
+  // or an unset needs no restart. runExclusive records the job health and keeps a deploy overlap from running two sweeps.
+  cron.schedule('52 6 * * *', async () => {
+    if (!require('../config/feature-gates').techTrainingDatesLive()) return;
+    try {
+      await runExclusive('technician-training-dates', async () => {
+        await require('./technician-training-reminders').runTechnicianTrainingReminders();
+      });
+    } catch (err) {
+      logger.error(`[technician-training-reminders] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5215,7 +5216,15 @@ function initScheduledJobs() {
           logger.warn(`[scheduled-sms] pending terminal-hook sweep failed: ${termErr.message}`);
         }
         scheduled = await claimDueScheduledSms(now);
-      } catch { return; /* scheduled_for column may not exist yet */ }
+      } catch (err) {
+        // Nothing is sent this tick, and a claim that keeps throwing stops
+        // every scheduled text. name/code only: knex errors can carry bound
+        // customer text (PII); job_health keeps the digit-masked message.
+        logger.error(`[scheduled-sms] claim failed, no scheduled texts sent this tick: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+        await recordLeaseFreeJobEnd(SCHEDULED_SMS_CLAIM_JOB, now.getTime(), err);
+        return;
+      }
+      await recordLeaseFreeJobEnd(SCHEDULED_SMS_CLAIM_JOB, now.getTime(), null);
 
       for (const msg of scheduled) {
         // Decision linkage is read FRESH after each terminal update, not
@@ -6348,7 +6357,9 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
-                if (smsResult.code === 'LINKED_VISIT_ENDED') {
+                // So does the pre-send customer-link check (scheduled-sms-delivery.js scheduledLinkRefusal): its reason is the
+                // check's own refusal code, and that function has already raised the office alert.
+                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED'].includes(smsResult.code)) {
                   await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
                     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
                   });
@@ -7171,7 +7182,7 @@ function initScheduledJobs() {
 
   // Customer health scoring is consolidated into the single nightly Customer
   // Intelligence Pipeline (3AM ET): detect signals → score (customer-health.js,
-  // the sole canonical engine) → enrich (upsell/next-action/LTV) → outreach.
+  // the sole canonical engine) → enrich (upsell/next-action/LTV).
   // The former 2AM (customer-health-v2 → unread customers.health_score) and
   // 2:15AM (standalone v3) jobs were removed to end the three-writer collision.
 
@@ -7327,7 +7338,6 @@ function initScheduledJobs() {
     try {
       const SignalDetector = require('./customer-intelligence/signal-detector');
       const HealthScorer = require('./customer-intelligence/health-scorer');
-      const RetentionEngine = require('./customer-intelligence/retention-engine');
 
       // Step 1: Detect signals. Isolated so a detection failure doesn't skip
       // tonight's scoring — this is now the only nightly health-score refresh,
@@ -7353,42 +7363,7 @@ function initScheduledJobs() {
       const enrichResult = await HealthScorer.enrichAllCustomers();
       logger.info(`Enrichment: ${enrichResult.enriched} enriched, ${enrichResult.upsells} upsells`);
 
-      // Step 3: Generate retention outreach for at-risk customers. high +
-      // critical = the canonical engine's at-risk band (vocab:
-      // low/moderate/high/critical). scored_at is a timestamp under the
-      // canonical engine, so match on its date.
-      step = 'step 3 (retention outreach)';
-      const today = etDateString();
-      // Real customers only: health scores cover leads too, and a never-
-      // paying new_lead must not consume an outreach draft or fire a churn
-      // alert (Copeman, 2026-07-11). Same predicate the engine itself guards
-      // with — this just skips the pointless per-lead calls.
-      const { CUSTOMER_STAGES } = require('./customer-stages');
-      const atRisk = await db('customer_health_scores as chs')
-        .join('customers as c', 'c.id', 'chs.customer_id')
-        .whereRaw('chs.scored_at::date = ?', [today])
-        .whereIn('chs.churn_risk', ['high', 'critical'])
-        .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-        .whereNull('c.deleted_at')
-        .select('chs.customer_id');
-
-      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
-      // customer, keyed on the churn band the owner ruled unusable
-      // (2026-08-29; win-back is a manual send). The engine itself enforces
-      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
-      // skip only saves the per-customer reads and logs the count.
-      const { customerIntelAiLive } = require('../config/feature-gates');
-      const intelAiOn = customerIntelAiLive();
-      let outreachGenerated = 0;
-      if (!intelAiOn) {
-        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
-      }
-      for (const c of intelAiOn ? atRisk : []) {
-        const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
-        if (result) outreachGenerated++;
-      }
-
-      logger.info(`Customer intelligence complete: ${outreachGenerated} outreach generated`);
+      logger.info('Customer intelligence complete');
     } catch (err) {
       logger.error(`Customer intelligence pipeline failed at ${step}: ${err.message}`);
     }
@@ -7407,11 +7382,6 @@ function initScheduledJobs() {
       const verifyLock = await runExclusive('csr-follow-up-verify', async () => {
         const CSRCoach = require('./csr/csr-coach');
         await CSRCoach.verifyFollowUps();
-        // Hourly: resolve actioned flags FIRST, then replay bells
-        // (codex #3232 r21/r23).
-        const riw = require('./reschedule-intent-watcher');
-        await riw.resolveActionedFlags();
-        await riw.replayPendingBells();
       });
       if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
@@ -8063,6 +8033,14 @@ function initScheduledJobs() {
           logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
         } catch (err) {
           logger.error(`Document request reminders failed: ${err.message}`);
+        }
+        // Mark accepted consumer notice catch-up (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE): re-sends an FDACS-13692
+        // a restart lost after the accept. After the reminders: a reminder that already reached the customer since the
+        // accept counts as delivered, so the same notice never goes out twice in one run.
+        try {
+          await require('./estimate-consumer-notice').reconcileManualAcceptConsumerNotices();
+        } catch (err) {
+          logger.error(`Mark accepted consumer notice catch-up failed: ${err.message}`);
         }
       });
     } catch (err) {
@@ -9057,49 +9035,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY MONDAY 10AM — Seasonal reactivation campaign (drafts V1)
-  // =========================================================================
-  // NEVER sends. Writes message_drafts status='pending' rows for owner
-  // approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log candidate
-  // counts only. Sending happens exclusively through the drafts approve route.
-  cron.schedule('20 10 * * 1', async () => {
-    logger.info('Running: seasonal reactivation campaign');
-    try {
-      await runExclusive('seasonal-reactivation', async () => {
-        const seasonalReactivation = require('./workflows/seasonal-reactivation');
-        if (seasonalReactivation.run) {
-          const result = await seasonalReactivation.run();
-          logger.info(`Seasonal reactivation done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate} (month ${result.month}, type: ${result.hookType})`);
-        }
-      });
-    } catch (err) {
-      logger.error(`Seasonal reactivation failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 9:30AM — Existing-customer upsell campaign drafts (V1)
-  // =========================================================================
-  // NEVER sends. Reads upsell_opportunities status='identified', applies the
-  // guards (live customer, prefs, unified 30d cross-lane cooldown, prepay
-  // notice suppression) and writes message_drafts status='pending' rows for
-  // owner approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log
-  // candidate counts only. Sending happens exclusively through the drafts
-  // approve route.
-  cron.schedule('30 9 * * *', async () => {
-    logger.info('Running: upsell campaign draft generator');
-    try {
-      await runExclusive('campaign-drafts-upsell', async () => {
-        const campaignDrafts = require('./campaign-drafts');
-        const result = await campaignDrafts.generateUpsellDrafts();
-        logger.info(`Upsell campaign drafts done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate}`);
-      });
-    } catch (err) {
-      logger.error(`Upsell campaign draft generator failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 11AM — Balance reminders (upcoming services with outstanding balance)
   // =========================================================================
   cron.schedule('0 11 * * *', async () => {
@@ -9364,6 +9299,30 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Hermes watchdog liveness tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // External job heartbeat watch — hourly at :05, 07:05-22:05 ET. A job that
+  // runs outside the portal (first entry: the plan gap sweep on the office
+  // Mac) upserts its job_health row at the end of each run; this rings ONE
+  // standing admin bell when no complete run has landed today by the job's
+  // due time (07:00 ET for the sweep), and closes it by itself when one does.
+  // Dark behind GATE_EXTERNAL_HEARTBEAT_WATCH (the service reads the gate
+  // itself); writes only admin notifications. See
+  // server/services/external-job-heartbeat-watch.js.
+  // =========================================================================
+  cron.schedule('5 7-22 * * *', async () => {
+    try {
+      await runExclusive('external-heartbeat-watch', async () => {
+        const { runExternalHeartbeatWatch } = require('./external-job-heartbeat-watch');
+        const result = await runExternalHeartbeatWatch();
+        if (!result.skipped && (result.alerted > 0 || result.closed > 0)) {
+          logger.warn(`[external-heartbeat-watch] alerted=${result.alerted} closed=${result.closed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`External heartbeat watch tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

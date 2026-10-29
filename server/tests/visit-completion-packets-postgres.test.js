@@ -370,35 +370,51 @@ postgres('visit completion packet records on PostgreSQL', () => {
     else process.env.PEST_RECAP = originalPestRecap;
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
-    await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
-    await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
-    await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
-    if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
-    if (fixture.estimateIds.length) {
-      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
-      await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
-      await mockPg('estimates').whereIn('id', fixture.estimateIds).del();
+    const removeFixtureRows = async () => {
+      await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
+      await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
+      await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
+      if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
+      if (fixture.estimateIds.length) {
+        await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
+        await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
+        await mockPg('estimates').whereIn('id', fixture.estimateIds).del();
+      }
+      // Clear movements before cascading customer/service-product deletion.
+      await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
+      await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
+      await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
+      await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
+      await mockPg('product_limits').where({ product_id: fixture.productId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).del();
+      if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
+      if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
+      if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
+      if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
+      if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+      await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
+      await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
+      if (fixture.historyTechId) await mockPg('technicians').where({ id: fixture.historyTechId }).del();
+      await mockPg('technicians').where({ id: fixture.techId }).del();
+      await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
+      await mockPg('services').where({ id: fixture.catalogId }).del();
+      if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
+      await mockPg('products_catalog').where({ id: fixture.productId }).del();
+    };
+    // A test can return while one of its own background writes is still
+    // committing on another pool connection. Postgres then aborts this
+    // cleanup as the deadlock victim (CI 2026-10-28: `delete from "customers"`
+    // deadlock detected, a different test each run). Every step above is
+    // idempotent, so the cleanup runs again once the other side has committed.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await removeFixtureRows();
+        break;
+      } catch (err) {
+        if (err?.code !== '40P01' || attempt === 5) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
     }
-    // Clear movements before cascading customer/service-product deletion.
-    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
-    await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
-    await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
-    await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
-    await mockPg('product_limits').where({ product_id: fixture.productId }).del();
-    await mockPg('customers').where({ id: fixture.customerId }).del();
-    if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
-    if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
-    if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
-    if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
-    if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
-    await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
-    await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
-    if (fixture.historyTechId) await mockPg('technicians').where({ id: fixture.historyTechId }).del();
-    await mockPg('technicians').where({ id: fixture.techId }).del();
-    await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
-    await mockPg('services').where({ id: fixture.catalogId }).del();
-    if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
-    await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 
   test.each([

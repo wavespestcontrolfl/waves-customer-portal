@@ -1,5 +1,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/scheduling/picker-road-spend', () => ({
+  reserveRoadSpend: jest.fn(async () => ({ allowed: true, day: '2026-10-28' })),
+  releaseRoadSpend: jest.fn(async () => {}),
+}));
 
 // GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25): with capacity mode off, a
 // staff check of a MOVED visit tries every place in the stored route, keeps
@@ -220,5 +224,43 @@ describe('placeMovedVisit writes nothing unless it may', () => {
     const trx = Object.assign(conn(), { transaction: jest.fn(async () => { throw new Error('savepoint rolled back'); }) });
     await expect(placeMovedVisit(trx, { serviceId: 'target' })).resolves.toBeNull();
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('route order not placed for target'));
+  });
+});
+
+// GATE_SAVE_ROAD_TIMES (owner 2026-10-28: Save uses Google too): a staff save's
+// check and route number read the road times the pickers bought, and buy none.
+describe('a staff save reads the pickers\' road times', () => {
+  const { staffSaveTravel } = require('../services/scheduling/arrival-route')._internals;
+  const TODAY = etDateString(new Date());
+  const drive = { date: TODAY, from: { lat: 27.5, lng: -82.4 }, to: { lat: 27.52, lng: -82.41 }, departureMin: 23 * 60 };
+  beforeEach(() => {
+    process.env.GATE_PICKER_ROAD_CHECK = 'true';
+    process.env.GATE_SAVE_ROAD_TIMES = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    delete process.env.GATE_SAVE_ROAD_TIMES;
+  });
+
+  test('a road day: a source that buys nothing, and a drive no picker bought keeps the model', async () => {
+    const travel = staffSaveTravel(TODAY);
+    await travel.preload([drive]);
+    expect(require('../services/scheduling/picker-road-spend').reserveRoadSpend).not.toHaveBeenCalled();
+    expect(travel.lookup(drive).source).toBe('conservative_model');
+  });
+
+  test('a later day keeps the model', () => {
+    expect(staffSaveTravel(DATE)).toBeNull();
+  });
+
+  test('off, without the pickers\' road check, or in capacity mode: the model', () => {
+    delete process.env.GATE_SAVE_ROAD_TIMES;
+    expect(staffSaveTravel(TODAY)).toBeNull();
+    process.env.GATE_SAVE_ROAD_TIMES = 'true';
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    expect(staffSaveTravel(TODAY)).toBeNull();
+    process.env.GATE_PICKER_ROAD_CHECK = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    expect(staffSaveTravel(TODAY)).toBeNull();
   });
 });

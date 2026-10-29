@@ -270,10 +270,9 @@ const TRIGGER_REGISTRY = {
         : '/admin/recruiting',
     }),
   },
-  // Fired by reschedule-intent-flagger when an inbound SMS reads as a
-  // reschedule/away request while a visit is still armed — the automation
-  // does not act on these, so the owner must (2026-08-05 incident class:
-  // customer asked to reschedule at 12:30am, visit ran and invoiced anyway).
+  // Nothing fires this today (the reschedule-intent flagger and its gate were
+  // removed). Kept so the bell rows it wrote before 2026-08-15 still render,
+  // stay in the technician feed allowlist and keep their push tag.
   appointment_reschedule_intent: {
     label: 'Customer asked to reschedule by text',
     category: 'schedule',

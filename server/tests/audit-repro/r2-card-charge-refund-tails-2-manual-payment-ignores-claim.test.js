@@ -33,7 +33,6 @@ jest.mock('../../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), er
 jest.mock('../../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => null) }));
-jest.mock('../../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => undefined) }));
 jest.mock('../../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: false })) }));

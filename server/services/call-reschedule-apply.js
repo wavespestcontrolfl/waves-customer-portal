@@ -21,10 +21,13 @@
  *     own judgement that the caller accepted the final slot
  *     (scheduling.caller_accepted_slot, schema 1.16.0), grounded by
  *     call-reschedule-agreement.js: the agent's commitment, the caller's
- *     acceptance and the agreed-slot quote each appear word for word in a
- *     turn of their speaker, and the words the extraction recorded for the
- *     agreed time (scheduling.agreed_slot_words, schema 1.17.0) sit in that
- *     quote and state the slot
+ *     acceptance each appear word for word in a turn of their speaker, and
+ *     the slot is the booking step's accepted slot, the extraction's
+ *     confirmed_start_at (owner 2026-10-27, the way the make-up move did it).
+ *     The extraction's recorded agreed_slot_words (schema 1.17.0) need not sit
+ *     in a quote: they were empty on 10 of 12 calls on Oct 24. Only a
+ *     RELATIVE date ("next Thursday") still needs them, since they are the one
+ *     check of the day the extraction resolved it to
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE upcoming live visit (pending or confirmed — a row parked
  *     at 'rescheduled' awaits a real rebook and stays a card; not dispatch-
@@ -223,7 +226,7 @@ function authoritativeServiceName(row) {
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
  * clock the future-instant check uses.
  */
-function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false, humanOverride = null } = {}) {
+function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false, humanOverride = null, acceptedSlot = false } = {}) {
   if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
   if (appointmentCreated) return skip('pipeline_created_appointment');
   if (v2.meta?.is_spam === true) return skip('spam');
@@ -268,7 +271,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // moved when the call named one. humanOverride is a person's decision.
   let movedDate = null;
   if (!humanOverride) {
-    const agreement = groundRescheduleAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at });
+    const agreement = groundRescheduleAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at, acceptedSlot });
     if (!agreement.ok) return skip('reschedule_not_agreed', { agreementReason: agreement.reason });
     movedDate = agreement.movedDate;
   }
@@ -718,7 +721,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   const customer = await conn('customers').where({ id: settled.customer_id }).first();
   const properties = await conn('customer_properties').where({ customer_id: settled.customer_id, active: true }).select('*');
   const candidates = await loadCandidates(conn, settled.customer_id, now);
-  const plan = planRescheduleFromCall({ v2, call: settled, customer, properties, candidates, appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels') });
+  const plan = planRescheduleFromCall({ v2, call: settled, customer, properties, candidates, appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'), acceptedSlot: true });
   if (plan.action === 'skip') {
     if (plan.reason !== 'not_a_reschedule' && plan.reason !== 'no_v2_extraction') await stampSkipOnCards(conn, call.id, plan);
     return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
@@ -767,7 +770,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
     const latestCandidates = await loadCandidates(trx, settled.customer_id, now);
     const checked = planRescheduleFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
-      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels') });
+      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'), acceptedSlot: true });
     const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
       && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
         .every((key) => (service[key] ?? null) === (visit[key] ?? null));

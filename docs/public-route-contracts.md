@@ -706,6 +706,19 @@ button charges the COMBINED total via one PI carrying a per-invoice
 metadata allocation (services/pay-combined.js is the one authority for
 selection, allocation, and settle). Sibling TOKENS still never ride the
 payload, and gate off ⇒ byte-identical to the single-invoice surface.
+Each itemized row also carries `pastDue` — the server's ET-correct
+overdue verdict (open-balance `is_overdue`); the page renders a "Past due
+since" caption from it and does no date math, and points to the customer
+portal / Waves app instead of linking sibling invoices. `/invoice.pdf`
+prints the SAME itemization (one shared builder, `payPagePreviousBalance`),
+and only when `/setup` would actually charge it (`payPageCombinedBalance`:
+no opted-in account credit in play, full or partial, since setup decides
+credit under its own locks; no required-save capture hold), under a "Total
+due today" line — what the Pay button charges, never
+labeled an account balance — with no sibling tokens and no service names
+(service names ride only the EMAILED invoice PDF, which reaches the
+customer's own saved recipient); gate off ⇒ no sibling read and the PDF
+is unchanged.
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
@@ -871,10 +884,9 @@ booking that already committed replays that booking;
 the customer-facing day closes at 18:00, and `booking_config.day_end` was
 migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
 open-day expansion cannot create additional starts. 12:00 is an ordinary
-offerable and reservable hour unless `GATE_BOOKING_LUNCH_BLOCK` is set, in
-which case every customer-facing offer AND commit surface (estimate picker +
-reserve, /book, public reschedule, public re-service, the assistant's
-availability engine) refuses a window overlapping 12:00–13:00. The estimate cache separates capacity mode
+offerable and reservable hour on every customer-facing offer AND commit
+surface (estimate picker + reserve, /book, public reschedule, public
+re-service, the assistant's availability engine). The estimate cache separates capacity mode
 from legacy mode. Assigned technicians have independent route capacity;
 unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
@@ -1074,7 +1086,7 @@ customer-facing and never had the cap. The finder's per-slot `return_time`
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
-shared grid / day-end / lunch-gate rules above, which apply in both modes.
+shared grid / day-end rules above, which apply in both modes.
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares
@@ -1328,7 +1340,7 @@ measured from the earlier stop's expected service end (catalog min/max
 midpoint, clamped to its window) and the 15-minute buffer is reduced by that
 stop's own window padding; rows with no catalog match keep the legacy drive +
 buffer gap. This packed-start geometry is independent of the customer grid /
-day-end / lunch-gate admission rule above (`customerWindowAdmits`) — a
+day-end admission rule above (`customerWindowAdmits`) — a
 candidate must clear both: the grid decides whether a start is offered at
 all, packing decides how close it may legally sit to a real neighbouring
 stop. Ranking ties on `/book` break toward the less hole-making slot
@@ -2955,7 +2967,7 @@ signature carries `:copyfix=1` only while the gate is live, and the narrative ke
 part is the `-tn0` sentinel for a lawn report.
 `GATE_LAWN_NEW_SOD_REPORT_CARD` (dark, strict `true`, read at call time; also needs `GATE_LAWN_NEW_SOD_NOTE`; gate off leaves the payload byte-identical) adds one optional top-level key to the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface): `lawnNewSod: { title, lead, items: [string, ...], rest: string | null, swap: string | null, close }`. Every value is a fixed sentence built by `server/services/lawn-sod-report-card.js` from the block frozen at completion (`structured_notes.lawnNewSod = { v: 1, visitDay, sodLaidOn, covers, planRan, held: [{ kind, until, rootedCheck }], swap: { name } | null }`); the only variable parts are calendar dates (the day the sod was laid and the day each held product class starts again). No staff free text is in the payload: the office's name for the sod area (`property_preferences.sod_area`) is never frozen or sent, and the swap product name is frozen but not printed. `rest` and the long form of `close` ("Everything else ran as normal.") are sent only when the frozen `planRan` is true (every other planned product was applied); else `rest` is null and `close` is "Same visit, same price.". The key is absent when the visit record has no valid frozen block (no planned product was held, the sheet's sod record no longer matched at completion, or the visit completed before the gate was on). The live web report prints it as the "New sod" card; the PDF and static views ignore it.
 
-`GATE_REPORT_CLEANUP_1020` (dark, strict `true`, read at call time; gate off leaves the payload, the stored method, the PDF and every cached PDF key byte-identical) changes the `/api/reports/:token/data` payload of a `service_report_v1` record, and the same render the PDF queue builds. No new route, token, privacy or rate-limit surface; every item below exists only while the gate is live. New top-level keys: `reportCleanup: true` (absent when off; the page keys items off it) and `troubleSpotNote` (a fixed sentence string, or `null` when the visit has no Trouble spot photo; absent when off). Changed fields: (1) `reportV2.aftercare.watering`: for a lawn visit whose watering instruction makes no claim and whose frozen product rules hold a `water_in` rule, no `hold` rule, and no product with a recorded watering note or `irrigation_required` but no structured rule, the line is "Water in about ½ inch within 24 hours." (deepest amount, shortest window; "today" for a same-day label) instead of the neutral "No special watering is needed…", with `waterInTask` set and `creditableWaterIn: false`; when any product carries a `hold` rule and the instruction makes no claim, `watering` is the empty string and neither line prints. A visit with a full instruction is unchanged. (2) `applications[].method` and `applications[].methodLabel`: `broadcast_spray` becomes `granular_broadcast` when the product name says granular (water-dispersible granules excluded); the completion also stores `granular_broadcast` in `service_products.application_method` for such a product. (3) `reportV2.followUp.reason`: a reason that is cut with an ellipsis, has no final stop, or carries a percent or a score is replaced by the fixed sentence "We’ll recheck the areas we flagged and compare them against today’s photos." (4) `reportV2.insights`: the lawn all-clear card (category `overall`) is left out; a tree & shrub all-clear card keeps its place but its `nextVisitPlan` is `null`. (5) `findings`: the softened `no_activity` finding titled "No corrective findings logged this visit" is left out. The PDF cache key gains `:cleanup1020=1`. The tech Fast Complete context (`GET /api/admin/dispatch/:id/lawn-fast/context` and the lawn re-service context) gains `methodCorrection: true` while live (absent otherwise).
+Service report cleanup (owner 2026-10-20; every report, no gate) changes the `/api/reports/:token/data` payload of a `service_report_v1` record, and the same render the PDF queue builds. No new route, token, privacy or rate-limit surface. New top-level key: `troubleSpotNote` (a fixed sentence string, or `null` when the visit has no Trouble spot photo). Changed fields: (1) `reportV2.aftercare.watering`: for a lawn visit whose watering instruction makes no claim and whose frozen product rules hold a `water_in` rule, no `hold` rule, and no product with a recorded watering note or `irrigation_required` but no structured rule, the line is "Water in about ½ inch within 24 hours." (deepest amount, shortest window; "today" for a same-day label) instead of the neutral "No special watering is needed…", with `waterInTask` set and `creditableWaterIn: false`; when any product carries a `hold` rule and the instruction makes no claim, `watering` is the empty string and neither line prints. A visit with a full instruction is unchanged. (2) `applications[].method` and `applications[].methodLabel`: `broadcast_spray` becomes `granular_broadcast` when the product name or catalog formulation says granular (water-dispersible granules excluded); the completion also stores `granular_broadcast` in `service_products.application_method` for such a product. (3) `reportV2.followUp.reason`: a reason that is cut with an ellipsis, has no final stop, or carries a percent or a score is replaced by the fixed sentence "We’ll recheck the areas we flagged and compare them against today’s photos." (4) `reportV2.insights`: the lawn all-clear card (category `overall`) is left out; a tree & shrub all-clear card keeps its place but its `nextVisitPlan` is `null`. (5) `findings`: the softened `no_activity` finding titled "No corrective findings logged this visit" is left out. The PDF cache key carries the constant part `:cleanup1020=1` (kept from the period the cleanup was gated, so every cached PDF stays valid). The tech Fast Complete context (`GET /api/admin/dispatch/:id/lawn-fast/context` and the lawn re-service context) no longer carries a `methodCorrection` key: the sheets always start a granular product on Granular broadcast. The page prints the rate with what it is per, drops a technician paragraph or defense sentence the summary already says, sizes each photo card to its photo, and prints `troubleSpotNote` beside a Trouble spot photo; none of these needs a payload flag.
 
 `GATE_LAWN_REPORT_POLISH` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and every cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys, absent while the gate is off: top-level `lawnPolish: true`; `reportV2.water.scheduleKind` (`'inches'`, `'runtime_only'` or `'none'`), `reportV2.water.scheduleText` (state `runtime_only` only: what the customer's own portal entries say, "45 min, Mondays"), `reportV2.water.scheduleParts` (state `runtime_only` only: `minutes_and_days` | `minutes_only` | `days_only`) `reportV2.water.irrigationBasis` (a figure derived from minutes and days, one fixed sentence) and `reportV2.water.longerCycles` (`true` only: the one fixed longer-cycles advice sentence prints on the Water card; set from the decision frozen at completion in `lawnReportFacts.waterAdvice`, and only when the visit has no hold or water-in banner, weekly plan or after-visit watering note); the same `scheduleKind` and, for `runtime_only`, `scheduleText` and `scheduleParts` ride `lawnAssessment.waterContext`. Changed values while the gate is live: `reportV2.water.explanation` for `runtime_only` (it no longer says no schedule is on file); `reportV2.water.irrigationInches` and `lawnAssessment.turfProfile.irrigationInchesPerWeek` for a customer whose figure is derived (one turf head type, drip ignored, the owner's rate table); `applications[].product.precaution_summary` for a record whose frozen `lawnReportFacts.labelLines` drops a sentence. The lawn PDF signature carries `:polish=1` only while the gate is live.
 
@@ -3889,16 +3901,11 @@ The identical detection table is shared with `resolveLeadSource`
 use — see those entries below — so an AI-referred visitor is classified
 the same way regardless of which endpoint their lead lands on. Abuse
 guards on both endpoints: honeypot silent-200, then Turnstile, enforced
-under `GATE_LEAD_TURNSTILE`. Owner alert call (owner 2026-10-14): a verified
-lead places the paid Twilio call to Adam's cell (the announce call, or the
-Press-1 bridge under `GATE_LEAD_AUTO_BRIDGE`) ONLY when
-`GATE_LEAD_ALERT_CALL` is exactly `true` AND it is 8 AM-8 PM ET
-(`shouldPlaceLeadAlertCall`, `server/routes/lead-webhook.js`). Off (the
-default), no call goes out at any hour: the lead takes the after-hours path
-(the `new_lead` bell; the legacy lead SMS to the owner only if that bell
-fails). The gate never changes the response, the lead's one automated text,
-or the estimate draft. A diff that places the call with the gate off is a
-P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead never places a phone
+call to the owner at any hour. It takes the `new_lead` bell; the legacy
+lead SMS to the owner goes only if that bell fails. The alert never
+changes the response, the lead's one automated text, or the estimate
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that
@@ -4339,6 +4346,7 @@ internals, or tech notes — generic 404 for missing/draft/expired/malformed.
 `GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
 top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
 itself never changes.
+`GATE_LAWN_JEV_TIMING_CHECK` (dark, `off` | `shadow` | `enforce`; needs `GATE_TYPED_DECISIONS`; off leaves the payload and the stored row unchanged) acts when the diagnosis is STORED, not when this page is read: in `enforce` the writers (this page's source rows from the public lawn assessment, the tech lawn diagnostic and the admin Analyze photos button) drop Jev-flagged timing sentences from `customer_summary` before the insert, waiting at most 3000 ms and failing open; `shadow` only records the verdict after the insert. Only the summary's sentences go to TypeSafe. The payload keys and shape never change, and `safeCustomerSummary` still drops word-list timing sentences at read.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
 "Based on N photos." from a count of the diagnostic's stored photos (capped at
@@ -4401,7 +4409,8 @@ the tech flow; the response is a TEASER ONLY — a strict subset of the public
 report egress allowlist (status label, one gated finding, counts) plus a
 32-hex claim token. The full report payload never leaves the server before
 claim. Prospect free-text note is stored for admin view only — never fed to
-models or customer copy. Privacy headers on all responses.)
+models or customer copy. Privacy headers on all responses.
+`GATE_LAWN_JEV_TIMING_CHECK` (owner 2026-10-28/29; dark, `off` | `shadow` | `enforce`, anything else reads as off, read at call time; honoured only while `GATE_TYPED_DECISIONS` is live; off changes nothing, makes no call and stores the row exactly as before) puts the MODEL-written lawn diagnosis summary (the contract's `customer_summary`; a deterministic summary is never sent) to TypeSafe Jev, one call per sentence of that summary and nothing else (no photo, contact, address or note), as package `lawn_result_timing.v1`. `shadow` stores the row unchanged, adds no wait to the request, and after the insert records the verdict in `decision_reviews` (subject `lawn_diagnostics`). `enforce` waits at most 3000 ms before the insert and drops the sentences Jev flags from `customer_summary` (the same way the read-time egress drops word-list timing sentences; nothing left reads as the generic low-confidence summary), so every stored copy (`report_contract.customer_summary`, `ai_summary` where it came from it) holds the same final text. A failed, malformed or late answer keeps the text (fail open); a technician's typed `aiSummary` is never checked or changed. The response shape and status codes do not change, and the read-time word list still runs after this.)
 `/api/card/:token` (read-only digital business card payload; 64-hex
 `customer_cards.share_token` format gate, generic 404 for unknown/malformed
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of
@@ -4865,6 +4874,25 @@ and priced on site — we'll call to schedule your free design visit."
 instead of the generic copy. No pricing, no self-book slot, no new auth
 surface — additive response-copy branching only.
 
+Top dressing is quote-only (owner 2026-10-29, top dressing scope option A; the
+engine formula is a floor that loses money on larger lawns, so the office
+prices every job by hand). Every `top_dressing` engine line carries
+`requiresManualReview` + the enforced `requiresCustomQuote` with
+`customQuoteReason: 'top_dressing_quote_only'` (`estimate-engine.js`), measured
+turf and an explicit top-dress area included. A low-confidence turf reason
+stays the line's `customQuoteReason` and both reasons are listed in
+`manualReviewReasons`. A direct `services.topDressing` request to `/calculate`
+therefore answers `202 { quote_required: true, service: 'top_dressing', reason:
+'top_dressing_quote_only', service_interest, message }` (it priced instantly
+before). `message` reuses the quote-on-request copy ("{service interest} is
+priced by our team, not the calculator — we'll send your estimate shortly."),
+and the office notice reads as an estimate request. When the turf reason wins
+(`low_confidence_turf_requires_field_verification`) the response is that
+reason's existing turf copy, unchanged. The lead is captured with zero totals
+and no self-book handoff. The keyed `top_dressing` catalog key was already
+quote-on-request and is unchanged. Additive: no new field, no new copy, no new
+auth surface, no migration, no gate.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -4970,7 +4998,26 @@ over the visitor side: Poison Control / veterinary lines as above; no quote
 CTA). It only ever adds the emergency script; a no, a failed or late check,
 or a malformed verdict leaves the answer unchanged (fails open to the
 answer, which keeps every guard above). Its accuracy is the classifier's —
-there is no regex on this path. NOT CORS-open — credentialed allowlist
+there is no regex on this path.
+With `GATE_ASK_WAVES_JEV_CHECK` set (dark; `askWavesJevCheckMode()` =
+`shadow` | `enforce`, read at call time, anything else is off; asks also need
+`GATE_TYPED_DECISIONS`, without which they return at once and the reply is
+kept), a model-written reply that the claim chokepoint above passed — never
+reviewed copy, the emergency script, an `emergency`-intent answer or the
+provider-failure fallback — is also put to Jev (TypeSafe typed decision
+`ask_waves_safety.v1`: a blanket safety claim? a re-entry or use time?). Its
+only state is the visitor's active message and the reply; both go to TypeSafe
+only while the gate is set. `shadow` changes nothing on the wire and adds no
+wait: Jev is asked after the conversation log has written the turn, and the
+answers are recorded in `decision_reviews` (subject `agent_messages`, the
+assistant row) for labeling. `enforce` waits at most 800 ms
+(`ASK_WAVES_JEV_CHECK_GRACE_MS`) once the reply is settled: a yes on either
+question replaces the reply with the same reviewed copy the claim chokepoint
+serves (emergency direction when it applies, else the English or Spanish
+"follow the product label" answer); a no, or a late or failed answer, keeps
+the reply (fails open: the chokepoint already passed it), and a kept reply's
+answers are recorded as in shadow. The response shape is unchanged in every
+mode. Kill switch: unset the gate. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
@@ -5072,7 +5119,7 @@ dependency).
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
 `/api/public/pricing-ranges` (read-only engine-derived per-service price
-ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
+ranges; `top_dressing` is no longer published (quote-only, owner 2026-10-29) — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
@@ -6127,8 +6174,7 @@ to show the van scene above the secure-card block. Unset gate = `false`
 in production (non-production envs return true, as above); no other field
 changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
 the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
-start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
-`GATE_BOOKING_LUNCH_BLOCK` is set.
+start grid is the shared 09:00–17:00 customer grid with 12:00 present.
 `GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
 unchanged by it.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
@@ -6165,8 +6211,7 @@ visit with 409 code
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
-(route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
-is set, and the self-serve notice window):
+(route feasibility and the self-serve notice window):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -6259,8 +6304,7 @@ lane that becomes unavailable refreshes eligibility with null availability,
 allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
-feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
-and the self-serve notice window — the anti-forgery model
+feasibility and the self-serve notice window — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion
@@ -6591,10 +6635,9 @@ from the project's own findings/recommendations/follow-up — data the sibling
 (`inspection_fee` class) are excluded server-side; no LLM, so nothing new can
 leak or be injected. Same long-lived report token + format gate as the
 `/data` viewer (`extractProjectReportTokenLookup`), inherits the router-level
-20 req/min `reportLimiter`, question length capped at 500 chars. The WDO
-payment hold 402s BEFORE any content-derived answer; the paper compliance
-documents (wdo_inspection, pre_treatment_termite_certificate) return a
-generic 404 — their pages never mount the ask bar. Only write: an
+20 req/min `reportLimiter`, question length capped at 500 chars. The paper
+compliance documents (wdo_inspection, pre_treatment_termite_certificate)
+return a generic 404 — their pages never mount the ask bar. Only write: an
 `activity_log` analytics row recording question length, never answer
 content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
@@ -7694,8 +7737,8 @@ document holds the per-route entries only.
 
 Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
 
-Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry five new optional keys, `final_exterior_date`, `final_exterior_time` (HH:MM, added 2026-10-23), `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token, hold and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. `final_exterior_time` must be blank or a clock time (HH:MM), else 422 `final_exterior_time_invalid`, and `/data` blanks a stored non-time value. No new route, token, eligibility, privacy or rate-limit change. Send readiness (2026-10-23, staff send only): a warranty from the form's choices, and a clock-time `treatment_time`, re-judged after the delivery claim (422 `missing_compliance_details`). The final-exterior keys never gate the send: they fill the notice's reference blank, and the later visit's full record is its own certificate. On a certificate that already has a link, `PUT /admin/projects/:id` refuses an edit that leaves a field it changed failing these checks (422 `published_certificate_incomplete`).
+Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry five new optional keys, `final_exterior_date`, `final_exterior_time` (HH:MM, added 2026-10-23), `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. `final_exterior_time` must be blank or a clock time (HH:MM), else 422 `final_exterior_time_invalid`, and `/data` blanks a stored non-time value. No new route, token, eligibility, privacy or rate-limit change. Send readiness (2026-10-23, staff send only): a warranty from the form's choices, and a clock-time `treatment_time`, re-judged after the delivery claim (422 `missing_compliance_details`). The final-exterior keys never gate the send: they fill the notice's reference blank, and the later visit's full record is its own certificate. On a certificate that already has a link, `PUT /admin/projects/:id` refuses an edit that leaves a field it changed failing these checks (422 `published_certificate_incomplete`).
 
-Pre-treat certificate Bora-Care record (owner 2026-10-24, no gate): the certificate's `findings` may carry three new optional keys, `framing_inspection_date`, `wood_base_plate_pct` and `borate_treatment_date`, entered by staff on the certificate form for Bora-Care jobs. They ride the same `findings` object on the project report payload (`/api/reports/project/:token/data`), with the same token, hold and fee-scrub rules as every other certificate field, and the certificate prints them on one "Bora-Care record" line on both layouts. The admin create/update routes store only checked values: `framing_inspection_date` blank or a real date no later than today (ET), else 422 `framing_inspection_date_invalid`; `borate_treatment_date` blank or a real date from the initial treatment to today, else 422 `borate_treatment_date_invalid`; `wood_base_plate_pct` blank or a plain percent from 0 to 100, else 422 `wood_base_plate_pct_invalid`. Those routes are the only writers of certificate findings, so `/data` blanks none of these keys; the certificate prints a base plate share only when it is a plain percent. A recorded `borate_treatment_date` scopes the applicator signature to the initial treatment, as a final exterior record does. The keys never gate the send. No new route, token, eligibility, privacy or rate-limit change.
+Pre-treat certificate Bora-Care record (owner 2026-10-24, no gate): the certificate's `findings` may carry three new optional keys, `framing_inspection_date`, `wood_base_plate_pct` and `borate_treatment_date`, entered by staff on the certificate form for Bora-Care jobs. They ride the same `findings` object on the project report payload (`/api/reports/project/:token/data`), with the same token and fee-scrub rules as every other certificate field, and the certificate prints them on one "Bora-Care record" line on both layouts. The admin create/update routes store only checked values: `framing_inspection_date` blank or a real date no later than today (ET), else 422 `framing_inspection_date_invalid`; `borate_treatment_date` blank or a real date from the initial treatment to today, else 422 `borate_treatment_date_invalid`; `wood_base_plate_pct` blank or a plain percent from 0 to 100, else 422 `wood_base_plate_pct_invalid`. Those routes are the only writers of certificate findings, so `/data` blanks none of these keys; the certificate prints a base plate share only when it is a plain percent. A recorded `borate_treatment_date` scopes the applicator signature to the initial treatment, as a final exterior record does. The keys never gate the send. No new route, token, eligibility, privacy or rate-limit change.
 
 Lawn protocol card, December potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K, dark, owner 2026-10-23): the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) carries `dynamicContext.lawnProtocol.products`, the products of the visit's protocol window. The staged December row for LESCO Black Out 0-0-24 AM Spar-TECH (a non-default row that exists for every v13 window) is listed in it ONLY when all of these hold: the swap gate is live (strict `true`, read at call time; it also needs `GATE_LAWN_TROUBLE_AREAS` and its prerequisites, and `GATE_LAWN_SPOT_TARGET`), AND the visit's `service_products` shows that product was applied on this record. With the gate off, with any prerequisite gate off, for a lawn whose visit did not apply it, or when the `service_products` read fails (the read fails closed: the row is dropped), the payload lists exactly the products it listed before the row existed (byte-identical). The row is identified by its stored trigger (`gates.trigger = active_large_patch_mapped`) or name, never by free text. No new key, route, token, privacy or rate-limit surface; every other product, and a window with no such row, is returned untouched. The same row is also left out of the technician pre-visit brief unless the gate is live (a technician surface, not public).

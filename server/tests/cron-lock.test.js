@@ -817,13 +817,13 @@ describe('cron-lock job-health recorder', () => {
   test('standalone recorders (no held connection) still write through the pool', async () => {
     // scheduler.js records skipped-tick failures OUTSIDE runExclusive — no
     // pinned connection exists there, so the pool path is correct.
-    await recordJobStart('reschedule-intent-watcher');
+    await recordJobStart('promised-estimate-watcher');
     expect(db).toHaveBeenCalledWith('job_health');
     expect(db.__builder.insert).toHaveBeenCalledWith(expect.objectContaining({
-      job_name: 'reschedule-intent-watcher', last_status: 'running',
+      job_name: 'promised-estimate-watcher', last_status: 'running',
     }));
 
-    await recordJobEnd('reschedule-intent-watcher', Date.now(), new Error('tick skipped: no_connection'));
+    await recordJobEnd('promised-estimate-watcher', Date.now(), new Error('tick skipped: no_connection'));
     expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
       last_status: 'failed',
       last_error: 'tick skipped: no_connection',

@@ -363,6 +363,16 @@ function normalizeCommercialTerms(raw) {
   return Object.values(terms).some((v) => v !== null) ? terms : null;
 }
 
+// What the site is used for, which decides Florida sales tax on pest work (Rule 12A-1.009): homes, apartments,
+// condos and their common areas are residential and not taxed, whoever pays; a business building is taxed. The
+// builder's pick sets each row's Taxable default (owner 2026-10-28, proposal defaults check). Null when unset (every
+// proposal saved before the pick existed).
+const BUILDING_USES = new Set(['residential', 'nonresidential']);
+function normalizeBuildingUse(raw) {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return BUILDING_USES.has(value) ? value : null;
+}
+
 function normalizeBuilding(raw = {}, index = 0) {
   const lineItems = Array.isArray(raw.lineItems || raw.line_items)
     ? (raw.lineItems || raw.line_items).map(normalizeLineItem)
@@ -781,6 +791,7 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
+  const buildingUse = normalizeBuildingUse(base.buildingUse);
 
   return {
     enabled: base.enabled === true,
@@ -790,6 +801,8 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     propertyAddress: String(base.propertyAddress || estimate.address || '').slice(0, 200),
     taxRate: Math.min(1, Math.max(0, num(base.taxRate, 0))),
     taxLabel: String(base.taxLabel || 'Sales tax').slice(0, 60),
+    // Present only when picked, so a proposal saved before the pick keeps its exact shape.
+    ...(buildingUse ? { buildingUse } : {}),
     terms: base.terms ? String(base.terms).slice(0, 2000) : null,
     ...(base.validThrough ? { validThrough: base.validThrough } : {}),
     buildings,
@@ -908,6 +921,7 @@ module.exports = {
   normalizeCorrectiveWork,
   normalizeCustomerResponsibilities,
   normalizeCommercialTerms,
+  normalizeBuildingUse,
   normalizePrograms,
   PROGRAM_FAMILIES,
   normalizePaymentTerms,

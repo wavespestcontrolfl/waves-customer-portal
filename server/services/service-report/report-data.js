@@ -474,7 +474,7 @@ async function attachApprovedReportProductFactsBase(knex, products = [], { froze
       product_category: product.product_category || facts.category,
       active_ingredient: product.active_ingredient || facts.activeIngredient,
       epa_reg_number: product.epa_reg_number || facts.epaRegNumber,
-      // GATE_REPORT_CLEANUP_1020: the catalog formulation, so a granular product whose name carries no mark still
+      // The catalog formulation, so a granular product whose name carries no mark still
       // reads as granular (internal row field; never on the payload).
       catalog_formulation: catalog?.formulation || null,
       approved_report_product_facts: facts,
@@ -4993,10 +4993,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const frozenUseTexts = reportFacts.frozenUseTextsFor(serviceLine, service.structured_notes);
   // GATE_LAWN_REPORT_POLISH: the one-label-line decision frozen at completion ({} when the record carries none).
   const frozenLabelDrops = reportFacts.frozenLabelDropsFor(serviceLine, service.structured_notes);
-  // GATE_REPORT_CLEANUP_1020: the formulation a frozen row lacks, for the granular method check below.
+  // The formulation a frozen row lacks, for the granular method check below.
   const formulationById = await reportCleanup1020.catalogFormulations(knex, products);
   const applications = products.map((product, index) => {
-    // GATE_REPORT_CLEANUP_1020: a granular product never prints a broadcast spray method (a record made before the fix).
+    // A granular product never prints a broadcast spray method (a record made before the fix).
     const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name, formulation: product.catalog_formulation || formulationById.get(String(product.product_id)) });
     return {
       id: product.id || `product-${index + 1}`,
@@ -5970,7 +5970,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
         reentryText: reportFacts.frozenReentryText(service),
-        // GATE_REPORT_CLEANUP_1020: the water-in the products' own frozen rules ask for, used only when the full instruction makes no claim.
+        // The water-in the products' own frozen rules ask for, used only when the full instruction makes no claim.
         waterInRule: reportCleanup1020.waterInRuleOf(products),
         // GATE_LAWN_WATER_RAIN: the rain card's permission, frozen at completion (null = today's card).
         rainAdvice: reportFacts.frozenRainAdvice('lawn', service.structured_notes),

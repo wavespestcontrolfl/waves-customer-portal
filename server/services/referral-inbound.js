@@ -20,9 +20,11 @@
  *    milestone text at 3, 5 and 10 conversions, and the reward text and email
  *    only when require_service_completion is off (it is on);
  *  - when a performed recurring visit is already on record, the existing
- *    first-service credit runs at once with notify:false, so both $25 credits
- *    post with no text or email; otherwise the completion flow credits at the
- *    next performed recurring visit, as today.
+ *    first-service credit runs at once, so both $25 credits post now;
+ *    otherwise the completion flow credits at the next performed recurring
+ *    visit, as today. Either way the referrer gets one thank-you email at the
+ *    next 9:00 AM ET and no text (referral-engine sendDueReferralRewardEmails,
+ *    owner 2026-10-29).
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -383,7 +385,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   result.creditsNow = Boolean(firstVisit);
   if (firstVisit && settings.require_service_completion) {
     try {
-      const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id, notify: false });
+      const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id });
       result.credited = credit ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars } : null;
     } catch (err) {
       logger.warn(`[referral-inbound] credit failed for referral ${referral.id}: ${err.code || err.message}`);

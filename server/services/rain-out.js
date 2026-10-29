@@ -905,6 +905,145 @@ function sameDayOptions(now = new Date()) {
   return options;
 }
 
+// Route-checked "later today" hours (GATE_TECH_MOVE_ROUTE_TIMES, dark; owner
+// 2026-10-28, "yes techs can move visits from their own app"). Read at CALL
+// time so an unset is the kill switch. The tech sheet used to guess now + 2h
+// and now + 4h with no route check; on, it offers the hours the technician's
+// route can actually keep, each with the minutes of drive it adds. The free
+// straight-line estimate only: a technician's request never buys Google road
+// times (those stay staff-only, GATE_PICKER_ROAD_CHECK).
+const TECH_MOVE_ROUTE_MAX_OPTIONS = 4;
+const SAME_DAY_LEAD_MINUTES = 60;
+// The stop the tech is at or driving to cannot be routed from itself
+// (arrival-route resolvePlacementOrigin refuses an active target).
+const ACTIVE_TARGET_STATUSES = new Set(['en_route', 'on_site']);
+
+function techMoveRouteTimesLive() {
+  return require('../config/feature-gates').gateEnvValue('GATE_TECH_MOVE_ROUTE_TIMES');
+}
+
+// Added drive of a finder slot in whole minutes; null when the finder has no
+// number for it (such an hour sorts after every hour that has one).
+function slotDriveMinutes(slot) {
+  const drive = Number(slot.detour_minutes);
+  return slot.detour_minutes == null || !Number.isFinite(drive) ? null : Math.round(drive);
+}
+
+// The feasible on-the-hour starts for today, one per hour (lowest added drive
+// wins a shared hour), lowest drive first, ties earlier start, at most 4.
+function pickRouteHours(slots, { todayStr, firstStart }) {
+  const byStart = new Map();
+  for (const slot of slots) {
+    const start = hhmmToMinutes(slot.start_time);
+    const inBounds = start != null && start % 60 === 0 && start >= firstStart && start <= SAME_DAY_LAST_START_MINUTES;
+    if (slot.date !== todayStr || !inBounds) continue;
+    const drive = slotDriveMinutes(slot);
+    const kept = byStart.get(start);
+    if (!kept || (drive ?? Infinity) < (kept.drive ?? Infinity)) byStart.set(start, { start, drive });
+  }
+  return [...byStart.values()]
+    .sort((a, b) => ((a.drive ?? Infinity) - (b.drive ?? Infinity)) || a.start - b.start)
+    .slice(0, TECH_MOVE_ROUTE_MAX_OPTIONS);
+}
+
+function routeHourOption({ start, drive }, todayStr) {
+  const window = { start: minutesToHHMM(start), end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES) };
+  return {
+    kind: 'same_day',
+    date: todayStr,
+    window,
+    label: 'Later today',
+    display: `Today, ${displayWindow(window)}`,
+    ...(drive != null ? { driveMinutes: drive } : {}),
+  };
+}
+
+// The visit's saved service location, by the staff finder's rule
+// (day-stops serviceLocationSelects + resolveServiceLocation): its own pin,
+// else its stamped service address (geocode cache only, never a paid lookup),
+// else the customer's pin. A secondary property never searches from home.
+async function visitServiceLocation(service) {
+  if (!service.service_address_line1) {
+    return { lat: service.lat ?? service.customer_latitude, lng: service.lng ?? service.customer_longitude };
+  }
+  const { resolveServiceLocation } = require('./scheduling/day-stops');
+  return resolveServiceLocation({
+    lat: service.lat, lng: service.lng, address_line1: service.service_address_line1,
+    city: service.service_address_city, state: service.service_address_state, zip: service.service_address_zip,
+  }, undefined, { cacheOnly: true });
+}
+
+// True when the finder judged today's route and refused every hour for a
+// real reason (arrival window, return time, an overcommitted day); only
+// route_unverified refusals (or none) mean it could not judge the route.
+function routeJudgedFull(result, todayStr) {
+  const reasons = Object.keys(result?.rejections_by_date?.[todayStr] || {});
+  return reasons.some((reason) => reason !== 'route_unverified');
+}
+
+// null = no route answer (an active target, the finder threw or answered
+// with an error, or it could not verify the route): the caller falls back to
+// sameDayOptions(). [] = the route was judged and keeps no hour today, so the
+// sheet offers no same-day hour rather than an unchecked guess.
+async function routeSameDayOptions(service, now = new Date()) {
+  if (ACTIVE_TARGET_STATUSES.has(service.status)) return null;
+  const parts = etParts(now);
+  const todayStr = etDateString(now);
+  const firstStart = Math.max(
+    Math.ceil((parts.hour * 60 + parts.minute + SAME_DAY_LEAD_MINUTES) / 60) * 60,
+    SAME_DAY_FIRST_START_MINUTES,
+  );
+  try {
+    const location = await visitServiceLocation(service);
+    // No usable pin: the route cannot be judged, so the guesses stay.
+    if (location?.lat == null || location?.lng == null) return null;
+    const { findAvailableSlots } = require('./scheduling/find-time');
+    const result = await findAvailableSlots({
+      lat: location.lat,
+      lng: location.lng,
+      durationMinutes: RESCHEDULE_WINDOW_MINUTES,
+      dateFrom: todayStr,
+      dateTo: todayStr,
+      ...(service.technician_id ? { technicianId: service.technician_id } : {}),
+      excludeServiceIds: [service.id],
+      // A shared stop is not asked as a whole visit (only the staff box asks
+      // that, arrival-route-visit-unit wiring test): its route_unverified
+      // answer keeps the +2h/+4h guesses below.
+      arrivalWindow: { serviceId: service.id },
+      // Today is the only date: a Sunday route is searched too (the blackout
+      // check above already covers a closed day).
+      includeWeekends: true,
+      // The sheet commits on-the-hour one-hour blocks; rank every hour.
+      slotStepMinutes: 60,
+      everyStepStart: true,
+      earliestStartMin: firstStart,
+      topN: Number.POSITIVE_INFINITY,
+      // A tech moves a visit mid-route: today's route continues from the
+      // current stop (an active stop otherwise leaves every hour unverified).
+      fromActiveStop: true,
+      // No Google drive times for a technician's request, the model only.
+      providerTravel: false,
+    });
+    if (result?.error) {
+      logger.warn(`[rain-out] tech route hours unavailable for ${service.id}, using the +2h/+4h guesses: ${result.error}`);
+      return null;
+    }
+    const picked = pickRouteHours(Array.isArray(result?.slots) ? result.slots : [], { todayStr, firstStart });
+    if (picked.length) return picked.map((hour) => routeHourOption(hour, todayStr));
+    return routeJudgedFull(result, todayStr) ? [] : null;
+  } catch (err) {
+    logger.warn(`[rain-out] tech route hours failed for ${service.id}, using the +2h/+4h guesses: ${err.message}`);
+    return null;
+  }
+}
+
+// Gate off = sameDayOptions() exactly as before.
+async function sameDayChoices(service) {
+  if (!techMoveRouteTimesLive()) return sameDayOptions();
+  const routed = await routeSameDayOptions(service);
+  return routed === null ? sameDayOptions() : routed;
+}
+
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
 // picking a time that overlaps another appointment gave no warning until
 // commit's SLOT_TAKEN). Same tech-blind predicate — occupancy.js's own
@@ -1329,6 +1468,10 @@ async function checkSlots({ targets, caller = null } = {}) {
   }));
   // results[i] answers targets[i] — the bulk bars rely on the alignment.
   const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
+  // One Google budget for the whole batch (up to 25 checks at once), so an
+  // admin's batch keeps the per-request limit and buys a shared leg once
+  // (GATE_PICKER_ROAD_CHECK). A technician's checks never use it.
+  const batchBudget = require('./scheduling/hint-road-times').createPickerBudget();
   const results = await Promise.all(parsed.map(async (p) => {
     if (p.serviceId && arrivalWindowRoutingEnabled()) {
       try {
@@ -1336,6 +1479,12 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+          // The pickers' Google road times are staff-only: a technician's
+          // check stays on the model. Counted against the admin who asked
+          // (picker-road-spend.js).
+          roads: caller?.isAdmin === true,
+          roadSpender: caller?.isAdmin === true ? caller.technicianId || null : null,
+          pickerBudget: batchBudget,
         });
         return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
       } catch (err) {
@@ -1367,7 +1516,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // not be offered (findRescheduleOptions covers tomorrow onward; same-day
   // candidates are built here). Fail-open helper.
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
-  const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
+  const sameDay = (await isBlackoutDate(todayStr)) ? [] : await sameDayChoices(service);
 
   // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h

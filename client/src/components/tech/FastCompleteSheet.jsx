@@ -91,7 +91,7 @@ import {
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
-  useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
+  useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { NO_STATION_GATE, NO_STATION_READ, StationCard, useStationChecks } from './FastCompleteStations';
@@ -1434,20 +1434,17 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
 // "Feet sprayed" box for a perimeter spray with no saved trace, and its trace read holds nothing: still loading or
 // failed, the body omits traceSeen (a saved trace the sheet could not read still shows on the report). A saved trace
 // that gives no feet (an outline, an old trace) keeps the rules below.
-function sendHolds({ active, draft, writing, perimeterFeet, traceRead, oneTap = false, reusing = false, typedFeet = null, typedFeetText = '' }) {
+function sendHolds({ active, draft, writing, perimeterFeet, traceRead, oneTap = false, typedFeet = null, typedFeetText = '' }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
-  // "Same as last visit" still copying: the send waits for the trace it will carry.
-  const copying = [reusing, 'Copying the last trace…'];
   // No trace and no typed feet are required on any visit (owner 2026-10-22, "trace should not be required for any
   // service"). Feet typed in the box (shown beside a perimeter spray, feetFieldFor) must be a whole number above 0: a
   // mistake is corrected, never dropped. A box the visit no longer shows holds nothing.
   if (oneTap && !traceRead.zone) {
     const badFeet = String(typedFeetText).trim() !== '' && typedFeet == null && perimeterSprayRow(active, draft);
-    return [...ready.report, copying, [badFeet, 'Type the feet as a whole number above 0, or leave the box empty.']];
+    return [...ready.report, [badFeet, 'Type the feet as a whole number above 0, or leave the box empty.']];
   }
   return [
     ...ready.report,
-    copying,
     // A saved trace is still read first, so the send carries the stamp of the trace the tech saw.
     ...ready.trace,
     // A saved outline (a lawn or yard capture, no perimeter length) beside a perimeter spray would show on the report
@@ -1930,10 +1927,9 @@ function ReportFlowForm({
   // if the office has moved the visit to another one since.
   const loadedPropertyId = ctx.visit?.propertyId;
   const [traceError, setTraceError] = useState('');
-  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
-  const reuse = useTraceReuse({
-    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
-  });
+  // A trace message (a failed remove) is stale once the visit has a trace by any path.
+  const hasZone = !!trace.zone;
+  useEffect(() => { if (hasZone) setTraceError(''); }, [hasZone]);
   // The inline tracer sits inside each step, so while it is open the report, the send and every way to another step
   // wait (a step change would remount it and drop its points, or a save in flight), and so do the header's Full form
   // and Close.
@@ -1958,7 +1954,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationSendHold: recordState.stationGate.complete, typedFeet: typedFeetValue, typedFeetText: typedFeet, reusing: reuse.reusing,
+    stationSendHold: recordState.stationGate.complete, typedFeet: typedFeetValue, typedFeetText: typedFeet,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
@@ -2132,7 +2128,6 @@ function ReportFlowForm({
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
-        reuse={reuse}
         traceError={traceError}
         feetField={feetFieldFor({ oneTap, trace, active, draft, value: typedFeet, onChange: setTypedFeet })}
         stockNotices={stockNotices}
@@ -2208,14 +2203,8 @@ function ReportFlowForm({
   );
 }
 
-// The report footer's trace buttons: read the trace again, remove it, or
-// "Same as last visit" (a one-tap copy of the customer's last trace at this place).
-// No copy offered (a lane or typed visit, a spot visit, a trace already saved).
-const NO_REUSE = { offer: null, reusing: false, feet: null };
-
-// `traceStep`: the report step has a perimeter spray to trace (offered, never
-// required); with none, the last trace is not offered.
-function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
+// The report footer's trace buttons: read the trace again, or remove it.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace }) {
   return (
     <>
       {onRetryTrace && (
@@ -2223,11 +2212,6 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
       )}
       {onRemoveTrace && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
-      )}
-      {traceStep && reuse.offer && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
-          {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
-        </Button>
       )}
     </>
   );
@@ -2239,7 +2223,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 function ReportStep({
   wrapUp, service, report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, tracer, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, reuse = NO_REUSE, feetField, stockNotices,
+  onBackFromPrompt, feetField, stockNotices,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2252,8 +2236,6 @@ function ReportStep({
         onRetryTrace={onRetryTrace}
         onRemoveTrace={onRemoveTrace}
         removingTrace={removingTrace}
-        reuse={reuse}
-        traceStep={!!trace}
       />
     </CompleteFooter>
   );
@@ -2297,7 +2279,7 @@ function ReportStep({
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {laneCard}
-        {showDraft && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} tracer={tracer} />}
+        {showDraft && <TraceSection trace={trace} locked={locked} onTrace={onTrace} tracer={tracer} />}
         <FeetSprayedField field={feetField} locked={locked} />
         {wrapUp.enabled && <fieldset className="tech-visit-form" disabled={locked}><FastCompleteWrapUp wrapUp={wrapUp} /></fieldset>}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}

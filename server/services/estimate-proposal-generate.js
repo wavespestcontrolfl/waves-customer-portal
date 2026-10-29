@@ -322,6 +322,25 @@ function buildFamilyRegistry(taxabilityMap = null) {
   return registry;
 }
 
+// The business-building Taxable rule of each saved row that names a service,
+// keyed by row id (owner 2026-10-28, building use): the same
+// commercialTaxableDefault generation applied, without the estimate's own
+// per-row flag. The builder restores a residential proposal's rows to these
+// when the operator picks Business building, so a canonical service key
+// (bed_bug, wdo_inspection) keeps its own rule instead of its family's.
+function businessTaxRulesFor(proposal, taxabilityMap = null) {
+  const rules = {};
+  const add = (row, oneTime) => {
+    if (row?.id && row.service) rules[row.id] = commercialTaxableDefault(row.service, undefined, { taxabilityMap, oneTime });
+  };
+  for (const work of proposal?.correctiveWork || []) add(work, true);
+  for (const building of proposal?.buildings || []) {
+    for (const line of building.lineItems || []) add(line, line.frequency === 'one_time');
+  }
+  for (const program of proposal?.programs || []) add(program, false);
+  return rules;
+}
+
 function parseEstimateData(estimateData) {
   if (!estimateData) return {};
   if (typeof estimateData === 'string') {
@@ -1430,7 +1449,9 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
   // reviews/overrides it like every generated value.
   const anyTaxable = [...(outPrograms || []), ...(outCorrective || [])].some((entry) => entry.taxable === true);
   const suggestedTaxRate = anyTaxable
-    ? await resolveCommercialPrepayBaseRate(estimate.customer_id ?? estimate.customerId ?? null, { database })
+    ? await resolveCommercialPrepayBaseRate(estimate.customer_id ?? estimate.customerId ?? null, {
+      database, propertyId: estimate.property_id || estimate.propertyId || undefined,
+    })
     : null;
   return {
     propertyScope: derivePropertyScope(estimateData),
@@ -1464,6 +1485,7 @@ module.exports = {
   deriveResponsibilities,
   programFamilyForService,
   buildFamilyRegistry,
+  businessTaxRulesFor,
   loadTaxabilityMap,
   loadTaxabilityMapStrict,
   PROGRAM_EXCLUSIONS,

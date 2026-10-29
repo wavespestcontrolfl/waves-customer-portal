@@ -184,7 +184,8 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     // the accept path. Tax dollars round to cents exactly as InvoiceService
     // does (rate * after-discount subtotal), so preview == minted total.
     const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
-      estimate.customer_id || estimate.customerId || null, {}
+      estimate.customer_id || estimate.customerId || null,
+      { propertyId: estimate.property_id || estimate.propertyId || undefined },
     );
     const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
       prepayDiscountApplied: Number(resolved.discount) > 0,
@@ -1002,6 +1003,12 @@ async function winCommercialProposal(trx, updatedEstimate) {
   // Flag the customer commercial for a TAXABLE proposal even when no first
   // invoice is built now. Idempotent.
   await proposalWin.flagProposalCustomerCommercialIfTaxable({
+    trx,
+    customerId: updatedEstimate.customer_id,
+    proposal: normalizeProposal(updatedEstimate),
+  });
+  // The proposal's building use, which decides the tax on later visits (GATE_BUILDING_USE_TAX).
+  await proposalWin.recordProposalBuildingUse({
     trx,
     customerId: updatedEstimate.customer_id,
     proposal: normalizeProposal(updatedEstimate),

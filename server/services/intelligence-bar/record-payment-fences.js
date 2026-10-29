@@ -16,8 +16,6 @@
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
  *           been edited since (edit time, scheduled date, service type) or is gone, or a technician started its job timer since (the
  *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen);
- *         - a project's report is held for this payment ('held' / 'releasing'): paying would release it to the customer, which
- *           the card cannot disclose. Under the lock the project rows are locked FOR UPDATE;
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
@@ -35,7 +33,6 @@ const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown �
 const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
 const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
 const TIMER_TEXT = 'A technician started the visit timer since this card; try again after the visit — nothing was recorded';
-const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 
 const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, drift: true });
@@ -65,12 +62,6 @@ async function closeoutVisitUnchanged(database, visit) {
     && (visit.status === undefined || (row.status ?? null) === (visit.status ?? null));
 }
 
-async function heldReportExists(database, invoiceId, { lock }) {
-  const query = database('projects').where({ invoice_id: invoiceId });
-  const projects = await (lock ? query.forUpdate() : query).select('id', 'report_hold_status');
-  return projects.some((p) => ['held', 'releasing'].includes(String(p.report_hold_status || '').toLowerCase()));
-}
-
 async function annualTermExists(database, row) {
   if (await require('../invoice-prepay').resolveInvoiceTermId(row, database, { strict: true })) return true;
   return Boolean((await database.schema.hasTable('annual_prepay_terms'))
@@ -91,7 +82,6 @@ function settlementFenceFor(pin) {
     // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
     // promised closeout would silently not happen. The closeout's own predicate, on the same handle.
     if (pin.closeout && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
-    if (await heldReportExists(database, pin.invoiceId, { lock: Boolean(locked) })) throw drift(HELD_REPORT_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     return true;
   };

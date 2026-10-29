@@ -12,12 +12,20 @@
  *     is never asked.
  *  3. A chip's rain is the highest NWS hourly chance across its window.
  *  4. No stop coordinates reach the serialized answer.
+ *  5. The chips' Google prices are staff-only and counted against the
+ *     pickers' durable ceilings; unsent lookups are given back (Codex #6881
+ *     security).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/scheduling/picker-road-spend', () => ({
+  reserveRoadSpend: jest.fn(async () => ({ allowed: true, day: '2026-10-08' })),
+  releaseRoadSpend: jest.fn(async () => {}),
+}));
 
 const { GAP_LEGS } = require('../services/scheduling/find-time');
 const { pickBestRows, buildBestRows, rainForWindow, buildHintSummary } = require('../services/scheduling/find-time-hints');
 const { priceChipsOnRoads, _test } = require('../services/scheduling/hint-road-times');
+const { reserveRoadSpend, releaseRoadSpend } = require('../services/scheduling/picker-road-spend');
 
 const PREV = { lat: 27.4208, lng: -82.4929 };
 const NEXT = { lat: 27.4111, lng: -82.4045 };
@@ -86,14 +94,19 @@ describe('priceChipsOnRoads', () => {
     if (ENV === undefined) delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
     else process.env.GATE_BEST_TIMES_ROAD_TIMES = ENV;
     _test.roadCache.clear();
+    reserveRoadSpend.mockClear();
+    releaseRoadSpend.mockClear();
   });
 
-  function fakeTravel(minutesByLeg) {
+  const STAFF = { paid: true, spender: 's1' };
+  function fakeTravel(minutesByLeg, { sends = true } = {}) {
     const calls = [];
+    let sent = 0;
     return {
       calls,
       factory: () => ({
-        preload: async (legs) => { calls.push(legs.length); },
+        preload: async (legs) => { calls.push(legs.length); if (sends) sent += legs.length; },
+        diagnostics: () => ({ requests: sent, elements: sent }),
         lookup: (leg) => {
           const key = `${leg.from === NEW ? 'new' : 'prev'}>${leg.to === NEW ? 'new' : (leg.to === NEXT ? 'next' : 'x')}`;
           const minutes = minutesByLeg[key];
@@ -106,7 +119,7 @@ describe('priceChipsOnRoads', () => {
   test('gate off: model numbers, Google never asked', async () => {
     delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
     const travel = fakeTravel({});
-    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory });
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
     expect(chip).toMatchObject({ drive_in_minutes: 19, detour_minutes: 34, drive_source: 'estimate' });
     expect(travel.calls).toEqual([]);
   });
@@ -114,12 +127,12 @@ describe('priceChipsOnRoads', () => {
   test('gate on: in + out − base from Google, then served from the cache', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
-    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory });
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
     expect(chip).toMatchObject({ drive_in_minutes: 21, detour_minutes: 34, drive_source: 'google' });
     expect(travel.calls).toEqual([3]);
 
     const again = fakeTravel({});
-    const [cached] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: again.factory });
+    const [cached] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: again.factory, ...STAFF });
     expect(cached).toMatchObject({ drive_in_minutes: 21, drive_source: 'google' });
     expect(again.calls).toEqual([]);
   });
@@ -127,7 +140,7 @@ describe('priceChipsOnRoads', () => {
   test('a leg Google did not answer keeps the whole chip on the model', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const travel = fakeTravel({ 'prev>new': 21, 'prev>next': 15 });
-    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory });
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
     expect(chip).toMatchObject({ drive_in_minutes: 19, detour_minutes: 34, drive_source: 'estimate' });
   });
 
@@ -141,12 +154,46 @@ describe('priceChipsOnRoads', () => {
     expect(_test.chipLegs(hour('2026-10-09', '16:00', 34, 19), nowEt).in.departureMin).toBe(12 * 60);
   });
 
+  test("a technician's chips keep the model: Google never asked", async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, paid: false });
+    expect(chip).toMatchObject({ drive_in_minutes: 19, drive_source: 'estimate' });
+    expect(travel.calls).toEqual([]);
+    expect(reserveRoadSpend).not.toHaveBeenCalled();
+  });
+
+  test('staff chips are reserved against the durable ceilings, once per distinct leg', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
+    // Two chips at the same hour share all three legs.
+    await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19), hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
+    expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 's1', pro: 3, plain: 0 });
+    expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 's1', pro: 0, plain: 0, day: '2026-10-08' });
+  });
+
+  test('a ceiling refusal keeps the model and asks nothing', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    reserveRoadSpend.mockResolvedValueOnce({ allowed: false, reason: 'daily_cap' });
+    const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
+    expect(chip).toMatchObject({ drive_in_minutes: 19, drive_source: 'estimate' });
+    expect(travel.calls).toEqual([]);
+  });
+
+  test('lookups the source never sent are given back', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const travel = fakeTravel({}, { sends: false });
+    await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
+    expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 's1', pro: 3, plain: 0, day: '2026-10-08' });
+  });
+
   test('an unpinned neighbour is never priced', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
     const chip = hour('2026-10-08', '12:00', null, null);
     chip[GAP_LEGS] = { ...chip[GAP_LEGS], prev: null };
-    const [out] = await priceChipsOnRoads([chip], { travelFactory: travel.factory });
+    const [out] = await priceChipsOnRoads([chip], { travelFactory: travel.factory, ...STAFF });
     expect(out).toMatchObject({ drive_in_minutes: null, detour_minutes: null, drive_source: 'estimate' });
     expect(travel.calls).toEqual([]);
   });
@@ -178,6 +225,19 @@ describe('rain and the serialized rows', () => {
     expect(seen[0]).toMatchObject({ end_time: '14:00' });
     expect(seen[0][GAP_LEGS].durationMinutes).toBe(120);
     expect(out.picked.rain_chance).toBe(60);
+  });
+
+  test.each([
+    ['staff', { paidRoads: true, roadSpender: 's1' }, { paid: true, spender: 's1' }],
+    ['no payer given (a technician)', {}, { paid: undefined, spender: undefined }],
+  ])('the chips are priced for %s', async (_who, args, expected) => {
+    const priceChipsOnRoads = jest.fn(async (chips) => chips);
+    const picked = { start: '12:00', fits: true, detour_minutes: 34, drive_in_minutes: 19, [GAP_LEGS]: hour('2026-10-08', '12:00', 34, 19)[GAP_LEGS] };
+    await buildBestRows([day('2026-10-08', [])], {
+      pickedDate: '2026-10-08', today: '2026-10-06', lat: 1, lng: 2, picked, ...args,
+      deps: { priceChipsOnRoads, hourlyRain: async () => hourly },
+    });
+    expect(priceChipsOnRoads).toHaveBeenCalledWith(expect.any(Array), expected);
   });
 
   test('no chips: no forecast lookup', async () => {
@@ -275,7 +335,7 @@ describe('capacity chips stay estimates (Codex #6045 r9)', () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     try {
       const factory = jest.fn();
-      const [out] = await priceChipsOnRoads([{ ...day.hours[0], date: day.date }], { travelFactory: factory });
+      const [out] = await priceChipsOnRoads([{ ...day.hours[0], date: day.date }], { travelFactory: factory, paid: true, spender: 's1' });
       expect(out).toMatchObject({ drive_in_minutes: 18, drive_source: 'estimate' });
       expect(factory).not.toHaveBeenCalled();
     } finally {

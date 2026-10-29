@@ -9,7 +9,7 @@ import CommercialProposalPage from './CommercialProposalPage';
 const fixture = {
   bidToolsEnabled: true,
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office', customerEmail: 'office@example.invalid', customerPhone: '+19415550100' },
-  proposal: { enabled: true, title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
+  proposal: { enabled: true, buildingUse: 'nonresidential', title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
 };
 let saved; let previewVersion; let failSave; let calls; let interloperAfterSave; let duringSave; let duringBidBlob;
 beforeEach(() => {
@@ -421,7 +421,7 @@ it('shows no Bid tools switch and no bid sections when the gate is off', async (
 // number when typed and stays off the payload when blank, so the server keeps no key for it.
 it('saves a program visit length when typed and leaves it off when blank', async () => {
   saved.proposal = {
-    enabled: true, title: 'Synthetic proposal', buildings: [],
+    enabled: true, buildingUse: 'nonresidential', title: 'Synthetic proposal', buildings: [],
     programs: [{ id: 'program-1', service: 'pest', label: 'Interior Pest Control', frequencyPerYear: 12, pricePerApplication: 81.67, taxable: true }],
   };
   mount(); await screen.findByDisplayValue('Synthetic proposal');

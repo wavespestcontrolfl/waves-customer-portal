@@ -22,8 +22,6 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 // Backfills the CALL-source funnel row when a voicemail text-back lead is
 // attached here (the call path skipped it: recovery leads are customer-less).
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
-const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
@@ -46,29 +44,6 @@ const {
 const { cachedLeadMeasurements, pendingLeadMeasurements, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements');
 
 const LEAD_PREFILL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-function notifyTwilioFailure(payload) {
-  void alertTwilioFailure(payload).catch((alertErr) => {
-    logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`);
-  });
-}
-
-function scrubLeadAlertProviderError(value) {
-  return String(value || '')
-    .replace(/%2B1\d{10}/gi, '[phone]')
-    .replace(/\+1\d{10}\b/g, '[phone]')
-    .replace(/\b1\d{10}\b/g, '[phone]')
-    .replace(/\b\d{10}\b/g, '[phone]');
-}
-
-async function markLeadAlertCallLogFailed(callLogId, errorMessage, database = db) {
-  if (!callLogId) return;
-  await database('call_log').where({ id: callLogId }).update({
-    status: 'failed',
-    notes: `Twilio create failed: ${errorMessage}`,
-    updated_at: new Date(),
-  });
-}
 
 // Delegates to the shared robust title-caser (Mc/Mac/O'/particles/hyphens) so
 // form-lead names match every other ingestion path.
@@ -115,14 +90,6 @@ function commercialLeadFields(readiness) {
   return leadCommercialSignalFromReadiness(readiness)
     ? { is_commercial: true, is_residential: false }
     : {};
-}
-
-// Whether a new web lead rings Adam's cell (announce, or Press-1 bridge
-// under leadAutoBridge). Business hours only, and only with
-// GATE_LEAD_ALERT_CALL on (owner 2026-10-14: off for now). Otherwise the
-// lead takes the after-hours path: new_lead bell, legacy SMS as fallback.
-function shouldPlaceLeadAlertCall({ isDuringHours }) {
-  return !!isDuringHours && isEnabled('leadAlertCall');
 }
 
 // Enrolls this submission in the local new_lead automation sequence
@@ -750,150 +717,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // created (below) so the bell can deep-link the real lead id —
     // customer.id here made /admin/leads?lead=<id> resolve to nothing.
 
-    // Notify Adam — during business hours (8AM-8PM ET) trigger a call, otherwise SMS
-    const now = new Date();
-    const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
-    const isDuringHours = etHour >= 8 && etHour < 20;
-    let callConnected = false;
-    let attemptedLeadCallFrom = null;
-    let pendingLeadAlertCallLogId = null;
-    // The legacy "New lead!" SMS to Adam's cell is redirected into an
-    // internal_admin_alert bell (owner phones never receive raw SMS), so on
-    // every after-hours or call-fallback lead it duplicated the new_lead
-    // bell fired below (2026-07-30 audit: two bells one second apart per web
-    // lead). Record the intent here; the send happens after the new_lead
-    // trigger, and only if that bell/push failed to deliver.
-    let legacyLeadSmsWanted = false;
-
-    try {
-      const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-      if (shouldPlaceLeadAlertCall({ isDuringHours }) && twilioClient) {
-        // During business hours: ring Adam's cell with a voice announcement of
-        // the lead (no Press-1-to-connect, no auto-dialing the lead). Adam calls
-        // back manually from the admin portal or directly.
-        try {
-          const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          // Internal alert leg to Adam: dedicated caller ID (see config), NOT the
-          // main line. The customer-facing bridge leg below presents the lead's
-          // home line under GATE_HOME_LINE (Bradenton when their address names
-          // no office), else the main line.
-          const fromNumber = TWILIO_NUMBERS.internalAlertCallerId();
-          attemptedLeadCallFrom = fromNumber;
-          const autoBridge = isEnabled('leadAutoBridge');
-
-          if (autoBridge) {
-            // Press-1-to-connect auto-bridge. Create call_log row FIRST so
-            // outbound-admin-prompt / outbound-connect can update it without
-            // racing Twilio's webhook fire (2–5s after create()).
-            const bridgeCallerId = require('../services/home-line').homeLineCallerId(customer);
-            const [callLogRow] = await db('call_log')
-              .insert({
-                customer_id: customer.id,
-                direction: 'outbound',
-                from_phone: fromNumber,
-                to_phone: ADAM_CELL,
-                status: 'initiated',
-                source: 'lead-webhook-auto-bridge',
-                metadata: JSON.stringify({
-                  type: 'lead_auto_bridge',
-                  leadName: `${firstName} ${lastName}`,
-                  leadPhone: phoneFormatted,
-                  bridgeCallerId,
-                }),
-              })
-              .returning(['id']);
-            const callLogId = callLogRow?.id;
-            pendingLeadAlertCallLogId = callLogId || null;
-
-            const promptParams = new URLSearchParams({
-              customerNumber: phoneFormatted,
-              callerIdNumber: bridgeCallerId,
-              leadName: firstName,
-            });
-            if (callLogId) promptParams.set('callLogId', callLogId);
-
-            logger.info(`[lead-webhook] Auto-bridge ON — calling Adam for ${firstName} (${phoneFormatted}). callLogId: ${callLogId}`);
-            const call = await twilioClient.calls.create({
-              to: ADAM_CELL,
-              from: fromNumber,
-              url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-              statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-              statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-              record: false,
-            });
-            callConnected = true;
-            logger.info(`[lead-webhook] Auto-bridge CallSid: ${call.sid}`);
-
-            if (callLogId) {
-              await db('call_log').where({ id: callLogId }).update({
-                twilio_call_sid: call.sid,
-                updated_at: new Date(),
-              }).catch(err => {
-                logger.warn(`[lead-webhook] Could not backfill call_log.twilio_call_sid: ${err.message}`);
-              });
-            }
-          } else {
-            // Flag OFF — keep the announce-only behavior: speak the lead name
-            // and phone to Adam, he calls back manually.
-            logger.info(`[lead-webhook] Auto-bridge OFF — announcing lead ${firstName} (${phoneFormatted}) to Adam. Domain: ${domain}`);
-            const call = await twilioClient.calls.create({
-              to: ADAM_CELL,
-              from: fromNumber,
-              url: `https://${domain}/api/webhooks/twilio/lead-alert-announce?leadName=${encodeURIComponent(firstName)}&leadPhone=${encodeURIComponent(phoneFormatted)}`,
-              statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-              statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-              record: false,
-            });
-            callConnected = true;
-            logger.info(`[lead-webhook] Announce CallSid: ${call.sid}`);
-
-            try {
-              await db('call_log').insert({
-                customer_id: customer.id,
-                direction: 'outbound',
-                from_phone: fromNumber,
-                to_phone: ADAM_CELL,
-                twilio_call_sid: call.sid,
-                status: 'initiated',
-                source: 'lead-webhook-announce',
-                metadata: JSON.stringify({
-                  type: 'lead_alert_announce',
-                  leadName: `${firstName} ${lastName}`,
-                  leadPhone: phoneFormatted,
-                }),
-              });
-            } catch (logErr) {
-              logger.warn(`[lead-webhook] Could not log outbound call: ${logErr.message}`);
-            }
-          }
-        } catch (callErr) {
-          const safeError = scrubLeadAlertProviderError(callErr.message);
-          if (pendingLeadAlertCallLogId) {
-            await markLeadAlertCallLogFailed(pendingLeadAlertCallLogId, safeError).catch(err => {
-              logger.warn(`[lead-webhook] Could not mark lead alert call_log failed: ${err.message}`);
-            });
-          }
-          logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${safeError}`);
-          notifyTwilioFailure({
-            channel: 'voice',
-            direction: 'outbound',
-            phase: 'send_api',
-            status: 'failed',
-            errorMessage: safeError,
-            from: attemptedLeadCallFrom,
-            to: ADAM_CELL,
-            link: '/admin/leads',
-          });
-          legacyLeadSmsWanted = true;
-        }
-      } else {
-        // After hours, or GATE_LEAD_ALERT_CALL off: no call — the new_lead
-        // bell below covers the alert,
-        // with the legacy SMS as delivery fallback only.
-        legacyLeadSmsWanted = true;
-      }
-    } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
-
     // Seed the intake state machine so the customer's next inbound SMS
     // gets routed through server/services/lead-intake.js (classify →
     // ask for address → auto-create draft estimate → notify Adam).
@@ -1186,8 +1009,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     // Last-resort delivery only: the legacy SMS becomes an
     // internal_admin_alert bell for owner phones, so sending it alongside a
-    // delivered new_lead bell raised two notifications for the same lead.
-    if (legacyLeadSmsWanted && !leadBellDelivered) {
+    // delivered new_lead bell raised two notifications for the same lead
+    // (2026-07-30 audit: two bells one second apart per web lead).
+    if (!leadBellDelivered) {
       try {
         await TwilioService.sendSMS(ADAM_CELL,
           `New lead!\n${firstName} ${lastName}\nPhone: ${phoneFormatted}\nAddress: ${fullAddress || 'No address'}${additionalPropertiesNote ? `\n${additionalPropertiesNote}` : ''}\nSource: ${leadSource.detail || leadSource.source}${utmCampaign ? '\nCampaign: ' + utmCampaign : ''}`,
@@ -2299,15 +2123,12 @@ async function ringRepeatFormAlert(customer, attachedLeadId = null) {
 module.exports = router;
 module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
-  shouldPlaceLeadAlertCall,
   leadCommercialSignalFromReadiness,
   commercialLeadFields,
   buildExistingCustomerLeadUpdates,
   ringRepeatFormAlert,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
-  scrubLeadAlertProviderError,
-  markLeadAlertCallLogFailed,
   buildLeadWebhookIntake,
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,

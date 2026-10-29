@@ -573,6 +573,12 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
       expect(await signedQuoteMatches(withLength, database)).toBe(true);
     });
 
+    test('a building use picked after signing is the operator classification: still true', async () => {
+      const estimate = estimateRow();
+      const { database } = await signedFor(estimate);
+      expect(await signedQuoteMatches(estimateRow({}, { buildingUse: 'nonresidential' }), database)).toBe(true);
+    });
+
     test('nothing signed, or another customer: false', async () => {
       const estimate = estimateRow();
       const made = makeDb({ estimate });

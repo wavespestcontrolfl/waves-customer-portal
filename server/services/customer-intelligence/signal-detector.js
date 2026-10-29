@@ -1,70 +1,7 @@
 const db = require('../../models/db');
 const { excludeNeverAttemptedHoldDeferrals } = require('../collections/collection-hold');
 const logger = require('../logger');
-const MODELS = require('../../config/models');
-const { dispatchWithFallback } = require('../llm/call');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
-const { customerIntelAiLive } = require('../../config/feature-gates');
-
-// AI sentiment mining is a real per-customer FLAGSHIP call (every customer
-// with inbound SMS in the last 14 days, re-read nightly AND on every inbound
-// event rescore — ~60% of all highStakes volume in the 09-2026 ledger) that
-// feeds the churn/risk signal the owner ruled unusable as a gauge or trigger
-// (2026-08-29). Off by default; read at CALL time so a flip needs no
-// redeploy (customerIntelAiLive — the one reader shared with
-// retention-engine and the admin route). Deterministic signals below are
-// unaffected either way.
-
-// Structured-output contract (llm/call.js jsonSchema). The confidence floor
-// and the type map below still decide which signals are recorded.
-const SIGNALS_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['signals'],
-  properties: {
-    signals: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['type', 'confidence', 'evidence'],
-        properties: {
-          type: { type: 'string', enum: ['frustration', 'treatment_ineffective', 'price_complaint', 'competitor_interest', 'cancellation_intent'] },
-          confidence: { type: 'number', description: '0.0-1.0' },
-          evidence: { type: 'string', description: 'brief quote' },
-        },
-      },
-    },
-  },
-};
-
-// Structural, off-contract validation for dispatchWithFallback's validate
-// hook: a signal outside contract (confidence not a 0.0-1.0 number, evidence
-// not a non-blank string, or a type outside the schema enum) fails BOTH legs
-// of the chain rather than being silently coerced or stored — a
-// present-but-off-contract value is never rewritten to a different meaning.
-const SIGNAL_TYPE_ENUM = SIGNALS_SCHEMA.properties.signals.items.properties.type.enum;
-
-function invalidAiSignals(json) {
-  const signals = Array.isArray(json?.signals) ? json.signals : null;
-  if (!signals) return 'schema_invalid';
-  for (const sig of signals) {
-    if (!sig || typeof sig !== 'object') return 'schema_invalid';
-    if (!SIGNAL_TYPE_ENUM.includes(sig.type)) return 'schema_invalid';
-    if (typeof sig.confidence !== 'number' || !Number.isFinite(sig.confidence) || sig.confidence < 0 || sig.confidence > 1) return 'schema_invalid';
-    if (typeof sig.evidence !== 'string' || !sig.evidence.trim()) return 'schema_invalid';
-  }
-  return null;
-}
-
-// customer_signals.signal_value is varchar(255) (migration 20260401000037).
-// An accepted (in-contract) signal's composed value must never be able to
-// fail that insert — clip it here rather than let a long evidence quote
-// abort the whole nightly detectAllSignals loop.
-function clip(str, max) {
-  const s = String(str == null ? '' : str);
-  return s.length > max ? s.slice(0, max) : s;
-}
 
 const SIGNAL_TYPES = {
   PAYMENT_FAILED: { weight: -15, severity: 'warning' },
@@ -93,108 +30,6 @@ const SIGNAL_TYPES = {
   CALLBACK_MULTIPLE: { weight: -15, severity: 'warning' },
   CALLBACK_PATTERN: { weight: -25, severity: 'critical' },
 };
-
-// ---------------------------------------------------------------------------
-// AI Sentiment Mining
-// ---------------------------------------------------------------------------
-async function analyzeSentimentBatch(customerId) {
-  const signals = [];
-  try {
-    // Throttle: only run for customers with recent inbound SMS in last 14 days
-    const recentInbound = await db('sms_log')
-      .where('customer_id', customerId)
-      .where('direction', 'inbound')
-      .where('created_at', '>', new Date(Date.now() - 14 * 86400000))
-      .count('* as count').first();
-
-    if (parseInt(recentInbound?.count || 0) === 0) return signals;
-
-    // Get last 10 inbound SMS
-    const smsMessages = await db('sms_log')
-      .where('customer_id', customerId)
-      .where('direction', 'inbound')
-      .orderBy('created_at', 'desc')
-      .limit(10)
-      .select('message_body', 'created_at');
-
-    // Get last 5 tech notes
-    let techNotes = [];
-    try {
-      techNotes = await db('service_records')
-        .where('customer_id', customerId)
-        .whereNotNull('technician_notes')
-        .where('technician_notes', '!=', '')
-        .orderBy('service_date', 'desc')
-        .limit(5)
-        .select('technician_notes', 'service_date');
-    } catch { /* technician_notes column may not exist */ }
-
-    const smsText = smsMessages.map(m => m.message_body || '').filter(Boolean);
-    const notesText = techNotes.map(n => n.technician_notes || '').filter(Boolean);
-
-    if (smsText.length === 0 && notesText.length === 0) return signals;
-
-    const prompt = `Analyze the following customer communications for a pest control company.
-
-SMS messages from customer (most recent first):
-${smsText.map((t, i) => `${i + 1}. "${t}"`).join('\n')}
-
-Technician notes about customer (most recent first):
-${notesText.length > 0 ? notesText.map((t, i) => `${i + 1}. "${t}"`).join('\n') : 'None available'}
-
-Detect these sentiment signals and rate confidence 0.0-1.0:
-- frustration: customer seems frustrated/angry/annoyed
-- treatment_ineffective: customer reports bugs still present, treatment not working
-- price_complaint: customer mentions cost being too high, seeking cheaper options
-- competitor_interest: customer mentions other pest control companies
-- cancellation_intent: customer hints at or explicitly mentions cancelling/stopping service
-
-For each signal give its type, a confidence, and a brief quote as evidence. Only include signals you detect. Empty array if none found.`;
-
-    // FLAGSHIP first, Sol on a miss. A two-leg miss throws into the catch
-    // below, which returns the deterministic signals exactly as before.
-    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
-      laneId: 'signal_detector',
-      text: prompt,
-      jsonMode: true,
-      jsonSchema: SIGNALS_SCHEMA,
-      maxTokens: 500,
-    }, { validate: (result) => invalidAiSignals(result.json) });
-    if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
-    const aiSignals = res.json.signals || [];
-
-    // Map AI types to existing signal types (only confidence >= 0.6)
-    const typeMap = {
-      frustration: 'COMPLAINT_FILED',
-      treatment_ineffective: 'SERVICE_DECLINED',
-      price_complaint: 'PRICE_COMPLAINT',
-      competitor_interest: 'COMPETITOR_MENTIONED',
-      cancellation_intent: 'DOWNGRADE_REQUEST',
-    };
-
-    const severityMap = {
-      frustration: 'critical',
-      treatment_ineffective: 'warning',
-      price_complaint: 'warning',
-      competitor_interest: 'critical',
-      cancellation_intent: 'critical',
-    };
-
-    for (const sig of aiSignals) {
-      if (sig.confidence >= 0.6 && typeMap[sig.type]) {
-        signals.push({
-          signal_type: typeMap[sig.type],
-          signal_value: clip(`AI detected: ${sig.type} (${Math.round(sig.confidence * 100)}% confidence) — ${sig.evidence || ''}`, 255),
-          severity: severityMap[sig.type] || 'warning',
-        });
-      }
-    }
-  } catch (err) {
-    logger.debug(`[signal-detector] AI sentiment analysis failed for ${customerId}: ${err.message}`);
-  }
-
-  return signals;
-}
 
 class SignalDetector {
   async detectAllSignals() {
@@ -392,18 +227,6 @@ class SignalDetector {
         newSignals.push({ signal_type: 'SERVICE_COMPLETED', signal_value: 'Service completed recently', severity: 'info' });
       }
     } catch { /* */ }
-
-    // ── AI Sentiment Mining (GATE_CUSTOMER_INTEL_AI, default off) ────
-    try {
-      const aiSignals = customerIntelAiLive() ? await analyzeSentimentBatch(customerId) : [];
-      for (const aiSig of aiSignals) {
-        if (!existing.has(aiSig.signal_type)) {
-          newSignals.push(aiSig);
-        }
-      }
-    } catch (err) {
-      logger.debug(`[signal-detector] AI sentiment step failed for ${customerId}: ${err.message}`);
-    }
 
     // Save new signals. Idempotent under concurrency: the partial unique index
     // customer_signals_unresolved_uniq (customer_id, signal_type) WHERE

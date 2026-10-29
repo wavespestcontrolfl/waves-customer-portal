@@ -3375,20 +3375,39 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
 // default so a lookup hiccup never blocks acceptance. `strict: true` rethrows
 // a lookup failure instead (the proposal builder's suggestion must not label
 // an unchecked default as the customer's rate).
-async function resolveCommercialPrepayBaseRate(customerId, { database, forceCommercial = true, strict = false } = {}) {
-  if (!customerId) return FL_COMMERCIAL_TAX_RATE;
+async function resolveCommercialPrepayBaseRate(customerId, options = {}) {
+  return (await resolveCommercialPrepayTax(customerId, options)).rate;
+}
+
+// The same resolution with where the rate came from: { rate, source }. The
+// proposal builder shows `source` beside the rate ("Sarasota County"), so the
+// operator can see why a rate applies before overriding it. propertyId: the
+// estimate's saved property; with GATE_TAX_SERVICE_COUNTY on its ZIP names the
+// county, since the surtax is due where the service is delivered, and the
+// source says so ("Charlotte County (property ZIP)").
+async function resolveCommercialPrepayTax(customerId, { database, forceCommercial = true, strict = false, propertyId } = {}) {
+  if (!customerId) return { rate: FL_COMMERCIAL_TAX_RATE, source: 'Florida commercial rate (no customer linked yet)' };
   try {
     const TaxCalculator = require('./tax-calculator');
     // forceCommercial: we KNOW this is a commercial accept; resolve the commercial
     // rate even if the customer row isn't marked commercial yet (pre-accept
     // display, or a residential→commercial upgrade), so display == invoice.
-    const result = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 1, { database, isCommercial: forceCommercial });
-    if (result && result.taxable === false) return 0; // exemption / non-taxable
+    const result = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 1, { database, isCommercial: forceCommercial, propertyId });
+    // exemption / non-taxable
+    if (result && result.taxable === false) return { rate: 0, source: result.reason || 'Not taxable' };
     const rate = Number(result?.rate);
-    return Number.isFinite(rate) && rate >= 0 ? rate : FL_COMMERCIAL_TAX_RATE;
+    if (!(Number.isFinite(rate) && rate >= 0)) return { rate: FL_COMMERCIAL_TAX_RATE, source: 'Florida commercial rate' };
+    const county = result?.county && result.county !== 'unknown' ? result.county : null;
+    const fromProperty = result?.countySource === 'property';
+    return {
+      rate,
+      source: county
+        ? `${county} County${fromProperty ? ' (property ZIP)' : ''}`
+        : `Florida commercial rate (county not found from the ${fromProperty ? "property's" : "customer's"} ZIP)`,
+    };
   } catch (err) {
     if (strict) throw err;
-    return FL_COMMERCIAL_TAX_RATE;
+    return { rate: FL_COMMERCIAL_TAX_RATE, source: 'Florida commercial rate' };
   }
 }
 
@@ -5025,7 +5044,7 @@ async function computeTermiteAnnualFrozenFinancials({
   // guard wedged the signed agreement in awaiting_signature forever.
   let taxRate = 0;
   if (hasCommercialRecurring) {
-    const baseRate = await resolveCommercialPrepayBaseRate(estimate.customer_id, { database });
+    const baseRate = await resolveCommercialPrepayBaseRate(estimate.customer_id, { database, propertyId: estimate.property_id || undefined });
     taxRate = resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
       prepayDiscountApplied,
       baseRate,
@@ -8199,7 +8218,7 @@ const EstimateConverter = {
           // pest share. Never hardcode 7%.
           const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
           const prepayCommercialBaseRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
-            ? await resolveCommercialPrepayBaseRate(customerId, { database })
+            ? await resolveCommercialPrepayBaseRate(customerId, { database, propertyId: estimate.property_id || undefined })
             : 0;
           const liveCommercialPrepayTaxRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
@@ -9303,6 +9322,7 @@ module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;
+module.exports.resolveCommercialPrepayTax = resolveCommercialPrepayTax;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
 module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;

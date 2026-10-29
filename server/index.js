@@ -1470,24 +1470,6 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
       scheduledCron.scheduleInterval(runContactCorrectionQueue, 60 * 1000).unref();
     }
 
-    // WDO report payment-hold release sweep — delivers held reports once
-    // their invoice settles. The interval is the guarantee (every settlement
-    // path converges on invoices.status); payment paths also nudge it via
-    // scheduleHoldReleaseSweep for near-instant release. No-op until the
-    // hold columns migrate and a held row exists.
-    {
-      const runReportHoldSweep = async () => {
-        try {
-          const { sweepHeldReportReleases } = require('./services/project-report-hold');
-          await sweepHeldReportReleases({ limit: 5 });
-        } catch (err) {
-          logger.error(`[report-hold] sweep failed: ${err.message}`);
-        }
-      };
-      scheduledCron.scheduleTimeout(runReportHoldSweep, 45 * 1000).unref();
-      scheduledCron.scheduleInterval(runReportHoldSweep, 60 * 1000).unref();
-    }
-
     // First-touch hold ledger sweep — retries abandoned release claims on
     // the first_touch_holds ledger (worker died mid post-commit DOI, or a
     // transient failure after the email review card resolved). Only holds

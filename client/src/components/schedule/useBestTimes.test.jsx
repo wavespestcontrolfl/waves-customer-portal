@@ -354,6 +354,8 @@ it('open times: one search from today for four weeks on every route; a new hour 
   expect(body).toMatchObject({ summary: true, openTimes: true, dateFrom: today, dateTo: addDays(today, 27), serviceId: 'fixture', hint: true });
   expect(body).not.toHaveProperty('pickedStart');
   expect(body).not.toHaveProperty('bestRows');
+  // Only Quick Move's sheet sends quickMove.
+  expect(body).not.toHaveProperty('quickMove');
   // Tech pick: the list covers every technician's route.
   expect(body).not.toHaveProperty('technicianId');
   expect(result.current.availability.days[0].hours[0]).toMatchObject({ start: '10:00', technicianName: 'Fixture Tech', rainTier: 2, detourMinutes: 6 });
@@ -441,4 +443,14 @@ it('open times: a far day whose lookup failed is marked unchecked, never shown a
   const { result } = renderHook(() => useBestTimes({ date: far, serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
   await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
   expect(result.current.availability.days.find((day) => day.date === far)).toEqual({ date: far, status: 'unchecked', hours: [] });
+});
+
+it('Quick Move: the search says so, for the server to pick its route check', async () => {
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    serviceId: 'fixture', technicianId: 'tech', bestRows: true, openTimes: true, quickMove: true, date: addDays(etDateString(), 1),
+  }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+  expect(searches(fetch)[0]).toMatchObject({ hint: true, openTimes: true, quickMove: true });
 });

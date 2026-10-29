@@ -1,13 +1,11 @@
 /**
  * WDO report attention sweep — exception-based ops guard for the WDO lane.
  *
- * The report-lifecycle automation only covered payment-hold releases; nothing
- * noticed a WDO that stalled BEFORE send. The July 2026 audit found three
- * flavors sitting silently in prod: inspections stuck on_site/pending days
- * past their date with no report ever created, reports signed and then never
- * sent, and (potentially) paid holds whose release keeps failing. Each is a
- * legal filing a realtor/closing is waiting on — this sweep rings ONE admin
- * bell when any of them exists.
+ * Nothing noticed a WDO that stalled BEFORE send. The July 2026 audit found
+ * two flavors sitting silently in prod: inspections stuck on_site/pending
+ * days past their date with no report ever created, and reports signed and
+ * then never sent. Each is a legal filing a realtor/closing is waiting on —
+ * this sweep rings ONE admin bell when any of them exists.
  *
  * Exception-based by design (owner's standing rule): quiet when the lane is
  * clean, one deduped notification when it isn't. A bell re-rings only when a
@@ -25,7 +23,6 @@ const { etDateString } = require('../utils/datetime-et');
 
 const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
-const HOLD_ATTENTION_ATTEMPTS = 5;
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 
@@ -46,11 +43,6 @@ async function findAttentionItems(now = new Date()) {
     .where({ project_type: 'wdo_inspection' })
     .whereNull('sent_at')
     .whereNotNull('wdo_signature')
-    // Pay-before-report holds park signed drafts INTENTIONALLY (status stays
-    // 'draft' until the invoice is paid) — those aren't stalled, and failing
-    // holds already ring via the stuck-hold bucket. Excluding them keeps
-    // this bucket exception-only.
-    .whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')")
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
     ])
@@ -77,23 +69,13 @@ async function findAttentionItems(now = new Date()) {
     .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
 
-  // A paid-for held report whose release keeps failing retries forever by
-  // design (no terminal cap) — after enough attempts a human needs to look
-  // at report_hold_last_error instead of waiting out the backoff.
-  const stuckHolds = await db('projects')
-    .whereIn('project_type', ['wdo_inspection', 'pre_treatment_termite_certificate'])
-    .where('report_hold_status', 'held')
-    .where('report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
-    .select('id', 'report_hold_attempts', 'report_hold_last_error');
-
-  return { signedUnsent, stuckAppts, stuckHolds };
+  return { signedUnsent, stuckAppts };
 }
 
-function itemIds({ signedUnsent, stuckAppts, stuckHolds }) {
+function itemIds({ signedUnsent, stuckAppts }) {
   return [
     ...signedUnsent.map((p) => `signed_unsent:${p.id}`),
     ...stuckAppts.map((a) => `stuck_appt:${a.id}`),
-    ...stuckHolds.map((p) => `stuck_hold:${p.id}`),
   ].sort();
 }
 
@@ -117,16 +99,13 @@ async function priorBellCovers(currentIds, now = new Date()) {
   return currentIds.every((id) => covered.has(id));
 }
 
-function summarize({ signedUnsent, stuckAppts, stuckHolds }) {
+function summarize({ signedUnsent, stuckAppts }) {
   const parts = [];
   if (signedUnsent.length) {
     parts.push(`${signedUnsent.length} WDO report${signedUnsent.length === 1 ? '' : 's'} signed but never sent`);
   }
   if (stuckAppts.length) {
     parts.push(`${stuckAppts.length} WDO inspection${stuckAppts.length === 1 ? '' : 's'} past date without a completed report`);
-  }
-  if (stuckHolds.length) {
-    parts.push(`${stuckHolds.length} held report${stuckHolds.length === 1 ? '' : 's'} failing release`);
   }
   return parts.join(' · ');
 }
@@ -156,7 +135,6 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
           item_ids: ids,
           signed_unsent: items.signedUnsent.map((p) => p.id),
           stuck_appointments: items.stuckAppts.map((a) => a.id),
-          stuck_holds: items.stuckHolds.map((p) => p.id),
         },
       },
     );
