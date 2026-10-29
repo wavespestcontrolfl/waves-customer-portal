@@ -60,12 +60,16 @@ function mockDb(call, { attemptsAfterFailure, throwOnUpdateKey = null }) {
     builder.whereRaw = (sql, bindings) => { if (table === 'call_log') state.whereRawCalls.push({ sql, bindings }); return builder; };
     builder.orWhereRaw = builder.whereRaw;
     builder.first = () => Promise.resolve(table === 'call_log' ? call : null);
-    builder.update = (payload) => {
+    builder.update = (payload, returningCols) => {
       if (table === 'call_log') {
         if (throwOnUpdateKey && Object.prototype.hasOwnProperty.call(payload, throwOnUpdateKey)) {
           throw new Error(`forced test failure on update containing ${throwOnUpdateKey}`);
         }
         state.callLogUpdates.push(payload);
+      }
+      // The no_transcription release asks for the post-increment count inline.
+      if (table === 'call_log' && Array.isArray(returningCols) && returningCols.includes('extraction_attempts')) {
+        return Promise.resolve([{ extraction_attempts: attemptsAfterFailure }]);
       }
       return {
         returning: () => Promise.resolve([{ extraction_attempts: attemptsAfterFailure }]),
@@ -146,6 +150,29 @@ describe('extraction failure: attempt counter + terminal triage card', () => {
     const payload = JSON.parse(item.payload);
     expect(payload.attempts).toBe(3);
     expect(payload.last_error).toMatch(/GEMINI_API_KEY/);
+  });
+
+  // No transcript at all (no cached text, no provider): the no_transcription
+  // lane. At the cap a real recording files the card (codex #6271 r43); a
+  // recording too short to hold words files none (call audit 2026-10-29).
+  const noTranscript = (overrides) => baseCall({ transcription: null, transcription_status: null, extraction_attempts: 2, processing_status: 'no_transcription', ...overrides });
+  const acceptedLeg = (seconds) => ({ forward_acceptance: { accepted: true, accepted_at: '2026-10-27T12:32:42.000Z' }, ended_at: new Date(Date.parse('2026-10-27T12:32:42.000Z') + seconds * 1000).toISOString() });
+
+  test.each([
+    ['a real recording', 1, { recording_duration_seconds: 90, answered_by: 'human' }],
+    ['a 1 s voicemail (hang-up at the beep)', 0, { recording_duration_seconds: 1, answered_by: 'voicemail' }],
+    ['a 2 s recording of a 3 s answered leg', 0, { recording_duration_seconds: 2, answered_by: 'human', metadata: acceptedLeg(3) }],
+    ['a 2 s recording of a 2-minute answered leg (audio may be lost)', 1, { recording_duration_seconds: 2, answered_by: 'human', metadata: acceptedLeg(120) }],
+    ['a 2 s recording nobody answered that is not a voicemail', 1, { recording_duration_seconds: 2, answered_by: 'human' }],
+  ])('no transcription at the cap: %s files %i card(s)', async (_label, cards, overrides) => {
+    const state = mockDb(noTranscript(overrides), { attemptsAfterFailure: 3 });
+
+    const result = await processor.processRecording(CALL_SID);
+
+    expect(result).toMatchObject({ success: false, error: 'No transcription available' });
+    expect(state.callLogUpdates.some((u) => u.processing_status === 'no_transcription')).toBe(true);
+    expect(state.triageInserts).toHaveLength(cards);
+    if (cards) expect(state.triageInserts[0].reason_code).toBe('extraction_failed_permanent');
   });
 
   test('non-force claim enforces the retryable-failure guard atomically (cap + 10-min backoff in SQL)', async () => {

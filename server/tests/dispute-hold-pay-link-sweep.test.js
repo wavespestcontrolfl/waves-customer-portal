@@ -295,9 +295,15 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
       'services/completion-balance-sweep.js', // off-session charge sweep
       'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
       'services/intelligence-bar/billing-reader-tools.js', // read-only owner reporting: names an active dispute hold; sends and charges nothing
+      'services/invoice-followups.js', // Auto Pay hold charge mode (GATE_AUTOPAY_HOLD_TIMEOUT=charge): its charge candidates mirror the charge's dispute-only refusal; the reminder ladder reads the messaging predicate (pinned below)
       'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
       'services/termite-annual-signature-charge.js', // signature charge
     ]);
+    // invoice-followups.js is a messaging module too: the dispute-only readers stay in its two charge-mode checks
+    // (the charge-mode candidate rule in staleAutopayHoldClause and disputeHoldBlocksCharge before the quote), so a
+    // new read anywhere else in the file fails here until it is classified.
+    expect(read('services/invoice-followups.js').match(/customerHasActiveCollectionHold\w*|collectionHoldInvoiceIds|disputeHoldExistsSql|activeDisputeHolds/g))
+      .toEqual(['disputeHoldExistsSql', 'customerHasActiveCollectionHoldChecked']);
   });
 
   test('the old dispute-only messaging name is gone: one shared predicate, messagingHeldByCollectionHold', () => {

@@ -235,6 +235,14 @@ another lane without an owner ruling. Gemini `thinkingLevel` (LOW | MEDIUM | HIG
 image `label` parts (numbered photos) are dispatcher payload fields any lane
 may use.
 
+**Lawn diagnosis perception (owner 2026-10-29):** `lawn-diagnostic-prompt.js#runPerception`
+keeps its raw Gemini read and, on any miss (no key, HTTP error such as the
+spend-cap 429, failed request, no observations), sends the same photos and
+prompt to `ROUTES.lawnDiagnosisPerceptionBackup`: the lawn photo lane's OpenAI
+model (`OPENAI_LAWN_ASSESSMENT`), single leg, through `llm/call.js#dispatch`.
+No Claude perception leg; the ladder's Claude VISION score composite stays the
+last rung when both reads miss.
+
 Adding a new cross-provider feature: add a `ROUTES` entry (env-overridable),
 dispatch through `llm/call.js`, implement the Claude fallback, and document
 the route in `models.js`. Never call the OpenAI/Gemini SDK directly from a
