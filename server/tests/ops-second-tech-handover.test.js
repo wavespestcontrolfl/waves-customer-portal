@@ -419,6 +419,19 @@ describe('second-tech-handover execute flags and refusals', () => {
     // The one message is the hire's card, through the tech feed's own writer.
     expect(code.match(/sendTechNotification\(/g)).toHaveLength(1);
   });
+
+  test('the series-maintenance fence uses the same key as admin-schedule acquireRecurringSeriesMaintenanceLock', () => {
+    const { SERIES_MAINTENANCE_LOCK } = require('../../ops/agents/second-tech-handover-execute.js');
+    const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const start = schedule.indexOf('async function acquireRecurringSeriesMaintenanceLock(');
+    expect(start).toBeGreaterThan(-1);
+    const body = schedule.slice(start, schedule.indexOf('\n}\n', start));
+    // Same two-key advisory lock, same first key: a drift here would let a nightly top-up slip past the run.
+    expect(body).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    expect(body).toContain(`'${SERIES_MAINTENANCE_LOCK}'`);
+    const execSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover-execute.js'), 'utf8');
+    expect(execSrc).toContain("trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SERIES_MAINTENANCE_LOCK, id])");
+  });
 });
 
 describe('tlsFor (connection TLS)', () => {

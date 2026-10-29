@@ -70,6 +70,18 @@ const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'
 
 const { OPEN_STATUSES, STOPPED_TRACK_STATES } = planner;
 const AUTO_DISPATCH_LOCK = 'cron:auto-dispatch-recurring';
+// admin-schedule acquireRecurringSeriesMaintenanceLock's key, byte for byte: the per-series fence
+// recurring maintenance (runRecurringSeriesMaintenance / topUpRecurringSeries, nightly 01:50 ET)
+// takes before it extends a series. Held here through commit, an overlapping extension either
+// lands before the final plan check (and changes the plan id) or reads the new template after.
+const SERIES_MAINTENANCE_LOCK = 'recurring-series-maintenance';
+
+/** Take the series-maintenance fence for each parent, sorted (series locks before tech-day locks, as the app does). */
+async function lockSeriesMaintenance(trx, parentIds) {
+  for (const id of [...new Set(parentIds.map(String))].sort()) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SERIES_MAINTENANCE_LOCK, id]);
+  }
+}
 const CARD_TYPE = 'series_handover';
 const ROLLBACK_VERSION = 1;
 
@@ -197,7 +209,9 @@ async function executeHandover(db, opts) {
       const first = await planner.planHandover(trx, { from, to, start, today, lines });
       if (first.planId !== planId) throw mismatch(first.planId);
 
-      // The tech-day fence every assignment writer takes, for every day the moves touch.
+      // Fence recurring maintenance for every planned series, then the tech-day fence every
+      // assignment writer takes, for every day the moves touch. Both hold through commit.
+      await lockSeriesMaintenance(trx, first.ids.retemplate);
       await lockTechDays(trx, first.ids.moves.flatMap((m) => [{ techId: from, date: m.date }, { techId: to, date: m.date }]));
       const plan = await planner.planHandover(trx, { from, to, start, today, lines });
       if (plan.planId !== planId) throw mismatch(plan.planId);
@@ -320,6 +334,7 @@ async function rollbackHandover(db, opts) {
   let result;
   try {
     result = await db.transaction(async (trx) => {
+      await lockSeriesMaintenance(trx, record.series.map((s) => s.id));
       await lockTechDays(trx, record.visits.flatMap((v) => [{ techId: from, date: v.date }, { techId: to, date: v.date }]));
       const skipped = { series: [], visits: [] };
       let seriesRestored = 0;
@@ -446,7 +461,7 @@ async function main(args) {
 }
 
 module.exports = {
-  Refusal, CARD_TYPE, AUTO_DISPATCH_LOCK,
+  Refusal, CARD_TYPE, AUTO_DISPATCH_LOCK, SERIES_MAINTENANCE_LOCK,
   restartWindowReason, summaryCard, checkTarget, takeAutoDispatchLock,
   executeHandover, rollbackHandover, writeConn, main,
 };
