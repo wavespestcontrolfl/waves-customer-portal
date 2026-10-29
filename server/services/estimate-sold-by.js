@@ -6,8 +6,9 @@
  * charges anyone.
  *
  * Three ways the column gets its value:
- *  - 'flag': a GPS-verified field lead of an active W-2 technician matches the estimate (the
- *    auto-fill, run from createOrReuseAdminEstimate and reviseAdminEstimate);
+ *  - 'flag': a GPS-verified field lead of an active W-2 technician bound to the estimate (its lead
+ *    or its customer; one flag credits one estimate). The auto-fill runs from
+ *    createOrReuseAdminEstimate and reviseAdminEstimate;
  *  - 'office': an admin chose the technician;
  *  - 'cleared': an admin chose no one. Auto-fill never refills a cleared estimate.
  * Once the customer accepts (accepted_at set) the value is locked.
@@ -35,14 +36,16 @@ const SOLD_BY_COLUMNS = [
   'sold_by_technician_id', 'sold_by_source', 'sold_by_lead_id', 'sold_by_set_by', 'sold_by_set_at',
 ];
 
-// The newest qualifying field flag for the estimate, or null. Matches by customer, by the last
-// ten digits of the phone, or by the lead already linked to the estimate. The seller is the
-// technician who flagged (gps_check.technician_id, written once by the flag), never
-// leads.assigned_to, which the office may reassign.
+// The newest qualifying field flag for the estimate, or null. A flag counts only when it is bound
+// to this estimate by a link the office made or the GPS proved: the estimate's own lead
+// (leads.estimate_id) or the estimate's customer (leads.customer_id: the visited customer of a
+// visit flag, or the customer the office made from a Neighbor). A typed phone alone never binds:
+// the GPS proves where the truck was, not whose phone it is. One flag credits one estimate: a lead
+// already filling another estimate's Sold by is skipped, and the lead row is locked so two saves
+// cannot both take it. The seller is the technician who flagged (gps_check.technician_id, written
+// once by the flag), never leads.assigned_to, which the office may reassign.
 async function findMatchingFlag(trx, estimate, now) {
   const since = new Date(now.getTime() - FLAG_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-  const phoneDigits = String(estimate.customer_phone || '').replace(/\D/g, '');
-  const phoneKey = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : null;
   const query = trx('leads')
     .joinRaw("JOIN technicians ON technicians.id::text = leads.gps_check->>'technician_id'")
     .where('leads.gps_verified', true)
@@ -52,18 +55,19 @@ async function findMatchingFlag(trx, estimate, now) {
     .where('leads.created_at', '<=', now)
     .where('technicians.employment_type', 'w2')
     .where('technicians.active', true)
-    .where(function matchesEstimate() {
+    .where(function boundToEstimate() {
       this.where('leads.estimate_id', estimate.id);
       if (estimate.customer_id) this.orWhere('leads.customer_id', estimate.customer_id);
-      if (phoneKey) {
-        this.orWhereRaw(
-          "length(regexp_replace(coalesce(leads.phone, ''), '\\D', '', 'g')) >= 10 AND right(regexp_replace(coalesce(leads.phone, ''), '\\D', '', 'g'), 10) = ?",
-          [phoneKey],
-        );
-      }
+    })
+    .whereNotExists(function creditedElsewhere() {
+      this.select(trx.raw('1')).from('estimates as credited')
+        .whereRaw('credited.sold_by_lead_id = leads.id')
+        .where('credited.sold_by_source', 'flag')
+        .whereNot('credited.id', estimate.id);
     })
     .orderBy('leads.created_at', 'desc')
-    .orderBy('leads.id', 'desc');
+    .orderBy('leads.id', 'desc')
+    .forUpdate('leads');
   return query.first('leads.id as lead_id', 'technicians.id as technician_id');
 }
 
@@ -78,11 +82,18 @@ async function autoFillSoldBy(trx, estimate, { now = () => new Date() } = {}) {
   const at = now();
   const flag = await findMatchingFlag(trx, estimate, at);
   if (!flag) return estimate;
-  // The guards ride the write: a concurrent accept or admin choice wins.
+  // The guards ride the write: a concurrent accept or admin choice wins, and the flag must still
+  // credit no other estimate (re-read after the lead lock, so two saves cannot both take it).
   const [filled] = await trx('estimates')
     .where({ id: estimate.id })
     .whereNull('accepted_at')
     .whereNull('sold_by_source')
+    .whereNotExists(function creditedElsewhere() {
+      this.select(trx.raw('1')).from('estimates as credited')
+        .where('credited.sold_by_lead_id', flag.lead_id)
+        .where('credited.sold_by_source', 'flag')
+        .whereNot('credited.id', estimate.id);
+    })
     .update({
       sold_by_technician_id: flag.technician_id,
       sold_by_source: 'flag',
