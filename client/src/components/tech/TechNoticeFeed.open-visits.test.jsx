@@ -73,4 +73,17 @@ describe('TechNoticeFeed — open visits card', () => {
     expect(card).toHaveTextContent('Clock out when you are done');
     expect(card).toHaveTextContent('you have been clocked in for 10 hours');
   });
+
+  it('renders the one series_handover summary card the same way', async () => {
+    stubFeed([{
+      id: 'n-handover', type: 'series_handover', created_at: '2026-11-01T23:00:00Z',
+      message: 'You now have 12 visits across 9 customers. They are on your schedule.',
+      payload: { headline: 'Visits moved to your schedule', visits: 12, customers: 9, series: 7 },
+    }]);
+    render(<TechNoticeFeed />);
+    await act(async () => { await Promise.resolve(); });
+    const card = await screen.findByTestId('tech-open-visits');
+    expect(card).toHaveTextContent('Visits moved to your schedule');
+    expect(card).toHaveTextContent('You now have 12 visits across 9 customers');
+  });
 });
