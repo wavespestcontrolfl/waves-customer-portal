@@ -6892,6 +6892,20 @@ function customerRouteCheckMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
+// GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
+// builds", Route Check Everywhere build 3c). The portal assistant's
+// check_availability and the text drafter's city-based OPEN TIMES fallback
+// (services/scheduling/assistant-route-times.js) read the customer pages' time
+// list instead of the by-city zone finder. 'off' (unset or any other value) is
+// today's finder byte for byte; 'shadow' computes both, logs the difference
+// and serves the finder's; 'on' (GATE_ASSISTANT_ROUTE_TIMES=true) serves the
+// customer pages' list in the finder's response shape.
+function assistantRouteTimesMode() {
+  const value = String(process.env.GATE_ASSISTANT_ROUTE_TIMES || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
+}
+
 // GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
 // tech-aware confirm-side conflict scope (scheduling/occupancy.js
 // techScopedConfirmActive, which also requires GATE_SCHEDULING_CAPACITY so the
@@ -8481,6 +8495,7 @@ function stockCountAwareUsageLive() {
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
+module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).

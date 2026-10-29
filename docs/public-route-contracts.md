@@ -6283,6 +6283,36 @@ code, error code, message text, limiter, signature or token changes.
 - Estimate page cache: the five-minute slot cache is keyed by the route check
   mode (and by whether the caller asked for the check), so changing the gate
   never serves the other mode's list.
+
+Assistant route times (`GATE_ASSISTANT_ROUTE_TIMES`, dark, owner 2026-10-29,
+Route Check Everywhere build 3c). Read at call time
+(`assistantRouteTimesMode()`): unset or any other value = `off`, `shadow`,
+`true`. It changes which times the signed-in portal assistant (`POST
+/api/ai/chat`, its `check_availability` tool) and the text drafter's
+city-based OPEN TIMES quote, and nothing else: no route, field, status code,
+error code, limiter or token changes, and no message is sent.
+- `off`: byte-identical to before; the customer pages' list is never built.
+- `shadow`: the old by-city list is served as before. After the answer, a
+  capped (5 seconds) comparison builds the customer pages' list for the same
+  customer and logs one `[assistant-route-times]` line. The reply never waits
+  for it.
+- `true`: a customer with a usable pin of their own (stored or geocoded
+  address) is offered the SAME list `/book` shows them, with
+  `GATE_CUSTOMER_ROUTE_CHECK` applied as on `/book`, in the old response shape
+  (`days[]` with `date`, `dayOfWeek`, `dayNum`, `month`, `fullDate`, `slots[]`
+  with `start`, `end`, `startTime24`, `endTime24`; one slot per distinct start).
+  No pin, a list that did not build in about 1.5 seconds (3 seconds for a
+  text quote), or any error serves the old list.
+- Text quotes carry the list that produced them (`open_times_snapshot.lookup.source`
+  is `route_times`); the send-time recheck asks that same list, whatever the
+  gate says by then. A snapshot without that source is the old list's, and is
+  rechecked against it.
+- `book_appointment` (the assistant's commit, `confirmBooking`) keeps its own
+  conflict checks. With the gate `true`, the new visit is also numbered in its
+  technician's day by the staff placement helper, inside the same transaction;
+  a visit with no technician is left as it was.
+- Cost: no Google call of its own (drive times are the default route-optimizer
+  estimate; the pin lookup is the one `/book` runs).
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

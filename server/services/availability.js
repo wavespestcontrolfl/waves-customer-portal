@@ -846,6 +846,11 @@ class AvailabilityEngine {
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
 
+      // GATE_ASSISTANT_ROUTE_TIMES (a no-op unless 'true'): number the visit in its
+      // technician's day with the placement helper New Appointment and the phone
+      // agent use, inside this transaction (a visit with no technician stays as is).
+      await require('./scheduling/assistant-route-times').placeAssistantBooking(trx, scheduledRow.id);
+
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —
       // the hourly sweep mints from it (Codex #3178 r6 P0).
