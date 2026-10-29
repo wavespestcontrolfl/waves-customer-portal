@@ -272,22 +272,26 @@ postgres('payroll commission ledger', () => {
       expect((await entries()).map((e) => [e.share_own_cents, e.share_all_cents].map(Number))).toEqual([[9720, 9720]]);
     });
 
-    it('takes a visit\'s scheduled price adjustment off that visit\'s lines only', async () => {
+    it('spreads a visit\'s scheduled price adjustment over the invoice the way the invoice writer does', async () => {
       const { cust, est } = await soldWorld();
       const sold = await visit(cust, est);
       const other = await visit(cust, null);
-      // One invoice for two visits: the sold one at $100, another at $100 brought down $50 to its stamped price.
+      // One invoice for two visits: the sold one at $100, another at $100 brought down $50 to its stamped price. The
+      // writer prices that reconciliation row as a document-wide stored stamp (stackInvoiceDocumentDiscounts), so the $50
+      // comes off both lines in proportion: the sold visit is $75 of $150.
       const inv = await invoice(cust, {
         subtotal: '200.00', discount_amount: '50.00', total: '150.00', scheduled_service_id: sold,
         line_items: JSON.stringify([
           { client_id: `scheduled_${sold}_primary`, description: 'Sold service', amount: 100 },
           { client_id: `scheduled_${other}_primary`, description: 'Other service', amount: 100 },
-          { client_id: `discount_scheduled_price_${other}`, _kind: 'discount', discount_for: null, description: 'Scheduled price adjustment', amount: -50 },
+          {
+            client_id: `discount_scheduled_price_${other}`, _kind: 'discount', discount_for: null, description: 'Scheduled price adjustment',
+            amount: -50, discount_dollars: 50, use_stored_discount: true, stored_discount_source: 'scheduled_service',
+          },
         ]),
       });
       await payment(cust, inv, '2026-09-16', '150.00');
-      // The sold visit is $100 of $150, not $75 (the $50 spread over the document).
-      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(1000);
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(750);
     });
 
     it('takes sales tax out of a commercial invoice', async () => {
@@ -894,12 +898,105 @@ postgres('payroll commission ledger', () => {
       expect(await paidCommission(cust, inv, '768.00')).toBe(2400);
     });
 
-    it('spreads a discount that names a line that is gone over the whole document', async () => {
+    it('gives a discount that names a line that is gone no line, as the invoice writer does', async () => {
       const { cust, inv } = await hostInvoice(() => [{
         client_id: 'discount_custom_gone', _kind: 'discount', discount_for: 'scheduled_gone_primary',
         description: 'Orphan discount', amount: -72,
       }], { discount_amount: '72.00', total: '768.00' });
+      // The add-on stays $240 of the $840 of lines: 2/7 of the $768 collected, $21.94.
       expect(await paidCommission(cust, inv, '768.00')).toBe(2194);
+    });
+
+    // Two $100 lines on a host visit invoice: the host service (not sold) and the sold add-on. `extra` are discount lines.
+    const twoLines = async (extra, patch, keys = {}) => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, W1);
+      const cust = await customer('Dana', 'Sample');
+      const est = await estimate(cust, tech);
+      const host = await visit(cust, null);
+      const [addon] = await trx('scheduled_service_addons').insert({
+        scheduled_service_id: host, service_name: 'Sample add-on', area_addon_scope: JSON.stringify({ sourceEstimateId: est }),
+      }).returning('id');
+      const hostClient = `scheduled_${host}_primary`;
+      const inv = await invoice(cust, {
+        subtotal: '200.00', scheduled_service_id: host,
+        line_items: JSON.stringify([
+          { client_id: hostClient, description: 'Host service', amount: 100, ...keys.host },
+          { client_id: `scheduled_${host}_addon_${idOf(addon)}`, description: 'Sample add-on', amount: 100, ...keys.addon },
+          ...extra(hostClient),
+        ]),
+        ...patch,
+      });
+      return { cust, inv };
+    };
+
+    it('narrows a scoped discount to the lines that match every scope it names: key AND category', async () => {
+      const { cust, inv } = await twoLines(() => [{
+        client_id: 'discount_scoped', _kind: 'discount', discount_for: null, document_discount: true, description: 'Host discount',
+        document_scope_service_key: 'sample_host_service', document_scope_service_category: 'pest', amount: -50,
+        discount_dollars: 50, use_stored_discount: true, stored_discount_source: 'scheduled_service',
+      }], { discount_amount: '50.00', total: '150.00' }, {
+        host: { service_key: 'sample_host_service', service_category: 'pest' },
+        addon: { service_key: 'sample_addon_service', service_category: 'pest' },
+      });
+      // The add-on shares the category but not the key: it stays $100 of $150, $10 (not $7.50).
+      expect(await paidCommission(cust, inv, '150.00')).toBe(1000);
+    });
+
+    it('keeps the writer\'s order: a fixed invoice credit comes off before a line percentage', async () => {
+      // A $100 invoice credit and 50% off the host line: the writer takes the credit first ($50 off each line), then
+      // 50% of the host's $50 left ($25, saved as its frozen dollars with its percentage sort key). The add-on is $50 of $75.
+      const { cust, inv } = await twoLines((hostClient) => [
+        { client_id: 'discount_credit', _kind: 'discount', discount_for: null, description: 'Invoice credit', amount: -100, stacking_regime: 'compound' },
+        {
+          client_id: 'discount_host_half', _kind: 'discount', discount_for: hostClient, description: 'Half off', amount: -25, discount_dollars: 25,
+          stack_sort_kind: 'percentage', stack_sort_value: 50, stack_sort_cap: null, stacking_regime: 'compound',
+        },
+      ], { discount_amount: '125.00', total: '75.00' });
+      expect(await paidCommission(cust, inv, '75.00')).toBe(500);
+    });
+  });
+
+  describe('an estimate deposit', () => {
+    // A $100 sold service; the $20 deposit paid at acceptance is credited on the minted invoice after tax, as a prior
+    // payment (invoice.js create), so the invoice asks $80. Deposits have no payments row.
+    const depositWorld = async () => {
+      const { tech, cust, est } = await soldWorld();
+      await approvedWeek(tech, W2);
+      const inv = await mintedInvoice(cust, est, {
+        subtotal: '100.00', total: '80.00', created_at: '2026-09-15T15:00:00Z', updated_at: '2026-09-15T15:00:00Z',
+        line_items: JSON.stringify([
+          { client_id: 'line_sold', description: 'Sample service', amount: 100 },
+          { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -20, amount: -20, category: 'deposit_credit', estimate_id: est },
+        ]),
+      });
+      return { cust, est, inv };
+    };
+
+    it('counts the deposit credited on the invoice with the balance payment: $20 + $80 earns $10', async () => {
+      const { cust, inv } = await depositWorld();
+      const paid = await payment(cust, inv, '2026-09-16', '80.00');
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
+      const rows = await entries();
+      expect(rows.map((e) => [e.payment_source, e.payment_id, e.invoice_id, Number(e.counted_cents)]).sort())
+        .toEqual([['deposit_credit', inv, inv, 2000], ['payment', paid, inv, 8000]]);
+      // A second sync never counts the credit again.
+      expect((await recompute(created.body.run.id)).status).toBe(200);
+      expect(await entries()).toHaveLength(2);
+    });
+
+    it('takes the deposit credit off when its invoice is voided inside the 12 months', async () => {
+      const { inv } = await depositWorld();
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(200);
+      expect((await finalize(created.body.run.id)).status).toBe(200);
+      // Voided: the credit goes back to the deposit, so it comes off the next commission (none comes: nothing is owed).
+      await trx('invoices').where({ id: inv }).update({ status: 'void', updated_at: '2026-09-22T15:00:00Z' });
+      const next = await draft(W2);
+      expect(commissionOf(next.body.run, 'Sample Alpha')).toBe(0);
+      expect((await entries()).map((e) => Number(e.counted_cents))).toEqual([0]);
+      expect(await ledgerLines()).toHaveLength(1);
     });
   });
 

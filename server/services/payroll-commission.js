@@ -37,22 +37,26 @@
  * billed before a row was replaced and paid after is still found. A sold visit's lines are its primary line and its
  * scheduled price top-up (scheduled_price_topup_<visit>, invoice.js), which brings a stale primary price up to the fee.
  *
- * Discounts: an invoice line's value is its amount less its discounts (invoice.js negative lines). A discount_for
- * line comes off its parent line. A visit's scheduled price adjustment (discount_scheduled_price_<visit>) comes off
- * that visit's lines. Any other negative line (document-wide, a referral or deposit credit, a discount_for naming a
- * line that is gone) is spread over every positive line, or only the lines its service key or category scope names,
- * in proportion to their values. The sold lines' share of the invoice is their value over all.
+ * Discounts: an invoice line's value is its amount less its discounts as the invoice writer allocates them. The saved
+ * discount lines are replayed through the writer's own engine (discount-stack.js stackDocumentDiscounts) the way
+ * invoice.js replays them on every later save: each at its frozen dollars, in its frozen canonical order (fixed credits
+ * before percentages), a line discount on its line, a document-wide one on the lines its scope names (key AND
+ * category). The sold lines' share of the invoice is their value over all.
  *
  * Payer statements (GATE_PAYER_STATEMENTS): settleStatementPaid writes ONE payment row for a whole NET-terms statement
  * (customer_id NULL, statement_id set) and marks the statement's child invoices paid. That row pays each child invoice
  * the invoice's total over the positive totals of the statement's invoices that are not void, so a sold invoice on a
  * statement gets its own entry (statement_part_cents over statement_total_cents), fixed like the rest of the snapshot.
  *
- * Tables (migrations 20261029200000 and 20261029203000): commission_sales (one per accepted estimate
- * sold by a W-2 technician; insert-only, except a customer merge moves its customer_id) and
- * commission_entries (one per sale, payment and invoice: what counted and what it earns). The pay
- * lines are payroll_pay_lines of kind 'commission', source_type 'commission_payment', source_id
- * '<entry id>:<n>'.
+ * Deposits: an estimate deposit has no payments row. The invoice writer credits it on the estimate's invoice as a
+ * deposit_credit line, after tax, as a prior payment, so that credit counts as a payment on the invoice
+ * (payment_source 'deposit_credit', payment_id = the invoice id). A voided invoice gives the credit back to the deposit.
+ *
+ * Tables (migrations 20261029200000, 20261029203000 and 20261029204000): commission_sales (one per
+ * accepted estimate sold by a W-2 technician; insert-only, except a customer merge moves its
+ * customer_id) and commission_entries (one per sale, payment and invoice: what counted and what it
+ * earns). The pay lines are payroll_pay_lines of kind 'commission', source_type
+ * 'commission_payment', source_id '<entry id>:<n>'.
  *
  * syncCommissionLines runs where syncReviewBonusLines runs (start of draft, recompute and finalize,
  * under the payroll lock, before the run is worked out). It is derived data: the open ledger lines
@@ -64,6 +68,7 @@
  * manual commission pay line for them.
  */
 const { recordAuditEvent } = require('./audit-log');
+const { stackDocumentDiscounts } = require('./discount-stack');
 const { roundDiv } = require('./payroll-calc');
 const { payrollPayLinesLive, payrollCommissionLedgerLive } = require('../config/feature-gates');
 const { payrollUnits } = require('../utils/payroll-units');
@@ -79,10 +84,9 @@ const INVOICE_NUMBER_RE = /^[A-Za-z0-9-]+$/;
 const DESCRIPTION_RE = /^Invoice ([A-Za-z0-9-]+) — /;
 const ADDON_CLIENT_RE = /^scheduled_([0-9a-f-]+)_addon_(.+)$/i;
 const PRIMARY_CLIENT_RE = /^scheduled_([0-9a-f-]+)_primary$/i;
-// invoice.js buildScheduledServiceInvoiceLines: the line that tops a visit's stale primary price up to its fee, and
-// the negative line that brings the visit's lines down to its stamped price.
+// invoice.js buildScheduledServiceInvoiceLines: the line that tops a visit's stale primary price up to its fee.
 const TOPUP_CLIENT_RE = /^scheduled_price_topup_([0-9a-f-]+)$/i;
-const VISIT_ADJUSTMENT_RE = /^discount_scheduled_price_([0-9a-f-]+)$/i;
+const VOIDED_INVOICE = new Set(['void', 'canceled', 'cancelled']);
 
 // The typeof guards keep a test mock of feature-gates that lacks a reader working (off).
 const payLinesOn = () => typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
@@ -189,13 +193,13 @@ function lineBelongs(net, lineage) {
 
 /**
  * The estimate's share of one invoice as { own, all } cents (share = own / all): 1 for an invoice minted from the
- * estimate; for another invoice the value (after discounts, see netLines) of the lines that belong to it over all lines; an invoice with no
- * line ids counts whole when every visit it bills is the estimate's.
+ * estimate; for another invoice the value (after discounts, see lineNets) of the lines that belong to it over all lines;
+ * an invoice with no line ids counts whole when every visit it bills is the estimate's.
  */
 function shareOf(invoice, minted, lineage, linkedVisitIds) {
   if (minted) return { own: 1n, all: 1n };
   const lines = Array.isArray(invoice.line_items) ? invoice.line_items.filter(Boolean) : [];
-  const nets = netLines(lines);
+  const nets = lineNets(lines);
   if (nets.some((net) => net.clientId)) {
     const sum = (list) => list.reduce((total, net) => total + net.net, 0n);
     return { own: sum(nets.filter((net) => net.clientId && lineBelongs(net, lineage))), all: sum(nets) };
@@ -204,71 +208,65 @@ function shareOf(invoice, minted, lineage, linkedVisitIds) {
   return whole ? { own: 1n, all: 1n } : { own: 0n, all: 1n };
 }
 
-/** The visit a line's client_id names: a primary line, an add-on line or a price top-up. */
-function visitOfClient(clientId) {
-  const match = clientId && (PRIMARY_CLIENT_RE.exec(clientId) || ADDON_CLIENT_RE.exec(clientId) || TOPUP_CLIENT_RE.exec(clientId));
-  return match ? match[1] : null;
+// The frozen dollars and the canonical sort key a saved discount line replays with: invoice.js storedDiscountDollars
+// and frozenSortKeyFields.
+const hasNumber = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+const storedDollars = (item) => Math.max(0, Math.round((hasNumber(item.discount_dollars)
+  ? Number(item.discount_dollars) : Math.abs(Number(item.amount) || 0)) * 100) / 100);
+const sortKeyOf = (item) => (item.stack_sort_kind == null ? {}
+  : { sortKind: item.stack_sort_kind, sortValue: item.stack_sort_value, sortCap: item.stack_sort_cap });
+
+/**
+ * The lines a saved document-wide discount reaches, as invoice.js stackInvoiceDocumentDiscounts resolves a stored stamp:
+ * null (every line) when it names no scope; else the lines matching EVERY scope it names (service key AND category).
+ * A stamp the writer once resolved strictly (document_scope_strict) stays strict; any other scoped stamp reaches every
+ * line of an invoice that carries no service key at all (a pre-scope invoice).
+ */
+function scopedLines(item, positives) {
+  const key = item.document_scope_service_key;
+  const category = item.document_scope_service_category;
+  if (!key && !category) return null;
+  const keyed = positives.some((line) => line.service_key != null && String(line.service_key) !== '');
+  if (item.document_scope_strict !== true && !keyed) return null;
+  return positives.map((line, i) => ((!key || String(line.service_key || '') === String(key))
+    && (!category || String(line.service_category || '') === String(category)) ? i : -1)).filter((i) => i >= 0);
 }
 
 /**
- * What each positive line of an invoice is worth after its discounts, in cents (invoice.js discount lines are negative
- * lines). A negative line whose discount_for names a positive line comes off that line. Any other negative line is
- * spread over its pool (poolOf) in proportion to the lines' nets, in whole cents. A net never goes below 0.
+ * What each positive line of an invoice is worth after its discounts, in cents, as the invoice writer allocates them:
+ * the saved discount lines are replayed through stackDocumentDiscounts (discount-stack.js), the engine invoice.js prices
+ * with, the way the writer itself replays them on every later save (each as a fixed amount of its frozen dollars, in its
+ * frozen canonical order). A discount that names a line comes off that line; one whose line is gone is $0 (the writer
+ * resolves it to $0); any other discount line is document-wide (scopedLines). A deposit_credit line is a prior payment,
+ * not a discount (it is counted as a payment, see depositPayment), and is left out. An invoice-level discount that never
+ * became a line (a create-time discountIds pick, in discount_amount only) changes no line's share of the invoice.
  */
-function netLines(lines) {
-  const nets = lines.filter((line) => payrollUnits(line.amount) > 0n).map((line) => {
-    const clientId = typeof line.client_id === 'string' && line.client_id ? line.client_id : null;
-    return {
-      clientId,
-      visitId: visitOfClient(clientId),
-      serviceKey: line.service_key || null,
-      serviceCategory: line.service_category || null,
-      net: payrollUnits(line.amount),
-    };
+function lineNets(lines) {
+  const positives = lines.filter((line) => Number(line.amount) > 0);
+  const indexById = new Map();
+  positives.forEach((line, i) => { if (line.client_id) indexById.set(String(line.client_id), i); });
+  const lineTerms = positives.map(() => []);
+  const documentTerms = [];
+  for (const item of lines) {
+    if (!(Number(item.amount) < 0) || item.category === 'deposit_credit') continue;
+    const term = { discountType: 'fixed_amount', amount: storedDollars(item), ...sortKeyOf(item) };
+    if (item.discount_for) {
+      const at = indexById.get(String(item.discount_for));
+      if (at !== undefined) lineTerms[at].push(term);
+      continue;
+    }
+    const eligibleLines = scopedLines(item, positives);
+    documentTerms.push({ ...term, ...(eligibleLines ? { eligibleLines } : {}), id: item.discount_id });
+  }
+  const stacked = stackDocumentDiscounts({
+    lines: positives.map((line, i) => ({ gross: Math.max(0, Number(line.amount) || 0), terms: lineTerms[i] })),
+    documentTerms,
   });
-  const byId = new Map(nets.filter((net) => net.clientId).map((net) => [net.clientId, net]));
-  const wide = [];
-  for (const line of lines) {
-    const amount = payrollUnits(line.amount);
-    if (amount >= 0n) continue;
-    const parent = line.discount_for ? byId.get(String(line.discount_for)) : null;
-    if (parent) parent.net += amount; else wide.push(line);
-  }
-  for (const net of nets) if (net.net < 0n) net.net = 0n;
-  for (const line of wide) spreadOver(poolOf(nets, line), -payrollUnits(line.amount));
-  return nets;
-}
-
-/**
- * The lines a negative line with no parent line comes off. A visit's scheduled price adjustment
- * (discount_scheduled_price_<visit>) brings that visit's own lines down to its stamped price, so it comes off them.
- * Any other one (no discount_for, a referral or deposit credit, a discount_for naming a line that is gone) reaches the
- * whole document: every positive line, or only the lines matching document_scope_service_key /
- * document_scope_service_category when either is set (and some line carries a key or category at all).
- */
-function poolOf(nets, line) {
-  const adjusted = VISIT_ADJUSTMENT_RE.exec(String(line.client_id || ''));
-  const visitLines = adjusted ? nets.filter((net) => net.visitId === adjusted[1]) : [];
-  return visitLines.length ? visitLines : documentPool(nets, line);
-}
-
-function documentPool(nets, line) {
-  const key = line.document_scope_service_key;
-  const category = line.document_scope_service_category;
-  if (!key && !category) return nets;
-  // An invoice that carries no service keys or categories at all cannot be narrowed: the credit reaches every line.
-  if (!nets.some((net) => net.serviceKey || net.serviceCategory)) return nets;
-  return nets.filter((net) => (key && net.serviceKey === key) || (category && net.serviceCategory === category));
-}
-
-function spreadOver(pool, amount) {
-  const total = pool.reduce((sum, net) => sum + net.net, 0n);
-  if (total <= 0n) return;
-  const cut = amount < total ? amount : total;
-  for (const net of pool) {
-    const part = roundDiv(cut * net.net, total);
-    net.net -= part < net.net ? part : net.net;
-  }
+  return positives.map((line, i) => ({
+    clientId: typeof line.client_id === 'string' && line.client_id ? line.client_id : null,
+    serviceKey: line.service_key || null,
+    net: payrollUnits(stacked.lines[i].net),
+  }));
 }
 
 /** The customer's invoices that carry part of the estimate: Map invoice id -> invoice row plus its share and cash figures. */
@@ -277,7 +275,7 @@ async function estimateInvoices(trx, sale, lineage) {
   if (!ids.length || !lineage.customerIds.length) return new Map();
   const invoices = await trx('invoices').whereIn('id', ids).whereIn('customer_id', lineage.customerIds)
     .select('id', 'customer_id', 'invoice_number', 'notes', 'line_items', 'scheduled_service_id', 'subtotal', 'discount_amount', 'tax_amount',
-      'total', 'status', 'payer_statement_id');
+      'total', 'status', 'payer_statement_id', 'created_at', 'updated_at');
   const packetRows = await trx('visit_completion_packet_items').whereIn('invoice_id', invoices.map((i) => i.id)).select('invoice_id', 'scheduled_service_id');
   const [claims, terms] = await Promise.all([
     trx('setup_fee_claims').where({ estimate_id: String(sale.estimate_id) }).select('invoice_id'),
@@ -293,9 +291,43 @@ async function estimateInvoices(trx, sale, lineage) {
     const linked = [invoice.scheduled_service_id, ...packetRows.filter((p) => p.invoice_id === invoice.id).map((p) => p.scheduled_service_id)].filter(Boolean);
     const share = shareOf(invoice, minted, lineage, linked);
     if (share.own <= 0n || share.all <= 0n) continue;
-    result.set(invoice.id, { ...invoice, preTax, tax: payrollUnits(invoice.tax_amount), totalCents: payrollUnits(invoice.total), share });
+    result.set(invoice.id, { ...invoice, minted, preTax, tax: payrollUnits(invoice.tax_amount), totalCents: payrollUnits(invoice.total), share });
   }
   return result;
+}
+
+const etDateOf = (value) => etDateString(value instanceof Date ? value : new Date(value));
+
+/**
+ * The estimate's deposit credited on an invoice, in cents: its deposit_credit lines for the estimate (a line that names
+ * no estimate counts on an invoice minted from it).
+ */
+function depositCreditCents(invoice, estimateId, minted) {
+  const lines = Array.isArray(invoice.line_items) ? invoice.line_items.filter(Boolean) : [];
+  return lines
+    .filter((line) => line.category === 'deposit_credit' && Number(line.amount) < 0
+      && (line.estimate_id ? String(line.estimate_id).toLowerCase() === String(estimateId).toLowerCase() : minted))
+    .reduce((sum, line) => sum - payrollUnits(line.amount), 0n);
+}
+
+/**
+ * An estimate deposit has no payments row (estimate-deposits.js markDepositReceived): the invoice writer credits it on
+ * the estimate's invoice as a deposit_credit line, after tax, as a prior payment (invoice.js create). So the deposit pays
+ * that invoice that much, like a payment row on it (id = the invoice id), dated the day the invoice was made and never
+ * before the sale. Voiding the invoice gives the credit back to the deposit (which can then be refunded), so a voided
+ * invoice reads as refunded in full, on the day it last changed (countedRefund's 12-month rule).
+ */
+function depositPayment(invoice, sale, cents) {
+  const made = etDateOf(invoice.created_at);
+  return {
+    id: invoice.id,
+    status: VOIDED_INVOICE.has(invoice.status) ? 'refunded' : 'paid',
+    refund_amount: null,
+    refunded_surcharge_cents: 0,
+    base_cents: cents.toString(),
+    payment_on: made > sale.accepted_on ? made : sale.accepted_on,
+    updated_on: etDateOf(invoice.updated_at || invoice.created_at),
+  };
 }
 
 /**
@@ -422,32 +454,56 @@ async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd
 }
 
 /**
- * The entries to write for payments seen for the first time: every payment inside the sale's window that pays one of the
- * estimate's invoices (a statement payment can pay several), one figure per payment and invoice, with the invoice, its
- * share, its cash figures and its part of the payment as they are NOW.
+ * The entries to write for money seen for the first time, one figure per payment and invoice, with the invoice, its
+ * share, its cash figures and its part of the payment as they are NOW: the estimate's deposit credited on each of its
+ * invoices (depositPayment), and every payment inside the sale's window that pays one of the estimate's invoices (a
+ * statement payment can pay several). `skip` holds the payment ids and the deposit-credited invoice ids already counted.
  */
-async function newFigures(trx, sale, weekEnd, skipIds, today) {
+async function newFigures(trx, sale, weekEnd, skip, today) {
   const lineage = await lineageOf(trx, sale);
   const invoices = await estimateInvoices(trx, sale, lineage);
   if (!invoices.size) return [];
+  const figures = [];
+  const add = (payment, source, { invoice, part, of }) => {
+    const snap = { preTax: invoice.preTax, tax: invoice.tax, own: invoice.share.own, all: invoice.share.all, part, of };
+    const refund = countedRefund(payment, 0n, sale, today);
+    figures.push({ source, paymentId: payment.id, paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
+  };
+  const to = sale.window_end < weekEnd ? sale.window_end : weekEnd;
+  for (const invoice of invoices.values()) {
+    const cents = skip.deposits.has(invoice.id) ? 0n : depositCreditCents(invoice, sale.estimate_id, invoice.minted);
+    const credit = cents > 0n ? depositPayment(invoice, sale, cents) : null;
+    if (credit && credit.payment_on <= to) add(credit, 'deposit_credit', { invoice, part: null, of: null });
+  }
   const statementIds = [...new Set([...invoices.values()].map((invoice) => invoice.payer_statement_id).filter(Boolean).map(String))];
-  const payments = await loadNewPayments(trx, { customerIds: lineage.customerIds, statementIds }, sale, weekEnd, skipIds);
-  if (!payments.length) return [];
+  const payments = await loadNewPayments(trx, { customerIds: lineage.customerIds, statementIds }, sale, weekEnd, [...skip.payments]);
+  if (!payments.length) return figures;
   const customerInvoices = await trx('invoices').whereIn('customer_id', lineage.customerIds)
     .select('id', 'customer_id', 'invoice_number', 'stripe_payment_intent_id');
   const totals = await statementTotals(trx, statementIds);
-  const figures = [];
   for (const payment of payments) {
-    const refund = countedRefund(payment, 0n, sale, today);
-    for (const { invoice, part, of } of paidInvoices(payment, invoices, customerInvoices, totals)) {
-      const snap = { preTax: invoice.preTax, tax: invoice.tax, own: invoice.share.own, all: invoice.share.all, part, of };
-      figures.push({ paymentId: payment.id, paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
-    }
+    for (const paid of paidInvoices(payment, invoices, customerInvoices, totals)) add(payment, 'payment', paid);
   }
   return figures;
 }
 
 const bigOrNull = (value) => (value == null ? null : BigInt(value));
+const moneyKey = (source, id) => `${source}:${id}`;
+
+/** The payment rows, and the deposit credits (depositPayment), the entries follow now. Map moneyKey -> payment-like row. */
+async function moneyOf(trx, sale, entries) {
+  const ids = (source) => [...new Set(entries.filter((entry) => entry.payment_source === source).map((entry) => entry.payment_id))];
+  const paymentIds = ids('payment');
+  const creditedIds = ids('deposit_credit');
+  const payments = paymentIds.length ? await trx('payments as p').whereIn('p.id', paymentIds).select(paymentColumns(trx)) : [];
+  const credited = creditedIds.length
+    ? await trx('invoices').whereIn('id', creditedIds).select('id', 'status', 'line_items', 'created_at', 'updated_at') : [];
+  const money = new Map(payments.map((payment) => [moneyKey('payment', payment.id), payment]));
+  for (const invoice of credited) {
+    money.set(moneyKey('deposit_credit', invoice.id), depositPayment(invoice, sale, depositCreditCents(invoice, sale.estimate_id, true)));
+  }
+  return money;
+}
 
 /**
  * The new figures of the entries a sale already has, from the snapshot each stored when its payment was first counted,
@@ -456,12 +512,10 @@ const bigOrNull = (value) => (value == null ? null : BigInt(value));
  */
 async function entryFigures(trx, sale, entries, weekEnd, today) {
   const due = entries.filter((entry) => entry.payment_on <= weekEnd);
-  const payments = due.length
-    ? await trx('payments as p').whereIn('p.id', [...new Set(due.map((entry) => entry.payment_id))]).select(paymentColumns(trx)) : [];
-  const byId = new Map(payments.map((payment) => [payment.id, payment]));
+  const money = due.length ? await moneyOf(trx, sale, due) : new Map();
   return due.map((entry) => {
     const previous = BigInt(entry.refund_counted_cents);
-    const payment = byId.get(entry.payment_id);
+    const payment = money.get(moneyKey(entry.payment_source, entry.payment_id));
     if (!payment || !COUNTED_STATUSES.includes(payment.status)) return { entry, counted: 0n, commission: 0n, refund: previous };
     const snap = {
       preTax: BigInt(entry.pre_tax_cents), tax: BigInt(entry.tax_cents), own: BigInt(entry.share_own_cents), all: BigInt(entry.share_all_cents),
@@ -477,7 +531,7 @@ async function entryFigures(trx, sale, entries, weekEnd, today) {
 const textOrNull = (value) => (value == null ? null : value.toString());
 
 const entryRow = (sale, figure) => ({
-  sale_id: sale.id, payment_id: figure.paymentId, technician_id: sale.technician_id, payment_on: figure.paymentOn,
+  sale_id: sale.id, payment_id: figure.paymentId, payment_source: figure.source, technician_id: sale.technician_id, payment_on: figure.paymentOn,
   counted_cents: figure.counted.toString(), commission_cents: figure.commission.toString(), refund_counted_cents: figure.refund.toString(),
   invoice_id: figure.invoiceId, share_own_cents: figure.snap.own.toString(), share_all_cents: figure.snap.all.toString(),
   pre_tax_cents: figure.snap.preTax.toString(), tax_cents: figure.snap.tax.toString(),
@@ -491,9 +545,10 @@ const entryRow = (sale, figure) => ({
  */
 async function syncEntries(trx, sale, weekEnd, today) {
   const existing = await trx('commission_entries').where({ sale_id: sale.id })
-    .select('id', 'payment_id', 'counted_cents', 'commission_cents', 'refund_counted_cents', 'share_own_cents', 'share_all_cents',
+    .select('id', 'payment_id', 'payment_source', 'counted_cents', 'commission_cents', 'refund_counted_cents', 'share_own_cents', 'share_all_cents',
       'pre_tax_cents', 'tax_cents', 'statement_part_cents', 'statement_total_cents', trx.raw("to_char(payment_on, 'YYYY-MM-DD') as payment_on"));
-  const figures = await newFigures(trx, sale, weekEnd, [...new Set(existing.map((entry) => entry.payment_id))], today);
+  const countedIds = (source) => new Set(existing.filter((entry) => entry.payment_source === source).map((entry) => entry.payment_id));
+  const figures = await newFigures(trx, sale, weekEnd, { payments: countedIds('payment'), deposits: countedIds('deposit_credit') }, today);
   const inserts = figures.filter((figure) => figure.counted > 0n).map((figure) => entryRow(sale, figure));
   if (inserts.length) await trx('commission_entries').insert(inserts);
   let updated = 0;
