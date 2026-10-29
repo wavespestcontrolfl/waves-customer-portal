@@ -86,6 +86,9 @@ const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'oth
 // The audit_log action recordManualPayment writes with every settlement, and the invoice columns the paid flip overwrites (their
 // pre-payment values ride the marker so Undo can put them back exactly). Read by invoice-manual-payment-undo.js.
 const MANUAL_PAYMENT_RECORDED_ACTION = 'invoice.manual_payment_recorded';
+// Written when every post-commit effect below has finished (reminder stop, pause clear, review ask, closeout, receipt). Undo refuses until it
+// exists, so it can never reverse a payment while those effects are still running against the paid snapshot.
+const MANUAL_PAYMENT_EFFECTS_DONE_ACTION = 'invoice.manual_payment_effects_done';
 const PAID_FIELDS = ['status', 'notes', 'paid_at', 'payment_method', 'payment_reference', 'payment_recorded_by', 'payment_recorded_at'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
 
@@ -220,6 +223,7 @@ async function recordManualPayment(id, {
   // missing on a transient DB failure — with no alert and no sweep (the
   // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
   // commit or the operator gets a retryable error and nothing changed.
+  let settledPaymentId = null;
   const updatedInvoice = await db.transaction(async (trx) => {
     // Combined-session reservation INSIDE the collection transaction
     // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
@@ -373,6 +377,7 @@ async function recordManualPayment(id, {
       });
     }
     const [{ id: paymentId }] = await trx('payments').insert(paymentRow).returning('id');
+    settledPaymentId = paymentId;
     // The marker Undo (invoice-manual-payment-undo.js) works from, in the SAME transaction: which ledger row backs this payment, how the
     // invoice looked before it, and whether a person or the Zelle reconciler recorded it. The marker's created_at is this transaction's
     // now(), the same instant payment_recorded_at carries, which is how Undo proves the marker belongs to the payment still on the invoice.
@@ -579,6 +584,17 @@ async function recordManualPayment(id, {
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
   const closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
 
+  // Every post-commit effect has finished: Undo may now consider this payment. Best-effort by design (recordAuditEvent logs and swallows):
+  // the payment is committed, so a lost marker only leaves it un-undoable, the safe direction. A crash before this line does the same.
+  await recordAuditEvent({
+    actor_type: recordedByTechnicianId ? 'admin' : 'system',
+    actor_id: recordedByTechnicianId,
+    action: MANUAL_PAYMENT_EFFECTS_DONE_ACTION,
+    resource_type: 'invoices',
+    resource_id: id,
+    metadata: { paymentId: settledPaymentId },
+  });
+
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
@@ -591,6 +607,7 @@ async function recordManualPayment(id, {
 module.exports = {
   VALID_PAYMENT_METHODS,
   MANUAL_PAYMENT_RECORDED_ACTION,
+  MANUAL_PAYMENT_EFFECTS_DONE_ACTION,
   PAID_FIELDS,
   refusal,
   recordManualPayment,

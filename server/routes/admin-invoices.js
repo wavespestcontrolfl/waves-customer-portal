@@ -2888,14 +2888,14 @@ router.get('/:id/undo-payment', requireAdmin, async (req, res, next) => {
 });
 
 // POST /:id/undo-payment — reverse a manual payment recorded today, before any receipt or reminder went out.
-// Body: { reason: string (required, <=400 chars) }. The writer is undoManualPayment (also the future Intelligence Bar tool's); refusals
+// Body: { reason: string (required, <=400 chars), paymentId: the payment id GET returned (required; a different payment now → 409) }. The writer is undoManualPayment (also the future Intelligence Bar tool's); refusals
 // arrive as statusCode-shaped errors (400 no reason, 404, 409 not eligible with a plain `error` and a `code`). 404 while the gate is off.
 router.post('/:id/undo-payment', requireAdmin, async (req, res, next) => {
   try {
     if (!undoManualPaymentLive()) return res.status(404).json({ error: 'Not found' });
     const undoneBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const result = await undoManualPayment(req.params.id, {
-      reason: req.body?.reason, undoneBy, undoneByTechnicianId: req.technicianId || null,
+      reason: req.body?.reason, paymentId: req.body?.paymentId, undoneBy, undoneByTechnicianId: req.technicianId || null,
     });
     res.json({ ok: true, ...result });
   } catch (err) {

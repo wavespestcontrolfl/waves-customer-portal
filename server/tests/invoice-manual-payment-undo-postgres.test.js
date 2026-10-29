@@ -86,7 +86,14 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
   const record = (invoiceId, over = {}) => recordManualPayment(invoiceId, {
     method: 'check', reference: '1042', note: 'check in hand', recordedBy: 'Synthetic Office', sendReceipt: false, ...over,
   });
-  const undo = (invoiceId, over = {}) => undoManualPayment(invoiceId, { reason: 'typed the wrong invoice', undoneBy: 'Synthetic Office', ...over });
+  // The payment id the confirm was shown (GET's payment.id): the newest marker's ledger row, or a stranger's id when the invoice has no marker.
+  async function shownPaymentId(invoiceId) {
+    const marker = await database('audit_log').where({ resource_id: invoiceId, action: 'invoice.manual_payment_recorded' }).orderBy('created_at', 'desc').first('metadata');
+    return marker?.metadata.paymentId || randomUUID();
+  }
+  const undo = async (invoiceId, over = {}) => undoManualPayment(invoiceId, {
+    reason: 'typed the wrong invoice', undoneBy: 'Synthetic Office', paymentId: await shownPaymentId(invoiceId), ...over,
+  });
   const row = (invoiceId) => database('invoices').where({ id: invoiceId }).first();
 
   // Move the payment (invoice stamps, marker, ledger row) one day into the past, as if it were recorded yesterday.
@@ -215,10 +222,64 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     expect(await database('activity_log').where({ customer_id: invoice.customer_id, action: 'invoice_payment_undone' })).toHaveLength(1);
   });
 
+  it('refuses to undo while the payment\'s post-commit effects are still running, then undoes once they finish', async () => {
+    const invoice = await makeInvoice();
+    const FollowUps = require('../services/invoice-followups');
+    const original = FollowUps.stopOnPayment;
+    let release;
+    let reached;
+    const held = new Promise((resolve) => { release = resolve; });
+    const entered = new Promise((resolve) => { reached = resolve; });
+    // Recording pauses AFTER its transaction committed, inside the reminder stop (the first post-commit effect).
+    const spy = jest.spyOn(FollowUps, 'stopOnPayment').mockImplementation(async (...args) => { reached(); await held; return original.apply(FollowUps, args); });
+    try {
+      const recording = record(invoice.id);
+      await entered;
+      expect((await row(invoice.id)).status).toBe('paid');
+      await expect(undo(invoice.id)).rejects.toMatchObject({ statusCode: 409, code: 'still_finishing', message: 'This payment is still finishing; try again in a minute.' });
+      await expect(describeManualPaymentUndo(invoice.id)).resolves.toMatchObject({ eligible: false, code: 'still_finishing' });
+      expect((await row(invoice.id)).status).toBe('paid');
+      expect(await database('activity_log').where({ customer_id: invoice.customer_id, action: 'invoice_payment_undone' })).toHaveLength(0);
+      release();
+      await recording;
+      await expect(undo(invoice.id)).resolves.toMatchObject({ remindersRearmed: true });
+      expect((await row(invoice.id)).status).toBe('viewed');
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a confirmation of a payment that is no longer the one on the invoice, and writes nothing', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id);
+    const shownA = await shownPaymentId(invoice.id);
+    // Another operator undoes payment A and records payment B while the first operator's confirm stays open.
+    await undo(invoice.id);
+    await record(invoice.id, { method: 'cash' });
+    const before = await row(invoice.id);
+
+    await expect(undo(invoice.id, { paymentId: shownA })).rejects.toMatchObject({
+      statusCode: 409, code: 'payment_changed', message: 'This invoice\'s payment changed since you opened this. Close and try again.',
+    });
+
+    expect(await row(invoice.id)).toEqual(before);
+    expect((await row(invoice.id)).status).toBe('paid');
+    expect(await database('payments').where({ customer_id: invoice.customer_id, status: 'paid' })).toHaveLength(1);
+    expect(await database('activity_log').where({ customer_id: invoice.customer_id, action: 'invoice_payment_undone' })).toHaveLength(1);
+  });
+
+  it('refuses an undo that names no payment', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id);
+    await expect(undo(invoice.id, { paymentId: undefined })).rejects.toMatchObject({ statusCode: 400 });
+    expect((await row(invoice.id)).status).toBe('paid');
+  });
+
   it('describes eligibility with the same rules, for the Invoices page', async () => {
     const invoice = await makeInvoice();
     await record(invoice.id);
-    await expect(describeManualPaymentUndo(invoice.id)).resolves.toMatchObject({ eligible: true, payment: { amount: 100, method: 'check' } });
+    await expect(describeManualPaymentUndo(invoice.id)).resolves.toMatchObject({ eligible: true, payment: { id: await shownPaymentId(invoice.id), amount: 100, method: 'check' } });
     await database('invoices').where({ id: invoice.id }).update({ receipt_sent_at: new Date() });
     await expect(describeManualPaymentUndo(invoice.id)).resolves.toMatchObject({
       eligible: false, code: 'receipt', message: expect.stringContaining('on the day it was recorded, before any receipt or reminder'),

@@ -2,7 +2,8 @@
  * Undo a manual (off-Stripe) invoice payment — the ONE writer, the counterpart of recordManualPayment
  * (invoice-manual-payment.js). Shared by POST /admin/invoices/:id/undo-payment and, later, an Intelligence Bar tool.
  *
- *   undoManualPayment(invoiceId, { reason, undoneBy, undoneByTechnicianId })
+ *   undoManualPayment(invoiceId, { reason, paymentId, undoneBy, undoneByTechnicianId })
+ *     paymentId = the payment the caller was shown (describeManualPaymentUndo's payment.id); a different payment on the invoice now → 409
  *     → { invoice, payment: { id, amount, method }, remindersRearmed }
  *   describeManualPaymentUndo(invoiceId)
  *     → { eligible, code, message, payment } — the same rules, read without a lock, for the Invoices page
@@ -14,6 +15,9 @@
  * What it works from: recordManualPayment writes a marker (audit_log, MANUAL_PAYMENT_RECORDED_ACTION) in the payment's own
  * transaction. It names the payments row that backs the payment, whether a person or the reconciler recorded it, and every
  * invoice column the paid flip overwrote. A payment recorded before the marker existed has none and is refused.
+ *
+ * A payment is undoable only after recordManualPayment wrote its completion marker (MANUAL_PAYMENT_EFFECTS_DONE_ACTION, the last thing it does,
+ * after the reminder stop, pause clear, review ask, closeout and receipt). A crash or a lost marker leaves a payment un-undoable here.
  *
  * Every rule runs again under the invoice row lock, in the order the payment writer locks (the per-customer combined-session
  * lock, then the invoice). The payment writer's effects and what Undo does about each:
@@ -35,7 +39,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { undoManualPaymentLive } = require('../config/feature-gates');
 const {
-  VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, PAID_FIELDS, refusal,
+  VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, MANUAL_PAYMENT_EFFECTS_DONE_ACTION, PAID_FIELDS, refusal,
 } = require('./invoice-manual-payment');
 
 const UNDO_NOTE_KEY = 'manualPaymentUndo';
@@ -125,6 +129,13 @@ async function manualPaymentUndoRefusal(conn, invoice) {
   }
   const marker = await markerFor(conn, invoice);
   if (!marker || marker.automated) return notEligible('not_recorded_by_office', manualOnly);
+  // recordManualPayment releases its transaction before it stops reminders, clears a billing pause and enrolls a review. Until its
+  // completion marker for THIS payment exists those effects may still be running, so a reversal now would be followed by them.
+  const effectsDone = await conn('audit_log')
+    .where({ action: MANUAL_PAYMENT_EFFECTS_DONE_ACTION, resource_type: 'invoices', resource_id: invoice.id })
+    .whereRaw("metadata->>'paymentId' = ?", [String(marker.paymentId)])
+    .first('id');
+  if (!effectsDone) return notEligible('still_finishing', 'This payment is still finishing; try again in a minute.');
   const sinceMs = ms(invoice.payment_recorded_at);
   if (etDateString(new Date(sinceMs)) !== etDateString() || ms(invoice.updated_at) > sinceMs) {
     return notEligible('too_late', TOO_LATE);
@@ -160,7 +171,7 @@ async function describeManualPaymentUndo(invoiceId) {
   if (refused) return { eligible: false, ...refused };
   return {
     eligible: true,
-    payment: { amount: Number(payment.amount), method: invoice.payment_method, recordedAt: invoice.payment_recorded_at },
+    payment: { id: payment.id, amount: Number(payment.amount), method: invoice.payment_method, recordedAt: invoice.payment_recorded_at },
   };
 }
 
@@ -174,10 +185,11 @@ function reopenPaymentFailedBells(trx, invoiceId, since) {
     .update({ done_at: null, done_by: null, resolution: null });
 }
 
-async function undoManualPayment(invoiceId, { reason, undoneBy = 'admin', undoneByTechnicianId = null } = {}) {
+async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'admin', undoneByTechnicianId = null } = {}) {
   if (!undoManualPaymentLive()) throw refusal(403, 'Undo payment is not turned on');
   const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 400) : '';
   if (!cleanReason) throw refusal(400, 'A reason is required to undo a payment');
+  if (!paymentId) throw refusal(400, 'The payment to undo is required');
   const unlocked = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id');
   if (!unlocked) throw refusal(404, 'Invoice not found');
 
@@ -188,6 +200,10 @@ async function undoManualPayment(invoiceId, { reason, undoneBy = 'admin', undone
     if (!locked) throw refusal(404, 'Invoice not found');
     const { refusal: refused, marker, payment } = await manualPaymentUndoRefusal(trx, locked);
     if (refused) throw refusal(409, refused.message, { code: refused.code });
+    // The caller confirmed the payment it was shown. Another operator may have undone it and recorded a different one since.
+    if (String(payment.id) !== String(paymentId)) {
+      throw refusal(409, 'This invoice\'s payment changed since you opened this. Close and try again.', { code: 'payment_changed' });
+    }
 
     const since = new Date(ms(locked.payment_recorded_at));
     const undone = {

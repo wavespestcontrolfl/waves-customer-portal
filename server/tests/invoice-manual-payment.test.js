@@ -587,6 +587,16 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
     });
 
+    test('writes the completion marker last, after every post-commit effect, naming the same ledger row', async () => {
+      const { recordAuditEvent } = require('../services/audit-log');
+      settle();
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
+      const actions = recordAuditEvent.mock.calls.map(([event]) => event.action);
+      expect(actions).toEqual(['invoice.manual_payment_recorded', 'invoice.manual_payment_effects_done']);
+      expect(recordAuditEvent.mock.calls[1][0]).toMatchObject({ resource_id: 'inv-1', metadata: { paymentId: 'pay-1' } });
+      expect(recordAuditEvent.mock.calls[1][0].trx).toBeUndefined();
+    });
+
     test('writes the Undo marker in the settlement transaction: the ledger row id, the tender, who recorded it and the pre-payment values', async () => {
       settle({ locked: card({ status: 'viewed', notes: 'Seed note' }) });
       await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, recordedBy: 'Synthetic Office' });
