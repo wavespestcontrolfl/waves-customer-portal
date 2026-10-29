@@ -303,17 +303,30 @@ async function buildLawnProtocolReportContext(record, knex, now) {
     });
   }
 
-  const summary = labelCatchUpProduct(summarizeProtocolContext(context), catchUp);
+  const summary = await withCatchUpIfApplied(summarizeProtocolContext(context), { record, knex, catchUp });
   return attachProtocolOperationalContext(await withoutUnappliedSwapRows(summary, { record, knex }), { completion, assignment });
 }
 
-// The catch-up's product in the window's list names itself: the spring pre-emergent catch-up for a new customer (lawn-rounds-catchup.js).
-function labelCatchUpProduct(summary, catchUp) {
+// The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when
+// this visit recorded that product as applied, and then it names itself (lawn-rounds-catchup.js). Eligibility alone never adds it: the plan may
+// have dropped the line (cap, inactive product) and the technician may have skipped it. Not recorded, or a failed read: the row leaves the list.
+// No catch-up read for this visit: the summary as it was (the same object).
+async function withCatchUpIfApplied(summary, { record, knex, catchUp }) {
   if (!catchUp || !Array.isArray(summary?.products)) return summary;
+  const isRow = (product) => roundsCatchUp.isCatchUpRow({ role: product.role, product_name: product.protocolProductName, catalog_product_name: product.productName });
+  const rows = summary.products.filter(isRow);
+  if (!rows.length) return summary;
+  const ids = rows.map((product) => product.productId).filter(Boolean);
+  const applied = record?.id && ids.length
+    ? await knex('service_products').where({ service_record_id: record.id }).whereIn('product_id', ids).select('product_id').catch(() => [])
+    : [];
+  const appliedIds = new Set(applied.map((row) => String(row.product_id)));
   return {
     ...summary,
-    products: summary.products.map((product) => (roundsCatchUp.isCatchUpRow({ role: product.role, product_name: product.protocolProductName, catalog_product_name: product.productName })
-      ? { ...product, roundsCatchUp: true, roundsCatchUpLabel: roundsCatchUp.CATCH_UP_LABEL } : product)),
+    products: summary.products.flatMap((product) => {
+      if (!isRow(product)) return [product];
+      return appliedIds.has(String(product.productId)) ? [{ ...product, roundsCatchUp: true, roundsCatchUpLabel: roundsCatchUp.CATCH_UP_LABEL }] : [];
+    }),
   };
 }
 

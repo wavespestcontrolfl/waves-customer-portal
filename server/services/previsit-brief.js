@@ -416,15 +416,29 @@ function statedRoundsNitrogen(entries, rounds, trackKey) {
   }
 }
 
-// The spring pre-emergent catch-up (lawn-rounds-catchup.js): the March Dimension 2EW row the window read for this visit is named in the pocket
-// reference, as a gated line with the catch-up as its trigger (it is not a fixed product of the round). No catch-up: the entries as they are.
-function labelRoundsCatchUp(entries, catchUp) {
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js): the March Dimension 2EW row the window read for this visit is shown only when the
+// PLAN would keep the line. The same settlement the plan runs (waveguard-plan-engine settleCatchUpForVisit: product active, a linked row that
+// calculates, the yearly limits; STRICT like every read here) decides it. A kept line is named as a gated line with the catch-up as its trigger
+// (it is not a fixed product of the round); a rejected line leaves the entries and joins `held` with the plan's unavailable text and no dose.
+// No catch-up for this visit: nothing is read and the entries are as they are.
+async function settleRoundsCatchUp(dbh, svc, entries, held, summary, catchUp) {
   if (!catchUp) return;
   const { isCatchUpRow, CATCH_UP_LABEL } = require('./lawn-rounds-catchup');
-  for (const entry of entries) {
-    if (!isCatchUpRow({ role: entry.shapedEntry.role, product_name: entry.shapedEntry.name })) continue;
-    entry.fixed = false;
-    entry.gates = { ...entry.gates, roundsCatchUp: CATCH_UP_LABEL, trigger: CATCH_UP_LABEL };
+  const engine = require('./waveguard-plan-engine');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const rows = entries.filter((entry) => isCatchUpRow({ role: entry.shapedEntry.role, product_name: entry.shapedEntry.name }));
+  for (const entry of rows) {
+    const product = entry.productId ? await dbh('products_catalog').where({ id: entry.productId }).first('id', 'name', 'active') : null;
+    const items = [{ roundsCatchUp: true, selected: true, product: product || null }];
+    const settled = v13Active ? await engine.settleCatchUpForVisit(dbh, svc, items, engine.v13ProtocolRows(summary), {}, { strict: true }) : { items: [], warnings: [] };
+    if (settled.items.length) {
+      entry.fixed = false;
+      entry.gates = { ...entry.gates, roundsCatchUp: CATCH_UP_LABEL, trigger: CATCH_UP_LABEL };
+      continue;
+    }
+    entries.splice(entries.indexOf(entry), 1);
+    // v13 not resolved: the plan drops the line without a word; so does the brief.
+    if (settled.warnings.length) held.push({ name: cleanText(entry.shapedEntry.name, 120), role: cleanText(entry.shapedEntry.role, 60), hold: true, message: cleanText(settled.warnings[0].message, 300) });
   }
 }
 
@@ -613,7 +627,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       }))
       .filter((p) => p.shapedEntry.name);
     statedRoundsNitrogen(shaped, rounds, grass.trackKey);
-    labelRoundsCatchUp(shaped, catchUp);
+    await settleRoundsCatchUp(dbh, svc, shaped, held, summary, catchUp);
     withoutOffSeasonNorthPortBlock(shaped, rounds);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);

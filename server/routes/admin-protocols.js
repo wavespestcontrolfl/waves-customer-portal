@@ -34,7 +34,7 @@ const {
   v13HoldWarnings,
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
-  v13RowCalculates,
+  settleCatchUpForVisit,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
@@ -1076,14 +1076,11 @@ async function loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOpt
   return bermudaRemoval.rowsByProduct(bermudaRemoval.withStepProducts([...new Set(rows.values())], stepRows));
 }
 
-// The sheet's catch-up line (lawn-rounds-catchup.js), settled as the plan settles it: its yearly limit read first (a proposal at the row's dose),
-// then a line with no active product, no linked row that calculates, or a reached limit leaves with a warning. No catch-up line: the inputs.
+// The sheet's catch-up line (lawn-rounds-catchup.js), settled by the plan's own decision (settleCatchUpForVisit): a line with no active product, no
+// linked row that calculates, or a reached limit leaves with a warning. v13 not live: the line leaves. No catch-up line: the inputs.
 async function settleSheetCatchUp(items, { v13Active, scheduled, v13Rows, nutrientTargets }) {
-  const lines = items.filter(roundsCatchUp.isCatchUpItem);
-  if (!lines.length) return { items, warnings: [] };
-  if (!v13Active) return { items: items.filter((item) => !roundsCatchUp.isCatchUpItem(item)), warnings: [] };
-  const probe = await v13VisitLimits(db, scheduled, lines, v13Rows, nutrientTargets);
-  return roundsCatchUp.settleCatchUp(items, { rowOf: (item) => bermudaRemoval.rowFor(v13Rows, item.product.id, false), calculates: v13RowCalculates, cappedIds: new Set(probe.capped.keys()) });
+  if (v13Active) return settleCatchUpForVisit(db, scheduled, items, v13Rows, nutrientTargets);
+  return { items: items.filter((item) => !roundsCatchUp.isCatchUpItem(item)), warnings: [] };
 }
 
 router.get('/lawn-mix', async (req, res, next) => {

@@ -2290,10 +2290,20 @@ function v13NorthPortReferenceWarnings(items) {
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
-async function v13VisitLimits(knex, service, items, rows, targets = {}, { place = null } = {}) {
+async function v13VisitLimits(knex, service, items, rows, targets = {}, { place = null, strict = false } = {}) {
   if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
-  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets, place });
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets, place, strict });
   return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
+}
+
+// The catch-up's settlement for a reader that has a booked visit but not the plan (the tank sheet, the pre-visit brief): the SAME decision the
+// plan makes (lawn-rounds-catchup.js settleCatchUp, fed by the same v13Limits read), so every surface keeps or drops the line together.
+// Returns { items, warnings, dropped }; no catch-up line in `items`: the inputs. `strict` throws a failed limit read (the brief).
+async function settleCatchUpForVisit(knex, service, items, rows, targets = {}, { strict = false } = {}) {
+  const lines = items.filter(roundsCatchUp.isCatchUpItem);
+  if (!lines.length) return { items, warnings: [], dropped: [] };
+  const found = await v13VisitLimits(knex, service, lines, rows, targets, { strict });
+  return roundsCatchUp.settleCatchUp(items, { rowOf: (item) => bermudaRemoval.rowFor(rows, item.product.id, false), calculates: v13RowCalculates, cappedIds: new Set(found.capped.keys()) });
 }
 
 // Plan notices for the v13 lines: a hard limit is a block per limit (the existing
@@ -2965,6 +2975,7 @@ module.exports = {
   visitForPlan,
   loadVisitForPlan,
   v13VisitLimits,
+  settleCatchUpForVisit,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

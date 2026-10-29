@@ -615,6 +615,14 @@ describe('the spring pre-emergent catch-up on the tank sheet', () => {
     expect(body.warnings.find((w) => w.code === 'lawn_rounds_catchup_unavailable').message).toMatch(/not planned on this visit \(a yearly application limit is reached\)/);
   });
 
+  test('an inactive 2EW product: the line leaves with the plan\'s warning, no block', async () => {
+    added.active = false;
+    const body = await sheet();
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(body.blocks).toEqual([]);
+    expect(body.warnings.find((w) => w.code === 'lawn_rounds_catchup_unavailable').message).toMatch(/is inactive/);
+  });
+
   test('a first round-4 visit (May 5) and a 12x March visit: no catch-up', async () => {
     const may = await sheet('2027-05-05');
     expect(may.items.some((item) => item.roundsCatchUp)).toBe(false);

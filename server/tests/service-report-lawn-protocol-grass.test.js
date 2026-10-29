@@ -184,7 +184,7 @@ describe('lawn protocol report context — the spring pre-emergent catch-up', ()
       grassTrack: 'st_augustine',
       products: [
         { productName: 'LESCO 24-0-11 with PolyPlus OPTI', protocolProductName: 'LESCO 24-0-11 with PolyPlus OPTI', role: 'nutrition' },
-        { productName: DIM_2EW, protocolProductName: DIM_2EW, role: 'pre_emergent' },
+        { productName: DIM_2EW, protocolProductName: DIM_2EW, productId: 'd2ew', role: 'pre_emergent' },
       ],
     }));
   });
@@ -193,12 +193,26 @@ describe('lawn protocol report context — the spring pre-emergent catch-up', ()
     summarizeProtocolContext.mockImplementation((ctx) => (ctx?.protocol ? { grassTrack: ctx.protocol.grass_track } : null));
   });
 
-  test('the window read asks for the catch-up row and the 2EW line is labelled; the bag line is not', async () => {
+  const namesOf = (result) => result.products.map((product) => product.productName);
+
+  test('eligibility alone never lists the 2EW: the window read asks for the row, but the report shows it only when this visit recorded it', async () => {
+    // A plan that dropped the line (capped, inactive) and a technician who skipped it both leave no service_products row.
     const result = await buildLawnProtocolReportContext(record(), knexWith(), new Date('2027-03-21T12:00:00Z'));
     expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2, catchUp: true });
+    expect(namesOf(result)).toEqual(['LESCO 24-0-11 with PolyPlus OPTI']);
+    expect(JSON.stringify(result)).not.toContain(LABEL);
+  });
+
+  test('a recorded 2EW is listed and labelled; the bag line is not labelled', async () => {
+    const result = await buildLawnProtocolReportContext(record(), knexWith({ service_products: [{ product_id: 'd2ew' }] }), new Date('2027-03-21T12:00:00Z'));
     const byName = Object.fromEntries(result.products.map((product) => [product.productName, product]));
     expect(byName[DIM_2EW]).toMatchObject({ roundsCatchUp: true, roundsCatchUpLabel: LABEL });
     expect(byName['LESCO 24-0-11 with PolyPlus OPTI']).not.toHaveProperty('roundsCatchUp');
+  });
+
+  test('a recorded product that is not the 2EW does not list it', async () => {
+    const result = await buildLawnProtocolReportContext(record(), knexWith({ service_products: [{ product_id: 'other' }] }), new Date('2027-03-21T12:00:00Z'));
+    expect(namesOf(result)).toEqual(['LESCO 24-0-11 with PolyPlus OPTI']);
   });
 
   test.each([
