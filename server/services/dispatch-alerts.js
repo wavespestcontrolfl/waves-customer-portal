@@ -425,6 +425,37 @@ const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
 // recorded and nothing to bring it back (services/not-closed-out.js).
 const DECISION_ONLY_ALERT_TYPES = Object.freeze(['visit_not_closed_out']);
 
+/**
+ * The Action Queue's single-card Resolve, shared by the board's route
+ * (PATCH /admin/dispatch/alerts/:id/resolve) and the Intelligence Bar's
+ * resolve_dispatch_alert card, so the two can never drift.
+ *
+ * A decision-only card (a visit not closed out) is settled by its own decision
+ * routes; a bare resolve would close it and record nothing, so it is refused.
+ * Otherwise resolveAlert runs (resolved_at + resolved_by, the linked tracking
+ * bells closed, dispatch:alert_resolved broadcast after commit). Idempotent: a
+ * card another dispatcher already resolved comes back as already_resolved with
+ * its row, and writes and broadcasts nothing.
+ *
+ * With a trx the caller owns the transaction (the bar holds the alert row
+ * FOR UPDATE in it); the reads here use it too.
+ *
+ * @returns {Promise<{outcome: 'decision_required'|'resolved'|'already_resolved'|'not_found', alert?: object}>}
+ */
+async function resolveAlertAsDispatcher({ id, resolvedBy, trx } = {}) {
+  const conn = trx || db;
+  const target = await conn('dispatch_alerts').where({ id }).first('type', 'resolved_at');
+  if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
+    return { outcome: 'decision_required' };
+  }
+  const row = await resolveAlert({ id, resolvedBy, trx });
+  if (row) return { outcome: 'resolved', alert: row };
+
+  const existing = await conn('dispatch_alerts').where({ id }).first();
+  if (!existing) return { outcome: 'not_found' };
+  return { outcome: 'already_resolved', alert: existing };
+}
+
 // Alert types in the "overdue family" — both fire on a slipping
 // window, just from different scopes (assigned vs unassigned).
 // Same terminal-status set clears both.
@@ -480,6 +511,7 @@ module.exports = {
   createAlert,
   createAlertOnce,
   resolveAlert,
+  resolveAlertAsDispatcher,
   resolveAllOpenAlerts,
   autoResolveOverdueAlertsForJob,
   OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,

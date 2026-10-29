@@ -36,6 +36,8 @@
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
  *   GATE_IB_SET_BILL_TO=true (the Intelligence Bar's set_customer_bill_to write tool, owner ruling 2026-10-21 "BUILD" on IB gap #9: an admin can set ONE self-pay customer's Bill-To payer on a confirm card (never owner-direct), by running the customer page's own save handler (PUT /admin/customers/:id with only payerId) in process. Future billing only: offered only when the customer has no open invoice without a payer and no open checkout, so no invoice moves and nothing is cancelled; sends nothing. Changing or removing an existing payer stays on the customer page. Needs GATE_IB_PLATFORM. Read at call time via ibSetBillToLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
+ *   GATE_IB_RESOLVE_DISPATCH_ALERT=true (the Intelligence Bar's resolve_dispatch_alert write tool, owner ask 2026-10-28 IB gap #4: an admin can resolve ONE Action Queue card on the dispatch board on a confirm card (admin only, never owner-direct), by running the board's own single-card Resolve (PATCH /admin/dispatch/alerts/:id/resolve) through the shared resolveAlertAsDispatcher. Marks the card resolved by that admin, closes the linked tracking bells, and tells every open dispatch board to drop the card; sends nothing to a customer or technician and changes no visit. Clear-all stays on the board; a card that needs a decision (a visit not closed out) is refused. Needs GATE_IB_PLATFORM. Read at call time via ibResolveDispatchAlertLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
+ *   GATE_IB_UNBLOCK_SENDER=true (the Intelligence Bar's unblock_sender write tool, owner ask 2026-10-28 IB gap #6: an admin can unblock ONE blocked email sender or domain on a confirm card (admin only, never owner-direct), by running the Email page's own unblock (DELETE /admin/email/blocked/:id) through the shared unblockSender. Removes the Gmail trash filter when one is on file and deletes the blocklist row; mail already in Trash stays there; sends nothing. Needs GATE_IB_PLATFORM. Read at call time via ibUnblockSenderLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_BILL_TO_NO_VISIT_INVOICES=true (owner ruling 2026-10-22 "move": an unpaid self-pay invoice that rides no visit (a manual or project invoice) changes hands with the customer's default payer like a visit-linked one. Setting a customer default payer (customer page Bill-To, payer activation, a customer merge) withdraws it to the payer: pay link stops, its checkout is cancelled, applied credit returns, reminders pause; clearing the default releases it. The live owner answer already reads such an invoice as the payer's. Sends nothing. Read at call time via billToNoVisitInvoicesLive(), strict 'true', dark by default; off = such invoices are not moved, as before.)
  *   GATE_IB_VOID_INVOICE=true (the Intelligence Bar's void_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can void ONE invoice that has collected nothing on a confirm card (never owner-direct), by running the Invoices page's own Void handler (POST /admin/invoices/:id/void) in process. Voids the invoice, stops its reminders, returns applied account credit, cancels an unconfirmed pay-page session; sends nothing. Refuses (by_owner_rule) any invoice with money received or in flight: refunds and card charges stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibVoidInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_SCHEDULE_SMS=true (the Intelligence Bar's schedule_sms write tool, owner ruling 2026-10-28 gap 5 and B1: an admin can schedule ONE plain text to a customer for a later day and time on a confirm card (never owner-direct, every login), by replaying the Communications page's own schedule-sms handler through the shared writer services/scheduled-sms-queue.js. B1: only 8:00 AM through 7:45 PM Eastern is accepted (the sender runs every five minutes with no quiet-hours check, so 7:45 PM is the latest time that always leaves before 8 PM even if two runs are missed; 8 PM to 8 AM is refused) and the bar asks for a time in that range; the page keeps its behavior. It TEXTS a customer later, so the flip is the owner's. Read at call time via ibScheduleSmsLive(), strict 'true', needs GATE_IB_PLATFORM, dark by default; off = the tool is not offered and not executable, exactly as before)
@@ -48,6 +50,7 @@
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
  *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_GENERAL_READ=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_reads and read_admin_data read tools, owner ruling 2026-10-12: on the owner login only, the bar may read what an admin screen reads. read_admin_data calls one reviewed admin GET endpoint from the generated catalog (server/services/intelligence-bar/admin-read-catalog.json) on this server as the logged-in owner and returns the JSON, capped. No write, no outside call, no file or stream. Read at call time via ibGeneralReadLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
+ *   GATE_IB_GENERAL_READ_OFFICE=true (needs GATE_IB_GENERAL_READ; owner ruling 2026-10-28 "A1": a non-owner ADMIN login (the office, Virginia) gets find_admin_reads and read_admin_data limited to the catalog rows a person reviewed as OFFICE rows (`office: true` in admin-read-reviewed.json: dispatch alerts, the email-template and automation lists, the schedule blackout dates); every other row is refused with a plain "not available on this login", free-text notes are always withheld on that login whatever GATE_IB_READ_NOTES says, and every later write is still carded. The owner login keeps the whole catalog; technicians never. Banking, payouts, the SEO pipeline, payroll, tax, revenue settings, pricing config and credentials can never be office rows (the catalog build fails). Read at call time via ibGeneralReadOfficeLive(), strict 'true'; dark by default; off = the two tools are offered to the owner login only, byte-identical to before.)
  *   GATE_IB_READ_NOTES=true (needs GATE_IB_GENERAL_READ; owner ruling 2026-10-13: the Intelligence Bar's general read RETURNS free-text notes and access instructions (gate codes, lockbox instructions) instead of the `[note withheld: N characters]` marker, on the owner login only. Each returned note passes the structural link redaction (signed and private links) and ONE fixed-format secret scrubber (API key and token shapes, Bearer tokens, JWTs, PEM blocks, long base64/hex runs, credential query parameters in URLs, card numbers, SSN pattern), is cut at 1,000 characters, and the read keeps its untrusted-data marker so later writes show confirm cards. Labelled credentials (a credential key followed by ':' or '=') lose everything after the separator to the end of the note string. No other prose rules: a code or password written as plain words comes back as written. Read at call time via ibReadNotesLive(), strict 'true', dark by default; off = notes are withheld exactly as before.)
  *   GATE_IB_GENERAL_EDIT=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_edits and propose_admin_edit tools, owner ruling 2026-10-12: a general EDIT tool for a reviewed allow-list of small internal edits only, on the owner login only, ALWAYS a confirm card, never owner-direct. propose_admin_edit takes one method and endpoint pattern from the generated catalog (server/services/intelligence-bar/admin-write-catalog.json), the path parameters and a body limited to the fields the reviewed row lists (any other field is refused), shows each field's new value (and the current one when a reviewed read supplies it), and on Confirm sends that exact body as a PUT or PATCH to this server as the logged-in owner, so the screen's own checks apply. Never a customer message, money, price, delete, bulk change, setting, user or credential; address text shows an ADDRESS CHANGE card. Read at call time via ibGeneralEditLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
@@ -5844,6 +5847,23 @@ function ibSetBillToLive() {
   return process.env.GATE_IB_SET_BILL_TO === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
+// GATE_IB_RESOLVE_DISPATCH_ALERT read at CALL time — strict `=== 'true'`, dark, and
+// it needs GATE_IB_PLATFORM (the tool exists only on the platform path). The
+// Intelligence Bar's resolve_dispatch_alert tool
+// (services/intelligence-bar/dispatch-alert-tools.js): offered and executable
+// only while on. Kill: unset.
+function ibResolveDispatchAlertLive() {
+  return process.env.GATE_IB_RESOLVE_DISPATCH_ALERT === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_UNBLOCK_SENDER read at CALL time — strict `=== 'true'`, dark, and it
+// needs GATE_IB_PLATFORM. The Intelligence Bar's unblock_sender tool
+// (services/intelligence-bar/unblock-sender-tools.js): offered and executable
+// only while on. Kill: unset.
+function ibUnblockSenderLive() {
+  return process.env.GATE_IB_UNBLOCK_SENDER === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
 // GATE_BILL_TO_NO_VISIT_INVOICES read at CALL time — strict `=== 'true'`, dark. On, the Bill-To withdrawal's owner
 // answer (services/visit-linked-invoice-withdrawal.js) covers invoices that ride no visit, owned through the customer
 // default. Kill: unset.
@@ -5885,6 +5905,14 @@ function ibGeneralReadLive() {
 // marker, as before. Kill: unset the variable.
 function ibReadNotesLive() {
   return process.env.GATE_IB_READ_NOTES === 'true' && ibGeneralReadLive();
+}
+
+// GATE_IB_GENERAL_READ_OFFICE read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_GENERAL_READ (so GATE_IB_PLATFORM too). The non-owner admin login (the office) gets the
+// general admin read limited to reviewed `office: true` catalog rows
+// (services/intelligence-bar/admin-read-tools.js). Kill: unset.
+function ibGeneralReadOfficeLive() {
+  return process.env.GATE_IB_GENERAL_READ_OFFICE === 'true' && ibGeneralReadLive();
 }
 
 // GATE_IB_GENERAL_EDIT read at CALL time — strict `=== 'true'`, dark, and it
@@ -8419,12 +8447,18 @@ module.exports.ibPaymentPlanLive = ibPaymentPlanLive;
 module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
 // GATE_IB_SET_BILL_TO reader, on its own line so gate PRs never conflict.
 module.exports.ibSetBillToLive = ibSetBillToLive;
+// GATE_IB_RESOLVE_DISPATCH_ALERT reader, on its own line so gate PRs never conflict.
+module.exports.ibResolveDispatchAlertLive = ibResolveDispatchAlertLive;
+// GATE_IB_UNBLOCK_SENDER reader, on its own line so gate PRs never conflict.
+module.exports.ibUnblockSenderLive = ibUnblockSenderLive;
 // GATE_IB_COMPOSE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibComposeEmailLive = ibComposeEmailLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
 // GATE_IB_READ_NOTES reader, on its own line so gate PRs never conflict.
 module.exports.ibReadNotesLive = ibReadNotesLive;
+// GATE_IB_GENERAL_READ_OFFICE reader, on its own line so gate PRs never conflict.
+module.exports.ibGeneralReadOfficeLive = ibGeneralReadOfficeLive;
 // GATE_IB_GENERAL_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.

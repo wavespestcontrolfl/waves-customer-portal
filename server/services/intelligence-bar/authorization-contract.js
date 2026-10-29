@@ -95,6 +95,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // The Dispatch board has no Reopen for a resolved Action Queue card.
+  'resolve_dispatch_alert',
   // An email cannot be unsent.
   'compose_email',
   // An invoice sent to the customer cannot be unsent.
@@ -165,6 +167,10 @@ CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
+// unblock-sender-tools.js cardLines). Neither sends anything.
+CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
+CURATED_PREVIEW_TOOL_NAMES.add('unblock_sender');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -251,6 +257,8 @@ const ACTION_LABELS = {
   create_invoice: 'Create a draft invoice (sends nothing)',
   compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
+  unblock_sender: 'Unblock an email sender (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -950,6 +958,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // resolve_dispatch_alert: the alert, when it was raised, the visit, customer and technician, and every effect of the Resolve.
+  if (toolName === 'resolve_dispatch_alert' && preview?.preview === true) {
+    for (const line of require('./dispatch-alert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
+  if (toolName === 'unblock_sender' && preview?.preview === true) {
+    for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

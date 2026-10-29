@@ -90,6 +90,8 @@ beforeAll(() => {
   process.env.GATE_IB_CREATE_INVOICE = 'true';
   process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
+  process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true';
+  process.env.GATE_IB_UNBLOCK_SENDER = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_RECORD_PAYMENT = 'true';
@@ -112,6 +114,8 @@ afterAll(() => {
   delete process.env.GATE_IB_CREATE_INVOICE;
   delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
+  delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
+  delete process.env.GATE_IB_UNBLOCK_SENDER;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -215,6 +219,8 @@ const WRITE_TWO_STEP = [
   'create_invoice',
   'compose_email',
   'set_customer_bill_to',
+  'resolve_dispatch_alert',
+  'unblock_sender',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -879,6 +885,17 @@ const UNCONFIRMED_CALLS = [
       payers: [{ id: 7, display_name: 'Synthetic Property Co', active: true }],
       invoices: [], scheduled_services: [], service_records: [], annual_prepay_terms: [],
     }],
+    // resolve_dispatch_alert's preview reads the alert, its technician, visit and customer; it may not write without confirmed
+    // (intelligence-bar-dispatch-alert.test.js covers the card itself).
+    ['dispatch-alert-tools', 'executeDispatchAlertTool', 'resolve_dispatch_alert', { alert_id: '00000000-0000-0000-0000-00000000a901' }, {
+      dispatch_alerts: [{ id: '00000000-0000-0000-0000-00000000a901', type: 'tech_late', severity: 'warn', tech_id: 'tech-1', job_id: '00000000-0000-0000-0000-00000000a902', payload: { delay_minutes: 20 }, created_at: new Date('2026-10-28T14:00:00Z'), resolved_at: null, resolved_by: null }],
+      scheduled_services: [{ id: '00000000-0000-0000-0000-00000000a902', customer_id: 'cust-1', service_type: 'Pest Control', scheduled_date: '2026-10-28', window_start: '09:00:00', window_end: '11:00:00', status: 'scheduled' }],
+    }],
+    // unblock_sender's preview reads the blocklist row; it may not write without confirmed
+    // (intelligence-bar-unblock-sender.test.js covers the card itself).
+    ['unblock-sender-tools', 'executeUnblockSenderTool', 'unblock_sender', { blocked_id: '00000000-0000-0000-0000-00000000a903' }, {
+      blocked_email_senders: [{ id: '00000000-0000-0000-0000-00000000a903', email_address: 'noreply@spam.example.invalid', domain: null, reason: 'spam_auto', blocked_count: 3, created_at: new Date('2026-10-01T12:00:00Z'), gmail_filter_id: 'filter-1' }],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -1340,7 +1357,8 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
     // compose_email (_sideEffects): its confirmed run sends an email (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
+    // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });

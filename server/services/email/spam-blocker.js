@@ -473,10 +473,12 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
   };
 }
 
-async function unblockSender(id) {
-  const blocked = await db('blocked_email_senders').where({ id }).first();
-  if (!blocked) return { error: 'Not found' };
-
+// The ONE unblock (admin-email DELETE /blocked/:id, the stale-reclassification
+// recovery in inbox-hygiene, and the IB unblock_sender card all call it):
+// remove the Gmail filter when one is on file, THEN delete the blocklist row.
+// A filter that cannot be removed keeps the row (the sender is still
+// trash-routed, never report an unblock that did not happen).
+async function removeBlockRecord(conn, blocked, id) {
   if (blocked.gmail_filter_id) {
     try {
       const gmailClient = require('./gmail-client');
@@ -505,8 +507,28 @@ async function unblockSender(id) {
     }
   }
 
-  await db('blocked_email_senders').where({ id }).del();
+  await conn('blocked_email_senders').where({ id }).del();
   return { success: true, unblocked: blocked.domain || blocked.email_address };
+}
+
+// verifyLocked (the IB card only): called with the blocklist row read FOR
+// UPDATE inside the unblock's own transaction (null when the row is gone) and
+// that transaction (so it can read overlapping blocks under the same lock),
+// before anything is removed. A false answer returns { changed: true } and
+// nothing is touched, so a block that changed after the card was shown is
+// never unblocked. The page route and the recovery sweeps pass nothing and
+// keep the plain read-then-remove above.
+async function unblockSender(id, { verifyLocked } = {}) {
+  if (typeof verifyLocked !== 'function') {
+    const blocked = await db('blocked_email_senders').where({ id }).first();
+    if (!blocked) return { error: 'Not found' };
+    return removeBlockRecord(db, blocked, id);
+  }
+  return db.transaction(async (trx) => {
+    const blocked = await trx('blocked_email_senders').where({ id }).forUpdate().first();
+    if (!(await verifyLocked(blocked || null, trx)) || !blocked) return { error: 'Not found', changed: true };
+    return removeBlockRecord(trx, blocked, id);
+  });
 }
 
 /**

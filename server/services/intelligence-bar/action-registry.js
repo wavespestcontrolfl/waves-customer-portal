@@ -12,10 +12,11 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
-const { adminReadLive } = require('./admin-read-tools');
+const { adminReadLive, officeReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
+const OFFICE_READ_TOOL_NAMES = new Set([ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL]);
 const { adminWriteLive } = require('./admin-write-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
@@ -83,6 +84,8 @@ const MODULES = [
   ['compose-email-tools', 'COMPOSE_EMAIL_TOOLS', 'executeComposeEmailTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
   ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
+  ['dispatch-alert-tools', 'DISPATCH_ALERT_TOOLS', 'executeDispatchAlertTool'],
+  ['unblock-sender-tools', 'UNBLOCK_SENDER_TOOLS', 'executeUnblockSenderTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['admin-write-tools', 'ADMIN_WRITE_TOOLS', 'executeAdminWriteTool'],
@@ -165,6 +168,8 @@ const GATED_ACTIONS = {
   compose_email: () => ibComposeEmailLive(),
   create_invoice: () => ibCreateInvoiceLive(),
   set_customer_bill_to: () => ibSetBillToLive(),
+  resolve_dispatch_alert: () => ibResolveDispatchAlertLive(),
+  unblock_sender: () => ibUnblockSenderLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
   find_admin_edits: () => adminWriteLive(),
@@ -188,7 +193,10 @@ function allowed(action, { role, context, fullAccess } = {}) {
   // their own check here rather than the blanket approval-kind refusal.
   if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
   // General admin reads (owner ruling 2026-10-12): owner login only.
-  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
+  // GATE_IB_GENERAL_READ_OFFICE (owner ruling 2026-10-28): the office login (a non-owner admin; technicians returned above) is offered
+  // exactly the two general-read tools, and only while that gate is on. find_admin_edits stays owner-only. The tools themselves limit
+  // that login to reviewed office rows (admin-read-tools.js).
+  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true && !(OFFICE_READ_TOOL_NAMES.has(action.id) && officeReadLive())) return false;
   return true;
 }
 

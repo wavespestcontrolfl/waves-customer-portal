@@ -1009,6 +1009,14 @@ const PINNED_DISPLAY_BUILDERS = {
   set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
     ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: 'none', sends_to_customer: 'nothing' }
     : null),
+  // resolve_dispatch_alert: the card names the alert, its text, the visit's customer and the technician; the lines ride the contract.
+  resolve_dispatch_alert: (params, preview) => (preview?.preview === true && preview.tool === 'resolve_dispatch_alert'
+    ? { alert: `${preview.alert_label} (${preview.severity})`, message: preview.message, customer: preview.customer_name || 'none', technician: preview.technician_name || 'none', sends_to_customer: 'nothing' }
+    : null),
+  // unblock_sender: the card names the blocked address or domain, why and how often it was blocked; the lines ride the contract.
+  unblock_sender: (params, preview) => (preview?.preview === true && preview.tool === 'unblock_sender'
+    ? { unblock: preview.blocked_target, scope: preview.scope, blocked_before: preview.reason, messages_caught: preview.blocked_count, after: preview.still_blocked_by ? `still blocked by the domain block ${preview.still_blocked_by}` : 'new mail is no longer auto-trashed', sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -1074,6 +1082,10 @@ const VERIFIED_VERSION_PARAMS = {
   create_invoice: '_verified_invoice_create_version',
   // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
   set_customer_bill_to: '_verified_bill_to_version',
+  // resolve_dispatch_alert binds the alert id, type, text, payload, visit, customer and technician the card showed.
+  resolve_dispatch_alert: '_verified_dispatch_alert_version',
+  // unblock_sender binds the blocklist row (address or domain, reason, time, block count, Gmail filter) the card showed.
+  unblock_sender: '_verified_unblock_sender_version',
   // compose_email binds the recipient, customer link, From, subject and a digest of the exact body the card showed.
   compose_email: '_verified_compose_email_version',
   cancel_queued_message: '_verified_message_version',
@@ -3555,6 +3567,8 @@ RULES:
 - Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, apply account credit, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
 - Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
+- Dispatch alerts: resolve_dispatch_alert (when it is in your tools) resolves ONE Action Queue card at a time, on a confirmation card, and sends nothing. If the operator asks to clear or resolve all or many alerts, do not call it repeatedly: say the bar resolves one alert at a time and the Clear all button on the Dispatch board clears the queue. A "Visit not closed out" card needs a decision on the board ("This was a miss" or "Not a miss") and is refused.
+- Blocked senders: unblock_sender (when it is in your tools) is the other half of block_sender: it unblocks ONE blocked address or domain on a confirmation card, removes its Gmail trash filter, and sends nothing. Mail already in Trash stays there.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - Scheduled texts: schedule_sms (when it is in your tools) queues ONE plain text to a customer for a later day and time behind a confirmation card, sent at that minute Eastern. Only 8:00 AM through 7:45 PM Eastern can be scheduled (owner ruling; texts go out on a five-minute check, within about 5 minutes after the time): a later or night time is refused. If the operator did not say AM or PM, ask which; never guess ("at 9" can be morning or evening). "Text them now" is send_sms, not this tool. To see or cancel a queued text use list_queued_messages and cancel_queued_message.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about

@@ -133,6 +133,10 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',
+  // resolve_dispatch_alert (IB gap #4) and unblock_sender (IB gap #6): the Dispatch board's single-card Resolve and the
+  // Email page's Unblock, run in process behind a card; each sends nothing.
+  'resolve_dispatch_alert',
+  'unblock_sender',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.
