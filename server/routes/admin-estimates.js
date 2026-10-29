@@ -3792,6 +3792,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 router.sendEstimateNow = sendEstimateNow;
 
 // GET /api/admin/estimates/lead-auto-send/preview — read-only dry-run audit.
+// Uses the same config as the scan, including the created-after cutoff
+// (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER, read from the environment only, never
+// from the query string): unset or unparseable lists no candidates.
 router.get('/lead-auto-send/preview', async (req, res, next) => {
   try {
     const config = leadEstimateAutoSendConfigFromEnv({
@@ -4460,12 +4463,16 @@ router.get('/:id/proposal', async (req, res, next) => {
     // exemption -> 0, county rate, FL commercial default), in strict mode: a
     // failed customer / exemption / county lookup is null (no autofill), never
     // the unchecked default labelled as the customer's rate. Never throws the read.
+    // suggestedTaxSource names where the rate came from ("Sarasota County"); the
+    // builder shows it beside the rate. Null whenever the rate is null.
     let suggestedTaxRate = null;
+    let suggestedTaxSource = null;
     try {
-      const rate = await require('../services/estimate-converter')
-        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db, strict: true });
+      const { rate, source } = await require('../services/estimate-converter')
+        .resolveCommercialPrepayTax(estimate.customer_id ?? null, { database: db, strict: true });
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
-    } catch (_) { suggestedTaxRate = null; }
+      suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
+    } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
     // A failed read leaves the line off; it never fails the builder's load.
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
@@ -4477,6 +4484,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       suggestedTaxRate,
+      suggestedTaxSource,
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
       commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),

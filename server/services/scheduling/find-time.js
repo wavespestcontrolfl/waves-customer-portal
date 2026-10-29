@@ -32,13 +32,13 @@ const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service
 const { occupiedRows, allocationKey } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
-const { customerWindowAdmits, overlapsLunch, pastCustomerLastStart } = require('./customer-windows');
+const { customerWindowAdmits, pastCustomerLastStart } = require('./customer-windows');
 const { findSlideOffers } = require('./slide-offer');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
-// day-end / lunch admission rule for customer-facing callers — the
+// day-end admission rule for customer-facing callers — the
 // documented public/token offer grid (09:00-17:00), honoring a preserved
-// booking_config.day_end override and the lunch gate. Only applied when a
+// booking_config.day_end override. Only applied when a
 // caller marks itself customerFacing (see findCapacitySlots and the legacy
 // per-gap loop below); staff/optimizer callers (admin-schedule-find-time.js,
 // intelligence-bar/schedule-tools.js, auto-dispatch/candidate-slots.js)
@@ -51,7 +51,7 @@ const { findSlideOffers } = require('./slide-offer');
 // are a DIFFERENT axis: they supply the packed-start GEOMETRY (how close a
 // candidate may sit next to a real neighbouring stop, credit-adjusted) —
 // customerWindowAdmits is the ADMISSION rule (is this start on the
-// customer grid, before day-end, outside lunch at all). A candidate must
+// customer grid, before day-end). A candidate must
 // clear both: customerWindowAdmits gates whether a start is offered on the
 // public grid; packedBounds/evaluateGap then tells it how early/late it may
 // legally sit against that day's real stops. Neither substitutes for the
@@ -319,9 +319,9 @@ async function findCapacitySlots(opts) {
       // (09:00-17:00). A customerFacing caller (the estimate picker, /book
       // and everything that shares its builder) additionally runs
       // customerWindowAdmits — the grid floor AND the resolved
-      // (booking_config-aware) close AND the lunch gate in one check — so
-      // capacity mode never hands a customer surface an 08:00 candidate, a
-      // start past a preserved earlier close, or a lunch-overlapping start
+      // (booking_config-aware) close in one check — so
+      // capacity mode never hands a customer surface an 08:00 candidate or a
+      // start past a preserved earlier close
       // the public route contract doesn't describe; staff/optimizer callers
       // that never pass customerFacing are unaffected and stay on the raw
       // shift bound below (Codex r3 P0, r4 P2 on #4663).
@@ -984,7 +984,7 @@ function logSlideShadow(date, tech, dayStops, params) {
       // on, plain overlap when off.
       pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
       // Off-hour stops (assessments, re-services) skip only the hour-grid
-      // test — lunch block and the last-start rule still apply.
+      // test — the last-start rule still applies.
       admits: ({ startMin, endMin, isNew, offHour }) => {
         // The caller's own "would I show this start?" rule (daypart, notice
         // window, zone-day funnel) — callers own those filters, find-time
@@ -992,7 +992,7 @@ function logSlideShadow(date, tech, dayStops, params) {
         if (isNew && !params.slideNewStartAllowed(date, startMin)) return false;
         return isNew || !offHour
           ? customerWindowAdmits({ startMin, endMin })
-          : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin);
+          : !pastCustomerLastStart(startMin);
       },
     });
     if (!result.offers.length) return;
@@ -1146,7 +1146,7 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
       // the next anchor). Availability surfaces that only offer clean
       // grid-aligned times use this to fan out EVERY aligned start the gap
       // fits — offering only the earliest-feasible minute meant an
-      // hour-snap into the lunch block or an occupied hour hid the gap's
+      // hour-snap or an occupied hour hid the gap's
       // genuinely free later hours, and whole days with real capacity
       // disappeared from the self-serve booking surfaces (2026-08-05
       // field report).

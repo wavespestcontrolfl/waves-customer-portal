@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { PUBLIC_PORTAL_DOMAINS } = require('../bid-desk/detector');
 
 const SHARED_EMAIL_DOMAINS = new Set([
   'gmail.com',
@@ -122,7 +123,10 @@ function isOperationalDomain(domain) {
 // and email-sync trashes a blocked sender's later mail before it is ever
 // classified. .gov / .mil / .fed.us and the Florida .us namespaces are
 // registrar-restricted; the named list covers Florida state and local
-// agencies that mail from ordinary domains. Kept separate from
+// agencies that mail from ordinary domains, plus the public bid portals the
+// Bid Desk reads. Agencies send bid notices through those portals: one spam
+// label blocked VendorLink, and its Gmail filter then trashed every later
+// notice (inbox replay 2026-10-28). Kept separate from
 // OPERATIONAL_EMAIL_DOMAINS, which also means "not a customer sender" to
 // other callers (access-code capture).
 const GOVERNMENT_SUFFIX_RE = /\.(?:gov|mil)$|\.fed\.us$|\.fl\.us$|\.state\.[a-z]{2}\.us$/;
@@ -136,6 +140,7 @@ const GOVERNMENT_EMAIL_DOMAINS = new Set([
   'mymanatee.org', // Manatee County Government
   'scgov.net', // Sarasota County Government
   'taxcollector.com', // Manatee County Tax Collector
+  ...PUBLIC_PORTAL_DOMAINS, // VendorLink, DemandStar, BidNet, Bonfire, OpenGov, HA eProcurement
 ]);
 
 function isGovernmentDomain(domain) {

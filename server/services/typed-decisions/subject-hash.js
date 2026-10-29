@@ -8,6 +8,10 @@
  *  - text: the previous Waves text plus the customer's trimmed text, the
  *    state sms-shadow.js gives Jev; the previous-text lookup can resolve
  *    differently later (a send's status changes).
+ *  - Ask Waves chat reply: the visitor's cleaned message plus the reply the
+ *    chat served, the state ask-waves-intake.js gives Jev (ask_waves_safety.v1).
+ *    The review route rebuilds both from the agent_messages rows the chat log
+ *    wrote (admin-typed-decisions.js), so a row edited later reads as changed.
  *  - social post photo: the hosted photo's URL (an unguessable key minted per
  *    upload, so it names exactly one image) plus the caption the model was
  *    given; photo-privacy-shadow.js builds the state the same way.
@@ -56,4 +60,8 @@ function socialPostSubjectHash({ imageUrl, captions }) {
   return crypto.createHash('sha256').update(JSON.stringify([imageUrl || null, socialPostCaption(captions)])).digest('hex');
 }
 
-module.exports = { callSubjectHash, callTranscriptSpan, smsSubjectHash, smsCustomerText, socialPostCaption, socialPostSubjectHash };
+function askWavesSubjectHash({ visitorMessage, reply }) {
+  return crypto.createHash('sha256').update(JSON.stringify([String(visitorMessage ?? ''), String(reply ?? '')])).digest('hex');
+}
+
+module.exports = { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, smsCustomerText, socialPostCaption, socialPostSubjectHash };

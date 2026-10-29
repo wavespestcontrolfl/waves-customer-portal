@@ -387,6 +387,8 @@ const SCOPE_SNAPSHOT = {
     'create_payment_plan', 'cancel_payment_plan',
     // create_invoice carries customer_id: the draft invoice is that customer's own.
     'create_invoice',
+    // compose_email carries customer_id when it names a customer (validateRecordTarget); a typed address is held to the task customer's own by validateComposeRecipient.
+    'compose_email',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
     // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.

@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -79,6 +79,7 @@ const MODULES = [
   ['invoice-edit-tools', 'INVOICE_EDIT_TOOLS', 'executeInvoiceEditTool'],
   ['invoice-reminder-tools', 'INVOICE_REMINDER_TOOLS', 'executeInvoiceReminderTool'],
   ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
+  ['compose-email-tools', 'COMPOSE_EMAIL_TOOLS', 'executeComposeEmailTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
   ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
   ['dispatch-alert-tools', 'DISPATCH_ALERT_TOOLS', 'executeDispatchAlertTool'],
@@ -161,6 +162,7 @@ const GATED_ACTIONS = {
   schedule_invoice_send: () => ibInvoiceRemindersLive(),
   create_payment_plan: () => ibPaymentPlanLive(),
   cancel_payment_plan: () => ibPaymentPlanLive(),
+  compose_email: () => ibComposeEmailLive(),
   create_invoice: () => ibCreateInvoiceLive(),
   set_customer_bill_to: () => ibSetBillToLive(),
   resolve_dispatch_alert: () => ibResolveDispatchAlertLive(),

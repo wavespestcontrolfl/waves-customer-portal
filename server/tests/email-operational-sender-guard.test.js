@@ -111,6 +111,16 @@ describe('email government-sender guard (outside review 2026-10-25)', () => {
     }
   });
 
+  test('every public bid portal the Bid Desk reads is a government sender, never a look-alike (inbox replay 2026-10-28)', () => {
+    const { PUBLIC_PORTAL_DOMAINS } = require('../services/bid-desk/detector');
+    expect(PUBLIC_PORTAL_DOMAINS).toEqual(expect.arrayContaining(['myvendorlink.com', 'demandstar.com', 'bidnetdirect.com']));
+    for (const domain of PUBLIC_PORTAL_DOMAINS) expect(isGovernmentDomain(domain)).toBe(true);
+    for (const domain of ['myvendorlink.com.evil.example', 'notmyvendorlink.com']) expect(isGovernmentDomain(domain)).toBe(false);
+    // One spam label blocked VendorLink, and its Gmail filter trashed every later bid notice.
+    expect(shouldSkipAutoAction('spam', 'vendorlink@myvendorlink.com', GOOG('myvendorlink.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'vendorlink@myvendorlink.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
+  });
+
   test('a regulator notice classified spam or newsletter is never auto-actioned when its auth aligns', () => {
     expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', GOOG('fdacs.gov'))).toBe(true);
     expect(shouldSkipAutoAction('marketing_newsletter', 'news@freshfromflorida.com', GOOG('freshfromflorida.com'))).toBe(true);

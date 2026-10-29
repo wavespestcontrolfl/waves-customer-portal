@@ -1770,7 +1770,17 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
       .mockResolvedValue({ rate: 0.07, amount: 0.07, taxable: true, county: 'Manatee' });
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.suggestedTaxRate).toBe(0.07);
+    expect(res.body.suggestedTaxSource).toBe('Manatee County');
     expect(calculate).toHaveBeenCalledWith('synthetic-customer', 'nonresidential_pest_control', 1, expect.objectContaining({ isCommercial: true }));
+  });
+
+  test('names the Florida default when the county cannot be found from the ZIP', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(TaxCalculator, 'calculateTax')
+      .mockResolvedValue({ rate: 0.07, amount: 0.07, taxable: true, county: 'unknown', reason: 'Default FL rate (county could not be inferred from ZIP)' });
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.suggestedTaxRate).toBe(0.07);
+    expect(res.body.suggestedTaxSource).toBe("Florida commercial rate (county not found from the customer's ZIP)");
   });
 
   test('returns 0 for a tax-exempt customer so nothing is filled', async () => {
@@ -1779,6 +1789,7 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
       .mockResolvedValue({ rate: 0, amount: 0, taxable: false, county: null, reason: 'Tax exempt — synthetic' });
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.suggestedTaxRate).toBe(0);
+    expect(res.body.suggestedTaxSource).toBe('Tax exempt — synthetic');
   });
 
   test('returns the resolver default (FL commercial 7%) with no customer, without a customer lookup', async () => {
@@ -1786,6 +1797,7 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
     const calculate = jest.spyOn(TaxCalculator, 'calculateTax');
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.suggestedTaxRate).toBe(require('../services/estimate-converter').FL_COMMERCIAL_TAX_RATE);
+    expect(res.body.suggestedTaxSource).toBe('Florida commercial rate (no customer linked yet)');
     expect(calculate).not.toHaveBeenCalled();
   });
 
@@ -1794,6 +1806,7 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
     jest.spyOn(TaxCalculator, 'calculateTax').mockRejectedValue(new Error('synthetic lookup failure'));
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.suggestedTaxRate).toBeNull();
+    expect(res.body.suggestedTaxSource).toBeNull();
     expect(res.body.proposal).toBeTruthy();
   });
 

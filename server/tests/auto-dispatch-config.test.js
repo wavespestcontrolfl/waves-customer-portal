@@ -156,6 +156,18 @@ describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
     }
   });
 
+  test('the road check at apply is off unless its gate is set', () => {
+    const prev = process.env.GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY;
+    try {
+      delete process.env.GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY;
+      expect(getAutoDispatchConfig().roadCheckAtApply).toBe(false);
+      process.env.GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY = 'true';
+      expect(getAutoDispatchConfig().roadCheckAtApply).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY; else process.env.GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY = prev;
+    }
+  });
+
   // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH (owner 2026-10-24): three values, and
   // off without the shared model, whose slot_taken filter drops an hour the
   // writer's probe would refuse (2026-09-26: 72 failed writes, all SLOT_TAKEN).

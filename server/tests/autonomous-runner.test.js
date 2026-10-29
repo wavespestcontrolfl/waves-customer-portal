@@ -1585,6 +1585,151 @@ describe('runDaily reserved citability backfill slots', () => {
   });
 });
 
+describe('runDaily takes the rows whose terminal draft is written first (owner ruling 2026-10-26)', () => {
+  const originalEnv = { ...process.env };
+  const spies = [];
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    while (spies.length) spies.pop().mockRestore();
+  });
+
+  // runNext stands in for the claim: the best pending row by score among the
+  // ids the call may take (onlyIds), minus the excluded ones. A row with
+  // `claimable: false` is held by a claim rule (deferred, fenced).
+  function queueRunner(rows, { written = [], reserved = 0 } = {}) {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const pending = new Map(rows.map((r) => [r.id, r]));
+    const order = [];
+    runner.runNext = jest.fn(async ({ onlyIds, excludeIds = [], actionType, bucket } = {}) => {
+      const best = [...pending.values()]
+        .filter((r) => r.claimable !== false && !excludeIds.includes(r.id) && (!onlyIds || onlyIds.includes(r.id))
+          && (!bucket || r.bucket === bucket) && (!actionType || r.action_type === actionType))
+        .sort((a, b) => b.score - a.score)[0];
+      if (!best) return { outcome: 'skipped_no_opportunity' };
+      pending.delete(best.id);
+      order.push(best.id);
+      return { outcome: best.outcome, action_type: best.action_type, opportunity_id: best.id };
+    });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+    runner._claimableBackfillSlots = jest.fn(async () => reserved);
+    runner._writtenTerminalDraftIds = jest.fn(async () => written);
+    runner.settleTerminalWork = jest.fn(async () => {});
+    runner._sendBlogDroughtSms = jest.fn(async () => {});
+    return { runner, order };
+  }
+  const row = (id, score, over = {}) => ({ id, score, action_type: 'refresh_existing_page', outcome: 'deferred_terminal_draft', ...over });
+  // The shape of the 2026-10-26 batch: five higher-scored rows with no draft
+  // yet, and two lower-ranked rows whose drafts were pushed the day before.
+  const oct26 = () => [
+    row('no_draft_93', 93), row('no_draft_80a', 80), row('no_draft_80b', 80), row('no_draft_79', 79), row('no_draft_78', 78),
+    row('written_a', 78, { outcome: 'completed_pending_review' }), row('written_b', 77, { outcome: 'completed_pending_review' }),
+  ];
+
+  test('written drafts ranked below the batch limit are claimed first, inside the same limit', async () => {
+    const { runner, order } = queueRunner(oct26(), { written: ['written_a', 'written_b'] });
+    const result = await runner.runDaily({ limit: 5 });
+    expect(order).toEqual(['written_a', 'written_b', 'no_draft_93', 'no_draft_80a', 'no_draft_80b']);
+    expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+      { excludeIds: [], onlyIds: ['written_a', 'written_b'] },
+      { excludeIds: [], onlyIds: ['written_b'] },
+      { excludeIds: [] }, { excludeIds: [] }, { excludeIds: [] },
+    ]);
+    expect(result).toMatchObject({ count: 5, limit: 5 });
+  });
+
+  test('no written draft: the claims and their order are the batch as before', async () => {
+    const { runner, order } = queueRunner(oct26());
+    await runner.runDaily({ limit: 5 });
+    expect(order).toEqual(['no_draft_93', 'no_draft_80a', 'no_draft_80b', 'no_draft_79', 'no_draft_78']);
+    expect(runner.runNext.mock.calls.every(([args]) => JSON.stringify(args) === '{"excludeIds":[]}')).toBe(true);
+  });
+
+  test('more drafts written than the batch has slots: the limit holds, best score first', async () => {
+    const rows = Array.from({ length: 7 }, (_, i) => row(`written_${i}`, 70 - i, { outcome: 'completed_pending_review' }));
+    const { runner, order } = queueRunner([row('no_draft_99', 99), ...rows], { written: rows.map((r) => r.id) });
+    const result = await runner.runDaily({ limit: 5 });
+    expect(order).toEqual(['written_0', 'written_1', 'written_2', 'written_3', 'written_4']);
+    expect(runner.runNext.mock.calls.every(([args]) => Array.isArray(args.onlyIds))).toBe(true);
+    expect(result).toMatchObject({ count: 5, limit: 5 });
+  });
+
+  test('a written row that is not claimable now gives its slot back (one probe); then the reserved backfill slots, then score order', async () => {
+    const rows = [
+      row('no_draft_93', 93), row('no_draft_80', 80), row('backfill_60', 60, { bucket: 'citability_backfill' }),
+      row('written_a', 78, { outcome: 'completed_pending_review' }), row('written_deferred', 90, { claimable: false }),
+    ];
+    const { runner, order } = queueRunner(rows, { written: ['written_deferred', 'written_a'], reserved: 1 });
+    const result = await runner.runDaily({ limit: 5 });
+    expect(order).toEqual(['written_a', 'backfill_60', 'no_draft_93', 'no_draft_80']);
+    expect(runner.runNext.mock.calls.slice(0, 3).map(([args]) => args)).toEqual([
+      { excludeIds: [], onlyIds: ['written_deferred', 'written_a'] },
+      { excludeIds: [], onlyIds: ['written_deferred'] },
+      { excludeIds: [], bucket: 'citability_backfill' },
+    ]);
+    // The empty scoped probe neither ends the batch nor uses a slot: four runs,
+    // then the closing no-opportunity claim of the score order.
+    expect(runner._appendToDailyDigest).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ count: 5, outcome: 'skipped_no_opportunity' });
+  });
+
+  test('the 1 PM catch-up (a blog-scoped pass) is unchanged: no drafts first', async () => {
+    const blog = (id, score) => row(id, score, { action_type: 'new_supporting_blog', outcome: 'completed_pending_review' });
+    const { runner, order } = queueRunner([blog('blog_55', 55), blog('blog_50', 50), row('written_a', 78)], { written: ['written_a'] });
+    await runner._runDailyInner({ limit: 5, actionType: 'new_supporting_blog' });
+    expect(runner._writtenTerminalDraftIds).not.toHaveBeenCalled();
+    expect(order).toEqual(['blog_55', 'blog_50']);
+    expect(runner.runNext.mock.calls.every(([args]) => args.actionType === 'new_supporting_blog' && args.onlyIds === undefined)).toBe(true);
+  });
+
+  describe('_writtenTerminalDraftIds', () => {
+    const spy = (s) => { spies.push(s); return s; };
+    const tw = () => require('../services/content/terminal-writer');
+    const runnerFor = () => new (require('../services/content/autonomous-runner').AutonomousRunner)();
+
+    test('gate on: the written rows only, in the listed order; gate off, kill switch off or a failed read: none', async () => {
+      process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+      const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
+        due: [{ opportunity_id: 'due_1' }], written: [{ opportunity_id: 'w_hi' }, { opportunity_id: 'w_lo' }], rebrief: [{ opportunity_id: 'old_1' }],
+      });
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
+
+      listing.mockRejectedValueOnce(new Error('GitHub 502'));
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+
+      process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
+      delete process.env.GATE_CONTENT_WRITER_TERMINAL;
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      expect(listing).toHaveBeenCalledTimes(2);
+    });
+
+    test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
+      process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+      const real = tw().awaitingTerminalDrafts;
+      const body = 'Ghost ants trail along the kitchen backsplash in the wet season. '.repeat(8);
+      const waiting = (id, briefAgeDays) => ({
+        opportunity_id: id, brief_id: `brief_${id}`, brief_created_at: new Date(Date.now() - briefAgeDays * 864e5),
+        outcome: tw().AWAITING_OUTCOME, agent_id: null, action_type: 'refresh_existing_page', score: 80,
+      });
+      const deps = {
+        db: { raw: jest.fn(async () => ({ rows: [waiting('fresh', 1), waiting('stale', 8)] })) },
+        gh: {
+          getBranchSha: jest.fn(async () => 'sha'),
+          getFile: jest.fn(async (path) => {
+            const id = path.split('/')[1].replace('.json', '');
+            return { content: JSON.stringify({ opportunity_id: id, brief_id: `brief_${id}`, frontmatter: { title: 'Ghost Ants' }, body }) };
+          }),
+        },
+      };
+      spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockImplementation((opts = {}) => real({ ...opts, deps }));
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['fresh']);
+    });
+  });
+});
+
 describe('runDaily batching', () => {
   test('claims best remaining opportunities until limit or empty queue', async () => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
