@@ -65,7 +65,7 @@ postgres('commission sold by', () => {
     const id = randomUUID();
     await trx('customers').insert({
       id, first_name: 'Sample', last_name: 'Customer', phone: '+19415550111',
-      address_line1: '1 Sample St', city: 'Bradenton', zip: '34202', ...patch,
+      address_line1: '1 Sample St', city: 'Bradenton', zip: '34202', latitude: HOUSE.lat, longitude: HOUSE.lng, ...patch,
     });
     return id;
   };
@@ -188,10 +188,11 @@ postgres('commission sold by', () => {
   });
 
   describe('the field flag with the gate on, from a visit', () => {
-    const run = async ({ arrivalHoursAgo, mutate } = {}) => {
+    const run = async ({ arrivalHoursAgo, mutate, truckAt = TRUCK_NEAR } = {}) => {
       const id = await tech('Sample Alpha');
       const cust = await customer();
       const v = await visit(id, cust);
+      if (truckAt) await truck(id, truckAt);
       if (arrivalHoursAgo !== undefined) await arrival(v, arrivalHoursAgo, id);
       const extra = mutate ? await mutate({ id, cust, v }) : {};
       const res = await flag({ 'x-test-tech': id, 'x-test-name': 'Sample Alpha' }, {
@@ -209,7 +210,7 @@ postgres('commission sold by', () => {
       expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Chinch bugs · GPS: verified, 40 m');
     });
 
-    it('keeps the distance unknown when the arrival row logged none', async () => {
+    it("measures the truck's distance to the visit now, not the distance the arrival logged", async () => {
       const { lead } = await run({
         mutate: async ({ id, v }) => {
           await trx('audit_log').insert({
@@ -220,8 +221,26 @@ postgres('commission sold by', () => {
         },
       });
       expect(lead.gps_verified).toBe(true);
-      expect(lead.gps_check.distance_m).toBeNull();
-      expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified$/);
+      expect(lead.gps_check.distance_m).toBe(40);
+      expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified, 40 m$/);
+    });
+
+    it('is not verified when the visit moved after the arrival: the truck is not at the new place', async () => {
+      const { lead } = await run({
+        arrivalHoursAgo: 2,
+        mutate: async ({ cust }) => {
+          await trx('customers').where({ id: cust }).update({ address_line1: '480 Faraway Rd', latitude: TRUCK_FAR.lat, longitude: TRUCK_FAR.lng });
+          return {};
+        },
+      });
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('too_far');
+    });
+
+    it('is not verified when the truck has no position', async () => {
+      const { lead } = await run({ arrivalHoursAgo: 1, truckAt: null });
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('no_truck');
     });
 
     it("stores a rental visit's stamped service address, not the customer's primary home", async () => {
@@ -230,6 +249,7 @@ postgres('commission sold by', () => {
         mutate: async ({ v }) => {
           await trx('scheduled_services').where({ id: v }).update({
             service_address_line1: '77 Rental Ave', service_address_city: 'Bradenton', service_address_zip: '34205',
+            lat: HOUSE.lat, lng: HOUSE.lng,
           });
           return {};
         },
@@ -331,9 +351,11 @@ postgres('commission sold by', () => {
       expect(lead.gps_check).toMatchObject({ result: 'verified', mode: 'prospect', radius_m: 300 });
       expect(lead.gps_check.distance_m).toBeGreaterThan(30);
       expect(lead.gps_check.distance_m).toBeLessThan(50);
+      // No coordinate is stored: no lat/lng key, and neither the truck's nor the house's numbers
+      // (exact strings, so a timestamp such as 17:27:27.485 can never trip it).
       const stored = JSON.stringify(lead.gps_check);
-      expect(stored).not.toContain('27.4');
-      expect(stored).not.toContain('82.45');
+      expect(stored).not.toMatch(/"(lat|lng|latitude|longitude)"/);
+      for (const value of [TRUCK_NEAR.lat, HOUSE.lng, HOUSE.lat]) expect(stored).not.toContain(`:${value}`);
       expect(Object.keys(lead.gps_check).sort()).toEqual([
         'checked_at', 'distance_m', 'mode', 'premise', 'radius_m', 'result', 'scheduled_service_id', 'technician_id', 'truck_reported_at',
       ]);

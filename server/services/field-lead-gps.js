@@ -24,6 +24,7 @@ const logger = require('./logger');
 const { toE164, nanpNationalDigits, isValidNanpNumber } = require('../utils/phone');
 
 const ARRIVAL_WINDOW_MS = 12 * 60 * 60 * 1000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TRUCK_POSITION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_RADIUS_M = 300;
 const RADIUS_SETTING_KEY = 'field_flag.gps_radius_m';
@@ -80,60 +81,82 @@ async function loadRadiusMeters(database = db) {
   }
 }
 
-// Customer mode. `scheduledServiceId` is the visit the flag was opened from.
-async function checkCustomerArrival({ database = db, technicianId, customerId, scheduledServiceId, now = new Date() }) {
-  // The route checks only with a customer id (customer mode).
+// Customer mode. `scheduledServiceId` is the visit the flag was opened from. Verified when this
+// technician's own truck logged a GPS arrival at the visit (or another stop of its grouped visit)
+// in the 12 hours before the flag AND the truck stands within the radius of the visit's destination
+// now (the arrival detector's own rule, extractDestination). The arrival proves an earlier moment
+// and the visit's address may have moved since; the current position binds the proof to the
+// premise stored with the result.
+async function checkCustomerArrival({ database = db, technicianId, customerId, scheduledServiceId, now = new Date(), radiusMeters = null }) {
   const check = blankCheck('customer', now, technicianId, { customer_id: String(customerId) });
   const serviceId = typeof scheduledServiceId === 'string' ? scheduledServiceId.trim() : '';
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(serviceId)) {
-    return { ...check, result: 'no_gps_arrival' };
-  }
+  if (!UUID_RE.test(serviceId)) return { ...check, result: 'no_gps_arrival' };
   check.scheduled_service_id = serviceId;
-  const visit = await database('scheduled_services').where({ id: serviceId })
-    .first('id', 'technician_id', 'customer_id', 'visit_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+  const visit = await loadFlaggedVisit(database, serviceId);
   if (!visit
     || String(visit.technician_id || '') !== String(technicianId || '')
-    || String(visit.customer_id || '') !== String(customerId || '')) {
+    || String(visit.customer_id || '') !== String(customerId || '')
+    || !(await arrivalLogged(database, visit, technicianId, now))) {
     return { ...check, result: 'no_gps_arrival' };
   }
-  // A grouped stop is one physical visit: the arrival row can sit on any member.
+  const destination = require('./gps-arrival-detector').extractDestination(visit);
+  if (!destination) return { ...check, result: 'no_gps_arrival' };
+  const radius = radiusMeters || await loadRadiusMeters(database);
+  return { ...check, premise: visitedPremise(visit), radius_m: radius, ...(await truckNear(database, technicianId, now, destination, radius)) };
+}
+
+// The visit row with what the destination rule and the premise need (the detector's own columns).
+function loadFlaggedVisit(database, serviceId) {
+  return database('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.id', serviceId)
+    .first('s.id', 's.technician_id', 's.customer_id', 's.visit_id',
+      's.lat as service_lat', 's.lng as service_lng',
+      's.service_address_line1', 's.service_address_line2', 's.service_address_city', 's.service_address_zip',
+      'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
+      'c.city as customer_city', 'c.zip as customer_zip', 'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
+}
+
+// This technician's truck logged an arrival at the visit (a grouped stop is one physical visit:
+// the row can sit on any member) in the 12 hours before the flag.
+async function arrivalLogged(database, visit, technicianId, now) {
   const memberIds = visit.visit_id
     ? (await database('scheduled_services').where({ visit_id: visit.visit_id }).pluck('id'))
     : [];
-  const visitIds = [...new Set([visit.id, ...memberIds].map(String))];
   const arrival = await database('audit_log')
     .where({ action: 'gps_arrival.mark_on_property', resource_type: 'scheduled_service' })
-    .whereIn('resource_id', visitIds)
+    .whereIn('resource_id', [...new Set([visit.id, ...memberIds].map(String))])
     .whereRaw("metadata->>'tech_id' = ?", [String(technicianId || '')])
     .where('created_at', '>=', new Date(now.getTime() - ARRIVAL_WINDOW_MS))
     .where('created_at', '<=', now)
-    .orderBy('created_at', 'desc')
-    .first('metadata');
-  if (!arrival) return { ...check, result: 'no_gps_arrival' };
-  const raw = arrival.metadata?.distance_meters;
-  const logged = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+    .first('id');
+  return Boolean(arrival);
+}
+
+// The property the truck is at, by the arrival detector's own rule (extractDestination): the
+// visit's stamped service address when it has one (a secondary or rental property), else the
+// customer's primary address, with the unit. Stored with the result, with the visit's customer row,
+// so the estimate is checked against the same place.
+function visitedPremise(visit) {
+  const stamped = Boolean(visit.service_address_line1);
   return {
-    ...check,
-    premise: await visitedPremise(database, visit),
-    result: 'verified',
-    distance_m: Number.isFinite(logged) ? Math.round(logged) : null,
+    customer_id: String(visit.customer_id),
+    address: (stamped ? visit.service_address_line1 : visit.customer_address_line1) || null,
+    unit: (stamped ? visit.service_address_line2 : visit.customer_address_line2) || null,
+    city: (stamped ? visit.service_address_city : visit.customer_city) || null,
+    zip: (stamped ? visit.service_address_zip : visit.customer_zip) || null,
   };
 }
 
-// The property the truck arrived at, by the arrival detector's own rule (gps-arrival-detector.js
-// extractDestination): the visit's stamped service address when it has one (a secondary or rental
-// property), else the customer's primary address. Kept with the result, with the visit's customer
-// row, so the estimate is checked against the same place.
-async function visitedPremise(database, visit) {
-  const customerId = String(visit.customer_id);
-  if (visit.service_address_line1) {
-    return {
-      customer_id: customerId, address: visit.service_address_line1, unit: visit.service_address_line2 || null,
-      city: visit.service_address_city || null, zip: visit.service_address_zip || null,
-    };
-  }
-  const row = await database('customers').where({ id: visit.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
-  return { customer_id: customerId, address: row?.address_line1 || null, unit: row?.address_line2 || null, city: row?.city || null, zip: row?.zip || null };
+// The truck against a point: { result, distance_m?, truck_reported_at? } (verified within radius).
+async function truckNear(database, technicianId, now, point, radius) {
+  const truck = await truckPosition(database, technicianId, now);
+  const reported = truck.reportedAt ? { truck_reported_at: truck.reportedAt } : {};
+  if (truck.result) return { ...reported, result: truck.result };
+  const { distanceMeters } = require('./gps-arrival-detector');
+  const meters = distanceMeters(Number(truck.lat), Number(truck.lng), Number(point.lat), Number(point.lng));
+  if (meters == null) return { ...reported, result: 'no_truck_position' };
+  return { ...reported, distance_m: Math.round(meters), result: meters <= radius ? 'verified' : 'too_far' };
 }
 
 // Prospect mode: the typed address against the technician's truck.
@@ -153,15 +176,7 @@ async function checkProspectLocation({ database = db, technicianId, prospect, no
   }
   if (!location) return { ...check, result: 'address_not_found' };
 
-  const truck = await truckPosition(database, technicianId, now);
-  if (truck.reportedAt) check.truck_reported_at = truck.reportedAt;
-  if (truck.result) return { ...check, result: truck.result };
-
-  const { distanceMeters } = require('./gps-arrival-detector');
-  const meters = distanceMeters(Number(truck.lat), Number(truck.lng), Number(location.lat), Number(location.lng));
-  if (meters == null) return { ...check, result: 'no_truck_position' };
-  check.distance_m = Math.round(meters);
-  return { ...check, result: meters <= radius ? 'verified' : 'too_far' };
+  return { ...check, ...(await truckNear(database, technicianId, now, location, radius)) };
 }
 
 // The technician's truck position, or the reason there is none. vehicle_locations keeps the latest
