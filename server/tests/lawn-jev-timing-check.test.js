@@ -159,6 +159,14 @@ describe('checkDiagnosisSummary', () => {
     expect(logged).not.toContain('mid-November');
   });
 
+  test('enforce: a flagged sentence on its own line is still dropped (Jev splits on line breaks, the egress does not)', async () => {
+    process.env[GATE] = 'enforce';
+    const LINE = 'Thin turf near the driveway';
+    const out = await checkDiagnosisSummary(contractOf(`${LINE}\n${S2} ${S3}`), { modelWritten: true }, deps({ flagged: [S2] }));
+    expect(out.contract.customer_summary).not.toContain('mid-November');
+    expect(out.contract.customer_summary).toContain(S3);
+  });
+
   test('enforce: every sentence flagged reads as the generic summary, like the read-time egress', async () => {
     process.env[GATE] = 'enforce';
     const out = await checkDiagnosisSummary(contractOf(), { modelWritten: true }, deps({ flagged: [S1, S2, S3] }));

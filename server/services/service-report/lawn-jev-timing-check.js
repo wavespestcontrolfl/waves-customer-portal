@@ -175,10 +175,12 @@ async function checkDiagnosisSummary(contract, { modelWritten = false } = {}, de
     }
     // A flagged sentence: drop it before storage, exactly as the read-time egress
     // drops word-list hits (and the same empty result). The dropped text is no
-    // longer the judged text, so nothing is recorded for it.
+    // longer the judged text, so nothing is recorded for it. Jev's sentences come
+    // from sentencesOf, which also splits on line breaks; the egress splitter cuts
+    // only after . ! or ?, so a piece is dropped when it CONTAINS a flagged
+    // sentence (an exact match would miss one that sits on its own line).
     const { withoutResultTimingSentences, GENERIC_LOW_CONFIDENCE_SUMMARY } = require('../lawn-diagnostic-report');
-    const flagged = new Set(verdict.flaggedSentences);
-    const kept = withoutResultTimingSentences(summary, (sentence) => flagged.has(sentence));
+    const kept = withoutResultTimingSentences(summary, (piece) => verdict.flaggedSentences.some((sentence) => piece.includes(sentence)));
     logger.info(`[lawn-jev-timing-check] enforce: dropped ${verdict.flaggedSentences.length} flagged sentence(s) from a lawn diagnosis summary before storage`);
     return UNCHANGED({ ...contract, customer_summary: kept === null ? GENERIC_LOW_CONFIDENCE_SUMMARY : kept });
   } catch (err) {
