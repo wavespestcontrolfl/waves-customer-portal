@@ -37,9 +37,11 @@
 //   5. The hire must be assignable on every date a visit moves to (the app's
 //      assertAssignableTechnician: a technician_absences row for that date refuses the run).
 //   6. The rollback file is written and synced BEFORE the first update. Ids and counts only.
-//      A run that then fails leaves a file that restores nothing (no row holds --to).
+//      It carries a run id that the execute audit row records in the same transaction, so a
+//      file left by a run that failed is refused by --rollback (RUN_NOT_COMMITTED).
 //
-// ROLLBACK restores a series only while its template still reads (--to, override) and a visit only
+// ROLLBACK needs the file's run to have committed (its execute audit row, same run id) and not to be
+// rolled back already (one rollback audit row per run). It restores a series only while its template still reads (--to, override) and a visit only
 // while it is still open, still held by --to, still on the day the run moved it, and the original
 // technician can still take that day (assertAssignableTechnician), and only while it is in no visit
 // group (a group's technician moves with its stops, through a path this run never calls). Everything
@@ -62,6 +64,7 @@
 //
 // Output carries counts, technician ids the operator typed, series ids, visit ids and the
 // rollback file path. No names, addresses, phones or emails.
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -250,6 +253,8 @@ async function executeHandover(db, opts) {
 
       const record = {
         version: ROLLBACK_VERSION,
+        // Ties the file to this run: rollback needs this run's execute audit row (written in the same transaction).
+        run_id: crypto.randomUUID(),
         plan_id: planId,
         created_at: new Date().toISOString(),
         from, to, start, lines,
@@ -294,7 +299,7 @@ async function executeHandover(db, opts) {
         resource_type: 'technician_handover',
         metadata: {
           plan_id: planId, from, to, start, lines, series: summary.series, visits: summary.visits, customers: summary.customers,
-          rollback_file: path.basename(rollbackFile), source: 'ops/agents/second-tech-handover-execute.js',
+          run_id: record.run_id, rollback_file: path.basename(rollbackFile), source: 'ops/agents/second-tech-handover-execute.js',
         },
         critical: true,
         trx,
@@ -315,8 +320,23 @@ async function executeHandover(db, opts) {
   return { ...rest, dateCount: dates.length, flush, cardSent: card };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isRollbackRecord = (r) => r && r.version === ROLLBACK_VERSION && /^[0-9a-f]{64}$/.test(String(r.plan_id || ''))
-  && r.from && r.to && Array.isArray(r.series) && Array.isArray(r.visits);
+  && UUID_RE.test(String(r.run_id || '')) && r.from && r.to && Array.isArray(r.series) && Array.isArray(r.visits);
+
+// The run this file belongs to must have committed (its execute audit row exists) and must not be undone already.
+// A file left by a run that failed after writing it restores nothing it should: refuse it.
+async function assertRunCommitted(trx, runId) {
+  const rows = await trx('audit_log').whereIn('action', ['schedule.handover.execute', 'schedule.handover.rollback'])
+    .whereRaw("metadata->>'run_id' = ?", [runId]).select('action');
+  const actions = new Set(rows.map((r) => r.action));
+  if (!actions.has('schedule.handover.execute')) {
+    throw new Refusal('RUN_NOT_COMMITTED', 'this rollback file belongs to a run that did not commit (no execute audit row): it has nothing to undo. Nothing was written.');
+  }
+  if (actions.has('schedule.handover.rollback')) {
+    throw new Refusal('ALREADY_ROLLED_BACK', 'this run was already rolled back. Nothing was written.');
+  }
+}
 
 /**
  * Undo a run from its rollback file. Restores a row only while it still holds --to: a template
@@ -342,6 +362,7 @@ async function rollbackHandover(db, opts) {
     result = await db.transaction(async (trx) => {
       await lockSeriesMaintenance(trx, record.series.map((s) => s.id));
       await lockTechDays(trx, record.visits.flatMap((v) => [{ techId: from, date: v.date }, { techId: to, date: v.date }]));
+      await assertRunCommitted(trx, record.run_id);
       const skipped = { series: [], visits: [] };
       let seriesRestored = 0;
       let visitsRestored = 0;
@@ -393,7 +414,7 @@ async function rollbackHandover(db, opts) {
         action: 'schedule.handover.rollback',
         resource_type: 'technician_handover',
         metadata: {
-          plan_id: record.plan_id, from, to, series_restored: seriesRestored, visits_restored: visitsRestored,
+          plan_id: record.plan_id, run_id: record.run_id, from, to, series_restored: seriesRestored, visits_restored: visitsRestored,
           series_skipped: skipped.series.length, visits_skipped: skipped.visits.length,
           source: 'ops/agents/second-tech-handover-execute.js',
         },

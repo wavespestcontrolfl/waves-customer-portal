@@ -202,7 +202,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect(JSON.stringify(file)).not.toMatch(/Synthetic|example\.invalid/);
     const audit = await knex('audit_log').where({ action: 'schedule.handover.execute' }).whereRaw("metadata->>'plan_id' = ?", [result.planId]);
     expect(audit).toHaveLength(1);
-    expect(audit[0].metadata).toMatchObject({ visits: 4, series: 2, customers: 1, from: w.ownerId, to: w.hireId });
+    expect(audit[0].metadata).toMatchObject({ visits: 4, series: 2, customers: 1, from: w.ownerId, to: w.hireId, run_id: file.run_id });
 
     // Rollback: one visit changed since (the hire handed it to the third technician): skipped and listed.
     await knex('scheduled_services').where({ id: w.wed.id }).update({ technician_id: w.otherId });
@@ -217,6 +217,9 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
     }
     expect((await notices([w.ownerId, w.hireId, w.otherId])).length).toBe(cardsBefore); // rollback sends nothing
+    expect(await knex('audit_log').where({ action: 'schedule.handover.rollback' }).whereRaw("metadata->>'plan_id' = ?", [result.planId])).toHaveLength(1);
+    // The same file a second time: refused, nothing written.
+    await expect(exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW })).rejects.toMatchObject({ code: 'ALREADY_ROLLED_BACK' });
     expect(await knex('audit_log').where({ action: 'schedule.handover.rollback' }).whereRaw("metadata->>'plan_id' = ?", [result.planId])).toHaveLength(1);
   });
 
@@ -349,6 +352,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     const w = await world();
     const plan = await dryRun(w);
     created.plans.push(plan.planId);
+    const filesBefore = new Set(fs.readdirSync(outDir));
     // The audit row is the last write inside the transaction: make it fail.
     const audit = require('../services/audit-log');
     const spy = jest.spyOn(audit, 'recordAuditEvent').mockRejectedValueOnce(new Error('audit write failed'));
@@ -362,5 +366,9 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect((await get(w.mon.id)).technician_id).toBe(w.ownerId);
     expect((await get(w.pest.id))).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
     expect(await notices([w.hireId])).toHaveLength(0);
+    // The file the failed run left behind belongs to no committed run: rollback refuses it.
+    const left = fs.readdirSync(outDir).filter((f) => !filesBefore.has(f));
+    expect(left).toHaveLength(1);
+    await expect(exec.rollbackHandover(knex, { file: path.join(outDir, left[0]), now: NOW })).rejects.toMatchObject({ code: 'RUN_NOT_COMMITTED' });
   });
 });

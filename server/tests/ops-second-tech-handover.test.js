@@ -436,7 +436,7 @@ describe('second-tech-handover execute flags and refusals', () => {
     const inWindow = new Date('2099-07-07T04:10:00-04:00');
     await expect(executeHandover(null, { ...base, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
     const file = path.join(require('os').tmpdir(), `handover-unit-${process.pid}.json`);
-    fs.writeFileSync(file, JSON.stringify({ version: 1, plan_id: PLAN, from: OWNER, to: HIRE, series: [], visits: [] }));
+    fs.writeFileSync(file, JSON.stringify({ version: 1, run_id: '00000000-0000-4000-8000-0000000000aa', plan_id: PLAN, from: OWNER, to: HIRE, series: [], visits: [] }));
     try {
       await expect(rollbackHandover(null, { file, now: inWindow })).rejects.toMatchObject({ code: 'RESTART_WINDOW' });
       await expect(rollbackHandover(null, { file: `${file}.missing` })).rejects.toMatchObject({ code: 'BAD_ROLLBACK_FILE' });
