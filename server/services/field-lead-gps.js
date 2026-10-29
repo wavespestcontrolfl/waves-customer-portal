@@ -104,7 +104,8 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
     .orderBy('created_at', 'desc')
     .first('metadata');
   if (!arrival) return { ...check, result: 'no_gps_arrival' };
-  const logged = Number(arrival.metadata?.distance_meters);
+  const raw = arrival.metadata?.distance_meters;
+  const logged = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
   return { ...check, result: 'verified', distance_m: Number.isFinite(logged) ? Math.round(logged) : null };
 }
 

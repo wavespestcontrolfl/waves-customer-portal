@@ -172,11 +172,18 @@ async function loadSoldByForList(database, estimates) {
       name: e.sold_by_technician_id ? names.get(String(e.sold_by_technician_id)) || null : null,
       source: e.sold_by_source || null,
       leadId: e.sold_by_lead_id || null,
-      gpsDistanceM: check && Number.isFinite(Number(check.distance_m)) ? Number(check.distance_m) : null,
+      gpsDistanceM: knownMeters(check?.distance_m),
       flaggedAt: lead?.created_at || null,
     });
   }
   return out;
+}
+
+// A distance the check measured, or null when it did not (null must not read as 0 m).
+function knownMeters(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const meters = Number(value);
+  return Number.isFinite(meters) ? meters : null;
 }
 
 // Spread into a list row: {} with the gate off.

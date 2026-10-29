@@ -199,6 +199,21 @@ postgres('commission sold by', () => {
       expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Chinch bugs · GPS: verified, 40 m');
     });
 
+    it('keeps the distance unknown when the arrival row logged none', async () => {
+      const { lead } = await run({
+        mutate: async ({ id, v }) => {
+          await trx('audit_log').insert({
+            actor_type: 'system:gps-arrival', action: 'gps_arrival.mark_on_property', resource_type: 'scheduled_service',
+            resource_id: v, metadata: { tech_id: id, distance_meters: null }, created_at: new Date(Date.now() - HOUR),
+          });
+          return {};
+        },
+      });
+      expect(lead.gps_verified).toBe(true);
+      expect(lead.gps_check.distance_m).toBeNull();
+      expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified$/);
+    });
+
     it('makes the lead, unverified, when no arrival was logged', async () => {
       const { res, lead } = await run();
       expect(res.status).toBe(200);
@@ -582,6 +597,19 @@ postgres('commission sold by', () => {
       const off = await admin('GET', '?limit=all');
       expect(off.body.estimates.every((e) => !('soldBy' in e))).toBe(true);
       expect(await loadSoldByForList(trx, [])).toBeNull();
+    });
+
+    it('keeps an unknown GPS distance unknown, never 0 m', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      const lead = await flagLead(t, {
+        customer_id: cust, gps_check: JSON.stringify({ result: 'verified', mode: 'customer', technician_id: t, distance_m: null }),
+      });
+      const est = await estimate({
+        customer_id: cust, sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead, sold_by_set_at: new Date(),
+      });
+      const rows = Object.fromEntries((await admin('GET', '?limit=all')).body.estimates.map((e) => [e.id, e]));
+      expect(rows[est].soldBy.gpsDistanceM).toBeNull();
     });
   });
 
