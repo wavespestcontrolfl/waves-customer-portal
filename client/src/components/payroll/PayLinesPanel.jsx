@@ -75,7 +75,8 @@ export default function PayLinesPanel({ call, weekStart, onChanged }) {
       setEnabled(true);
       setOpen(openData.payLines || []);
       setError('');
-      const [paidData, techData] = await Promise.all([call('/pay-lines?status=paid'), call('/technicians')]);
+      // Every W-2 employee, one who has left too (a commission paid after the last day).
+      const [paidData, techData] = await Promise.all([call('/pay-lines?status=paid'), call('/pay-lines/technicians')]);
       setPaid((paidData.payLines || []).slice(0, 10));
       setTechnicians(techData.technicians || []);
     } catch (failure) {
@@ -149,7 +150,9 @@ export default function PayLinesPanel({ call, weekStart, onChanged }) {
         <Field label="Employee" required>
           <Select value={form.technicianId} onChange={set('technicianId')}>
             <option value="">Pick an employee</option>
-            {technicians.map(tech => <option key={tech.id} value={tech.id}>{tech.name}</option>)}
+            {technicians.map(tech => <option key={tech.id} value={tech.id}>
+              {tech.employmentStatus === 'inactive' ? `${tech.name} (former employee)` : tech.name}
+            </option>)}
           </Select>
         </Field>
         <Field label="Kind" required>

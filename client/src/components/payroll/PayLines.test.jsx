@@ -63,6 +63,9 @@ beforeEach(() => {
     if (path === '/admin/payroll/technicians') {
       return reply({ technicians: gateOn ? TECHS : TECHS.map(({ flsaOvertimeCovered, ...rest }) => rest) });
     }
+    if (path === '/admin/payroll/pay-lines/technicians') {
+      return reply({ technicians: [...TECHS, { id: 'tech-c', name: 'Sample Former', employmentStatus: 'inactive' }] });
+    }
     if (path === '/admin/payroll/runs') return reply({ runs: [] });
     if (path === '/admin/payroll/runs/run-1') return reply({ run: RUN });
     if (path === '/admin/payroll/pay-lines?status=open') return reply({ payLines: open });
@@ -129,6 +132,20 @@ describe('Pay lines panel (GATE_PAYROLL_PAY_LINES on)', () => {
       coversFrom: '2026-10-01', coversTo: '2026-10-31', note: 'Sample',
     });
     expect(await screen.findByText(/Pay line added/)).toBeInTheDocument();
+  });
+
+  it('offers an employee who has left, marked as a former employee', async () => {
+    render(<PayrollSettings />);
+    const form = await within(await panel()).findByRole('form', { name: 'Add pay line' });
+    const employee = within(form).getByLabelText(/Employee/);
+    expect(await within(employee).findByRole('option', { name: 'Sample Former (former employee)' })).toBeInTheDocument();
+    expect(within(employee).getByRole('option', { name: 'Sample Alpha' })).toBeInTheDocument();
+    expect(calls.some(c => c.path === '/admin/payroll/pay-lines/technicians')).toBe(true);
+    fireEvent.change(employee, { target: { value: 'tech-c' } });
+    fireEvent.change(within(form).getByLabelText(/Amount/), { target: { value: '400' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add pay line' }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0].body).toMatchObject({ technicianId: 'tech-c', amountCents: 40000 });
   });
 
   it('removes a waiting line', async () => {

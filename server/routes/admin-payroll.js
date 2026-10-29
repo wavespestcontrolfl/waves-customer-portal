@@ -48,6 +48,7 @@
  *
  * Pay lines (GATE_PAYROLL_PAY_LINES, also dark; off answers 404 { enabled: false }).
  * GET    /pay-lines?technicianId=&status=   lines, newest week first (status open, paid or voided).
+ * GET    /pay-lines/technicians             every W-2 employee a line can be for, one who has left too.
  * POST   /pay-lines                         { kind: 'review_bonus' | 'commission' | 'health_allowance' |
  *                                    'hsa_employer', technicianId, amountCents, earnedWeekStart (a Monday),
  *                                    coversFrom?, coversTo?, note? } 201 { payLine }. The next pay run
@@ -155,6 +156,12 @@ router.get('/pay-lines', payLinesOnly, async (req, res) => {
   try {
     res.json({ payLines: await payrollPayLines.listPayLines(req.query) });
   } catch (err) { fail(res, 'list pay lines', err); }
+});
+
+router.get('/pay-lines/technicians', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ technicians: await payrollPayLines.listPayLineTechnicians() });
+  } catch (err) { fail(res, 'list pay line employees', err); }
 });
 
 router.post('/pay-lines', payLinesOnly, async (req, res) => {

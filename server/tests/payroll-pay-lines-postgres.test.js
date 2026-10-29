@@ -155,6 +155,7 @@ postgres('payroll pay lines', () => {
       const id = await readyTech('Sample Alpha');
       for (const [method, path, body] of [
         ['GET', '/pay-lines'],
+        ['GET', '/pay-lines/technicians'],
         ['POST', '/pay-lines', { kind: 'review_bonus', technicianId: id, amountCents: 3000, earnedWeekStart: W1 }],
         ['DELETE', `/pay-lines/${randomUUID()}`],
         ['PUT', `/technicians/${id}/flsa-coverage`, { covered: true }],
@@ -164,6 +165,20 @@ postgres('payroll pay lines', () => {
       }
       expect(Number((await trx('payroll_pay_lines').count('* as n').first()).n)).toBe(0);
       expect((await trx('technicians').where({ id }).first('flsa_overtime_covered')).flsa_overtime_covered).toBeNull();
+    });
+
+    it('offer every W-2 employee for a line, one who has left too, and no contractor', async () => {
+      const former = await technician({ name: 'Sample Former', employment_status: 'inactive' });
+      const current = await readyTech('Sample Zulu');
+      const contractor = await technician({ name: 'Sample Contractor', employment_type: '1099' });
+      const listed = await api('GET', '/pay-lines/technicians');
+      expect(listed.status).toBe(200);
+      const ours = listed.body.technicians.filter((t) => [former, current, contractor].includes(t.id));
+      // Current employees first, then the ones who have left.
+      expect(ours).toEqual([
+        { id: current, name: 'Sample Zulu', employmentStatus: 'active' },
+        { id: former, name: 'Sample Former', employmentStatus: 'inactive' },
+      ]);
     });
 
     it('are admin only', async () => {

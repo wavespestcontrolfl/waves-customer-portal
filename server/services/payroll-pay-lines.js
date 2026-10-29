@@ -129,6 +129,20 @@ async function listPayLines(query, conn = db) {
   return (await q.select(lineColumns(conn))).map(serializeLine);
 }
 
+/**
+ * The employees a line can be for: every W-2 technician, one who has left too (a
+ * commission paid after the last day). The payroll settings list holds current
+ * employees only, so the add form reads this one. Current employees first, then by name.
+ */
+async function listPayLineTechnicians(conn = db) {
+  const rows = await conn('technicians')
+    .where({ employment_type: 'w2' })
+    .orderByRaw("CASE WHEN employment_status = 'inactive' THEN 1 ELSE 0 END")
+    .orderBy([{ column: 'name' }, { column: 'id' }])
+    .select('id', 'name', 'employment_status');
+  return rows.map((row) => ({ id: row.id, name: row.name, employmentStatus: row.employment_status }));
+}
+
 // ---- Writing
 
 function checkSpan(v) {
@@ -343,6 +357,7 @@ module.exports = {
   KIND_WORDS,
   payLinesOn,
   listPayLines,
+  listPayLineTechnicians,
   createPayLine,
   deletePayLine,
   setFlsaCoverage,
