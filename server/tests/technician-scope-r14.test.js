@@ -53,7 +53,8 @@ describe('finding 1: schedule-sms is office-only', () => {
     const queue = read('services/scheduled-sms-queue.js');
     const writerGuard = queue.indexOf("if (actor?.techRole !== 'admin') return fail(403, 'Admin access required');");
     expect(writerGuard).toBeGreaterThan(0);
-    expect(writerGuard).toBeLessThan(queue.indexOf('recruitingReplyContext('));
+    // ...before the ordered guard list runs a single check (the first reads the hooks, the customer lookup reads the DB).
+    expect(writerGuard).toBeLessThan(queue.indexOf('for (const guard of SCHEDULE_GUARDS)'));
     expect(writerGuard).toBeLessThan(queue.indexOf("trx('sms_log')"));
   });
 
