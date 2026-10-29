@@ -401,32 +401,13 @@ export default function ProjectReportViewPage() {
     setLoadError(false);
     fetch(`${API_BASE}/reports/project/${token}/data`)
       .then(r => {
-        if (r.status === 404 || r.status === 410 || r.status === 402) return r.json();
+        if (r.status === 404 || r.status === 410) return r.json();
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();
       })
       .then(d => { setData(d); setLoading(false); })
       .catch(() => { setLoadError(true); setLoading(false); });
   }, [token, loadAttempt]);
-
-  // Paid-but-unswept: without this, the 402 card sits static after the
-  // customer pays in another tab. Quietly re-check every 30s and swap the
-  // report in once it unlocks. Safe to poll: the server 402s before any
-  // view-stamp/activity write, and non-OK re-checks change nothing here.
-  useEffect(() => {
-    if (data?.code !== 'report_payment_required') return undefined;
-    // `cancelled` invalidates in-flight responses on cleanup — clearing the
-    // interval alone would let a slow response for the PREVIOUS token setData
-    // over the newly-loaded report (codex P2 #2824 r2).
-    let cancelled = false;
-    const id = window.setInterval(() => {
-      fetch(`${API_BASE}/reports/project/${token}/data`)
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => { if (!cancelled && d && !d.error) setData(d); })
-        .catch(() => {});
-    }, 30000);
-    return () => { cancelled = true; window.clearInterval(id); };
-  }, [data?.code, token]);
 
   if (loading) return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_BODY }}>
@@ -448,39 +429,6 @@ export default function ProjectReportViewPage() {
         This looks temporary. Your link is still valid&mdash;check your connection and try again.
       </PublicStateCard>
     </CustomerColumn>
-  );
-
-  // Payment-held report (402 report_payment_required): the inspection is
-  // done and the report exists, but it unlocks — and is emailed automatically
-  // — only once the invoice is paid. Warm customer-surface card with the pay
-  // CTA when the server offered a live pay link.
-  if (data?.code === 'report_payment_required') return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, maxWidth: 440, textAlign: 'center' }}>
-        <div style={{ color: ESTIMATE_MUTED }}><Icon name="lock" size={32} strokeWidth={1.75} /></div>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>
-          Your {data.reportTypeLabel || 'inspection'} report is ready
-        </h1>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          {data.payerBilled
-            ? 'This inspection is billed directly to the requesting party. As soon as their invoice is paid, your official report is emailed automatically and unlocks right here.'
-            : data.paymentProcessing
-              ? 'Your bank payment is processing — as soon as it clears, your official report is emailed to you automatically and unlocks right here. No extra steps needed.'
-              : <>Once your invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''} is paid, your official
-                report is emailed to you automatically and unlocks right here — no extra steps needed.</>}
-        </div>
-        {data.payUrl ? (
-          <a href={data.payUrl} style={{ ...primaryButtonStyle, marginTop: 16 }}>
-            Pay invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''}
-          </a>
-        ) : null}
-        <div style={{ marginTop: data.payUrl ? 10 : 16 }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={data.payUrl ? { ...secondaryButtonStyle } : { ...primaryButtonStyle }}>
-            Call Waves — {WAVES_PHONE_DISPLAY}
-          </a>
-        </div>
-      </div>
-    </div>
   );
 
   if (!data || data.error) return (

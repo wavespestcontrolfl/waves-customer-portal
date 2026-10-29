@@ -299,29 +299,6 @@ describe('refusals', () => {
     expect(await preview()).toMatchObject({ code: 'visit_terminal' });
   });
 
-  test.each(['held', 'releasing'])('an invoice a %s report waits on is refused at the preview and at Confirm (it would release the report to the customer)', async (status) => {
-    const clean = await preview();
-    state.projects.push({ id: 'p1', invoice_id: INV, report_hold_status: status });
-    const res = await preview();
-    expect(res).toMatchObject({ code: 'payment_releases_report_unsupported' });
-    expect(res.error).toBe('Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page.');
-    expect(await confirm(clean)).toMatchObject({ code: 'payment_releases_report_unsupported', preview_changed: true });
-    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
-  });
-
-  test('a report already released, or held for a different invoice, does not block', async () => {
-    state.projects.push({ id: 'p1', invoice_id: INV, report_hold_status: 'released' }, { id: 'p2', invoice_id: 'other', report_hold_status: 'held' });
-    expect(await preview()).toMatchObject({ preview: true });
-  });
-
-  test('a held-report lookup that fails refuses (fail closed)', async () => {
-    const base = makeDb();
-    db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
-    const res = await preview();
-    expect(res).toMatchObject({ code: 'payment_releases_report_unsupported' });
-    expect(res.error).toMatch(/could not check/);
-  });
-
   test('target errors: both or neither of id and number, a bad id, an unknown invoice', async () => {
     expect(await preview({ invoice_number: 'WPC-2099-0001' })).toMatchObject({ code: 'invalid_target' });
     expect(await preview({ invoice_id: undefined })).toMatchObject({ code: 'invalid_target' });

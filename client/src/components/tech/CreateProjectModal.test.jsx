@@ -321,7 +321,6 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     detailPayload = {
       wdo_applicator: { name: 'Adam Benetti', idCardNo: 'JE362022' },
       wdo_signature: null,
-      report_payment_hold_available: true,
     };
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
       const u = String(url);
@@ -338,7 +337,6 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
         }
         return jsonResponse({
           sent: true,
-          report_held: true,
           invoice: { id: 'inv-1', invoice_number: 'INV-1001', total: 250 },
         });
       }
@@ -552,7 +550,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
     const saveForLater = await screen.findByRole('button', { name: 'Save for later' });
-    const finish = screen.getByRole('button', { name: 'Send invoice & hold report' });
+    const finish = screen.getByRole('button', { name: 'Send invoice & report' });
     expect(finish.style.width).toBe('100%');
     expect(screen.queryByText("Unsigned reports can’t be sent yet.")).toBeNull();
     fireEvent.click(saveForLater);
@@ -564,7 +562,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     await saveIntoSignStep({ allowInvoiceCompletion: false });
     fireEvent.click(screen.getByText('mock-sign-saved'));
     await screen.findByText('Signed — saved for office review and invoice delivery.');
-    expect(screen.queryByRole('button', { name: 'Send invoice & hold report' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send invoice & report' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Save for later' })).toBeTruthy();
   });
 
@@ -579,13 +577,13 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(screen.getByText("Unsigned reports can’t be sent yet.")).toBeTruthy();
   });
 
-  it('sends the invoice, arms the customer-side hold, closes the service, and skips the legacy editor handoff', async () => {
+  it('sends the invoice with the report, closes the service, and skips the legacy editor handoff', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
     await saveIntoSignStep({ onCreated, onClose });
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & report' }));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'p-1', status: 'closed' }),
@@ -597,12 +595,11 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
 
     const calls = fetch.mock.calls.filter(([url]) => String(url).includes('/admin/projects/p-1'));
-    const holdSend = calls.find(([url, opts]) => (
+    const realSend = calls.find(([url, opts]) => (
       String(url).includes('/send-with-invoice')
-      && JSON.parse(opts.body || '{}').hold_report_until_paid === true
       && !JSON.parse(opts.body || '{}').dry_run
     ));
-    expect(holdSend).toBeTruthy();
+    expect(realSend).toBeTruthy();
     expect(calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(true);
   });
 
@@ -625,7 +622,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     const onCreated = vi.fn();
     await saveIntoSignStep({ onCreated, onClose: vi.fn() });
     fireEvent.click(screen.getByText('mock-sign-saved'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & report' }));
 
     await screen.findByText('Temporary closeout failure');
     fireEvent.click(screen.getByRole('button', { name: 'Finish service' }));
@@ -639,14 +636,13 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(invoiceCalls).toHaveLength(2); // one preview + one real send, no retry send
   });
 
-  it('falls back to combined invoice + report delivery when the hold gate is unavailable', async () => {
-    detailPayload.report_payment_hold_available = false;
+  it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
     const baseFetch = fetch;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
       if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
         const body = JSON.parse(opts.body || '{}');
         if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-1', total: 250 } });
-        return jsonResponse({ sent: true, report_held: false, invoice: { id: 'inv-1', invoice_number: 'INV-1001' } });
+        return jsonResponse({ sent: true, invoice: { id: 'inv-1', invoice_number: 'INV-1001' } });
       }
       return baseFetch(url, opts);
     }));
@@ -659,72 +655,6 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
       expect.objectContaining({ status: 'closed' }),
       expect.objectContaining({ completed: true }),
     ));
-    const invoiceBodies = fetch.mock.calls
-      .filter(([url]) => String(url).includes('/send-with-invoice'))
-      .map(([, opts]) => JSON.parse(opts.body || '{}'));
-    expect(invoiceBodies.every((body) => body.hold_report_until_paid !== true)).toBe(true);
-  });
-
-  it('retries statement-billed delivery without a payment hold', async () => {
-    const baseFetch = fetch;
-    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
-      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
-        const body = JSON.parse(opts.body || '{}');
-        if (body.hold_report_until_paid === true) {
-          return Promise.resolve({
-            ok: false,
-            json: () => Promise.resolve({
-              code: 'hold_statement_accrued',
-              error: 'This service bills on the payer monthly statement',
-            }),
-          });
-        }
-        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-statement', total: 250 } });
-        return jsonResponse({
-          sent: true,
-          report_held: false,
-          invoice: { id: 'inv-statement', invoice_number: 'INV-NET-1' },
-        });
-      }
-      return baseFetch(url, opts);
-    }));
-    const onCreated = vi.fn();
-    await saveIntoSignStep({ onCreated });
-    fireEvent.click(screen.getByText('mock-sign-saved'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
-
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'closed' }),
-      expect.objectContaining({ completed: true }),
-    ));
-    const invoiceBodies = fetch.mock.calls
-      .filter(([url]) => String(url).includes('/send-with-invoice'))
-      .map(([, request]) => JSON.parse(request.body || '{}'));
-    expect(invoiceBodies).toHaveLength(3);
-    expect(invoiceBodies[0].hold_report_until_paid).toBe(true);
-    expect(invoiceBodies.slice(1).every((body) => body.hold_report_until_paid !== true)).toBe(true);
-  });
-
-  it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
-    const baseFetch = fetch;
-    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
-      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
-        const body = JSON.parse(opts.body || '{}');
-        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-1', total: 250 } });
-        return jsonResponse({ sent: true, report_held: false, invoice: { id: 'inv-1', invoice_number: 'INV-1001' } });
-      }
-      return baseFetch(url, opts);
-    }));
-    const onCreated = vi.fn();
-    await saveIntoSignStep({ onCreated });
-    fireEvent.click(screen.getByText('mock-sign-saved'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
-
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'closed' }),
-      expect.objectContaining({ completed: true }),
-    ));
-    expect(screen.queryByText(/not placed on hold/i)).toBeNull();
   });
 
   it('sends a no-charge WDO report without creating or sending an invoice', async () => {
@@ -845,7 +775,6 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
         if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-cert', total: 425 } });
         return jsonResponse({
           sent: true,
-          report_held: true,
           invoice: { id: 'inv-cert', invoice_number: 'INV-2001', total: 425 },
         });
       }
@@ -856,7 +785,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       }
       if (u.endsWith('/admin/projects/cert-1')) {
         return jsonResponse({
-          project: { report_payment_hold_available: true },
+          project: {},
           closeoutPreview: { billing: { required: true, resolved: false, reason: 'invoice_required' } },
         });
       }
@@ -874,7 +803,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(screen.getByRole('button', { name: '+ Add unplanned application' })).toBeTruthy();
   });
 
-  it('uses the saved applicator attestation, sends the invoice, holds the certificate, and closes the service', async () => {
+  it('uses the saved applicator attestation, sends the invoice with the certificate, and closes the service', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
     renderCertificateSheet({ onCreated, onClose });
@@ -885,7 +814,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     await screen.findByText('✓ Certificate saved');
     expect(screen.queryByTestId('sign-pad')).toBeNull();
     expect(screen.getByText(/Applicator attestation saved/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Send invoice & hold certificate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send invoice & certificate' }));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'cert-1', status: 'closed' }),
@@ -897,7 +826,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     const sendCalls = fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'));
     expect(sendCalls).toHaveLength(2);
-    expect(sendCalls.every(([, opts]) => JSON.parse(opts.body).hold_report_until_paid === true)).toBe(true);
+    expect(sendCalls.every(([, opts]) => JSON.parse(opts.body).hold_report_until_paid === undefined)).toBe(true);
   });
 
   it('delivers a prepaid certificate and closes without sending another invoice', async () => {
@@ -906,7 +835,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       const u = String(url);
       if (u.endsWith('/admin/projects/cert-1')) {
         return jsonResponse({
-          project: { report_payment_hold_available: true },
+          project: {},
           closeoutPreview: { billing: { required: true, resolved: true, reason: 'prepaid_covered' } },
         });
       }
@@ -931,7 +860,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       const u = String(url);
       if (u.endsWith('/admin/projects/cert-1')) {
         return jsonResponse({
-          project: { report_payment_hold_available: true },
+          project: {},
           closeoutPreview: {
             billing: {
               required: true, resolved: true, reason: 'invoice_exists', invoiceStatus: 'paid',
@@ -951,7 +880,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       expect.objectContaining({ status: 'closed' }),
       expect.objectContaining({ completed: true }),
     ));
-    expect(screen.queryByRole('button', { name: 'Send invoice & hold certificate' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send invoice & certificate' })).toBeNull();
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
   });
 
@@ -961,7 +890,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       const u = String(url);
       if (u.endsWith('/admin/projects/cert-1')) {
         return jsonResponse({
-          project: { report_payment_hold_available: true },
+          project: {},
           closeoutPreview: {
             billing: {
               required: true, resolved: true, reason: 'invoice_exists', invoiceStatus: 'sent',
@@ -974,7 +903,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     renderCertificateSheet();
     fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
 
-    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Send invoice & certificate' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Send certificate & finish service' })).toBeNull();
   });
 
@@ -989,7 +918,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     renderCertificateSheet();
     fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
 
-    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Send invoice & certificate' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Charge .*6789/ })).toBeNull();
   });
 
@@ -1095,7 +1024,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
         return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
       }
       if (u.endsWith('/admin/projects/cert-1')) {
-        return jsonResponse({ project: { report_payment_hold_available: true } });
+        return jsonResponse({ project: {} });
       }
       return jsonResponse({});
     }));
@@ -1103,7 +1032,7 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     renderCertificateSheet();
     fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
 
-    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Send invoice & certificate' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Charge .*1111/ })).toBeNull();
   });
 

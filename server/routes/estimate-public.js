@@ -15626,7 +15626,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
           coverageTermSynced = true;
         } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
-        require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
         // termSyncPending keeps the durable job UNRESOLVED on a sync
         // failure (Codex r18): credit coverage has no Stripe webhook, so
         // without the sweep retry only the daily reconciliation would

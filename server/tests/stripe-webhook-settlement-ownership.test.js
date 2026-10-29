@@ -64,7 +64,6 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   enqueueReceiptDelivery: jest.fn(async () => {}),
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
-jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
