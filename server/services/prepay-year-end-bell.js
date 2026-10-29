@@ -109,7 +109,9 @@ async function consequenceFor(conn, termId) {
     if (!Number.isFinite(price) || price <= 0) return CHECK_PRICE;
     if (highest === null || price > highest) highest = price;
   }
-  return highest === null ? STOPS : `the next visit bills ${usd(highest)}`;
+  // The highest price the booking would put on any visit it books (seriesNextOccurrencesPrice takes the
+  // maximum across the horizon, add-ons included), so the text says "up to", never "the next visit".
+  return highest === null ? STOPS : `visits bill up to ${usd(highest)}`;
 }
 
 function customerName(row) {

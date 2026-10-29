@@ -42,7 +42,7 @@ describe('prepay year end bell copy', () => {
 
   test('the bell is rule-clean and short, even for a very long customer name', () => {
     const long = row({ first_name: 'Alexandria Bartholomew', last_name: 'Featherstonehaugh-Montgomery the Third' });
-    for (const consequence of [STOPS, CHECK_PRICE, 'the next visit bills $1,234.56']) {
+    for (const consequence of [STOPS, CHECK_PRICE, 'visits bill up to $1,234.56']) {
       const composed = composeAdminAlert(alertSpec(long, consequence));
       expect(composed.headline.length).toBeLessThanOrEqual(60);
       expect(composed.why.length).toBeLessThanOrEqual(110);
@@ -98,7 +98,7 @@ describe('prepay year end bell consequence', () => {
     admin.seriesNextOccurrencesUnbillable.mockImplementation(async (_conn, id) => (id === 'r3' ? { error: 'will not bill' } : null));
     admin.seriesNextOccurrencesPrice.mockImplementation(async (_conn, id) => ({ unverified: false, price: id === 'r1' ? 117 : 140.5 }));
     const conn = fakeConn([{ root_id: 'r1' }], [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }]);
-    expect(await consequenceFor(conn, 'term-1')).toBe('the next visit bills $140.50');
+    expect(await consequenceFor(conn, 'term-1')).toBe('visits bill up to $140.50');
     expect(admin.seriesNextOccurrencesPrice).toHaveBeenCalledTimes(2);
   });
 
