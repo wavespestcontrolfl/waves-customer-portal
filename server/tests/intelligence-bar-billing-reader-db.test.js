@@ -53,8 +53,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const admin = { role: 'admin', context: 'platform', actionContext: { isAdmin: true } };
   const read = (name, input, actionContext = {}) => execute(name, input, { ...admin, actionContext: { isAdmin: true, ...actionContext } });
   const json = (value) => JSON.stringify(value);
-  // Record ids are random UUIDs, and one can hold "4111" by chance (a v4
-  // UUID's third group opens with 4: "…-4111-…", CI 2026-10-03). The PAN
+  // Record ids are random UUIDs, and one can hold "4111" or "4242" by chance
+  // (a v4 UUID's third group opens with 4: "…-4111-…", CI 2026-10-03; any
+  // group can hold the digits: "…-7424258c2df3", CI 2026-10-26). The PAN
   // checks read the result with its ids set aside; a card number in free
   // text is never UUID-shaped.
   const withoutIds = (text) => text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
@@ -852,7 +853,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const spaced = ['4111    1111    1111    1111', '4111\n        1111\n        1111\n        1111', '4111\t1111\t1111\t1111', '4111 \t\n  - 1111  . \n 1111 /   1111'];
     for (const [n, number] of spaced.entries()) await invoice(`q_wide_${n}`, Q, { total: 5, title: `Paid ${number} thanks` });
     const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
-    expect(text).not.toMatch(/4111|1111/);
+    expect(withoutIds(text)).not.toMatch(/4111|1111/);
     expect((text.match(/Paid \[number\] thanks/g) || []).length).toBe(spaced.length);
     // An ISO date-time (space-separated) is still left alone.
     await invoice('q_wide_date', Q, { total: 5, title: 'Seen 2026-10-02 14:05:10 ok' });
@@ -1070,7 +1071,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     outputs.push(json(await read('get_customer_invoices', { customer_id: A, include_archived: true, limit: 50 })));
     const all = outputs.join('\n');
     expect(all).not.toMatch(/example\.com/);
-    expect(all).not.toMatch(/4242/);
+    expect(withoutIds(all)).not.toMatch(/4242/);
     expect(all).not.toMatch(/@/);
     for (const token of tokens) expect(all).not.toContain(token);
     expect(all).not.toMatch(/client_secret/);
