@@ -58,7 +58,8 @@ const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } 
 const SPRAY_WINDOW_HOURS = 4;
 const RAIN_HOLD_PCT = 50;
 // GATE_SPRAY_RAIN_RULES (owner 2026-10-26, D1 = A): one odds table for every rain number, the weather
-// rebooker's own. A caution keeps the dose on the card; only a hold withholds it.
+// rebooker's own. Owner 2026-10-29 ("i just want to warn techs"): with the rain rules on, no weather
+// reading withholds a dose; a reading past the hold tier is a caution that names it.
 const RAIN_CAUTION_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.caution_if_rain_prob_above;
 const RAIN_HOLD_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.reschedule_if_rain_prob_above;
 const MAX_PARAGRAPH_WORDS = 60;
@@ -854,7 +855,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
 
   // GATE_SPRAY_RAIN_RULES (rainRules = { waves: { [productId]: rule } }, sprayRainRulesMode()): the verified
   // limits, the product's label rain rule (config/label-rain-rules.js), else the Waves rule of its service for
-  // a tank spray, all rain on one odds table (D1 = A). A caution keeps the dose; a hold withholds it, as before.
+  // a tank spray, all rain on one odds table (D1 = A). Every tier is a caution that keeps the dose (owner 2026-10-29).
   const startRow = (Array.isArray(hourly) ? hourly : []).find((h) => {
     const t = Date.parse(h.startTime);
     return Number.isFinite(t) && t <= start && start < t + 3600000;
@@ -890,8 +891,11 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
       productId, verdict, reason: list.map((c) => c.reason).join(', '),
       ...(rainRules ? { kind: list[0].kind, source: list[0].source, at: list[0].at || null } : {}),
     });
-    if (tiers.hold.length) return fired('hold', tiers.hold);
-    if (missing.length) return { productId, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
+    // Owner 2026-10-29: the rain rules warn and never withhold, so a reading past a hold tier is a caution. It
+    // still outranks a missing hour, as the hold did: a known breach is worth saying.
+    if (tiers.hold.length) return fired(rainRules ? 'caution' : 'hold', tiers.hold);
+    // forecastGap: only the forecast is missing, nothing about the label (the Tree & Shrub guide still shows its mix).
+    if (missing.length) return { productId, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast`, ...(rainRules ? { forecastGap: true } : {}) };
     if (review?.unresolved) return { productId, verdict: 'unknown', reason: CONDITIONAL_REVIEW };
     return tiers.caution.length ? fired('caution', tiers.caution) : { productId, verdict: 'ok', reason: null };
   };
@@ -910,7 +914,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
       return rainRules ? { productId: product.id, verdict: 'ok', reason: null } : { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
     }
     if (!rainRules && !verified) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
-    if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
+    if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast', ...(rainRules ? { forecastGap: true } : {}) };
     return judge(product.id, checks, review);
   });
 
@@ -1592,7 +1596,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // amount here too, with the Tank section's own reason.
     const { demandMix, inventory, short } = stockForLine(line);
     // A spray-check Hold withholds the amount on the card exactly as it does
-    // in the tank search — a held product is not dosed anywhere.
+    // in the tank search — a held product is not dosed anywhere. The rain
+    // rules (GATE_SPRAY_RAIN_RULES=true) never hold: owner 2026-10-29.
     const held = verdict.verdict === 'hold';
     const plannedMix = !blocked && !tankReason && !unverified && !held ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
@@ -1717,13 +1722,11 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
 // A schedule strip reports exceptions from the card's existing evidence. No
 // amounts, access information, customer text, or vendor prices leave this view.
 // The strip's one weather chip. Without the rain rules (GATE_SPRAY_RAIN_RULES), today's labels exactly.
-// With them the chip names the rule that fired, and "Weather unknown" means a forecast is missing.
-function rainChipLabel(verdict) {
-  if (verdict.kind !== 'rain') return 'Weather hold';
-  if (verdict.verdict === 'hold') {
-    if (verdict.source === 'label') return 'Rain hold · label';
-    return verdict.source === 'Waves rule' ? 'Rain hold · Waves rule' : 'Rain hold';
-  }
+// With them nothing holds (owner 2026-10-29), so the chip is never red: it names the caution that fired,
+// ahead of "Weather unknown" (a missing forecast), so one product without a forecast cannot hide another's rain.
+function cautionChipLabel(verdict) {
+  if (verdict.kind === 'wind') return 'Wind caution';
+  if (verdict.kind === 'temperature') return 'Temperature caution';
   if (verdict.source === 'label') return `Rain likely ${verdict.at} · label: no spraying in rain`;
   if (verdict.source === 'label advice') return 'Rain caution · label advice';
   return verdict.source === 'Waves rule' ? 'Rain caution · Waves rule' : 'Rain caution';
@@ -1736,12 +1739,11 @@ function weatherIssue(sprayCheck, isToday) {
     if (sprayCheck.verdicts.some(v => v.verdict !== 'ok')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
     return null;
   }
-  const hold = sprayCheck.verdicts.find((v) => v.verdict === 'hold');
-  if (hold) return { kind: 'weather', status: 'hold', label: rainChipLabel(hold) };
+  const caution = sprayCheck.verdicts.find((v) => v.verdict === 'caution');
+  if (caution) return { kind: 'weather', status: 'caution', label: cautionChipLabel(caution) };
   if (!isToday) return { kind: 'weather', status: 'unknown', label: 'Weather on visit day' };
   if (sprayCheck.verdicts.some((v) => v.verdict === 'unknown')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
-  const caution = sprayCheck.verdicts.find((v) => v.verdict === 'caution');
-  return caution ? { kind: 'weather', status: 'caution', label: rainChipLabel(caution) } : null;
+  return null;
 }
 
 function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
@@ -1797,15 +1799,17 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   // GATE_SPRAY_RAIN_RULES: 'true' judges with the rain rules; 'shadow' keeps today's check live and
-  // records what the rain rules would show (spray_rain_rule_shadow), never awaited, never fatal. A
-  // product's Waves rule comes from the services whose lines name it (an add-on's line is its add-on's).
+  // records what the rain rules would show (spray_rain_rule_shadow), never awaited, never fatal. 'true'
+  // keeps recording the same row (the live check is then the rain rules), so the real rain odds behind
+  // every caution stay countable (owner 2026-10-29). A product's Waves rule comes from the services whose
+  // lines name it (an add-on's line is its add-on's).
   const rainMode = sprayRainRulesMode();
   const rainRules = rainMode === 'off' ? null : {
     waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(lines.filter((l) => l.product.id === p.id).map((l) => l.source || facts.serviceType))])),
   };
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules: rainMode === 'true' ? rainRules : null });
-  if (rainMode === 'shadow' && isToday && lines.length) {
-    const shadow = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
+  if (rainMode !== 'off' && isToday && lines.length) {
+    const shadow = rainMode === 'true' ? sprayCheck : buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
     Promise.resolve()
       .then(() => (deps.recordSprayRainShadow || require('./spray-rain-rule-shadow').recordSprayRainShadow)({
         dbh, facts, products, hourly, serviceInstant,
@@ -1830,7 +1834,15 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 
   // A month reference cannot bypass the job's label/weather holds. Keep
   // target and source details, but withhold scaled mixing amounts until
-  // the exact catalog product and the current checks permit them.
+  // the exact catalog product and the current checks permit them. With the
+  // rain rules on, weather never withholds (owner 2026-10-29): a caution
+  // shows the mix, and so does an unknown that is only a missing forecast;
+  // an open label review still withholds it.
+  const checksPermit = (row, verdict) => {
+    if (!sprayCheck.rainRules) return ['ok', 'caution'].includes(verdict.verdict);
+    if (reviewedWeather(row, labelSources[row.id])?.unresolved) return false;
+    return verdict.verdict !== 'unknown' || verdict.forecastGap === true;
+  };
   for (const currentProcedure of [procedure, ...addons.map(addon => addon.procedure)]) {
     if (!currentProcedure?.fieldGuide) continue;
     for (const product of Object.values(currentProcedure.fieldGuide.products)) {
@@ -1839,7 +1851,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
         || fieldGuideLineProduct(name, products);
       const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
-      if (blocks.length || !row?.label_verified_at || !verdict || !['ok', 'caution'].includes(verdict.verdict)) {
+      if (blocks.length || !row?.label_verified_at || !verdict || !checksPermit(row, verdict)) {
         product.mix = null;
         product.summary = 'Mix withheld · see product checks';
       }
