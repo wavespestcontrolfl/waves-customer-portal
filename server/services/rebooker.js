@@ -3639,6 +3639,20 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
         });
       }
+      // Lawn rounds: the moved visit's date now places every later visit (its
+      // offset in its round and its weekday). The parent's own date is history,
+      // so the anchor is stored beside it; a later top-up or extension reads it
+      // (admin-schedule seriesRoundAnchor) and lands where this move put the
+      // later visits.
+      if (parent.recurring_pattern === LAWN_ROUNDS_9) {
+        const anchorCols = await trx('scheduled_services').columnInfo();
+        if (anchorCols.recurring_round_anchor_date) {
+          await trx('scheduled_services').where({ id: parentId }).update({
+            recurring_round_anchor_date: dateOnly(newDate),
+            updated_at: trx.fn.now(),
+          });
+        }
+      }
       // GATE_SERIES_MOVE_CARRIES_VISIT — carry one occurrence's grouped-visit
       // partners to the occurrence's NEW stop, inside THIS transaction (so a
       // member can never commit while its partner did not), then re-key the

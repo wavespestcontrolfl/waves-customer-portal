@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   LAWN_ROUNDS_9, roundOf, roundOrdinal, roundTaken, lawnRoundDate, lawnRoundDateFrom,
+  SeriesDates, seriesDatesFromRows,
 } = require('../services/lawn-rounds');
 const Seeder = require('../services/recurring-appointment-seeder');
 const rebooker = require('../services/rebooker');
@@ -29,6 +30,7 @@ const { _internals: { searchWindow } } = require('../services/auto-dispatch/cand
 const {
   planSeriesExtendDates, planSpawnChildDates, planCadenceRewriteTargets, seriesExtendAnchor,
   seasonalSafeShift, recurrenceOrdinalOptions, seriesDateTaken,
+  seriesRecurrenceOptions, seriesRoundAnchor, stampSeriesRoundAnchor, loadActiveSeriesDates,
 } = adminSchedule._test;
 
 // Only Date is faked (the planners floor candidates at today); timers stay real.
@@ -478,5 +480,137 @@ describe('seeder: one visit per round when a visit already sits in a round', () 
       existingDates: [owner], maxAttempts: 6,
     })];
     expect(got.map(ord)).toEqual([1, 3, 4, 5].map((k) => ord(anchor) + k));
+  });
+});
+
+describe('a series move stores its round anchor, and later top-ups hop from it', () => {
+  const parentDate = '2027-03-17'; // Wed, round 3, 2 days into the round: the first visit
+  const movedTo = '2027-05-05'; // Wed, round 4, 11 days in: a later visit's series move re-anchored here
+  const parent = { id: 'p1', scheduled_date: parentDate, recurring_pattern: LAWN_ROUNDS_9 };
+
+  test('the next top-up lands where the move put the later visits, not on the first visit offset', () => {
+    // The move projected the later visits from May 5; the round 7 one is Sep 1.
+    const latest = lawnRoundDate(movedTo, 3);
+    expect(latest).toBe('2027-09-01');
+    const plan = (row) => planSeriesExtendDates({
+      baseDateStr: latest, pattern: LAWN_ROUNDS_9, rOpts: seriesRecurrenceOptions(row), skip: false, dir: 'forward',
+      seen: new Set([latest]), need: 2, blackoutDates: null,
+    });
+    expect(plan({ ...parent, recurring_round_anchor_date: movedTo })).toEqual(['2027-10-13', '2027-11-24']);
+    expect(plan({ ...parent, recurring_round_anchor_date: movedTo })).toEqual([4, 5].map((k) => lawnRoundDate(movedTo, k)));
+    // Without the stored anchor the hop reads the first visit's offset: Oct 6, a week off the series.
+    expect(plan(parent)[0]).toBe('2027-10-06');
+  });
+
+  test('seriesRoundAnchor: the stored anchor, else the parent cadence position', () => {
+    expect(seriesRoundAnchor({ ...parent, recurring_round_anchor_date: movedTo })).toBe(movedTo);
+    expect(seriesRoundAnchor({ ...parent, recurring_round_anchor_date: new Date('2027-05-05T00:00:00Z') })).toBe(movedTo);
+    expect(seriesRoundAnchor(parent)).toBe(parentDate);
+    // A one-off move of the first visit, and a hand-off the night tool placed a day away,
+    // keep the series where it was seeded.
+    expect(seriesRoundAnchor({ ...parent, scheduled_date: '2027-03-19', date_exception: true, date_exception_cadence_date: parentDate })).toBe(parentDate);
+    expect(seriesRoundAnchor({ ...parent, scheduled_date: '2027-03-18', recurring_dispatch_due_date: parentDate })).toBe(parentDate);
+  });
+
+  test('stampSeriesRoundAnchor writes the parent row for lawn rounds only, and only once the column exists', async () => {
+    const makeConn = (cols) => {
+      const writes = [];
+      const conn = (table) => ({
+        columnInfo: async () => cols,
+        where: (where) => ({ update: async (data) => { writes.push({ table, where, data }); return 1; } }),
+      });
+      conn.writes = writes;
+      return conn;
+    };
+    const live = makeConn({ recurring_round_anchor_date: {} });
+    await stampSeriesRoundAnchor(live, parent, movedTo);
+    expect(live.writes).toEqual([{ table: 'scheduled_services', where: { id: 'p1' }, data: { recurring_round_anchor_date: movedTo } }]);
+    const other = makeConn({ recurring_round_anchor_date: {} });
+    await stampSeriesRoundAnchor(other, { ...parent, recurring_pattern: 'every_6_weeks' }, movedTo);
+    expect(other.writes).toEqual([]);
+    const premigration = makeConn({});
+    await stampSeriesRoundAnchor(premigration, parent, movedTo);
+    expect(premigration.writes).toEqual([]);
+  });
+
+  describe('wiring', () => {
+    const scheduleSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
+    test('every extension writer builds its options from the parent through seriesRecurrenceOptions', () => {
+      // The one remaining parent-date read is inside the helper itself.
+      expect(scheduleSrc.match(/recurrenceOrdinalOptions\(parent\.scheduled_date/g)).toHaveLength(1);
+      expect(scheduleSrc.match(/= seriesRecurrenceOptions\(parent\);/g)).toHaveLength(6);
+    });
+    test('a series move, an Edit appointment cadence rewrite and make-recurring store the anchor', () => {
+      expect(rebookerSrc).toMatch(/if \(parent\.recurring_pattern === LAWN_ROUNDS_9\) \{\s*const anchorCols = await trx\('scheduled_services'\)\.columnInfo\(\);\s*if \(anchorCols\.recurring_round_anchor_date\) \{\s*await trx\('scheduled_services'\)\.where\(\{ id: parentId \}\)\.update\(\{\s*recurring_round_anchor_date: dateOnly\(newDate\),/);
+      expect(scheduleSrc.match(/await stampSeriesRoundAnchor\(trx, parent, baseDateStr\);/g)).toHaveLength(2);
+      // The pre-lock planner plans a same-save top-up from the anchor the rewrite stores.
+      expect(scheduleSrc).toMatch(/if \(after\.recurring_pattern === LAWN_ROUNDS_9\) after\.recurring_round_anchor_date = baseDateStr;/);
+    });
+  });
+});
+
+describe('a booster extra never stands in for a round\'s regular visit', () => {
+  const anchor = '2027-03-17'; // round 3; the round 4 visit is Apr 28
+  const booster = '2027-05-12'; // a booster extra inside round 4 (Apr 24 - Jun 2)
+
+  test('SeriesDates: a booster blocks its own day but owns no round, and a copy keeps that', () => {
+    const seen = seriesDatesFromRows([
+      { scheduled_date: anchor, is_recurring: true },
+      { scheduled_date: booster, is_recurring: false },
+    ]);
+    expect(seen.has(booster)).toBe(true);
+    expect(seriesDateTaken(seen, LAWN_ROUNDS_9, booster)).toBe(true);
+    expect(roundTaken(seen, '2027-04-28')).toBe(false);
+    expect(roundTaken(new SeriesDates(seen), '2027-04-28')).toBe(false);
+    // A row read without is_recurring counts as a plan visit, as before boosters were told apart.
+    expect(roundTaken(seriesDatesFromRows([{ scheduled_date: booster }]), '2027-04-28')).toBe(true);
+    // A date a walk adds is a plan visit and owns its round.
+    seen.add('2027-04-30');
+    expect(roundTaken(seen, '2027-04-28')).toBe(true);
+  });
+
+  test('an extension walk still places the round 4 visit beside the booster', () => {
+    const seen = seriesDatesFromRows([{ scheduled_date: anchor, is_recurring: true }, { scheduled_date: booster, is_recurring: false }]);
+    const dates = planSeriesExtendDates({
+      baseDateStr: anchor, pattern: LAWN_ROUNDS_9, rOpts: recurrenceOrdinalOptions(anchor, {}), skip: false, dir: 'forward',
+      seen, need: 2, blackoutDates: null,
+    });
+    expect(dates).toEqual([lawnRoundDate(anchor, 1), lawnRoundDate(anchor, 2)]);
+    expect(dates[0]).toBe('2027-04-28');
+  });
+
+  test('loadActiveSeriesDates reads is_recurring, so a booster owns no round', async () => {
+    let selected = null;
+    const conn = () => {
+      const q = {
+        where: () => q,
+        whereNotIn: () => q,
+        select: async (...cols) => {
+          selected = cols;
+          return [
+            { scheduled_date: anchor, is_recurring: true },
+            { scheduled_date: new Date(`${booster}T00:00:00Z`), is_recurring: false },
+          ];
+        },
+      };
+      return q;
+    };
+    const seen = await loadActiveSeriesDates(conn, 'p1');
+    expect(selected).toEqual(['scheduled_date', 'is_recurring']);
+    expect([...seen].sort()).toEqual([anchor, booster]);
+    expect(roundTaken(seen, '2027-04-28')).toBe(false);
+  });
+
+  test('seeder: existing booster dates own no round', () => {
+    const existingDates = seriesDatesFromRows([{ scheduled_date: booster, is_recurring: false }]);
+    const got = [...Seeder.recurringDateCandidates(anchor, LAWN_ROUNDS_9, { existingDates, maxAttempts: 4 })];
+    expect(got.map(ord)).toEqual([1, 2, 3].map((k) => ord(anchor) + k));
+    expect(got[0]).toBe('2027-04-28');
+    const rows = Seeder.buildRecurringFollowUpRows(
+      { customer_id: 'c1', scheduled_date: anchor },
+      { pattern: LAWN_ROUNDS_9, plannedCount: 3, existingDates },
+    );
+    expect(rows[0].scheduled_date).toBe('2027-04-28');
   });
 });

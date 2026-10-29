@@ -11,7 +11,7 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
-const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -456,7 +456,9 @@ function* recurringDateCandidates(baseDate, pattern, {
   existingDates = [], blackoutDates = null, maxAttempts,
 } = {}) {
   const rOpts = recurrenceOrdinalOptions(baseDate, recurrenceOptions);
-  const seen = new Set([baseDate, ...existingDates]);
+  // A SeriesDates keeps which existing dates are boosters (they own no round).
+  const seen = new SeriesDates(existingDates);
+  seen.add(baseDate);
   for (let attempt = 1; attempt < maxAttempts; attempt++) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     const shifted = shiftPastWeekend(rawNext, skipWeekends, weekendShift);
@@ -490,7 +492,12 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
   });
-  const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
+  // existingSeriesDates hands a SeriesDates (boosters own no lawn round); a
+  // caller's plain list is read as cadence dates.
+  const existingDates = opts.existingDates instanceof SeriesDates
+    ? new SeriesDates(opts.existingDates)
+    : new SeriesDates((opts.existingDates || []).map(dateOnly).filter(Boolean));
+  existingDates.add(baseDate);
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -711,20 +718,22 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
 }
 
 async function existingSeriesDates(conn, parent, columns) {
-  const dates = [dateOnly(parent?.scheduled_date)].filter(Boolean);
+  // Every row blocks its day; a booster (is_recurring = false) owns no lawn
+  // round (SeriesDates).
+  const dates = new SeriesDates([dateOnly(parent?.scheduled_date)].filter(Boolean));
   if (!parent?.id || !columns?.recurring_parent_id) return dates;
   const rows = await conn('scheduled_services')
     .where(function () {
       this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
     })
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    .select('scheduled_date')
+    .select('scheduled_date', 'is_recurring')
     .catch(() => []);
   for (const row of rows || []) {
     const d = dateOnly(row.scheduled_date);
-    if (d) dates.push(d);
+    if (d) (row.is_recurring === false ? dates.addExtra(d) : dates.add(d));
   }
-  return [...new Set(dates)];
+  return dates;
 }
 
 // Find this customer's ACTIVE recurring series parents in the same service

@@ -142,13 +142,60 @@ function roundOrdinal(dateStr) {
   return home ? home.programYear * ROUNDS_PER_YEAR + (home.round - 1) : null;
 }
 
-// True when `dates` (any iterable of 'YYYY-MM-DD') already holds a visit in
-// the same round as `dateStr`. A series owes one visit a round: a candidate
-// whose round is taken is not a missing visit, it is a second one.
+// The dates a recurring series already occupies, for a walk that places new
+// visits. Every date blocks its own day (the Set itself). Only a CADENCE
+// visit owns a lawn round (`cadence`): a booster extra shares
+// recurring_parent_id but carries is_recurring = false and sits on top of the
+// plan, so it must never stand in for a round's regular visit. add() records
+// a cadence date (every date a walk places is one); addExtra() a booster's.
+// Copying another SeriesDates keeps which dates are extras.
+class SeriesDates extends Set {
+  constructor(dates = []) {
+    super();
+    this.cadence = new Set();
+    if (dates instanceof SeriesDates) {
+      for (const d of dates) super.add(d);
+      for (const d of dates.cadence) this.cadence.add(d);
+      return;
+    }
+    for (const d of dates || []) this.add(d);
+  }
+
+  add(date) {
+    super.add(date);
+    this.cadence.add(date);
+    return this;
+  }
+
+  addExtra(date) {
+    super.add(date);
+    return this;
+  }
+}
+
+// A SeriesDates from scheduled_services rows ({ scheduled_date, is_recurring }).
+// A row without is_recurring counts as a cadence visit (the reading before
+// boosters were told apart). `toDate` normalizes the stored date.
+function seriesDatesFromRows(rows, toDate = dateOnly) {
+  const out = new SeriesDates();
+  for (const row of rows || []) {
+    const d = toDate(row?.scheduled_date);
+    if (!d) continue;
+    if (row.is_recurring === false) out.addExtra(d);
+    else out.add(d);
+  }
+  return out;
+}
+
+// True when `dates` (any iterable of 'YYYY-MM-DD', or a SeriesDates) already
+// holds a visit in the same round as `dateStr`. A series owes one visit a
+// round: a candidate whose round is taken is not a missing visit, it is a
+// second one. A SeriesDates answers from its cadence visits only.
 function roundTaken(dates, dateStr) {
   const want = roundOrdinal(dateStr);
   if (want == null) return false;
-  for (const d of dates || []) if (roundOrdinal(d) === want) return true;
+  const pool = dates instanceof SeriesDates ? dates.cadence : dates;
+  for (const d of pool || []) if (roundOrdinal(d) === want) return true;
   return false;
 }
 
@@ -163,4 +210,6 @@ module.exports = {
   lawnRoundDateFrom,
   roundOrdinal,
   roundTaken,
+  SeriesDates,
+  seriesDatesFromRows,
 };
