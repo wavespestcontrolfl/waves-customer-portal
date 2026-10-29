@@ -155,7 +155,6 @@ const { minutesFromElapsed } = require('../utils/duration-minutes');
 const {
   baseQuantityUnit,
   convertInventoryQuantity,
-  unitDefinition,
 } = require('../services/inventory-units');
 // Shared with job-costing's application-history fallback, so both price a
 // recorded amount the same way.
@@ -1641,26 +1640,31 @@ async function recordCountedUsage(trx, {
   };
 }
 
-// The most one product line may move stock by in a single advisory-stock visit, by unit dimension. The advisory lane
-// lets stock go negative, so a typo (a million fl oz) must not corrupt the count; real prod maxima sit far below these.
-const IMPLAUSIBLE_VISIT_AMOUNT = {
-  volume: { amount: 2560, unit: 'fl_oz' },
-  weight: { amount: 500, unit: 'lb' },
-  count: { amount: 500, unit: 'each' },
+// What one product line may move stock by in a single advisory-stock visit. The advisory lane lets stock go negative,
+// so a typo (a million fl oz) must not corrupt the count. The ceiling is the product's own history; with too little
+// history it is a floor by unit dimension (real prod per-line maxima: 320 fl oz, 85 oz, 27.5 lb, 16 each).
+const PLAUSIBLE_VISIT = {
+  historyDays: 365,
+  minHistory: 3,
+  medianMultiple: 20, // a visit using 20 times this product's usual amount is a typo, not a heavy job
+  floors: [{ amount: 640, unit: 'fl_oz' }, { amount: 100, unit: 'lb' }, { amount: 50, unit: 'each' }],
 };
 
-// The ceiling in the product's inventory unit, or null when its dimension is unknown (that line keeps today's behaviour).
-// A bare 'oz' on both sides could be volume or weight: it takes the looser ceiling.
-function implausibleVisitCeiling(amountUnit, inventoryUnit) {
-  const dimensionOf = (unit) => unitDefinition(unit)?.dimension || null;
-  const dims = [dimensionOf(amountUnit), dimensionOf(inventoryUnit)];
-  if (dims.some((dim) => !dim)) return null;
-  const known = dims.filter((dim) => dim !== 'ambiguous');
-  const dimensions = known.length ? [known[0]] : ['volume', 'weight'];
-  const ceilings = dimensions
-    .map((dim) => convertInventoryQuantity(IMPLAUSIBLE_VISIT_AMOUNT[dim].amount, IMPLAUSIBLE_VISIT_AMOUNT[dim].unit, inventoryUnit))
-    .filter((ceiling) => ceiling != null);
-  return ceilings.length ? Math.max(...ceilings) : null;
+// True when deductedAmount (in the product's inventory unit) is over that ceiling. A unit with no known dimension and
+// too little history has no ceiling. Read only on the overdraw path, so a completion that stays in stock pays nothing.
+async function exceedsPlausibleVisit(trx, { productId, inventoryUnit, deductedAmount }) {
+  const since = new Date(Date.now() - PLAUSIBLE_VISIT.historyDays * 24 * 60 * 60 * 1000);
+  const prior = await trx('product_inventory_movements')
+    .where({ product_id: productId, movement_type: 'usage' })
+    .where('created_at', '>=', since)
+    .select('quantity', 'unit');
+  const history = prior.map((row) => convertInventoryQuantity(row.quantity, row.unit, inventoryUnit))
+    .filter((quantity) => quantity != null)
+    .sort((x, y) => x - y);
+  const median = (history[(history.length - 1) >> 1] + history[history.length >> 1]) / 2;
+  const floor = Math.max(0, ...PLAUSIBLE_VISIT.floors.map((f) => convertInventoryQuantity(f.amount, f.unit, inventoryUnit) ?? 0));
+  const ceiling = history.length >= PLAUSIBLE_VISIT.minHistory ? PLAUSIBLE_VISIT.medianMultiple * median : floor;
+  return ceiling > 0 && deductedAmount > ceiling;
 }
 
 async function deductProductInventory(trx, {
@@ -1738,8 +1742,7 @@ async function deductProductInventory(trx, {
   }
   // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
   // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  const ceiling = insufficient && allowNegative ? implausibleVisitCeiling(amountUnit, inventoryUnit) : null;
-  if (ceiling != null && deductedAmount > ceiling) {
+  if (insufficient && await exceedsPlausibleVisit(trx, { productId: inventoryProduct.id, inventoryUnit, deductedAmount })) {
     return {
       ...snapshot,
       status: 'not_deducted_implausible',
@@ -2243,6 +2246,15 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   }
 }
 
+const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
+// The alert words with the product named, or plain words when the alert rules refuse the name (a code, a bracket, a
+// second sentence). The headline and the one-sentence why carry a short name; the detail keeps it whole.
+function stockAlertWords(fullName, wordsFor, plain) {
+  const { breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  const named = wordsFor(require('../services/ops-digest').truncateAtWord(fullName, 24));
+  return breaksAlertRules(named.action) || breaksAlertRules(named.why) || named.why.length > MAX_WHY_CHARS ? plain : named;
+}
+
 // Owner 2026-10-20, "dont block": one office alert for each
 // product this pest, lawn or tree & shrub visit took below zero, raised after the record is saved and never blocking. The key is the product's, and only an OPEN row
 // dedupes (dedupeOpenOnly): a retry, a resume or the next visit that overdraws it again finds the standing alert and
@@ -2253,85 +2265,60 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
 // back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
 // Decided from the committed record: a pest, lawn (WaveGuard included) or tree & shrub record alerts for each
 // shortfall it holds.
-const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
+// A line refused for an implausible amount (deductProductInventory) moved no stock: the office checks the amount entered,
+// one open alert for each record and product, instead of restocking.
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
   const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
   if (!visitLabel) return;
-  const { raiseAdminAlert, breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
   if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = {}; } }
-  const shortfalls = (Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [])
-    .filter((deduction) => deduction?.status === 'deducted_insufficient_stock' && deduction.productId);
-  for (const deduction of shortfalls) {
-    try {
-      const fullName = deduction.productName || 'A product';
-      // The headline and the one-sentence why carry a short name; the detail keeps it whole. A name the alert rules
-      // refuse (a code, a bracket, a second sentence) falls back to plain words.
-      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const namedWhy = `${name} went below zero in stock after a ${visitLabel} visit.`;
-      const plain = breaksAlertRules(`restock ${name}`) || breaksAlertRules(namedWhy) || namedWhy.length > MAX_WHY_CHARS;
-      const dedupeKey = stockShortfallKey(deduction.productId);
-      const unit = String(deduction.inventoryUnit || '').replace(/_/g, ' ');
-      const created = await database.transaction(async (trx) => {
-        const product = await trx('products_catalog').where({ id: deduction.productId }).forUpdate().first('inventory_on_hand');
-        if (!(product?.inventory_on_hand != null && Number(product.inventory_on_hand) < 0)) return 'not_below_zero';
-        return raiseAdminAlert('inventory', {
-          area: 'Inventory',
-          action: plain ? 'restock a product' : `restock ${name}`,
-          why: plain ? `A product went below zero in stock after a ${visitLabel} visit.` : namedWhy,
-          severity: 'needs-you',
-          who: 'person',
-          link: `/admin/inventory?tab=products&search=${encodeURIComponent(fullName)}&productId=${deduction.productId}`,
-          subject: { type: 'check', id: dedupeKey },
-          doneWhen: 'stock_restocked',
-        }, {
-          bell: true,
-          dedupeKey,
-          dedupeOpenOnly: true,
-          trx,
-          detail: `${fullName} went to ${deduction.stockAfter} ${unit} on hand after a ${visitLabel} visit used ${deduction.deductedAmount} ${unit}. Restock it, or fix the count if the shelf has more.`,
-          metadata: {
-            productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
-            stockAfter: deduction.stockAfter, inventoryUnit: deduction.inventoryUnit, dedupeKey,
-          },
-        });
-      });
-      if (!created) logger.error(`[dispatch] stock shortfall alert NOT recorded for record ${record.id} (admin alert returned null)`);
-    } catch (err) {
-      logger.error(`[dispatch] stock shortfall alert failed (non-blocking): ${err.message}`);
-    }
-  }
-  // A line refused for an implausible amount moved no stock, so there is nothing to restock: the office checks the amount.
-  const refused = (Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [])
-    .filter((deduction) => deduction?.status === 'not_deducted_implausible' && deduction.productId);
-  for (const deduction of refused) {
-    try {
-      const fullName = deduction.productName || 'A product';
-      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const namedWhy = `${name} amount looks too big for a ${visitLabel} visit, so stock was not changed.`;
-      const plain = breaksAlertRules(`check ${name} amount`) || breaksAlertRules(namedWhy) || namedWhy.length > MAX_WHY_CHARS;
-      const dedupeKey = `stock-amount-check:${record.id}:${deduction.productId}`;
-      const unit = String(deduction.amountUnit || '').replace(/_/g, ' ');
-      const created = await raiseAdminAlert('inventory', {
-        area: 'Inventory',
-        action: plain ? 'check a product amount' : `check ${name} amount`,
-        why: plain ? `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` : namedWhy,
-        severity: 'needs-you',
-        who: 'person',
-        link: svc.customer_id ? `/admin/customers?customerId=${svc.customer_id}` : `/admin/inventory?tab=products&productId=${deduction.productId}`,
-        subject: { type: 'check', id: dedupeKey },
-        doneWhen: 'amount_checked',
+  const lines = Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [];
+  const raise = (words, dedupeKey, spec, opts) => raiseAdminAlert('inventory', {
+    area: 'Inventory', action: words.action, why: words.why, severity: 'needs-you', who: 'person', subject: { type: 'check', id: dedupeKey }, ...spec,
+  }, { bell: true, dedupeKey, dedupeOpenOnly: true, ...opts, metadata: { ...opts.metadata, dedupeKey } });
+  const sendShortfall = async (deduction) => {
+    const fullName = deduction.productName || 'A product';
+    const words = stockAlertWords(fullName, (n) => ({ action: `restock ${n}`, why: `${n} went below zero in stock after a ${visitLabel} visit.` }),
+      { action: 'restock a product', why: `A product went below zero in stock after a ${visitLabel} visit.` });
+    const unit = String(deduction.inventoryUnit || '').replace(/_/g, ' ');
+    return database.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: deduction.productId }).forUpdate().first('inventory_on_hand');
+      if (!(product?.inventory_on_hand != null && Number(product.inventory_on_hand) < 0)) return 'not_below_zero';
+      return raise(words, stockShortfallKey(deduction.productId), {
+        link: `/admin/inventory?tab=products&search=${encodeURIComponent(fullName)}&productId=${deduction.productId}`,
+        doneWhen: 'stock_restocked',
       }, {
-        bell: true,
-        dedupeKey,
-        dedupeOpenOnly: true,
-        detail: `${fullName}: ${deduction.amount} ${unit} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
-        metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit, dedupeKey },
+        trx,
+        detail: `${fullName} went to ${deduction.stockAfter} ${unit} on hand after a ${visitLabel} visit used ${deduction.deductedAmount} ${unit}. Restock it, or fix the count if the shelf has more.`,
+        metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, stockAfter: deduction.stockAfter, inventoryUnit: deduction.inventoryUnit },
       });
-      if (!created) logger.error(`[dispatch] stock amount alert NOT recorded for record ${record.id} (admin alert returned null)`);
-    } catch (err) {
-      logger.error(`[dispatch] stock amount alert failed (non-blocking): ${err.message}`);
+    });
+  };
+  const sendAmount = async (deduction) => {
+    const fullName = deduction.productName || 'A product';
+    const words = stockAlertWords(fullName, (n) => ({ action: `check ${n} amount`, why: `${n} amount looks too big for a ${visitLabel} visit, so stock was not changed.` }),
+      { action: 'check a product amount', why: `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` });
+    return raise(words, `stock-amount-check:${record.id}:${deduction.productId}`, {
+      link: `/admin/customers?customerId=${svc.customer_id}`,
+      doneWhen: 'amount_checked',
+    }, {
+      detail: `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
+      metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit },
+    });
+  };
+  const kinds = [
+    { status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall },
+    { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
+  ];
+  for (const { status, label, send } of kinds) {
+    for (const deduction of lines.filter((line) => line?.status === status && line.productId)) {
+      try {
+        if (!(await send(deduction))) logger.error(`[dispatch] stock ${label} alert NOT recorded for record ${record.id} (admin alert returned null)`);
+      } catch (err) {
+        logger.error(`[dispatch] stock ${label} alert failed (non-blocking): ${err.message}`);
+      }
     }
   }
 }

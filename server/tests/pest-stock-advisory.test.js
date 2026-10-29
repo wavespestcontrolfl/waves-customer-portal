@@ -43,16 +43,20 @@ describe('which completions may take stock below zero', () => {
 
 describe('the deduction a pest visit now makes with allowNegative', () => {
   // The row lock finds no row, so the deduction uses the passed-in product; the writes are recorded.
-  const fakeTrx = () => {
+  // The usage history the ceiling reads is the rows given here; every table the helper touches is recorded in trx.reads.
+  const fakeTrx = (history = []) => {
     const writes = [];
+    const reads = [];
     const trx = (table) => ({
       where: () => ({
         forUpdate: () => ({ first: async () => null }),
         update: async (row) => { writes.push({ table, update: row }); return 1; },
+        where: (...since) => ({ select: async () => { reads.push({ table, since }); return history; } }),
       }),
       insert: (row) => ({ returning: async () => { writes.push({ table, insert: row }); return [{ id: 'movement-1', ...row }]; } }),
     });
     trx.writes = writes;
+    trx.reads = reads;
     return trx;
   };
   const args = {
@@ -80,48 +84,92 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
   });
 
   describe('an amount no visit uses', () => {
-    const huge = (productInput, product = args.product) => ({ ...args, product, productInput, allowNegative: true });
-
-    test.each([
-      ['volume', { totalAmount: 1000000, amountUnit: 'fl_oz' }, 'fl_oz'],
-      ['weight', { totalAmount: 501, amountUnit: 'lb' }, 'lb'],
-      ['count', { totalAmount: 501, amountUnit: 'each' }, 'each'],
-      ['weight sold in a different unit', { totalAmount: 501, amountUnit: 'lb' }, 'oz'],
-    ])('a %s line over the ceiling moves no stock and no cost, and the completion goes on', async (_name, productInput, inventoryUnit) => {
-      const trx = fakeTrx();
-      const result = await deductProductInventory(trx, huge(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+    const overdraw = (productInput, product = args.product) => ({ ...args, product, productInput, allowNegative: true });
+    const usage = (...quantities) => quantities.map((quantity) => ({ quantity, unit: 'fl_oz' }));
+    const refusedWith = (result, trx) => {
       expect(trx.writes).toEqual([]);
       expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, stockBefore: 1, remainingStock: 1 });
       expect(result.movementId).toBeUndefined();
       expect(result.costUsed).toBeUndefined();
-      expect(result.warning).toBe(`${productInput.totalAmount} ${productInput.amountUnit.replace('_', ' ')} of ${args.product.name} is too much for one visit, so stock was not changed. Check the amount.`);
+    };
+
+    describe('a product with no history (the floor by unit dimension)', () => {
+      test.each([
+        ['volume', { totalAmount: 641, amountUnit: 'fl_oz' }, 'fl_oz'],
+        ['volume, the old flat ceiling', { totalAmount: 2560, amountUnit: 'fl_oz' }, 'fl_oz'],
+        ['weight', { totalAmount: 101, amountUnit: 'lb' }, 'lb'],
+        ['count', { totalAmount: 51, amountUnit: 'each' }, 'each'],
+        ['weight sold in a different unit', { totalAmount: 101, amountUnit: 'lb' }, 'oz'],
+        ['a million fl oz', { totalAmount: 1000000, amountUnit: 'fl_oz' }, 'fl_oz'],
+      ])('%s over the floor moves no stock and no cost, and the completion goes on', async (_name, productInput, inventoryUnit) => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, overdraw(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+        refusedWith(result, trx);
+        expect(result.warning).toBe(`${productInput.totalAmount} ${productInput.amountUnit.replace('_', ' ')} of ${args.product.name} is too much for one visit, so stock was not changed. Check the amount.`);
+      });
+
+      test.each([
+        ['volume', { totalAmount: 640, amountUnit: 'fl_oz' }, 'fl_oz', -639],
+        ['weight', { totalAmount: 100, amountUnit: 'lb' }, 'lb', -99],
+        ['count', { totalAmount: 50, amountUnit: 'each' }, 'each', -49],
+        ['a bare oz stock takes the looser floor', { totalAmount: 1600, amountUnit: 'oz' }, 'oz', -1599],
+      ])('%s at the floor is an ordinary overdraw', async (_name, productInput, inventoryUnit, stockAfter) => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, overdraw(productInput, { ...args.product, inventory_unit: inventoryUnit }));
+        expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter });
+        expect(trx.writes).toHaveLength(2);
+      });
+
+      test('two prior rows are too few: the floor still applies', async () => {
+        const trx = fakeTrx(usage(1, 1));
+        refusedWith(await deductProductInventory(trx, overdraw({ totalAmount: 641, amountUnit: 'fl_oz' })), trx);
+      });
+
+      test('a unit with no known dimension has no ceiling', async () => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, overdraw({ totalAmount: 1000000, amountUnit: 'bags' }, { ...args.product, inventory_unit: 'bags' }));
+        expect(result.status).toBe('deducted_insufficient_stock');
+      });
     });
 
-    test('an amount at the ceiling is still an ordinary overdraw', async () => {
-      const trx = fakeTrx();
-      const result = await deductProductInventory(trx, huge({ totalAmount: 2560, amountUnit: 'fl_oz' }));
-      expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -2559 });
-      expect(trx.writes).toHaveLength(2);
+    describe('a product with three or more prior rows (20 times the median)', () => {
+      test('an amount above 20 times the median is refused, even under the floor', async () => {
+        const trx = fakeTrx(usage(4, 5, 6)); // median 5, ceiling 100
+        refusedWith(await deductProductInventory(trx, overdraw({ totalAmount: 101, amountUnit: 'fl_oz' })), trx);
+      });
+
+      test('an amount at or below it is an ordinary overdraw, even over the floor', async () => {
+        const low = fakeTrx(usage(4, 5, 6));
+        expect(await deductProductInventory(low, overdraw({ totalAmount: 100, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock', stockAfter: -99 });
+        const high = fakeTrx(usage(100, 200, 300)); // median 200, ceiling 4000
+        expect(await deductProductInventory(high, overdraw({ totalAmount: 3000, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock' });
+        expect(low.writes).toHaveLength(2);
+        expect(high.writes).toHaveLength(2);
+      });
+
+      test('an even count averages the middle two; rows in other units are converted to the stock unit first', async () => {
+        const trx = fakeTrx([{ quantity: 1, unit: 'gal' }, { quantity: 64, unit: 'fl_oz' }, { quantity: 128, unit: 'fl_oz' }, { quantity: 256, unit: 'fl_oz' }]);
+        // 128, 64, 128, 256 fl oz: median 128, ceiling 2560
+        expect(await deductProductInventory(trx, overdraw({ totalAmount: 2560, amountUnit: 'fl_oz' }))).toMatchObject({ status: 'deducted_insufficient_stock' });
+        const over = fakeTrx([{ quantity: 1, unit: 'gal' }, { quantity: 64, unit: 'fl_oz' }, { quantity: 128, unit: 'fl_oz' }, { quantity: 256, unit: 'fl_oz' }]);
+        refusedWith(await deductProductInventory(over, overdraw({ totalAmount: 2561, amountUnit: 'fl_oz' })), over);
+      });
+
+      test('the history is this product\'s usage rows over the last 365 days', async () => {
+        const trx = fakeTrx(usage(4, 5, 6));
+        await deductProductInventory(trx, overdraw({ totalAmount: 5, amountUnit: 'fl_oz' }));
+        expect(trx.reads).toEqual([{ table: 'product_inventory_movements', since: ['created_at', '>=', expect.any(Date)] }]);
+        const since = trx.reads[0].since[2].getTime();
+        expect(Date.now() - since).toBeGreaterThan(364.9 * 86400000);
+        expect(Date.now() - since).toBeLessThan(365.1 * 86400000);
+      });
     });
 
-    test('a plausible overdraw in another unit still goes negative', async () => {
+    test('an amount the stock covers never reads the history', async () => {
       const trx = fakeTrx();
-      const result = await deductProductInventory(trx, huge({ totalAmount: 27.5, amountUnit: 'lb' }, { ...args.product, inventory_unit: 'lb' }));
-      expect(result).toMatchObject({ status: 'deducted_insufficient_stock', deductedAmount: 27.5 });
-      expect(trx.writes).toHaveLength(2);
-    });
-
-    test('a unit with no known dimension keeps today\'s behaviour', async () => {
-      const trx = fakeTrx();
-      const result = await deductProductInventory(trx, huge({ totalAmount: 1000000, amountUnit: 'bags' }, { ...args.product, inventory_unit: 'bags' }));
-      expect(result.status).toBe('deducted_insufficient_stock');
-      expect(trx.writes).toHaveLength(2);
-    });
-
-    test('an amount the stock covers is never refused, whatever the size', async () => {
-      const trx = fakeTrx();
-      const result = await deductProductInventory(trx, huge({ totalAmount: 3000, amountUnit: 'fl_oz' }, { ...args.product, inventory_on_hand: 9000 }));
+      const result = await deductProductInventory(trx, overdraw({ totalAmount: 3000, amountUnit: 'fl_oz' }, { ...args.product, inventory_on_hand: 9000 }));
       expect(result.status).toBe('deducted');
+      expect(trx.reads).toEqual([]);
     });
 
     test('a visit that may not go negative keeps the hard refusal, whatever the size', async () => {
@@ -129,6 +177,7 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
       await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } }))
         .rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
       expect(trx.writes).toEqual([]);
+      expect(trx.reads).toEqual([]);
     });
   });
 });
