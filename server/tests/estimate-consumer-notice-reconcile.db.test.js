@@ -2,7 +2,8 @@
 // office accepts the daily run re-sends the FDACS-13692 for (the 21-day window and its one-hour grace, the send's
 // go-live floor, a delivery since the accept, the office bell, a customer's own accept, a deleted customer), that the
 // re-send is the accept-time send (a signed notice or an estimate with no termite line sends nothing; an open notice is
-// resent, not duplicated), and that a notice it re-sent is not sent again by the next run. Every write runs in a
+// resent, not duplicated), one send per customer a run, that passed-over accepts never hide an older lost send, and
+// that a notice it re-sent is not sent again by the next run. Every write runs in a
 // transaction that is rolled back. Synthetic data only. Skips without DATABASE_URL (CI runs it against the migrated
 // database).
 const SKIP = !process.env.DATABASE_URL;
@@ -155,6 +156,29 @@ describeDb('Mark accepted consumer notice catch-up (PostgreSQL)', () => {
     // Other suites' rows can share this window, so only this test's customers are compared.
     const reached = (await sentTo()).filter((id) => [before, after].includes(id));
     expect(reached).toEqual([after]);
+  });
+
+  test('sends one notice a run to a customer whose estimates all lost it', async () => {
+    const twice = await customer();
+    await accepted(twice, new Date(NOW - 2 * HOUR));
+    await accepted(twice, new Date(NOW - 4 * HOUR));
+
+    expect(await reconcileManualAcceptConsumerNotices({ now: NOW })).toEqual({ checked: 2, sent: 1, skipped: 1, failed: 0 });
+    expect(mockDeliver).toHaveBeenCalledTimes(1);
+  });
+
+  test('reaches a lost send behind more passed-over accepts than a page holds', async () => {
+    // One accepted time for all 60: the page boundary falls inside a tie.
+    const pestOnly = await customer();
+    await mockPg('estimates').insert(Array.from({ length: 60 }, () => ({
+      customer_id: pestOnly, status: 'accepted', price_locked_by: 'manual_accept', accepted_at: new Date(NOW - 2 * HOUR),
+      estimate_data: JSON.stringify(PEST), created_by_technician_id: techId,
+    })));
+    const lost = await customer();
+    await accepted(lost, new Date(NOW - 5 * HOUR));
+
+    expect(await reconcileManualAcceptConsumerNotices({ now: NOW })).toEqual({ checked: 61, sent: 1, skipped: 60, failed: 0 });
+    expect(await sentTo()).toEqual([lost]);
   });
 
   test('sends at most `limit` a run, newest accept first', async () => {

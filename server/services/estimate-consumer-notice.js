@@ -395,56 +395,74 @@ async function alertManualAcceptConsumerNoticeSkipped({ estimateId, customerId, 
 const MANUAL_ACCEPT_SEND_LIVE_SINCE = new Date('2026-10-26T11:33:50Z');
 // The live send runs seconds after the accept commits; a younger accept may still have its send in flight.
 const CATCH_UP_GRACE_MS = 60 * 60 * 1000;
-const CATCH_UP_MAX_SCANNED = 200;
+const CATCH_UP_PAGE_SIZE = 50;
 
 // Daily catch-up (scheduler, the 6:10 AM ET document lifecycle run; GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE): the
 // Mark accepted send runs detached after the commit, so a restart in between loses it with no bell. This re-runs that
 // send for an office accept from the last `sinceDays` when nothing shows the customer got a notice since the accept (no
 // email_sent or sms_sent event on a 13692 Document Request from the accept on) and the office was never told (no bell
 // under the send's per-estimate dedupe key). The send decides the rest, as it does at accept time: a notice signed since,
-// or no termite line any more, sends nothing; a refusal or a failed delivery rings the bell, which takes the estimate
-// out of the next run. `limit` caps the sends per run.
+// or no termite line, sends nothing; a refusal or a failed delivery rings the bell, which takes the estimate out of the
+// next run. The whole window is read a page at a time: an estimate the send passes over stays in the window, so a cap on
+// rows read would leave an older lost send behind enough of them. One send per customer a run: the notice covers all
+// their estimates, and a second send would rotate the link the first one carried. `limit` caps the sends per run.
 async function reconcileManualAcceptConsumerNotices({ now = new Date(), sinceDays = 21, limit = 25 } = {}) {
   const { manualAcceptConsumerNoticeSendLive, manualAcceptConsumerNoticeReconcileLive } = require('../config/feature-gates');
   if (!manualAcceptConsumerNoticeReconcileLive() || !manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off' };
   const since = new Date(Math.max(now.getTime() - sinceDays * 24 * 60 * 60 * 1000, MANUAL_ACCEPT_SEND_LIVE_SINCE.getTime()));
   const before = new Date(now.getTime() - CATCH_UP_GRACE_MS);
   const results = { checked: 0, sent: 0, skipped: 0, failed: 0 };
-  if (since >= before) return results;
-  const estimates = await db('estimates')
-    .where({ status: 'accepted', price_locked_by: 'manual_accept' })
-    .whereNotNull('customer_id')
-    .where('accepted_at', '>=', since)
-    .where('accepted_at', '<', before)
-    .whereExists(function customerOnFile() {
-      this.select(db.raw('1')).from('customers as c').whereRaw('c.id = estimates.customer_id').whereNull('c.deleted_at');
-    })
-    .whereNotExists(function officeTold() {
-      this.select(db.raw('1')).from('notifications as n')
-        .where('n.recipient_type', 'admin')
-        .whereRaw("n.metadata->>'dedupeKey' = (? || estimates.id::text)", [NOT_SENT_ALERT_KEY_PREFIX]);
-    })
-    .whereNotExists(function noticeDeliveredSinceAccept() {
-      this.select(db.raw('1')).from('customer_contract_events as e')
-        .join('customer_contracts as cc', 'cc.id', 'e.contract_id')
-        .whereRaw('e.customer_id = estimates.customer_id')
-        .where({ 'cc.contract_type': 'document_template', 'cc.document_template_key': CONSUMER_NOTICE_TEMPLATE_KEY })
-        .whereIn('e.event_type', ['email_sent', 'sms_sent'])
-        .whereRaw('e.created_at >= estimates.accepted_at');
-    })
-    .orderBy('accepted_at', 'desc')
-    .limit(CATCH_UP_MAX_SCANNED)
-    .select('id', 'customer_id');
-  if (estimates.length === CATCH_UP_MAX_SCANNED) {
-    logger.warn(`[estimate-consumer-notice] catch-up scanned its cap of ${CATCH_UP_MAX_SCANNED} office accepts; older ones wait`);
-  }
-  for (const estimate of estimates) {
-    if (results.sent + results.failed >= limit) break;
-    results.checked += 1;
-    const result = await sendManualAcceptConsumerNotice({ estimateId: estimate.id, customerId: estimate.customer_id });
-    if (result.sent) results.sent += 1;
-    else if (result.skipped) results.skipped += 1;
-    else results.failed += 1;
+  const customersSent = new Set();
+  let last = null;
+  let more = since < before;
+  while (more && results.sent + results.failed < limit) {
+    const page = await db('estimates')
+      .where({ status: 'accepted', price_locked_by: 'manual_accept' })
+      .whereNotNull('customer_id')
+      .where('accepted_at', '>=', since)
+      .where('accepted_at', '<', before)
+      .whereExists(function customerOnFile() {
+        this.select(db.raw('1')).from('customers as c').whereRaw('c.id = estimates.customer_id').whereNull('c.deleted_at');
+      })
+      .whereNotExists(function officeTold() {
+        this.select(db.raw('1')).from('notifications as n')
+          .where('n.recipient_type', 'admin')
+          .whereRaw("n.metadata->>'dedupeKey' = (? || estimates.id::text)", [NOT_SENT_ALERT_KEY_PREFIX]);
+      })
+      .whereNotExists(function noticeDeliveredSinceAccept() {
+        this.select(db.raw('1')).from('customer_contract_events as e')
+          .join('customer_contracts as cc', 'cc.id', 'e.contract_id')
+          .whereRaw('e.customer_id = estimates.customer_id')
+          .where({ 'cc.contract_type': 'document_template', 'cc.document_template_key': CONSUMER_NOTICE_TEMPLATE_KEY })
+          .whereIn('e.event_type', ['email_sent', 'sms_sent'])
+          .whereRaw('e.created_at >= estimates.accepted_at');
+      })
+      // Newest accept first. The next page starts below the last row read, compared in the database so the
+      // timestamp keeps its microseconds.
+      .modify((q) => {
+        if (last) q.whereRaw('(estimates.accepted_at, estimates.id) < (select e2.accepted_at, e2.id from estimates e2 where e2.id = ?)', [last.id]);
+      })
+      .orderBy([{ column: 'accepted_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(CATCH_UP_PAGE_SIZE)
+      .select('id', 'customer_id');
+    more = page.length === CATCH_UP_PAGE_SIZE;
+    last = page[page.length - 1];
+    for (const estimate of page) {
+      if (results.sent + results.failed >= limit) break;
+      results.checked += 1;
+      if (customersSent.has(String(estimate.customer_id))) {
+        results.skipped += 1;
+        continue;
+      }
+      const result = await sendManualAcceptConsumerNotice({ estimateId: estimate.id, customerId: estimate.customer_id });
+      if (result.skipped) {
+        results.skipped += 1;
+        continue;
+      }
+      customersSent.add(String(estimate.customer_id));
+      if (result.sent) results.sent += 1;
+      else results.failed += 1;
+    }
   }
   if (results.sent || results.failed) {
     logger.info(`[estimate-consumer-notice] catch-up: ${results.checked} checked, ${results.sent} sent, ${results.skipped} skipped, ${results.failed} failed`);
