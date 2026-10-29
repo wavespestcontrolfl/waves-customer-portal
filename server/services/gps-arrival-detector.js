@@ -681,6 +681,8 @@ module.exports = {
   validLatitude,
   validLongitude,
   loadArrivalConfig: loadConfig,
+  // Shared with the field flag's GPS check (field-lead-gps.js): the one rule for where a visit is.
+  extractDestination,
   _test: {
     DEFAULT_CONFIG,
     buildArrivalDecision,

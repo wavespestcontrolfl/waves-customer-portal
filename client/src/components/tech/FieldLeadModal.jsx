@@ -4,10 +4,79 @@ import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 
 const SERVICE_TYPES = ['Pest', 'Lawn', 'Termite', 'Mosquito', 'Tree & Shrub', 'Other'];
+
+// GATE_COMMISSION_SOLD_BY (owner 2026-10-29, D5 part 3b-1): a "Neighbor" flag for a new customer,
+// and the visit id so the server can check the truck GPS. Both exist only while the gate is on.
+const EMPTY_PROSPECT = { firstName: '', lastName: '', phone: '', address: '', city: '', zip: '' };
+const PROSPECT_FIELDS = [
+  ['firstName', 'First name', 'given-name'],
+  ['lastName', 'Last name', 'family-name'],
+  ['phone', 'Phone', 'tel'],
+  ['address', 'Address', 'street-address'],
+  ['city', 'City', 'address-level2'],
+  ['zip', 'ZIP', 'postal-code'],
+];
+const prospectInputStyle = {
+  width: '100%', padding: '10px 12px', borderRadius: 4, border: '1px solid #d6d3d1',
+  fontSize: 14, color: '#1c1917', marginBottom: 10, background: '#fff', boxSizing: 'border-box',
+};
+
+// Gate off: exactly the body the modal always sent.
+function buildLeadBody({ neighbor, neighborEnabled, service, serviceType, notes, urgency, prospect }) {
+  const base = { leadServiceType: serviceType, notes, urgency };
+  if (neighbor) return { ...base, prospect };
+  const body = { customerId: service?.customer_id || service?.customerId, ...base };
+  return neighborEnabled ? { ...body, scheduledServiceId: service?.id } : body;
+}
+
+function prospectProblem(neighbor, prospect) {
+  if (!neighbor) return '';
+  const missing = ['firstName', 'phone', 'address', 'zip'].some((key) => !prospect[key].trim());
+  return missing ? 'First name, phone, address and ZIP are required' : '';
+}
+
+// The customer card, or with the gate on a choice between this visit and a Neighbor.
+function LeadWho({ neighborEnabled, mode, onMode, prospect, onProspect, customerName, address }) {
+  return (
+    <>
+      {neighborEnabled && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          {[['visit', 'This visit'], ['neighbor', 'Neighbor']].map(([key, label]) => (
+            <button key={key} type="button" onClick={() => onMode(key)} aria-pressed={mode === key} style={{
+              flex: 1, padding: '8px 0', borderRadius: 4, fontSize: 13, fontWeight: 500,
+              border: mode === key ? 'none' : '1px solid #d6d3d1', cursor: 'pointer',
+              background: mode === key ? '#1c1917' : '#fff',
+              color: mode === key ? '#fff' : '#57534e',
+            }}>{label}</button>
+          ))}
+        </div>
+      )}
+      {neighborEnabled && mode === 'neighbor' ? (
+        <div style={{ marginBottom: 6 }}>
+          {PROSPECT_FIELDS.map(([key, label, autoComplete]) => (
+            <input
+              key={key} aria-label={label} placeholder={label} autoComplete={autoComplete}
+              inputMode={key === 'phone' ? 'tel' : undefined}
+              value={prospect[key]} onChange={e => onProspect(p => ({ ...p, [key]: e.target.value }))}
+              style={prospectInputStyle}
+            />
+          ))}
+        </div>
+      ) : (
+        /* Customer info */
+        <div style={{ background: '#fafaf9', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: 14, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, color: '#1c1917' }}>{customerName}</div>
+          {address && <div style={{ fontSize: 13, color: '#57534e', marginTop: 2 }}>{address}</div>}
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function FieldLeadModal({ service, onClose, onSubmit }) {
   const fieldPortalClass = useFieldPortalClass();
@@ -19,12 +88,18 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
+  const neighborEnabled = useFeatureFlag('commission_sold_by', false);
+  const [mode, setMode] = useState('visit');
+  const [prospect, setProspect] = useState(EMPTY_PROSPECT);
 
   const customerName = service?.customerName || `${service?.first_name || ''} ${service?.last_name || ''}`.trim() || 'Unknown';
   const address = service?.address || service?.address_line1 || '';
 
   const handleSubmit = async () => {
     if (!serviceType) { setError('Please select a service type'); return; }
+    const neighbor = neighborEnabled && mode === 'neighbor';
+    const problem = prospectProblem(neighbor, prospect);
+    if (problem) { setError(problem); return; }
     setSubmitting(true);
     setError('');
     try {
@@ -32,12 +107,7 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
       const r = await fetch(`${API}/tech/field-lead`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customerId: service?.customer_id || service?.customerId,
-          leadServiceType: serviceType,
-          notes,
-          urgency,
-        }),
+        body: JSON.stringify(buildLeadBody({ neighbor, neighborEnabled, service, serviceType, notes, urgency, prospect })),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Failed'); }
       setSuccess(true);
@@ -79,11 +149,10 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
         ) : (
           <>
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 24px' }}>
-            {/* Customer info */}
-            <div style={{ background: '#fafaf9', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: 14, marginBottom: 16 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: '#1c1917' }}>{customerName}</div>
-              {address && <div style={{ fontSize: 13, color: '#57534e', marginTop: 2 }}>{address}</div>}
-            </div>
+            <LeadWho
+              neighborEnabled={neighborEnabled} mode={mode} onMode={setMode} prospect={prospect} onProspect={setProspect}
+              customerName={customerName} address={address}
+            />
 
             {/* Service type */}
             <label style={{ display: 'block', fontSize: 13, fontWeight: 500, color: '#57534e', marginBottom: 6 }}>Service Type</label>

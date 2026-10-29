@@ -103,6 +103,7 @@ import {
   Pencil,
 } from "lucide-react";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import EstimateSoldByRow from "../../components/admin/EstimateSoldByRow";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -2622,6 +2623,7 @@ function EstimatePipelineViewV2({
                         {e.address || "—"}
                         {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
                       </div>{" "}
+                      <EstimateSoldByRow estimate={e} onChanged={refreshEstimates} />
                     </div>
                     {/* Call + text + send-estimate trailing buttons — matches the
                      CustomersPageV2 list row's icon trio. Send is shown for
@@ -3508,6 +3510,7 @@ function ViewErrorNote({ message, className }) {
 // non-interactive avoids nesting buttons and links inside a role="button" row.
 export function MobileEstimateRow({
   estimate,
+  onSoldByChanged,
   onCreateFromAddress,
   onOpenCustomerPanel,
   onSend,
@@ -3754,6 +3757,7 @@ export function MobileEstimateRow({
               </span>{" "}
             </div>
           )}
+          <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />
         </div>
         {estimate.customerPhone && (
           <Button
@@ -4437,6 +4441,7 @@ function EstimatesMobileListView({
             <MobileEstimateRow
               key={e.id}
               estimate={e}
+              onSoldByChanged={refreshEstimates}
               highlighted={String(e.id) === String(highlightId)}
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
