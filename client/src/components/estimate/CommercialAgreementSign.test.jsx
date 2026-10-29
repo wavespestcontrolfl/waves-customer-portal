@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CommercialAgreementSign, { SIGN_BUTTON_LABEL } from './CommercialAgreementSign';
 
@@ -63,5 +63,48 @@ describe('CommercialAgreementSign', () => {
     fireEvent.click(button);
     await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex #6869 r2 P2: the page left for the signing page with the button busy; a bfcache restore keeps that state.
+  it('back through the browser history (a bfcache restore): the button works again', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ signingUrl: 'https://portal.example.test/contract/x' }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: true, state: 'none' }} />);
+    fireEvent.click(screen.getByRole('button', { name: SIGN_BUTTON_LABEL }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Opening your agreement…' })).toBeDisabled();
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    const button = screen.getByRole('button', { name: SIGN_BUTTON_LABEL });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+});
+
+// GATE_COMMERCIAL_FIRST_VISIT: /data's cta.commercialFirstVisit turns the signed state into the first-visit picker.
+describe('CommercialAgreementSign with the first-visit picker', () => {
+  it('signed + pick: the picker replaces "we will follow up", and it loads the open times', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, days: [], slots: [] }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'signed' }} firstVisit={{ state: 'pick', durationMinutes: 30 }} />);
+    expect(screen.getByTestId('commercial-first-visit-picker')).toHaveTextContent('Each visit takes about 30 minutes.');
+    expect(screen.queryByText(/Our team will follow up/)).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/estimates/tok-1/first-visit/availability', { method: 'POST' }));
+  });
+
+  it('signed + booked: the booked date instead of "we will follow up"', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'signed' }} firstVisit={{ state: 'booked', visit: { date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' } }} />);
+    expect(screen.getByTestId('commercial-agreement-signed')).toHaveTextContent('Your first visit is booked for Tuesday, November 3 at 9 AM.');
+  });
+
+  it('signed with no first-visit block (gate off or not eligible): the copy is unchanged', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'signed' }} />);
+    expect(screen.getByTestId('commercial-agreement-signed')).toHaveTextContent('Our team will follow up to schedule your first visit.');
+  });
+
+  it('before signing, an eligible proposal says the customer picks the visit next', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: true, state: 'none' }} firstVisit={{ state: 'after_signing' }} />);
+    expect(screen.getByTestId('commercial-agreement-sign')).toHaveTextContent('Then you pick the day and time of your first visit.');
+    expect(screen.getByTestId('commercial-agreement-sign')).not.toHaveTextContent('our team will follow up');
   });
 });

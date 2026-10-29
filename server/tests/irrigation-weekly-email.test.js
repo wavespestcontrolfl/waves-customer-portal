@@ -862,6 +862,23 @@ describe('findLawnEmailAudienceGaps', () => {
       ]);
       expect(await findUnstampedRecurringLawnMembers()).toEqual([]);
     });
+
+    test('a whole-account hold never pages; an autopay-failure pause and an unpaused member still do (owner 2026-10-28)', async () => {
+      // A held account is not expected to have a recurring series booked,
+      // so "stamp the series" is not the fix. The shared rule
+      // (series-customer-eligibility) treats ONLY 'autopay_final_failure'
+      // as not-a-hold (dues cron only, visits continue) and an unset reason
+      // on a paused row as a hold (fail closed).
+      const pausedAt = new Date('2026-09-11T14:00:00Z');
+      mockBookRows([
+        unstamped({ id: 'hand-set', service_paused_at: pausedAt, service_pause_reason: 'owner hold' }),
+        unstamped({ id: 'null-reason', service_paused_at: pausedAt, service_pause_reason: null }),
+        unstamped({ id: 'autopay', service_paused_at: pausedAt, service_pause_reason: 'autopay_final_failure' }),
+        unstamped({ id: 'unpaused', service_paused_at: null, service_pause_reason: null }),
+      ]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => g.customerId)).toEqual(['autopay', 'unpaused']);
+    });
   });
 
   test('churned customers (trailing-only evidence, non-customer stage) are a legitimate drop', async () => {

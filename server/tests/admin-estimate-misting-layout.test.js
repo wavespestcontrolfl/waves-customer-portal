@@ -107,7 +107,7 @@ const payload = (over = {}) => ({
   lines: [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 700, y: 200 }] }],
   nozzles: [{ x: 100, y: 200, kind: 'eave', lineIndex: 0 }, { x: 400, y: 200, kind: 'eave', lineIndex: 0 }],
   risers: [{ x: 50, y: 60 }],
-  pump: { x: 70, y: 80 },
+  pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } },
   zones: [{ kind: 'pool', x: 300, y: 300, radiusFt: 15 }],
   ...over,
 });
@@ -167,8 +167,23 @@ describe('GET', () => {
       snapshotUrl: 'https://signed.example/layout.png',
     });
     expect(json.layout.nozzles).toHaveLength(2);
-    expect(json.layout.pump).toEqual({ x: 70, y: 80 });
+    expect(json.layout.pump).toEqual({ x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } });
     expect(mockSign.mock.calls[0][1].input.Key).toBe(mockLayouts[0].snapshot_s3_key);
+  });
+
+  test('a layout saved before the checklist (pump without checks) still reads', async () => {
+    await put(EST);
+    mockLayouts[0].pump = JSON.stringify({ x: 70, y: 80 });
+    const { status, json } = await get(EST);
+    expect(status).toBe(200);
+    expect(json.layout.pump).toEqual({ x: 70, y: 80 });
+  });
+
+  test('a refused checklist answers 400 with the checklist message', async () => {
+    const { status, json } = await put(EST, { body: payload({ pump: { x: 70, y: 80 } }) });
+    expect(status).toBe(400);
+    expect(json.error).toBe('Confirm the pump checklist');
+    expect(mockLayouts).toHaveLength(0);
   });
 });
 
@@ -253,6 +268,10 @@ describe('PUT', () => {
       payload({ nozzles: [{ x: 'a', y: 1, kind: 'eave' }] }),
       payload({ nozzles: [{ x: 1, y: 1, kind: 'roof' }] }),
       payload({ pump: null }),
+      payload({ pump: { x: 70, y: 80 } }),
+      payload({ pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: false } } }),
+      payload({ pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true, shade: true } } }),
+      payload({ pump: { x: 70, y: 80, checks: { outlet: true, level: 'true', dry: true, stucco: true } } }),
       payload({ risers: [{ x: 1, y: 1, source: 'wall' }] }),
       payload({ zones: [{ kind: 'pool', x: 1, y: 1, radiusFt: 9999 }] }),
     ]) {
@@ -340,8 +359,17 @@ describe('document block (the estimate PDF section)', () => {
         revision: expect.stringMatching(/^[0-9a-f]{16}$/),
         address: '500 Example Court, Venice, FL',
         counts: { nozzles: 2, eave: 2, fence: 0, risers: 1, linearFt: expect.any(Number), zones: 1, pump: true },
+        geometry: expect.objectContaining({
+          zoom: expect.any(Number),
+          mapWidth: 1280,
+          mapHeight: 960,
+          center: { lat: expect.any(Number), lng: expect.any(Number) },
+          nozzles: expect.arrayContaining([expect.objectContaining({ kind: expect.any(String), x: expect.any(Number), y: expect.any(Number) })]),
+          pump: { x: expect.any(Number), y: expect.any(Number) },
+        }),
       },
     });
+    expect(JSON.stringify(block)).not.toContain('service-photos');
     expect(mockSign.mock.calls[0][2]).toEqual({ expiresIn: 20 * 60 });
   });
 

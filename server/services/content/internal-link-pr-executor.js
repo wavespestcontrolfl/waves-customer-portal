@@ -295,7 +295,16 @@ async function previewBuildGate(ctx) {
       close: { status: 'patch_candidate', note: `Hub preview build ${preview.reason.replace('preview_build_', '')} on the link PR head; PR closed, links returned to the candidate pool.` },
     };
   }
-  return preview.ok ? null : { hold: preview.reason };
+  if (!preview.ok) return { hold: preview.reason };
+  // The astro brand-isolation job must pass on this head too (a spoke brand
+  // leak is invisible to the hub preview). Only ever a hold, never a close.
+  try {
+    await require('../content-astro/astro-publisher').assertBrandIsolationClear(ctx.pr);
+  } catch (err) {
+    if (err?.code === 'BRAND_ISOLATION_REQUIRED' || err?.code === 'BRAND_ISOLATION_LOOKUP_FAILED') return { hold: err.reason };
+    throw err;
+  }
+  return null;
 }
 
 // Findings close the PR as a reviewer rejection (a link PR has nothing to

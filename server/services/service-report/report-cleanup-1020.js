@@ -1,8 +1,7 @@
 'use strict';
 
-// GATE_REPORT_CLEANUP_1020 (owner 2026-10-20): fixes to the customer service report that every future report gets.
-// Fixed sentences only, no model. Every entry point here is a no-op while the gate is off, so the payload, the
-// PDF and the PDF cache key stay as they were.
+// Service report cleanup (owner 2026-10-20): fixes to the customer service report that every report gets.
+// Fixed sentences only, no model.
 //
 //   waterInRuleOf(products)       the one water-in amount and window the visit's products ask for
 //   waterInAftercare(rule, ...)   the one aftercare line for a visit whose watering instruction made no claim
@@ -10,15 +9,12 @@
 //   cleanFollowUp(data)           the follow-up card's reason is a whole customer sentence or the fixed one
 //   dropStockLines(data)          the repeated reassurance card, its "keep the program steady" line, and the
 //                                 "No corrective findings logged" finding are left out
-//   attachCleanupFields(data)     payload flag reportCleanup:true and troubleSpotNote
-//   reportCleanup1020PdfSignature the PDF cache key part, empty while the gate is off
+//   attachCleanupFields(data)     troubleSpotNote
+//   reportCleanup1020PdfSignature the PDF cache key part (a constant, so cached PDFs stay valid)
 
 const featureGates = require('../../config/feature-gates');
 const { formatInches } = require('./lawn-watering-instruction');
 const { rulesForTargets, MODES } = require('./lawn-watering-rule');
-
-// A partial gates module (a route test double) reads as off.
-const live = () => typeof featureGates.reportCleanup1020Live === 'function' && featureGates.reportCleanup1020Live();
 
 // ── Item 1: one water-in line ─────────────────────────────────────────────
 // The visit's products carry their watering rule and recorded watering text frozen with the completion
@@ -46,7 +42,6 @@ function visitRulesOf(product, facts) {
 }
 
 function waterInRuleOf(products) {
-  if (!live()) return null;
   // A product whose rule or catalog row could not be read may be a hold: no affirmative advice (report-data.js
   // withholds the full instruction on the same markers).
   if (products && (products.wateringRuleLookupFailed || products.catalogEnrichmentFailed)) return null;
@@ -100,11 +95,6 @@ function neutralWatering(rule, line) {
   return rule && rule.hold ? '' : line;
 }
 
-// The sheet's granular default keys off this (client/src/lib product method default). Absent while the gate is off.
-function methodCorrectionKey() {
-  return live() ? { methodCorrection: true } : {};
-}
-
 // ── Item 2: a granular product never keeps a spray method ──────────────────
 const DISPERSIBLE = /water[- ]?(?:dispersible|soluble)|\b(?:WDG|WG|WSG|WP|SP|DF)\b/i;
 const GRANULAR_FORMULATION = /granul|\(G\)|\bT?GR?\b/i;
@@ -121,12 +111,12 @@ function isGranularProduct(row) {
 }
 
 // The catalog formulation of each product row that does not already carry one (a frozen completion snapshot holds no
-// formulation): one read, only while the gate is live, fail-soft (a failed read leaves the name-only check).
+// formulation): one read, fail-soft (a failed read leaves the name-only check).
 async function catalogFormulations(knex, products) {
   const ids = [...new Set((Array.isArray(products) ? products : [])
     .filter((p) => p && p.product_id && !p.catalog_formulation)
     .map((p) => String(p.product_id)))];
-  if (!live() || !ids.length) return new Map();
+  if (!ids.length) return new Map();
   try {
     const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'formulation');
     return new Map(rows.map((row) => [String(row.id), row.formulation || null]));
@@ -138,7 +128,7 @@ async function catalogFormulations(knex, products) {
 // A method of broadcast_spray beside a granular product becomes granular_broadcast. Any other method (bait
 // placement, spot treatment, a perimeter band) is the technician's record and stays.
 function correctedMethod(method, row) {
-  return live() && method === 'broadcast_spray' && isGranularProduct(row) ? 'granular_broadcast' : method;
+  return method === 'broadcast_spray' && isGranularProduct(row) ? 'granular_broadcast' : method;
 }
 
 // ── Item 3: the follow-up reason ───────────────────────────────────────────
@@ -147,7 +137,7 @@ const FOLLOW_UP_FALLBACK = 'We’ll recheck the areas we flagged and compare the
 const NOT_CUSTOMER_SENTENCE = /…|\.\.\.|\d\s*%|\b\d{1,3}\s*(?:\/|out of)\s*100\b|\(\s*\d{1,3}\s*\)/i;
 
 function cleanFollowUp(data) {
-  const followUp = live() && data && data.reportV2 && data.reportV2.followUp;
+  const followUp = data && data.reportV2 && data.reportV2.followUp;
   if (!followUp || typeof followUp.reason !== 'string') return data;
   const reason = followUp.reason.trim();
   const clean = reason && /[.!?]$/.test(reason) && !NOT_CUSTOMER_SENTENCE.test(reason) ? reason : FOLLOW_UP_FALLBACK;
@@ -161,7 +151,7 @@ const NO_CORRECTIVE_TITLE = 'No corrective findings logged this visit';
 const NO_CORRECTIVE_DETAIL = 'See your technician’s visit summary for what was applied and observed today; no separate corrective finding was logged.';
 
 function dropStockLines(data) {
-  if (!live() || !data) return data;
+  if (!data) return data;
   const v2 = data.reportV2;
   if (v2 && Array.isArray(v2.insights)) {
     // Lawn: the all-clear card repeats the Overall line and ends on "keep the program steady". Tree & shrub keeps
@@ -192,19 +182,18 @@ function troubleSpotNote(data) {
   return `The trouble spot photo shows an area your technician flagged. We will check it again ${next}.`;
 }
 
-// The flag the client keys off, and the note. Present only while the gate is live; the note is null with no
-// trouble-spot photo.
+// The trouble-spot note on the payload; null with no trouble-spot photo.
 function attachCleanupFields(data) {
-  if (!live() || !data || typeof data !== 'object') return data;
-  data.reportCleanup = true;
+  if (!data || typeof data !== 'object') return data;
   data.troubleSpotNote = troubleSpotNote(data);
   return data;
 }
 
 // ── PDF cache key ──────────────────────────────────────────────────────────
-// Every renderer path appends this part; a PDF cached while the gate was off is never served after it is on.
+// Every renderer path appends this part. It stays the constant the gate-on path produced, so a PDF cached while the
+// gate was live keeps its key (changing it would re-render every cached PDF).
 function reportCleanup1020PdfSignature() {
-  return live() ? ':cleanup1020=1' : '';
+  return ':cleanup1020=1';
 }
 
 module.exports = {
@@ -212,7 +201,6 @@ module.exports = {
   waterInRuleOf,
   waterInAftercare,
   neutralWatering,
-  methodCorrectionKey,
   isGranularProduct,
   correctedMethod,
   cleanFollowUp,

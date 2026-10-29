@@ -94,7 +94,7 @@ const LABELS = {
 // statement carries an efficacy timeline (no day/week/month window, no
 // "you may still see … for a while"), labeled or not.
 const FAMILIES = {
-  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
+  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg', 'antapex wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
   contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'gentrol_complete_ec3'] },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr', 'gentrol_complete_ec3'] },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },

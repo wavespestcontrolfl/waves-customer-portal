@@ -250,28 +250,17 @@ describe('application method and area', () => {
   const pressed = (name, label) => within(howGroup(name)).getByRole('button', { name: label }).getAttribute('aria-pressed');
   const areaInput = (name) => within(editorFor(name)).getByLabelText('Area treated (sq ft)');
 
-  describe('GATE_REPORT_CLEANUP_1020 methodCorrection', () => {
+  describe('granular method default', () => {
     const headway = { productId: 'headway', name: 'Headway G', totalAmount: 6, amountUnit: 'lb', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' };
-    const ctxWith = (extra) => ({ ...CONTEXT, ...extra, lastVisit: { ...CONTEXT.lastVisit, products: [headway, ...CONTEXT.lastVisit.products.slice(0, 2)] } });
+    const ctxWith = () => ({ ...CONTEXT, lastVisit: { ...CONTEXT.lastVisit, products: [headway, ...CONTEXT.lastVisit.products.slice(0, 2)] } });
 
-    test('flag on: a granular product last recorded on a spray method starts on Granular broadcast; a liquid keeps its spray method', async () => {
-      await readyVisit(makeRequest({ context: ctxWith({ methodCorrection: true }) }));
+    test('a granular product last recorded on a spray method starts on Granular broadcast; a liquid keeps its spray method', async () => {
+      await readyVisit(makeRequest({ context: ctxWith() }));
       fireEvent.click(tile('Headway G'));
       expect(pressed('Headway G', 'Granular broadcast')).toBe('true');
       expect(pressed('Headway G', 'Broadcast spray')).toBe('false');
       fireEvent.click(tile('Talak 7.9%'));
       expect(pressed('Talak 7.9%', 'Broadcast spray')).toBe('true');
-    });
-
-    test('flag off or absent: the recorded spray method stands, as before', async () => {
-      await readyVisit(makeRequest({ context: ctxWith({ methodCorrection: false }) }));
-      fireEvent.click(tile('Headway G'));
-      expect(pressed('Headway G', 'Broadcast spray')).toBe('true');
-      expect(pressed('Headway G', 'Granular broadcast')).toBe('false');
-      cleanup();
-      await readyVisit(makeRequest({ context: ctxWith({}) }));
-      fireEvent.click(tile('Headway G'));
-      expect(pressed('Headway G', 'Broadcast spray')).toBe('true');
     });
   });
 

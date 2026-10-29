@@ -154,6 +154,7 @@ describe('GET /pay/:token previous-balance itemization', () => {
         // customer's service history.
         serviceDate: '2026-08-01',
         dueDate: '2026-08-15',
+        pastDue: false,
         amountDue: 44.55,
       }],
       total: 44.55,
@@ -207,6 +208,108 @@ describe('GET /pay/:token previous-balance itemization', () => {
     });
     const { body } = await getPayPage(invoiceData());
     expect(body).not.toHaveProperty('previousBalance');
+  });
+});
+
+// The downloadable PDF prints the SAME previous balance the page shows, from
+// the same selection — and nothing at all with the gate off.
+async function getInvoicePdf(data, { customer = null } = {}) {
+  InvoiceService.getByToken.mockResolvedValue(data);
+  db.mockImplementation((table) => chain({ first: table === 'customers' ? customer : null }));
+  const layer = payRouter.stack.find((l) => l.route?.path === '/:token/invoice.pdf' && l.route.methods.get);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  let error = null;
+  await handler({ params: { token: data.token } }, {}, (err) => { error = err; });
+  if (error) throw error;
+  const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
+  return generateInvoicePDF.mock.calls[0][0];
+}
+
+describe('GET /pay/:token/invoice.pdf previous balance', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => false);
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+  });
+
+  test('gate OFF: the PDF gets no previous balance and no sibling read runs', async () => {
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+    expect(openBalance.openBalanceInvoices).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: the PDF carries the itemization the page shows — never sibling tokens', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice.previous_balance).toEqual({
+      invoices: [{ invoiceNumber: 'INV-OLD', serviceDate: '2026-08-01', dueDate: '2026-08-15', pastDue: false, amountDue: 44.55 }],
+      total: 44.55,
+      combinedTotal: 194.55,
+      // What the Pay button charges, not the whole account.
+      totalLabel: 'Total due today',
+    });
+    expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain(SIBLING_TOKEN);
+  });
+
+  test('gate ON: past-due comes from the open-balance overdue verdict, and no service names ride the PDF', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [{ ...siblingRow(), is_overdue: true }]);
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice.previous_balance.invoices[0].pastDue).toBe(true);
+    expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain('Lawn Care');
+  });
+
+  test('gate ON, required-save invoice with no chargeable saved method: setup charges it alone, so no combined block', async () => {
+    // /:token/setup sets holdCoverageForCapture here and skips the combined
+    // allocation; the PDF must not print a "Total due today" it won't charge.
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData(), { customer: { id: 'cust-1', billing_mode: 'per_application' } });
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+  });
+
+  test('gate ON, opted-in partial account credit: no combined block, since setup decides the credit under its own locks', async () => {
+    // $150 anchor + $44.55 sibling, $20 opted-in credit. Setup's
+    // applyAccountCreditToInvoice may decline it (an active payment plan, an
+    // attached PaymentIntent), so a net total could understate the charge
+    // and a gross one could overstate it: print neither.
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      const pdfInvoice = await getInvoicePdf(invoiceData(), {
+        customer: { id: 'cust-1', account_credits: '20.00', auto_apply_account_credit: true },
+      });
+      expect(pdfInvoice).not.toHaveProperty('previous_balance');
+    } finally {
+      gates.autoApplyAccountCredit = false;
+    }
+  });
+
+  test('gate ON, credit on file but not opted in: setup applies none, so the combined block prints in full', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      const pdfInvoice = await getInvoicePdf(invoiceData(), {
+        customer: { id: 'cust-1', account_credits: '20.00', auto_apply_account_credit: false },
+      });
+      expect(pdfInvoice.previous_balance).toMatchObject({ total: 44.55, combinedTotal: 194.55, totalLabel: 'Total due today' });
+      expect(pdfInvoice.previous_balance).not.toHaveProperty('creditToApply');
+    } finally {
+      gates.autoApplyAccountCredit = false;
+    }
+  });
+
+  test('gate ON, payer-billed invoice: the PDF never shows the homeowner balance', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData({ payer_id: 'payer-1' }));
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+  });
+
+  test('gate ON, paid invoice: no previous balance block', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData({ status: 'paid' }));
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
   });
 });
 

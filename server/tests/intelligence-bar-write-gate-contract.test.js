@@ -83,11 +83,16 @@ beforeAll(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
+  process.env.GATE_IB_SCHEDULE_SMS = 'true';
   process.env.GATE_IB_INVOICE_EDITS = 'true';
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
   process.env.GATE_IB_CREATE_INVOICE = 'true';
+  process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
+  process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
+  process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true';
+  process.env.GATE_IB_UNBLOCK_SENDER = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_RECORD_PAYMENT = 'true';
@@ -103,11 +108,16 @@ afterAll(() => {
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
+  delete process.env.GATE_IB_SCHEDULE_SMS;
   delete process.env.GATE_IB_INVOICE_EDITS;
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
   delete process.env.GATE_IB_CREATE_INVOICE;
+  delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
+  delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
+  delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
+  delete process.env.GATE_IB_UNBLOCK_SENDER;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -196,6 +206,7 @@ const WRITE_TWO_STEP = [
   'send_invoice',
   'record_payment',
   'void_invoice',
+  'schedule_sms',
   'edit_invoice',
   'archive_invoice',
   'unarchive_invoice',
@@ -208,7 +219,13 @@ const WRITE_TWO_STEP = [
   'create_payment_plan',
   'cancel_payment_plan',
   'create_invoice',
+  'compose_email',
   'set_customer_bill_to',
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
+  'resolve_dispatch_alert',
+  'unblock_sender',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -338,7 +355,7 @@ const READ_ONLY = [
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
   'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
-  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages',
+  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages', 'list_agent_review_drafts',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',
   'get_quarterly_estimate', 'get_pnl', 'get_advisor_alerts', 'get_mileage_summary', 'get_ar_aging',
   'get_lead_overview', 'query_leads', 'get_stale_leads', 'get_lead_funnel',
@@ -379,6 +396,8 @@ const READ_ONLY = [
   'offer_choices',
   // address-tools.js: Google address check. Read only: no rows, no writes.
   'check_address',
+  // customer-link-tools.js: the Quick Links library search. Read only: public links, no customer rows.
+  'search_quick_links',
   // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
   // with a payments timeline (attempts kept apart from received payments).
   'get_customer_invoices', 'get_invoice_detail',
@@ -820,6 +839,11 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
       payments: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [], scheduled_services: [],
     }],
+    // schedule_sms's preview reads the customer and the send path's consent checks; it may not write or queue without confirmed
+    // (intelligence-bar-schedule-sms.test.js covers the card itself).
+    ['schedule-sms-tools', 'executeScheduleSmsTool', 'schedule_sms', { customer_id: '00000000-0000-0000-0000-00000000f311', message: 'Synthetic scheduled text.', send_date: '2099-02-03', send_time: '10:00' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f311', first_name: 'Pat', last_name: 'Tester', phone: '+19415550188', deleted_at: null }],
+    }],
     // The invoice edit cards' previews read the invoice, its payments, plan, statement and links; none may write without
     // confirmed (intelligence-bar-invoice-edits.test.js covers the cards themselves).
     ...[
@@ -845,6 +869,13 @@ const UNCONFIRMED_CALLS = [
       ...REMINDER_SEED,
       payment_plans: [{ id: '00000000-0000-0000-0000-00000000f402', invoice_id: '00000000-0000-0000-0000-00000000f401', status: 'active', total_balance: '129.00', payment_amount: '50.00', payment_frequency: 'monthly', next_payment_date: '2099-02-01' }],
     }],
+    // compose_email's preview reads the recipient and runs the link check; it may not send without confirmed
+    // (intelligence-bar-compose-email.test.js covers the card itself).
+    ['compose-email-tools', 'executeComposeEmailTool', 'compose_email', {
+      customer_id: '00000000-0000-0000-0000-00000000f401', subject: 'Visit tomorrow', body: 'Hi Pat, we are coming tomorrow.',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f401', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.invalid' }],
+    }],
     // create_invoice's preview reads the customer and the service's own totals mirror (spied below); it may not write
     // without confirmed (intelligence-bar-create-invoice.test.js covers the card itself).
     ['create-invoice-tools', 'executeCreateInvoiceTool', 'create_invoice', {
@@ -858,6 +889,26 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: '00000000-0000-0000-0000-00000000b901', first_name: 'Pat', last_name: 'Tester', payer_id: null, deleted_at: null }],
       payers: [{ id: 7, display_name: 'Synthetic Property Co', active: true }],
       invoices: [], scheduled_services: [], service_records: [], annual_prepay_terms: [],
+    }],
+    // The Agent Review draft cards' previews read the decision, the thread's newest inbound text and the customer; they may not
+    // write without confirmed (intelligence-bar-agent-review.test.js covers the cards themselves).
+    ...['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].map((name) => ['agent-review-tools', 'executeAgentReviewTool', name, {
+      decision_id: '00000000-0000-0000-0000-00000000a701', ...(name === 'revise_agent_review_draft' ? { revised_text: 'Thursday works. See you then.' } : {}),
+    }, {
+      // The tool reads the decision joined to its inbound text and customer in one aliased query: the recorder keys on that table string.
+      'agent_decisions as ad': [{ id: '00000000-0000-0000-0000-00000000a701', status: 'pending_review', workflow: 'synthetic_reply_agent', source_channel: 'sms', customer_id: '00000000-0000-0000-0000-00000000a703', sms_log_id: '00000000-0000-0000-0000-00000000a702', suggested_message: 'Yes, Thursday works. See you then!', input_snapshot: {}, created_at: '2026-10-28T12:00:00Z', sms_from_phone: '+19415550142', sms_to_phone: '+19415550100', inbound_message: 'Can you come Thursday?', first_name: 'Pat', last_name: 'Tester', customer_phone: '+19415550142' }],
+      sms_log: [{ id: '00000000-0000-0000-0000-00000000a702' }],
+    }]),
+    // resolve_dispatch_alert's preview reads the alert, its technician, visit and customer; it may not write without confirmed
+    // (intelligence-bar-dispatch-alert.test.js covers the card itself).
+    ['dispatch-alert-tools', 'executeDispatchAlertTool', 'resolve_dispatch_alert', { alert_id: '00000000-0000-0000-0000-00000000a901' }, {
+      dispatch_alerts: [{ id: '00000000-0000-0000-0000-00000000a901', type: 'tech_late', severity: 'warn', tech_id: 'tech-1', job_id: '00000000-0000-0000-0000-00000000a902', payload: { delay_minutes: 20 }, created_at: new Date('2026-10-28T14:00:00Z'), resolved_at: null, resolved_by: null }],
+      scheduled_services: [{ id: '00000000-0000-0000-0000-00000000a902', customer_id: 'cust-1', service_type: 'Pest Control', scheduled_date: '2026-10-28', window_start: '09:00:00', window_end: '11:00:00', status: 'scheduled' }],
+    }],
+    // unblock_sender's preview reads the blocklist row; it may not write without confirmed
+    // (intelligence-bar-unblock-sender.test.js covers the card itself).
+    ['unblock-sender-tools', 'executeUnblockSenderTool', 'unblock_sender', { blocked_id: '00000000-0000-0000-0000-00000000a903' }, {
+      blocked_email_senders: [{ id: '00000000-0000-0000-0000-00000000a903', email_address: 'noreply@spam.example.invalid', domain: null, reason: 'spam_auto', blocked_count: 3, created_at: new Date('2026-10-01T12:00:00Z'), gmail_filter_id: 'filter-1' }],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
@@ -1315,10 +1366,14 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
+    // schedule_sms (_sideEffects): its confirmed run queues a customer text (live smoke must not).
     // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
+    // compose_email (_sideEffects): its confirmed run sends an email (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
+    // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
+    // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });

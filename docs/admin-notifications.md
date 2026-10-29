@@ -100,6 +100,11 @@ customer's message by this rule.
    visit, a quote handed off, a person's Gmail reply. Never because someone opened or read
    the bell (`read_at` is not evidence). It is behind `GATE_ALERT_CONTACT_CLOSE`: off, or
    `shadow` (records what would close in `audit_log`, changes no bell), or `true` (closes).
+   Two rules carry their own gate (off / `shadow` / `true`, rollback = unset): a voicemail
+   closes once the customer's own visit completed after it the same Eastern day
+   (`GATE_VOICEMAIL_VISIT_UNDERWAY`), and a Leads bell with `doneWhen: 'lead_contacted'` and a
+   lead id closes once the lead was texted or called back, booked or quoted after the bell
+   (`GATE_LEAD_CONTACTED_CLOSE`). Details in `docs/gates-and-env.md`.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a

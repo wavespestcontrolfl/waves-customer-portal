@@ -97,14 +97,14 @@ const SERVICE_DETAILS_COPY = {
   pest_control: {
     title: 'Pest Protection — Service Details',
     // Stylized in-house renders (gemini-3-pro-image, 2026-07-11 — no
-    // manufacturer photography/trade dress). Owner-picked set: the plan's
-    // primary solutions + the spray adjuvant.
+    // manufacturer photography/trade dress). Owner-picked set, cut to Taurus
+    // 2026-10-26: the Talstar P render shows a brand Waves does not buy (owner
+    // 2026-09-11: the bifenthrin bottle is Atticus Talak 7.9 F), and the
+    // surfactant left pest stops (owner walkthrough 2026-10-03).
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
         { file: 'product-taurus-sc.png', product: 'Taurus', caption: 'Taurus SC® — non-repellent insecticide (fipronil)' },
-        { file: 'product-talstar-p.png', product: 'Talstar', caption: 'Talstar® P — residual insecticide (bifenthrin)' },
-        { file: 'product-surfactant.png', caption: 'Non-ionic surfactant — helps treatments spread & stick' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection and the label, and your service report names the exact products applied at your home.',
     },
@@ -112,9 +112,11 @@ const SERVICE_DETAILS_COPY = {
       heading: 'Your plan at a glance',
       rows: [
         ['Service cadence', 'Quarterly, bi-monthly, or monthly \u2014 you pick on your estimate'],
-        ['Primary solutions', 'Taurus SC\u00ae (fipronil) & Talstar\u00ae P (bifenthrin) \u2014 selected per inspection & label'],
+        ['Primary solutions', 'Taurus SC\u00ae (fipronil) & Atticus Talak 7.9 F (bifenthrin) \u2014 selected per inspection & label'],
         ['Covered pests', 'Ants (incl. ghost, big-headed, carpenter & fire-ant mounds near the structure), large roaches (American, Australian, smokybrown \u2014 \u201cpalmetto bugs\u201d), spiders (incl. widow & recluse), crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, stink & boxelder bugs'],
-        ['Interior service', 'Included for covered pests whenever you report activity'],
+        // Owner 2026-10-22: the first visit includes an inside spray; after that the inside is up to the customer
+        // (services/sms-company-facts.js, the same rule for Waves AI).
+        ['Interior service', 'Your first visit includes an inside spray; after that, inside whenever you ask. Someone home or access needed. Exterior-only plans: ask the office to add it.'],
         ['Re-service', 'Unlimited, no charge, for covered pests between visits'],
         ['Guarantee', 'Money-back guarantee on recurring plans'],
         ['Separate services', 'German-roach cleanouts, fleas, bed bugs, rodents, wildlife, turf insect programs'],
@@ -124,7 +126,7 @@ const SERVICE_DETAILS_COPY = {
     tagline: 'Inspection-led service for covered household pests \u2014 documented visits, no-charge re-service between appointments.',
     included: [
       'Exterior perimeter protection around entry-prone areas',
-      'Interior service support when activity is reported',
+      'Interior treatment on the first visit, then whenever you ask',
       'Web, nest, and egg-sac removal from accessible exterior areas',
       'Free re-service between recurring visits',
     ],
@@ -132,14 +134,14 @@ const SERVICE_DETAILS_COPY = {
       'Every visit starts with inspection, not application: the foundation and lower walls, door and garage thresholds, window frames and sills, utility penetrations, cracks and crevices, eaves and soffits, lanai and entry areas, and the landscape zones touching the structure.',
       'Product selection follows the inspection, not a script. Depending on the findings, the technician may place non-repellent products where pests actively enter, travel, and harbor, and residual contact or repellent treatments in appropriate labeled exterior zones \u2014 when both are used, placement is planned around the labels and the target pest.',
       'Some non-repellent products can extend control beyond the first insect that contacts or consumes them: for certain ants and cockroaches, exposed insects can pass the effect through contact, feeding, and grooming. That transfer is product- and pest-specific \u2014 we use it where it genuinely applies and never present it as a universal effect or a colony-elimination guarantee.',
-      'Where the pest, site, and label support it, the technician establishes a residual exterior treatment zone at selected foundation, threshold, landscape-edge, and eave areas identified during inspection \u2014 targeted placement, never an automatic pass over every wall, plant, and surface.',
-      'Interior service is included for pests covered by your recurring plan: an interior spray plus baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
+      'On a normal visit, where the label allows, the technician treats a residual band around the house and on the covered eaves, the garage and the lanai or pool cage, placed from the inspection \u2014 never an automatic pass over every wall, plant, and surface.',
+      'Interior service is included on your first visit and whenever you ask for it on later visits: an interior spray plus baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances. If you chose exterior-only service, ask the office to add inside service. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
       'Routine exterior visits include removal of accessible spider webs, egg sacs, and inactive nest material from designated service areas \u2014 wherever they can be safely reached from the ground with standard service equipment. Active stinging-insect nests and work needing specialized access are handled under the applicable service terms.',
     ],
     faq: [
       {
         q: 'Which pests are actually covered?',
-        a: 'The plan is built around two professional mainstays \u2014 Taurus SC\u00ae (fipronil, non-repellent) and Talstar\u00ae P (bifenthrin, residual) \u2014 and covers the household pests on their labels: ants including ghost, big-headed, carpenter, and fire-ant mounds near the structure; the big Florida roaches (American, Australian, smokybrown \u2014 the \u201cpalmetto bugs\u201d); spiders including widow and recluse; crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, and stink and boxelder bugs. German-cockroach cleanouts, fleas, bed bugs, rodents, and turf insect programs are separate services with their own treatment plans.',
+        a: 'The plan is built around two professional mainstays \u2014 Taurus SC\u00ae (fipronil, non-repellent) and Atticus Talak 7.9 F (bifenthrin, residual) \u2014 and covers the household pests on their labels: ants including ghost, big-headed, carpenter, and fire-ant mounds near the structure; the big Florida roaches (American, Australian, smokybrown \u2014 the \u201cpalmetto bugs\u201d); spiders including widow and recluse; crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, and stink and boxelder bugs. German-cockroach cleanouts, fleas, bed bugs, rodents, and turf insect programs are separate services with their own treatment plans.',
       },
       {
         q: 'Does pest control spray around the house base or just the grass?',
@@ -147,7 +149,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Is the interior included, or is that extra?',
-        a: 'Included for the pests your recurring plan covers \u2014 an interior spray is part of your pest visits at no extra charge, with baits, gels, and crack-and-crevice work added wherever you see covered activity inside. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
+        a: 'Included for the pests your recurring plan covers \u2014 your first visit includes an inside spray, and on later visits we treat inside whenever you ask, with baits, gels, and crack-and-crevice work wherever you see covered activity. Someone needs to be home, or leave us access. If you chose exterior-only service, you can ask the office to add inside service back. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
       },
       {
         q: 'Is it safe for my kids and pets?',
@@ -155,15 +157,15 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What if it rains after my treatment?',
-        a: 'Before treating, the technician weighs current and forecast weather, wind, surface moisture, and the product label \u2014 we do not apply when conditions would violate the label or waste the treatment. Select microencapsulated formulations add controlled release and residual staying power, but no application is weatherproof: if heavy rain hits before a treatment dries or you think an application was compromised, contact us and we will re-service at no charge when your plan warrants it.',
+        a: 'Before treating, the technician weighs current and forecast weather, wind, surface moisture, and the product label \u2014 we do not apply when conditions would violate the label or waste the treatment. No application is weatherproof: a treatment needs to dry and bond to surfaces, and after that it holds up to weather.',
       },
       {
         q: 'I still see ants a few days after treatment — is it working?',
-        a: 'Often, yes \u2014 non-repellent and bait treatments are intentionally slower than contact-kill sprays because foragers have to contact or consume them, so continued activity for several days is normal. An apparent increase does not by itself prove the treatment is working, though \u2014 give it 7\u201310 days, and if activity is not clearly declining by then, request your no-charge re-service. That is exactly what it exists for.',
+        a: 'Often, yes \u2014 non-repellent and bait treatments are intentionally slower than contact sprays because foragers have to contact or consume them, so continued activity is normal. If you still see activity between visits, text us a photo \u2014 a re-service between visits is free and doesn\u2019t move your next visit.',
       },
       {
         q: 'Do I need to be home?',
-        a: 'For the initial visit, we ask that an adult be available when it includes a walkthrough or interior service. Routine exterior visits generally do not need anyone home as long as we have safe access to gates and covered areas \u2014 and you can watch the technician\u2019s arrival live in the app either way.',
+        a: 'For the initial visit, we ask that an adult be available when it includes a walkthrough or interior service. Routine exterior visits do not need anyone home as long as we have safe access to gates and covered areas. For the inside, someone needs to be home or you leave us access; with nobody home, we treat the outside and note it. You can watch the technician\u2019s arrival live in the app either way.',
       },
     ],
   },
@@ -173,7 +175,6 @@ const SERVICE_DETAILS_COPY = {
       heading: 'A few of the products doing the work',
       images: [
         { file: 'product-scion.png', product: 'Scion', caption: 'Scion® — residual insecticide' },
-        { file: 'product-bifen-it.png', product: 'Bifen', caption: 'Bifen® I/T — bifenthrin insecticide' },
         { file: 'product-tekko-pro.png', product: 'Tekko', caption: 'Tekko® Pro — insect growth regulator' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection, the season, and the label, and your service report names the exact products applied at your home.',
@@ -186,7 +187,7 @@ const SERVICE_DETAILS_COPY = {
         ['Covered pest', 'Mosquitoes'],
         ['Other biting insects', 'No-see-ums, biting midges, gnats, fleas & ticks only when named in your estimate'],
         ['Every visit', 'Adult-mosquito treatment in resting zones + inspection of accessible on-property water sources'],
-        ['Larval control', 'EPA-registered larvicide or growth regulator applied only to eligible, label-approved sites within your covered area'],
+        ['Larval control', 'EPA-registered larvicide or growth regulator applied only to eligible, label-approved sites within your covered area; Bti dunks and mosquito stations when your estimate includes them'],
         ['Re-service', 'No-charge re-service for qualifying mosquito activity between visits'],
         ['Guarantee', 'Money-back guarantee on recurring plans'],
       ],
@@ -195,11 +196,11 @@ const SERVICE_DETAILS_COPY = {
     included: [
       'Targeted adult-mosquito treatment in identified resting zones',
       'Inspection of accessible on-property water-holding sources, documented each visit',
-      'Label-directed larval treatment of eligible water sources within the covered area',
+      'Label-directed larval treatment of eligible water sources within the covered area; Bti dunks and mosquito stations when your estimate includes them',
       'Weather-aware treatment timing',
     ],
     process: [
-      'Many adult mosquitoes rest through the heat of the day in shaded, humid, protected places — dense vegetation, fence lines, lanai framing, under decks and outdoor structures. We direct treatment there with gas-powered backpack misting equipment that places fine, labeled spray droplets into and beneath the foliage — controlled placement where mosquitoes actually rest, not a blanket pass over the lawn.',
+      'Many adult mosquitoes rest through the heat of the day in shaded, humid, protected places — dense vegetation, fence lines, lanai framing, under decks and outdoor structures. We direct treatment there with a gas-powered backpack sprayer that places fine, labeled spray droplets into and beneath the foliage — controlled placement where mosquitoes actually rest, not a blanket pass over the lawn.',
       'The treatment reduces adult mosquitoes that contact treated surfaces and pressure from mosquitoes entering the yard. It is not a physical barrier — no honest company will tell you nothing can fly in from next door.',
       'Every visit includes a visual inspection of accessible, on-property water-holding sources — planters, toys, tarps, birdbaths, bromeliads, visible drainage, accessible gutters — with each finding documented: emptied, treated, inaccessible, off-property, or flagged for you to correct.',
       'Where the label, site, and your plan allow, standing water that cannot be emptied is treated with an EPA-registered larvicide or insect growth regulator — applied only through label-approved methods to eligible locations. Adult sprays, by contrast, are kept out of water and away from drift into aquatic areas per label; the two applications are separate tools with separate rules.',
@@ -232,17 +233,39 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'How do you handle kids, pets, gardens, pollinators, and water?',
-        a: 'Before treating, the technician accounts for play areas, pets, open blooms and active pollinators, edible plants, ponds, pools, aquarium airways, wind, and neighboring property — placement and product selection follow the complete label. Adult sprays are kept off edible plants unless the specific label permits it, and away from blooms and aquatic features where the label requires. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about hives, butterfly gardens, or koi ponds before service, and keep people and pets clear until the report\u2019s re-entry condition is met.',
+        a: 'Before treating, the technician accounts for play areas, pets, open blooms and active pollinators, edible plants, ponds, pools, aquarium airways, wind, and neighboring property — placement and product selection follow the complete label. Adult sprays are kept off edible plants and open water, and off blooming plants where pollinators are active. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about hives, butterfly gardens, or koi ponds before service, and keep people and pets clear until the report\u2019s re-entry condition is met.',
       },
       {
         q: 'What if it rains right after treatment?',
-        a: 'We evaluate current and forecast weather, wind, and wet foliage against the product label before treating — and we do not apply when the label says no. No exterior treatment is weatherproof: if heavy rain hits before an application dries or you believe a visit was compromised, contact us and we will re-service at no charge when your plan warrants it.',
+        a: 'We evaluate current and forecast weather, wind, and wet foliage against the product label before treating — and we do not apply when the label says no. No exterior treatment is weatherproof: a spray needs to dry and bond to the foliage, and after that it holds up to weather.',
       },
       {
         q: 'Why is there a sign in my yard after service?',
         a: 'Florida law requires a conspicuous treatment notice whenever pesticide is applied to lawn or exterior foliage. We post it at every qualifying visit — and pair it with something better than a sign: a digital report naming the exact products, treatment areas, and precautions for your property.',
       },
     ],
+    // Mosquito-specific safety copy replaces the shared structural-pest
+    // section: a yard spray has no crack-and-crevice, wall-void or bait
+    // placement, and its precautions are blooms, edibles and water.
+    safetyOverride: {
+      heading: 'Pets, kids, pollinators & your yard — mosquito-treatment safety, straight',
+      paragraphs: [
+        'A mosquito treatment goes into the shrubs and shade around the places your family and pets spend time outside — so here is the full answer, not a slogan.',
+        'Every pesticide product Waves applies is EPA-registered and used in accordance with its product label. Registration means the EPA evaluated the required scientific data and the proposed label and determined the product can be used without unreasonable adverse effects when the label is followed — and that label is legally binding: it dictates where the product may go, at what rate, with what precautions, and when people and pets may re-enter. EPA registration does not mean exposure is risk-free; in this industry the label is the law, and our technicians treat it that way.',
+      ],
+      bullets: [
+        'The adult spray goes into the shaded leaves where mosquitoes rest — hedges, fence lines, under decks, the lanai and pool-cage edges — not across the open lawn or onto play equipment.',
+        'Blooming plants with active pollinators, edible plants, and open water are not sprayed. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about beehives, butterfly gardens, edible plants, and fish ponds before service.',
+        'Wind and rain must allow the application. When they do not, the technician holds or limits the treatment and notes why in your service report.',
+        'Read the signal word on every product card in this guide. It is the EPA’s at-a-glance acute-hazard communication: DANGER is the most severe category, WARNING is next, and CAUTION is the lowest signal-word category. It reflects the product’s acute hazard labeling — a useful indicator, though not a complete measure of every risk, which is why the full label governs every application.',
+        'The adult mosquito sprays are mixed at label-mandated rates of about an ounce or less per gallon and go down at finished concentrations well under one-tenth of one percent active ingredient. Concentration alone does not set the precautions, though: the label does, and we follow it in full.',
+        'Where a program uses insect-specific chemistry, we say so — insect growth regulators (mosquito and flea programs) disrupt molting and reproduction hormone systems that mammals simply do not have.',
+        'The "keep off until dry" rule has a mechanism behind it: while a liquid application is wet, it can transfer to skin, paws, and mouths; once dry, the residue stays on the treated surface where insects contact it. For labels that require it, complete drying — not a generic clock time — is the controlling condition, and your service report carries the precautions for the products actually used at your visit.',
+        'More product is never the answer. Rates come from the label, not from pest pressure or an upsell — correct identification, accurate placement, and label-compliant application are what produce results.',
+        'Waves Pest Control, LLC operates under Florida pest-control business license JB351547 and is insured, and every applied product is documented in your service report with its own re-entry guidance — so you never have to wonder what was used at your home or when the yard is yours again.',
+      ],
+      closing: 'We will never tell you a pesticide is “100% safe” — no honest company can, and the EPA does not permit that claim for any product. What we can show you is every choice made to minimize exposure, and the paper trail to verify it — our technicians treat their own homes with the same products and the same rules.',
+    },
     ctaMicro: 'Month-to-month plan \u00b7 No-charge re-service for qualifying mosquito activity \u00b7 Money-back guarantee',
     illustrations: ['treatment_notice'],
   },

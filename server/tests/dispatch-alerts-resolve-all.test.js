@@ -88,15 +88,22 @@ describe('dispatch alerts bulk resolve', () => {
     expect(emit).not.toHaveBeenCalled();
   });
 
-  test('the single-card Resolve route refuses a decision-only card before resolving it', () => {
-    const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-    const start = source.indexOf("router.patch('/alerts/:id/resolve'");
-    const route = source.slice(start, source.indexOf('router.', start + 10));
-    const refusal = route.indexOf("code: 'DECISION_REQUIRED'");
-    expect(route).toContain('DECISION_ONLY_ALERT_TYPES.includes(target.type)');
-    expect(route).toContain('res.status(409)');
+  test('the single-card Resolve refuses a decision-only card before resolving it', () => {
+    // The decision check lives in the shared function the board route and the bar's resolve_dispatch_alert both call.
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/dispatch-alerts.js'), 'utf8');
+    const start = source.indexOf('async function resolveAlertAsDispatcher(');
+    const fn = source.slice(start, source.indexOf('\n}\n', start));
+    const refusal = fn.indexOf("outcome: 'decision_required'");
+    expect(fn).toContain('DECISION_ONLY_ALERT_TYPES.includes(target.type)');
     expect(refusal).toBeGreaterThan(-1);
-    expect(refusal).toBeLessThan(route.indexOf('await resolveAlert('));
+    expect(refusal).toBeLessThan(fn.indexOf('await resolveAlert('));
+    const routeSource = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const routeStart = routeSource.indexOf("router.patch('/alerts/:id/resolve'");
+    const route = routeSource.slice(routeStart, routeSource.indexOf('router.', routeStart + 10));
+    expect(route).toContain('resolveAlertAsDispatcher(');
+    expect(route).toContain('res.status(409)');
+    expect(route).toContain("code: 'DECISION_REQUIRED'");
     expect(dispatchAlerts.DECISION_ONLY_ALERT_TYPES).toEqual(['visit_not_closed_out']);
   });
+
 });

@@ -33,6 +33,18 @@ describe('content-astro github-client pagination', () => {
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/compare/main...content%2Fblog-x'), expect.any(Object));
   });
 
+  test('listWorkflowRunsForHead and listWorkflowRunJobs read the Actions API and unwrap the lists', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({ workflow_runs: [{ id: 7 }] }))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [{ name: 'brand-isolation' }] }))
+      .mockResolvedValueOnce(jsonResponse({}));
+    await expect(gh.listWorkflowRunsForHead('AbC123')).resolves.toEqual([{ id: 7 }]);
+    expect(global.fetch.mock.calls[0][0]).toContain('/actions/runs?head_sha=AbC123&per_page=100');
+    await expect(gh.listWorkflowRunJobs(7)).resolves.toEqual([{ name: 'brand-isolation' }]);
+    expect(global.fetch.mock.calls[1][0]).toContain('/actions/runs/7/jobs?per_page=100');
+    await expect(gh.listWorkflowRunJobs(8)).resolves.toEqual([]);
+  });
+
   test('getFile percent-encodes reserved filename characters — a literal `?` in a name is not a query string (GH r29)', async () => {
     global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ sha: 'x', path: 'public/images/blog/x/what?name.webp', content: '' }));
     await gh.getFile('public/images/blog/x/what?name.webp');

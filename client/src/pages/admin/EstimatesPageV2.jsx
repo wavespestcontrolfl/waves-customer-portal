@@ -3069,6 +3069,45 @@ function EstimatePipelineViewV2({
                               ),
                               onClick: () => setOutlineTarget(e),
                             },
+                            // GATE_TS_OUTLINE: the server marks an estimate with a Tree & Shrub line.
+                            e.treeShrubOutlineAvailable && {
+                              key: "tree-shrub-outline",
+                              label: "Tree & Shrub service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "tree_shrub",
+                                }),
+                            },
+                            // GATE_PEST_OUTLINE: the server marks an estimate with a recurring pest line.
+                            e.pestOutlineAvailable && {
+                              key: "pest-outline",
+                              label: "Pest service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "pest_control",
+                                }),
+                            },
+                            // GATE_MOSQUITO_OUTLINE: the server marks an estimate with a recurring mosquito program row.
+                            e.mosquitoOutlineAvailable && {
+                              key: "mosquito-outline",
+                              label: "Mosquito service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "mosquito",
+                                }),
+                            },
                             {
                               key: "proposal",
                               label: "Commercial proposal",
@@ -3847,6 +3886,30 @@ export function MobileEstimateRow({
               label: "Lawn service outline",
               icon: <ClipboardList size={16} strokeWidth={1.75} />,
               onClick: () => onLawnOutline?.(estimate),
+            },
+            // GATE_TS_OUTLINE: the same composer, opened on the Tree & Shrub outline.
+            estimate.treeShrubOutlineAvailable && {
+              key: "tree-shrub-outline",
+              label: "Tree & Shrub service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "tree_shrub" }),
+            },
+            // GATE_PEST_OUTLINE: the same composer, opened on the Pest Control outline.
+            estimate.pestOutlineAvailable && {
+              key: "pest-outline",
+              label: "Pest service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "pest_control" }),
+            },
+            // GATE_MOSQUITO_OUTLINE: the same composer, opened on the Mosquito outline.
+            estimate.mosquitoOutlineAvailable && {
+              key: "mosquito-outline",
+              label: "Mosquito service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "mosquito" }),
             },
             {
               key: "audit",

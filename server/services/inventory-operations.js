@@ -438,6 +438,7 @@ async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
   if (input.action !== 'receive') return { secondReceive };
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
+    ?? await require('./procurement/vendor-order-email').emailOrderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');
   const enteredUnit = supportedUnit(input.unit || request.unit || product.inventory_unit);
@@ -503,7 +504,7 @@ async function updateRestockRequest(requestId, raw, options = {}) {
     }
     const [updated] = await trx('product_restock_requests').where({ id: requestId }).update({
       status: preview.new_status, updated_at: new Date(),
-      metadata: { ...restockMeta(request.metadata), lastManualAction: {
+      metadata: { ...restockMeta(request.metadata), ...options.metadataPatch, lastManualAction: {
         action: input.action, note: input.note || null, actorId: options.actorId || null, recordedAt: new Date().toISOString(),
       } },
       ...(input.action !== 'mark_ordered' ? { closed_by: options.actorId || null, closed_at: new Date() } : {}),

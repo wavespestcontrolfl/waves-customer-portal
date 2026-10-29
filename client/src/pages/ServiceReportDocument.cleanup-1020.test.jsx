@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// GATE_REPORT_CLEANUP_1020, client side: rate basis, the technician paragraph that adds
-// nothing, photo cards that fit the photo, and the trouble-spot line. Every check runs with the
-// payload key on and off: off prints exactly what the document printed before. Synthetic data only.
+// Service report cleanup, client side: rate basis, the technician paragraph that adds
+// nothing, photo cards that fit the photo, the trouble-spot line and one pest summary sentence.
+// The document always prints them. Synthetic data only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
@@ -44,12 +44,8 @@ const data = (over = {}) => ({
 const text = (d, token = 'tok-c') => render(<ServiceReportDocument data={d} token={token} />).container.textContent;
 
 describe('rate basis (item 5)', () => {
-  it('prints the basis a stored rate is per when the key is on, and the old rate when it is off', () => {
-    expect(text(data({ reportCleanup: true }))).toContain('4.04 lb per 1,000 sq ft');
-    cleanup();
-    const off = text(data());
-    expect(off).toContain('4.04 lb');
-    expect(off).not.toContain('per 1,000 sq ft');
+  it('prints the basis a stored rate is per', () => {
+    expect(text(data())).toContain('4.04 lb per 1,000 sq ft');
   });
 
   it('reads the basis out of a per-area or per-gallon unit, and prints the old rate when it does not know one', () => {
@@ -66,8 +62,8 @@ describe('rate basis (item 5)', () => {
     expect(rateWithBasis({ rateUnit: '' }, '1')).toBeNull();
   });
 
-  it('keeps the old rate for a row with no known basis, key on', () => {
-    const t = text(data({ reportCleanup: true, applications: [app({ areaUnit: null, areaValue: null })] }));
+  it('keeps the plain rate for a row with no known basis', () => {
+    const t = text(data({ applications: [app({ areaUnit: null, areaValue: null })] }));
     expect(t).toContain('4.04 lb');
     expect(t).not.toContain('per 1,000 sq ft');
   });
@@ -80,16 +76,13 @@ describe('From your technician (item 6)', () => {
     reportV2: { snapshot: { overallScore: 86, statusHeadline: 'Looking great' }, lead: { techParagraph: tech } },
   });
 
-  it('is hidden when the summary already says it, key on; printed as before when off', () => {
-    expect(text(withTech({ reportCleanup: true }))).not.toContain('From your technician');
-    cleanup();
-    expect(text(withTech({}))).toContain('From your technician');
+  it('is hidden when the summary already says it', () => {
+    expect(text(withTech({}))).not.toContain('From your technician');
   });
 
-  it('prints the whole paragraph word for word when any sentence is new, key on', () => {
+  it('prints the whole paragraph word for word when any sentence is new', () => {
     const full = `${tech} The back fence line was thin.`;
     const d = data({
-      reportCleanup: true,
       reportV2: { snapshot: { overallScore: 86, statusHeadline: 'Looking great' }, lead: { techParagraph: full } },
     });
     render(<ServiceReportDocument data={d} token="tok-d" />);
@@ -113,38 +106,29 @@ describe('photo cards and the trouble-spot line (items 10 and 4)', () => {
   ];
   const NOTE = 'This is a thin patch we will recheck at your next visit.';
 
-  it('sizes the photo to its own shape, key on; the fixed 190px frame, key off', () => {
-    render(<ServiceReportDocument data={data({ reportCleanup: true, photos })} token="tok-e" />);
-    const on = document.querySelector('img[src="https://cdn.example.com/wide.jpg"]');
-    expect(on.style.height).toBe('auto');
-    expect(on.style.maxHeight).toBe('190px');
-    expect(on.style.width).toBe('100%');
-    cleanup();
-    render(<ServiceReportDocument data={data({ photos })} token="tok-f" />);
-    const off = document.querySelector('img[src="https://cdn.example.com/wide.jpg"]');
-    expect(off.style.height).toBe('190px');
+  it('sizes the photo to its own shape, capped at 190px tall', () => {
+    render(<ServiceReportDocument data={data({ photos })} token="tok-e" />);
+    const img = document.querySelector('img[src="https://cdn.example.com/wide.jpg"]');
+    expect(img.style.height).toBe('auto');
+    expect(img.style.maxHeight).toBe('190px');
+    expect(img.style.width).toBe('100%');
   });
 
-  it('lets each card size to its own photo (grid aligns to the start), key on only', () => {
-    render(<ServiceReportDocument data={data({ reportCleanup: true, photos })} token="tok-e2" />);
+  it('lets each card size to its own photo (grid aligns to the start)', () => {
+    render(<ServiceReportDocument data={data({ photos })} token="tok-e2" />);
     expect(document.querySelector('.doc-photo-grid').style.alignItems).toBe('start');
-    cleanup();
-    render(<ServiceReportDocument data={data({ photos })} token="tok-f2" />);
-    expect(document.querySelector('.doc-photo-grid').style.alignItems).toBe('');
   });
 
-  it('prints the server line once under the photos when a Trouble spot photo exists, key on only', () => {
-    render(<ServiceReportDocument data={data({ reportCleanup: true, photos, troubleSpotNote: NOTE })} token="tok-g" />);
+  it('prints the server line once under the photos when a Trouble spot photo exists', () => {
+    render(<ServiceReportDocument data={data({ photos, troubleSpotNote: NOTE })} token="tok-g" />);
     expect(screen.getAllByTestId('doc-trouble-spot-note')).toHaveLength(1);
     expect(screen.getByTestId('doc-trouble-spot-note').textContent).toBe(`Trouble spot: ${NOTE}`);
-    cleanup();
-    expect(text(data({ photos, troubleSpotNote: NOTE }), 'tok-h')).not.toContain(NOTE);
   });
 
   it('prints no line when the note is empty or there is no Trouble spot photo', () => {
-    expect(text(data({ reportCleanup: true, photos, troubleSpotNote: null }), 'tok-i')).not.toContain('Trouble spot:');
+    expect(text(data({ photos, troubleSpotNote: null }), 'tok-i')).not.toContain('Trouble spot:');
     cleanup();
-    expect(text(data({ reportCleanup: true, photos: [photos[0]], troubleSpotNote: NOTE }), 'tok-j')).not.toContain(NOTE);
+    expect(text(data({ photos: [photos[0]], troubleSpotNote: NOTE }), 'tok-j')).not.toContain(NOTE);
     expect(isTroubleSpotPhoto({ caption: 'Trouble spot (front)' })).toBe(true);
     expect(isTroubleSpotPhoto({ caption: 'Front yard' })).toBe(false);
   });
@@ -167,14 +151,12 @@ describe('one pest summary sentence, once under What we found', () => {
   });
   const count = (d, token) => text(d, token).split('watching activity levels between visits').length - 1;
 
-  it('prints the sentence once with the key on, twice (as before) with it off', () => {
-    expect(count(pest({ reportCleanup: true }), 'tok-k')).toBe(1);
-    cleanup();
-    expect(count(pest(), 'tok-l')).toBe(2);
+  it('prints the sentence once', () => {
+    expect(count(pest(), 'tok-k')).toBe(1);
   });
 
   it('keeps the defense summary when it says something the status line does not', () => {
-    const other = pest({ reportCleanup: true });
+    const other = pest();
     other.pestReportV2.defense.summary = 'Your perimeter is protected and we are watching the entry.';
     expect(text(other, 'tok-m')).toContain('we are watching the entry');
   });

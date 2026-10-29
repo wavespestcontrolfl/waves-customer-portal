@@ -31,6 +31,13 @@ const callbackSourceTechLive = () => {
   return typeof gates.callbackSourceTechLive === 'function' && gates.callbackSourceTechLive();
 };
 
+// GATE_TECH_OPEN_TIME and GATE_TECH_COST_RATES (L11b), same call-time lookup and missing-reader-is-off rule.
+const openTimeBridgeLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.techOpenTimeLive === 'function' && gates.techOpenTimeLive() === true
+    && typeof gates.techCostRatesLive === 'function' && gates.techCostRatesLive() === true;
+};
+
 // Server-side gate for the AI chart builder. The client hides the panel behind
 // the same flag, but the endpoints must enforce it too — otherwise any admin who
 // knows the route could reach the LLM + SQL sandbox while it's dark-launched.
@@ -1320,6 +1327,42 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       };
     } catch { /* job_costs absent — headline COGS only */ }
 
+    // Vehicle fixed cost the gross profit above already carries in its drive
+    // cost (vehicle cost cards, GATE_TECH_COST_RATES): the same service_records
+    // rows and window, so the bridge takes exactly that out of the vehicle
+    // overhead and it counts once. Its own guarded read, so an environment
+    // before the column's migration still gets the bridge.
+    let vehicleFixedInCogs = 0;
+    try {
+      const v = await db('service_records')
+        .where('service_date', '>=', monthStart).where('service_date', '<=', today)
+        .whereNotNull('revenue')
+        .sum({ v: 'vehicle_fixed_cost' })
+        .first();
+      vehicleFixedInCogs = Number(v.v); // NULL sum = none; the bridge reads it as 0
+    } catch { /* vehicle_fixed_cost absent — nothing allocated */ }
+
+    // Open time (L11b, GATE_TECH_OPEN_TIME + GATE_TECH_COST_RATES): the labor cost of the paid technician
+    // minutes the month's finished days (the month start through yesterday) left unbooked. Its own guarded
+    // read: a failure leaves the bridge without the row, as it is without the gates.
+    let openTime = null;
+    if (openTimeBridgeLive()) {
+      try {
+        const yesterday = etDateString(addETDays(now, -1));
+        if (yesterday >= monthStart) {
+          const { computeOpenTime } = require('../services/open-time');
+          const ot = await computeOpenTime(db, { from: monthStart, to: yesterday, today });
+          openTime = {
+            amount: Math.round(ot.totals.openCostCents) / 100,
+            days: ot.totals.days,
+            openMinutes: ot.totals.openMinutes,
+          };
+        }
+      } catch (err) {
+        logger.error(`[admin-dashboard] ebitda-bridge open time failed (${err.code || err.name})`);
+      }
+    }
+
     const bridge = buildEbitdaBridge({
       revenue: parseFloat(fin?.rev) || 0,
       grossProfit: parseFloat(fin?.gp) || 0,
@@ -1327,9 +1370,12 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       overhead,
       cogsSplit,
       monthFraction,
+      allocated: { vehicle: vehicleFixedInCogs },
+      ...(openTime ? { openTime: openTime.amount } : {}),
     });
     res.json({
       ...bridge,
+      ...(openTime ? { openTime } : {}),
       period: { from: monthStart, to: today, label: 'Month to date', elapsedDays, daysInMonth },
       jobs: parseInt(fin?.jobs || 0, 10),
       uncostedRevenue: Math.round((parseFloat(fin?.uncosted) || 0) * 100) / 100,

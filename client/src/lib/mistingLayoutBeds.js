@@ -1,8 +1,8 @@
 // Misting layout designer: bed lines and the risers along them (GATE_MISTING_LAYOUT_DESIGNER).
 //
-// A bed line traces the edge of a landscape bed. Risers go along it about every 8 ft (Pynamite: "Risers should be
-// spaced out about every 8 feet"), with one at each end and no gap over 8 ft: the same placement engine as the nozzles
-// (placeNozzles), with a nominal spacing of 8 ft and a minimum of half that. A bed line gets no eave or fence nozzles.
+// A bed line traces the edge of a landscape bed. Risers go along it about every 10 ft (Pynamite's manual:
+// "Nozzles/risers are typically placed 10 feet apart"), with one at each end and no gap over 10 ft: the same placement
+// engine as the nozzles (placeNozzles), with a nominal spacing of RISER_SPACING_FT and a minimum of half that. A bed line gets no eave or fence nozzles.
 //
 // Bed risers are derived from the lines on every render, like the automatic nozzles. Staff can move or delete one; that is
 // an edit overlay on the CURRENT bed lines (`riserMoved`, `riserRemoved` in the designer's edits) and is cleared, with the

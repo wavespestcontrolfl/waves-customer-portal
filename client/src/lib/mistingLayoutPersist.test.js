@@ -33,7 +33,7 @@ describe('save then reopen round trip', () => {
     const finals = applyNozzleEdits(placed.nozzles, edits);
     const payload = buildLayoutPayload({
       address: '500 Example Court', center: CENTER, zoom: ZOOM, lines, nozzles: finals, risers: [{ key: 'R1', x: 50, y: 60 }],
-      pump: { x: 70, y: 80 }, zones: [{ key: 'Z1', kind: 'pool', x: 300, y: 300, radiusFt: 15, radiusPx: 99 }], mapWidth: 1280, mapHeight: 960,
+      pump: { x: 70, y: 80, checks: { outlet: true, level: false, dry: true, stucco: true } }, zones: [{ key: 'Z1', kind: 'pool', x: 300, y: 300, radiusFt: 15, radiusPx: 99 }], mapWidth: 1280, mapHeight: 960,
     });
 
     const restored = restoreLayout(asSaved(payload));
@@ -48,7 +48,7 @@ describe('save then reopen round trip', () => {
     // Lines come back as the same geometry; extras come back with fresh keys.
     expect(restored.lines.map((l) => l.points)).toEqual(lines.map((l) => l.points));
     expect(restored.extras.risers).toEqual([{ key: 'R1', x: 50, y: 60 }]);
-    expect(restored.extras.pump).toEqual({ x: 70, y: 80 });
+    expect(restored.extras.pump).toEqual({ x: 70, y: 80, checks: { outlet: true, level: false, dry: true, stucco: true } });
     expect(restored.extras.zones).toEqual([{ key: 'Z2', kind: 'pool', x: 300, y: 300, radiusFt: 15 }]);
     // Ids continue past what was restored, so a new line or manual nozzle cannot collide.
     const usedIds = [...restored.lines.map((l) => l.id), ...restored.edits.added.map((n) => n.key)];

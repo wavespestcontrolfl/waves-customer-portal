@@ -88,6 +88,7 @@ const {
   protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
+const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outline-programs');
 
 // Hard ceiling for limit=all list fetches. The estimates pipeline computes
 // all-time KPIs client-side from this list; if the table ever outgrows this
@@ -3791,6 +3792,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 router.sendEstimateNow = sendEstimateNow;
 
 // GET /api/admin/estimates/lead-auto-send/preview — read-only dry-run audit.
+// Uses the same config as the scan, including the created-after cutoff
+// (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER, read from the environment only, never
+// from the query string): unset or unparseable lists no candidates.
 router.get('/lead-auto-send/preview', async (req, res, next) => {
   try {
     const config = leadEstimateAutoSendConfigFromEnv({
@@ -4100,7 +4104,11 @@ router.get('/', async (req, res, next) => {
       clickStats = new Map(rows.map((r) => [r.entity_id, r]));
     }
 
+    // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
+    // Pest Control, Mosquito) apart; every other packet is lawn.
     let outlineByEstimateId = new Map();
+    const programOutlines = new Map(Object.keys(OUTLINE_PROGRAMS).map((line) => [line, new Map()]));
+    const livePrograms = Object.entries(OUTLINE_PROGRAMS).filter(([, program]) => program.live());
     if (ids.length) {
       try {
         const outlineRows = await db('service_outline_packets')
@@ -4109,6 +4117,7 @@ router.get('/', async (req, res, next) => {
           .select(
             'id',
             'estimate_id',
+            'service_line',
             'status',
             'validation_status',
             'turf_type',
@@ -4139,15 +4148,19 @@ router.get('/', async (req, res, next) => {
           outlineEventStats = new Map(eventRows.map((row) => [row.packet_id, row]));
         }
         for (const row of outlineRows) {
-          if (!row.estimate_id || outlineByEstimateId.has(row.estimate_id)) continue;
+          const program = outlineProgram(row.service_line);
+          const byEstimate = program ? programOutlines.get(row.service_line) : outlineByEstimateId;
+          if (!row.estimate_id || byEstimate.has(row.estimate_id)) continue;
           const stats = outlineEventStats.get(row.id) || {};
+          const currentContentLibraryVersion = program ? program.contentLibraryVersion() : contentLibraryVersion();
+          const currentProtocolVersion = program ? program.protocolVersion() : protocolVersion();
           const staleReasons = [
-            row.content_library_version !== contentLibraryVersion() ? 'content library updated' : null,
-            row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
+            row.content_library_version !== currentContentLibraryVersion ? 'content library updated' : null,
+            row.protocol_version !== currentProtocolVersion ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
           ].filter(Boolean);
-          outlineByEstimateId.set(row.estimate_id, {
+          byEstimate.set(row.estimate_id, {
             id: row.id,
             status: row.status,
             validationStatus: row.validation_status,
@@ -4166,8 +4179,8 @@ router.get('/', async (req, res, next) => {
             protocolVersion: row.protocol_version,
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
-            currentContentLibraryVersion: contentLibraryVersion(),
-            currentProtocolVersion: protocolVersion(),
+            currentContentLibraryVersion,
+            currentProtocolVersion,
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,
             stale: staleReasons.length > 0,
@@ -4393,6 +4406,11 @@ router.get('/', async (req, res, next) => {
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
+          // Each program whose gate is on: whether the estimate offers its outline, and its newest outline; off = neither key.
+          ...Object.fromEntries(livePrograms.flatMap(([line, program]) => [
+            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal, estimateData: estData, pricingAuthority: e.pricing_authority || null }))],
+            [program.listKeys.outline, programOutlines.get(line).get(e.id) || null],
+          ])),
         };
       }),
       // Signals the ESTIMATE_LIST_LIMIT cap was hit, so the client can warn that
@@ -4445,12 +4463,19 @@ router.get('/:id/proposal', async (req, res, next) => {
     // exemption -> 0, county rate, FL commercial default), in strict mode: a
     // failed customer / exemption / county lookup is null (no autofill), never
     // the unchecked default labelled as the customer's rate. Never throws the read.
+    // suggestedTaxSource names where the rate came from ("Sarasota County"); the
+    // builder shows it beside the rate. Null whenever the rate is null.
     let suggestedTaxRate = null;
+    let suggestedTaxSource = null;
     try {
-      const rate = await require('../services/estimate-converter')
-        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db, strict: true });
+      const { rate, source } = await require('../services/estimate-converter')
+        .resolveCommercialPrepayTax(estimate.customer_id ?? null, { database: db, strict: true, propertyId: estimate.property_id || undefined });
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
-    } catch (_) { suggestedTaxRate = null; }
+      suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
+    } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
+    const proposalGenerate = require('../services/estimate-proposal-generate');
+    // Never throws: a failed read is null, and the family defaults apply.
+    const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
     // A failed read leaves the line off; it never fails the builder's load.
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
@@ -4462,6 +4487,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       suggestedTaxRate,
+      suggestedTaxSource,
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
       commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),
@@ -4481,9 +4507,11 @@ router.get('/:id/proposal', async (req, res, next) => {
       // never catalog membership (codex 1A-ii r15 — a hand-authored line
       // matching a stock sentence must survive), so reopened proposals
       // prune exactly what their generation installed.
-      familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
-        await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
-      ),
+      familyRegistry: proposalGenerate.buildFamilyRegistry(taxabilityMap),
+      // Business-building Taxable rule per saved row that names a service (row id ->
+      // boolean): a residential proposal switched to Business building restores each
+      // such row to it, keeping service-specific rules (owner 2026-10-28, building use).
+      businessTaxRules: proposalGenerate.businessTaxRulesFor(proposal, taxabilityMap),
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
@@ -4616,6 +4644,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         // r8 on #4270).
         const programIssue = programRevenueIssue(program);
         if (programIssue) return res.status(400).json({ error: programIssue });
+        // Visit length: blank, or whole minutes from 5 to 480 (the normalizer drops anything else, so say so here).
+        const visitMinutes = program?.visitMinutes;
+        if (visitMinutes != null && String(visitMinutes).trim() !== ''
+          && !(Number.isInteger(Number(visitMinutes)) && Number(visitMinutes) >= 5 && Number(visitMinutes) <= 480)) {
+          return res.status(400).json({ error: 'Visit length must be a whole number of minutes from 5 to 480.' });
+        }
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }
@@ -4704,6 +4738,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         && (scopeItems.length > 24 || scopeItems.some((item) => String(item?.label ?? '').length > 80 || String(item?.value ?? '').length > 160))) {
         return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
       }
+    }
+    // Building use (owner 2026-10-28): residential, nonresidential or unset. An unknown value gets a 400 rather than
+    // a silent drop, since it decides which rows the builder taxes.
+    if (incoming.buildingUse != null && String(incoming.buildingUse).trim() !== ''
+      && require('../services/estimate-proposal').normalizeBuildingUse(incoming.buildingUse) === null) {
+      return res.status(400).json({ error: 'Building use must be residential or nonresidential.' });
     }
     // Present-but-invalid term numbers get a 400, not a silent normalize:
     // cleanBoundedInt rounds fractions and drops out-of-range values, so

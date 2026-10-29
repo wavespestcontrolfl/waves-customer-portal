@@ -7192,13 +7192,13 @@ const InvoiceService = {
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database: sp, skipCustomerExemption: !!resolvedPayerId },
+              { database: sp, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ))
           : TaxCalculator.calculateTax(
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database, skipCustomerExemption: !!resolvedPayerId },
+              { database, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ));
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
@@ -7419,6 +7419,10 @@ const InvoiceService = {
     // Intelligence Bar create_invoice only: the caller's explicit taxRate, resolved as create() resolves one (residential or
     // payer-exempt = 0; a verified exemption zeroes it for a self-pay invoice). undefined = the calculator, as before.
     taxRate = undefined,
+    // Commercial first visit only (commercial-first-visit.js): the customer is marked commercial before this invoice
+    // exists (a taxable proposal's win, proposal-win.js flagProposalCustomerCommercialIfTaxable), so the preview taxes
+    // it as commercial, through TaxCalculator's own isCommercial option. Default false: the row decides, as before.
+    assumeCommercial = false,
     database = db,
   }) {
     const cust =
@@ -7465,13 +7469,15 @@ const InvoiceService = {
     // created (esp. for WDO report+invoice bundles billed to an exempt builder).
     let payerTaxExempt = false;
     let previewPayerBilled = false;
+    // The visit (direct, or the service record's) also names the tax county
+    // below, through its saved property, as in create() (GATE_TAX_SERVICE_COUNTY).
+    let previewScheduledServiceId = scheduledServiceId;
     try {
       const PayerService = require("./payer");
       // Mirror create(): when linked only by serviceRecordId, derive the visit's
       // scheduled_service_id so a per-job (tax-exempt) payer override is reflected
       // in the dry-run total — otherwise the preview shows tax the real, exempt
       // invoice won't actually bill.
-      let previewScheduledServiceId = scheduledServiceId;
       if (!previewScheduledServiceId && serviceRecordId) {
         const srLink = await database("service_records")
           .where({ id: serviceRecordId, customer_id: customerId })
@@ -7486,7 +7492,7 @@ const InvoiceService = {
       previewPayerBilled = !!resolved.payerId;
     } catch { /* preview proceeds with the normal tax calc */ }
 
-    const isCommercial =
+    const isCommercial = assumeCommercial === true ||
       cust.property_type === "commercial" || cust.property_type === "business";
     let rate, taxAmount;
     if (!isCommercial || payerTaxExempt) {
@@ -7511,7 +7517,12 @@ const InvoiceService = {
           customerId,
           serviceType || title,
           subtotal,
-          { database, skipCustomerExemption: previewPayerBilled },
+          {
+            database,
+            skipCustomerExemption: previewPayerBilled,
+            scheduledServiceId: previewScheduledServiceId || undefined,
+            ...(assumeCommercial === true ? { isCommercial: true } : {}),
+          },
         );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;

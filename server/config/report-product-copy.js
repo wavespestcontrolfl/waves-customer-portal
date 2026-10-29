@@ -147,15 +147,24 @@ const REPORT_PRODUCT_COPY = [
     petsKids: 'Stay off treated areas until the application has dried.',
   },
   {
-    epaReg: '499-561',
-    names: ['alpine wsg'],
+    // The catalog row is Atticus Antapex WSG (EPA 91234-401) since the owner's
+    // 2026-10-26 confirmation of the bottle actually applied, so visit lines read
+    // through the catalog carry that registration; lines recorded earlier keep
+    // BASF Alpine WSG's 499-561 and the name 'Alpine WSG'. One entry serves all of
+    // them: this wording is true of the non-repellent dinotefuran in either label,
+    // and the two labels name the same pests for it.
+    epaReg: '91234-401',
+    movedEpaRegs: ['499-561'],
+    names: ['atticus antapex wsg', 'antapex wsg', 'alpine wsg'],
     mainPests: ['ants', 'roaches'],
     howItWorks: 'A non-repellent. Pests don’t avoid it, so we use it on ant trails, entry points and the cracks where roaches hide.',
-    // 30 distinct pests — EPA PPLS, accepted 05/01/2019 (BASF Alpine WSG,
-    // EPA Reg. No. 499-561; no later PPLS version found). -> floors to 25+.
+    // 30 distinct pests — Atticus, LLC Antapex WSG label (EPA Reg. No. 91234-401),
+    // KILLS list read in full 2026-10-26 (six named ants, the listed beetles and
+    // cockroaches, bed bugs, fleas, flies, mosquitoes, wasps and more; counted by the
+    // same rule as the BASF Alpine WSG label's 30 of 05/01/2019). -> floors to 25+.
     alsoLabeledForPestCount: 30,
     // Pests its current EPA label names, for the writer's "its label lists" fact
-    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000499-00561-20190501 (2019-05-01).
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 091234-00401-20251216 (2025-12-16).
     // Wasps and flies appear only as listed species; "Ants (excluding Pharaoh)".
     labelPests: ['ants', 'cockroaches', 'spiders', 'Carpenter ants', 'Fire ants', 'Argentine ants', 'German cockroaches', 'American cockroaches', 'earwigs', 'millipedes', 'centipedes', 'springtails', 'crickets', 'Paper wasps', 'Yellowjackets', 'House flies'],
     labelPestsExcept: ['Pharaoh ants'],

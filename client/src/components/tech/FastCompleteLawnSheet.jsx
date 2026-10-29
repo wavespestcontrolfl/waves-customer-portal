@@ -237,7 +237,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -339,8 +339,6 @@ const optionalContextFields = (data) => ({
   carpetgrassCelsiusWarning: carpetgrassWarningOf(data),
   // Spot-area rules: only while the server says so, so an older server renders as before.
   spotRules: data?.spotRules === true,
-  // GATE_REPORT_CLEANUP_1020: a granular product starts on Granular broadcast, never a spray method.
-  methodCorrection: data?.methodCorrection === true,
   weedMix: weedMixOf(data),
   // The treatment guide: the server says the cards are on, and offers the chinch tap.
   treatmentGuide: data?.treatmentGuide === true,
@@ -749,8 +747,8 @@ function plannedRate(planned) {
 // null; and the plan's notes for the product (a watering hold, a distance), which the row shows.
 const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
 
-function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false, methodCorrection }) {
-  const rawMethod = startMethodFor(product, planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn'), methodCorrection);
+function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
+  const rawMethod = startMethodFor(product, planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn'));
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
   // Under the spot rules a spot row never holds the plan's quantity: it is figured from the plan's
@@ -1021,7 +1019,7 @@ function rowsForPlanned(items, ctx, catalog) {
   return items.map((item) => ({
     ...productRow(
       byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
-      { planned: item, spotRules: !!ctx.spotRules, methodCorrection: ctx.methodCorrection === true },
+      { planned: item, spotRules: !!ctx.spotRules },
     ),
     sodSwap: item.sodSwap || null,
   }));
@@ -1032,7 +1030,6 @@ const plannedRows = (ctx, catalog) => rowsForPlanned(splitHeldPlanned(uniquePlan
 
 function useProductRows(ctx, catalog) {
   const spotRules = !!ctx.spotRules;
-  const methodCorrection = ctx.methodCorrection === true;
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
   // The products the technician added, removed or changed himself this session (a later re-read of the holds leaves his choice alone).
   const touched = useRef(new Set());
@@ -1065,9 +1062,9 @@ function useProductRows(ctx, catalog) {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
       // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
-      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules, methodCorrection }), troubleSource: source, pickedPlace: place },
+      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
     ]));
-  }, [spotRules, methodCorrection]);
+  }, [spotRules]);
   const removeRow = useCallback((productId) => {
     touched.current.add(String(productId).toLowerCase());
     setRows((prev) => prev.filter((row) => row.productId !== productId));

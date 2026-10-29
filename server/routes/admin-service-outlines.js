@@ -18,6 +18,7 @@ const {
   hashToken,
   regenerationTurfType,
 } = require('../services/lawn-service-outline');
+const { outlineProgram } = require('../services/service-outline-programs');
 
 const router = express.Router();
 
@@ -42,6 +43,37 @@ const LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE = {
   suppression_group_key: 'service_operational',
 };
 
+// A request that names a program's service line (service-outline-programs.js: Tree & Shrub GATE_TS_OUTLINE, Pest
+// Control GATE_PEST_OUTLINE) builds that program's outline; every other request builds the lawn outline exactly as
+// before. A program whose gate is off is refused.
+function programOffError(serviceLine) {
+  const program = outlineProgram(serviceLine);
+  return program && !program.live() ? program.offError : null;
+}
+
+function buildServiceOutline({ estimate, input }) {
+  const program = outlineProgram(input.serviceLine);
+  return program ? program.build({ db, estimate, input }) : buildOutline({ db, estimate, input });
+}
+
+// The version stamps a packet keeps: a program's outline carries its own; the lawn outline's come from the lawn module,
+// as before.
+function outlineStamps(outline) {
+  if (outlineProgram(outline.meta?.serviceLine)) {
+    const { templateVersion, contentLibraryVersion: content, protocolVersion: protocol, productRegistryVersion } = outline.meta;
+    return { templateVersion, contentLibraryVersion: content, protocolVersion: protocol, productRegistryVersion };
+  }
+  return {
+    templateVersion: TEMPLATE_VERSION,
+    contentLibraryVersion: contentLibraryVersion(),
+    protocolVersion: protocolVersion(),
+    productRegistryVersion: PRODUCT_REGISTRY_VERSION,
+  };
+}
+
+// The customer text and email name the packet's program (a program's own `send` words, else the lawn outline's).
+const LAWN_SEND_COPY = Object.freeze({ program: 'lawn care', title: 'Your Waves Lawn Care Program Overview', messageType: 'lawn_service_outline' });
+
 function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
 }
@@ -51,6 +83,7 @@ function safePacket(row, rawToken = null) {
   return {
     id: row.id,
     estimateId: row.estimate_id,
+    serviceLine: row.service_line,
     customerId: row.customer_id,
     leadId: row.lead_id,
     status: row.status,
@@ -121,7 +154,9 @@ function coerceInput(body = {}, { partial = false } = {}) {
     return input;
   }
 
+  const serviceLine = body.serviceLine || body.service_line;
   return {
+    ...(outlineProgram(serviceLine) ? { serviceLine } : {}),
     turfType: body.turfType || body.turf_type || null,
     detailLevel: body.detailLevel || 'standard',
     includeProductCards: body.includeProductCards === true,
@@ -160,26 +195,28 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
   const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 45);
   const turf = outline.meta.turf;
   const rule = outline.meta.jurisdictionRule;
+  const programLine = outlineProgram(outline.meta.serviceLine) ? outline.meta.serviceLine : null;
+  const stamps = outlineStamps(outline);
   const row = {
     customer_id: estimate.customer_id || null,
     lead_id: estimate.lead_id || null,
     estimate_id: estimate.id,
-    service_line: 'lawn_care',
+    service_line: programLine || 'lawn_care',
     status,
     title: outline.content.title,
     turf_type: turf.turfType,
     turf_confidence: turf.confidence,
     mixed_turf_flag: turf.mixed,
-    protocol_track: turf.turfType,
+    protocol_track: programLine || turf.turfType,
     service_tier: input.serviceTier || outline.estimateSnapshot.tier || null,
     month: outline.inputSnapshot.month,
     season_band: outline.inputSnapshot.seasonBand,
     jurisdiction_id: rule?.jurisdiction_id || outline.inputSnapshot.jurisdictionId || null,
     fertilizer_rule_version: rule?.version || null,
-    content_library_version: contentLibraryVersion(),
-    protocol_version: protocolVersion(),
-    product_registry_version: PRODUCT_REGISTRY_VERSION,
-    template_version: TEMPLATE_VERSION,
+    content_library_version: stamps.contentLibraryVersion,
+    protocol_version: stamps.protocolVersion,
+    product_registry_version: stamps.productRegistryVersion,
+    template_version: stamps.templateVersion,
     generation_mode: 'rules_only',
     estimate_snapshot_json: outline.estimateSnapshot,
     input_snapshot_json: outline.inputSnapshot,
@@ -220,6 +257,8 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
 function inputFromPacket(packet) {
   const snapshot = packet?.input_snapshot_json || {};
   return {
+    // A regenerated outline keeps its program.
+    ...(outlineProgram(packet?.service_line) ? { serviceLine: packet.service_line } : {}),
     turfType: regenerationTurfType(packet),
     detailLevel: snapshot.detailLevel || 'standard',
     includeProductCards: Array.isArray(packet?.content_json?.productCards) && packet.content_json.productCards.length > 0,
@@ -240,17 +279,14 @@ router.post('/preview', async (req, res, next) => {
     const estimate = await loadEstimate(req.body.estimateId || req.body.estimate_id);
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const input = coerceInput(req.body);
-    const outline = await buildOutline({ db, estimate, input });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
+    const outline = await buildServiceOutline({ estimate, input });
     res.json({
       outline: outline.content,
       summary: outline.summary,
       validation: outline.validation,
-      meta: {
-        templateVersion: TEMPLATE_VERSION,
-        contentLibraryVersion: contentLibraryVersion(),
-        protocolVersion: protocolVersion(),
-        productRegistryVersion: PRODUCT_REGISTRY_VERSION,
-      },
+      meta: outlineStamps(outline),
     });
   } catch (err) {
     next(err);
@@ -262,7 +298,9 @@ router.post('/', async (req, res, next) => {
     const estimate = await loadEstimate(req.body.estimateId || req.body.estimate_id);
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const input = coerceInput(req.body);
-    const outline = await buildOutline({ db, estimate, input });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
+    const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
     const packet = await db.transaction((trx) => insertPacket(trx, {
       estimate,
@@ -414,7 +452,9 @@ router.post('/:id/regenerate', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found for this outline' });
 
     const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}, { partial: true }) };
-    const outline = await buildOutline({ db, estimate, input });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
+    const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
     const revokeOld = req.body.revokeOld !== false;
     const packet = await db.transaction(async (trx) => {
@@ -465,6 +505,9 @@ router.post('/:id/send', async (req, res, next) => {
       return res.status(422).json({ error: 'Service outline must be approved before it can be sent' });
     }
     if (packet.revoked_at) return res.status(422).json({ error: 'Revoked service outline cannot be sent' });
+    const offError = programOffError(packet.service_line);
+    if (offError) return res.status(409).json({ error: offError });
+    const sendCopy = outlineProgram(packet.service_line)?.send || LAWN_SEND_COPY;
     if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
       return res.status(422).json({ error: 'Expired service outline cannot be sent' });
     }
@@ -551,7 +594,7 @@ router.post('/:id/send', async (req, res, next) => {
           entityId: packet.id,
           customerId: packet.customer_id || estimate.customer_id || null,
         });
-        const smsBody = `Waves: Your lawn care program overview is ready: ${shortUrl} Reply STOP to opt out.`;
+        const smsBody = `Waves: Your ${sendCopy.program} program overview is ready: ${shortUrl} Reply STOP to opt out.`;
         outcomes.sms = await sendCustomerMessage({
           to: estimate.customer_phone,
           body: smsBody,
@@ -567,10 +610,12 @@ router.post('/:id/send', async (req, res, next) => {
             source: 'admin_lawn_service_outline_send',
             capturedAt: estimate.created_at || new Date().toISOString(),
           },
+          // One operator entry point for every outline send (send-window.js OPERATOR_ENTRY_POINTS); the message type
+          // names the program.
           entryPoint: 'admin_lawn_service_outline_send',
           metadata: {
             packetId: packet.id,
-            original_message_type: 'lawn_service_outline',
+            original_message_type: sendCopy.messageType,
           },
         });
       }
@@ -603,18 +648,18 @@ router.post('/:id/send', async (req, res, next) => {
         outcomes.email = { ok: false, sent: false, blocked: true, reason: 'email_opted_out', error: 'email_opted_out' };
       } else {
         await persistGeneratedTokenBeforeDelivery();
-        const title = packet.title || 'Your Waves Lawn Care Program Overview';
+        const title = packet.title || sendCopy.title;
         const greetingName = escapeHtml(estimate.customer_name || 'there');
         const escapedPublicUrl = escapeHtml(publicUrl);
         // Standard service chrome — this send previously shipped bare
         // unbranded <p> tags, the only customer email outside the wrappers.
         const html = wrapServiceEmail({
-          preheader: 'Your lawn care program overview is ready.',
+          preheader: `Your ${sendCopy.program} program overview is ready.`,
           body: [
-            `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">Your lawn care program overview</h1>`,
+            `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">Your ${sendCopy.program} program overview</h1>`,
             `<div style="font-size:15px;line-height:1.58;color:${colors.BODY};">`,
             `<p style="margin:0 0 14px 0;">Hi ${greetingName},</p>`,
-            '<p style="margin:0 0 14px 0;">Your Waves lawn care program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>',
+            `<p style="margin:0 0 14px 0;">Your Waves ${sendCopy.program} program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>`,
             '</div>',
             `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(escapedPublicUrl, 'View my program overview')}</div>`,
           ].join(''),
@@ -623,8 +668,8 @@ router.post('/:id/send', async (req, res, next) => {
           to: estimate.customer_email,
           subject: title,
           html,
-          text: `Your Waves lawn care program overview is ready: ${publicUrl}`,
-          categories: ['lawn_service_outline'],
+          text: `Your Waves ${sendCopy.program} program overview is ready: ${publicUrl}`,
+          categories: [sendCopy.messageType],
         });
       }
     }

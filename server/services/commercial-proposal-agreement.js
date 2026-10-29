@@ -144,13 +144,12 @@ function signableProposal(estimate) {
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
 const {
-  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS,
+  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText,
 } = require('../../shared/commercial-agreement-terms.cjs');
 
 const commercialAutopayLive = () => require('../config/feature-gates').commercialAutopayLive();
 
-// Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
-const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+// Case, whitespace and apostrophe style do not matter (normalizeTermText, shared with the builder's Standard choice).
 const matchesDefaultText = (key) => (value) => normalizeTermText(value) === normalizeTermText(AGREEMENT_TERMS[key]);
 
 // field -> { detail: what the builder line asks for, allowed(value): the value the agreement can sit beside }.
@@ -203,12 +202,15 @@ function signEligibility(estimate) {
 }
 
 // Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
-// of narrative lines), so re-saving the same quote never changes it and any customer-visible change does.
+// of narrative lines, a program's `visitMinutes`: scheduling only, it sizes the first visit and is not part of the
+// quote; the proposal's `buildingUse`: the operator's tax classification, whose effect on the quote is each row's
+// Taxable flag, hashed with the row), so re-saving the same quote never changes it and any customer-visible change does.
+const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes', 'buildingUse']);
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
     return Object.keys(value).sort()
-      .filter((key) => key !== 'id' && !key.startsWith('generated'))
+      .filter((key) => !BUILDER_ONLY_KEYS.has(key) && !key.startsWith('generated'))
       .reduce((acc, key) => ({ ...acc, [key]: canonical(value[key]) }), {});
   }
   return value;
@@ -265,6 +267,22 @@ async function agreementCtaFor(estimate, conn = db) {
     logger.warn(`[commercial-agreement] cta skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
     return null;
   }
+}
+
+// Whether the quote as it stands is the quote the customer signed: the newest signed agreement for this estimate, for
+// this customer, whose frozen fingerprint equals the fingerprint of the proposal now (the sign-time comparison in
+// refuseStaleSignature, against the template version the contract was rendered from). A proposal edited after
+// signing (price, cadence, lines, terms) no longer matches. false when nothing is signed.
+async function signedQuoteMatches(estimate, conn = db) {
+  if (!estimate?.id || !estimate.customer_id) return false;
+  const contract = await estimateAgreementQuery(estimate.id, conn)
+    .whereIn('status', ['signed'])
+    .orderByRaw('signed_at DESC NULLS LAST, created_at DESC')
+    .first('id', 'customer_id', 'document_variables_snapshot', 'document_template_version_id');
+  if (!contract || String(contract.customer_id) !== String(estimate.customer_id)) return false;
+  const signable = signableProposal(estimate);
+  const stored = parseJson(contract.document_variables_snapshot)?.estimate?.fingerprint;
+  return Boolean(signable && stored) && stored === currentFingerprint(estimate, signable, contract.document_template_version_id);
 }
 
 // The admin builder's read: the agreement state, plus why online signing is not offered when the proposal's payment
@@ -536,24 +554,34 @@ async function handleAgreementSigned({ contractId, database = db }) {
       ? new Date(contract.signed_at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })
       : '';
     const payment = await paymentSentence(est, contract.customer_id, database);
+    // GATE_COMMERCIAL_FIRST_VISIT: when the signer can book the first visit online, the office waits for that booking
+    // (its own alert) instead of booking by phone beside it.
+    const bookOnline = await require('./commercial-first-visit').firstVisitOnlineFor(est.id, database);
 
     await raiseAdminAlert('customer', {
       area: 'Estimates',
-      action: fitAction('Estimates', name, [
+      action: fitAction('Estimates', name, bookOnline ? [
+        (who) => `watch for ${who}'s first visit booking`,
+        (who) => `watch for ${who}'s booking`,
+      ] : [
         (who) => `mark ${who} won and book the first visit`,
         (who) => `mark ${who} won`,
       ]),
-      why: `Signed the commercial agreement for ${number}; the estimate is still open and nothing is booked.`,
+      why: bookOnline
+        ? `Signed the commercial agreement for ${number}; they can book the first visit online now.`
+        : `Signed the commercial agreement for ${number}; the estimate is still open and nothing is booked.`,
       severity: 'needs-you',
       link: `/admin/estimates/${est.id}/proposal`,
       subject: { type: 'estimate', id: String(est.id) },
-      doneWhen: 'estimate_marked_won',
+      doneWhen: bookOnline ? 'visit_booked' : 'estimate_marked_won',
       who: 'person',
     }, {
       // A customer signing is a customer acting: the bell policy never silences it.
       bell: true,
       dedupeKey: `commercial-agreement-signed:${contract.id}`,
-      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. ${payment}Mark the estimate won, then schedule the first visit. The signed copy goes to the customer by email.`,
+      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. ${payment}${bookOnline
+        ? 'They can now pick their first visit online, and you get a second alert when they book. If they do not book, mark the estimate won, then schedule the first visit.'
+        : 'Mark the estimate won, then schedule the first visit.'} The signed copy goes to the customer by email.`,
       metadata: { estimateId: est.id, customerId: contract.customer_id, contractId: contract.id },
     });
 
@@ -623,6 +651,7 @@ module.exports = {
   lockEstimateForSign,
   refuseStaleSignature,
   agreementStateForEstimate,
+  signedQuoteMatches,
   agreementCtaFor,
   newContractRow,
   ensureAgreement,

@@ -105,6 +105,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // schedule_sms (owner ruling 2026-10-28, gap 5 and B1): the Communications page's schedule-sms handler, run through the
+  // shared queue writer behind a card on every login; one plain customer text at one day and time, 8 AM to 8 PM ET only.
+  'schedule_sms',
   // The Invoices page's edit-type handlers (owner ruling 2026-10-12), each run in process behind its own card: edit an unpaid
   // invoice's title, notes or due date, archive / unarchive a voided invoice, unvoid. None sends or moves money.
   'edit_invoice',
@@ -121,12 +124,24 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'schedule_invoice_send',
   'create_payment_plan',
   'cancel_payment_plan',
+  // compose_email (IB gap #9): the Email page's Send for a NEW email, run in process behind a card on every login (the owner's
+  // too, never owner-direct); it emails one person.
+  'compose_email',
   // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
   // a draft only, sends nothing.
   'create_invoice',
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',
+  // Agent Review drafts (owner ask 2026-10-28, gap 7, GATE_IB_AGENT_REVIEW_DRAFTS): the composer's Use Draft send, run in process behind
+  // a card. approve and revise TEXT the customer (always a card, owner login included); ignore sends nothing.
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
+  // resolve_dispatch_alert (IB gap #4) and unblock_sender (IB gap #6): the Dispatch board's single-card Resolve and the
+  // Email page's Unblock, run in process behind a card; each sends nothing.
+  'resolve_dispatch_alert',
+  'unblock_sender',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

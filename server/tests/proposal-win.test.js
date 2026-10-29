@@ -28,6 +28,7 @@ const {
   ensureCustomerForProposalWin,
   promoteLinkedCustomerForProposalWin,
   resolveProposalWinContact,
+  recordProposalBuildingUse,
 } = require('../services/proposal-win');
 
 const SIESTA_PROPOSAL = {
@@ -511,5 +512,23 @@ describe('resolveProposalWinContact', () => {
     expect(c.companyName).toHaveLength(150); // company_name varchar(150)
     expect(c.phone).toHaveLength(20);      // phone varchar(20)
     expect(c.email).toHaveLength(150);     // email varchar(150)
+  });
+});
+
+// Owner 2026-10-28: the won proposal's building use decides the tax on the account's later visits
+// (TaxCalculator, GATE_BUILDING_USE_TAX), so every win records it; no pick leaves the customer as it is.
+describe('recordProposalBuildingUse', () => {
+  test("writes the won proposal's building use onto the customer", async () => {
+    const { trx, ops } = makeTrx();
+    await recordProposalBuildingUse({ trx, customerId: 'cust-1', proposal: { buildingUse: 'residential' } });
+    expect(ops.updates).toEqual([{ clause: { id: 'cust-1' }, patch: { building_use: 'residential' } }]);
+  });
+
+  test('leaves the customer alone with no pick, an unknown pick, or no customer', async () => {
+    const { trx, ops } = makeTrx();
+    await recordProposalBuildingUse({ trx, customerId: 'cust-1', proposal: {} });
+    await recordProposalBuildingUse({ trx, customerId: 'cust-1', proposal: { buildingUse: 'warehouse' } });
+    await recordProposalBuildingUse({ trx, customerId: null, proposal: { buildingUse: 'residential' } });
+    expect(ops.updates).toHaveLength(0);
   });
 });

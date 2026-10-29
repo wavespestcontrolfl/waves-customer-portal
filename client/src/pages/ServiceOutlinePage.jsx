@@ -32,11 +32,21 @@ import { etDateString } from "../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// The program a packet describes: a Tree & Shrub (GATE_TS_OUTLINE), Pest Control (GATE_PEST_OUTLINE) or Mosquito
+// (GATE_MOSQUITO_OUTLINE) packet says so in content.serviceLine; every other packet is a lawn outline.
+const PROGRAMS = {
+  lawn_care: { badge: "Lawn Care Program", pageTitle: "Your Lawn Care Program Overview | Waves" },
+  tree_shrub: { badge: "Tree & Shrub Program", pageTitle: "Your Tree & Shrub Program Overview | Waves" },
+  pest_control: { badge: "Pest Control Program", pageTitle: "Your Pest Control Program Overview | Waves" },
+  mosquito: { badge: "Mosquito Program", pageTitle: "Your Mosquito Program Overview | Waves" },
+};
+const programFor = (content) => PROGRAMS[content?.serviceLine] || PROGRAMS.lawn_care;
+
 function LoadingState() {
   return (
     <div data-glass-clear="" className="flex-1 bg-waves-page px-4 py-10">
       <div data-glass="soft" className="mx-auto max-w-3xl rounded-md border border-zinc-200 bg-white p-6 text-slate-600">
-        Loading your lawn care program overview...
+        Loading your program overview...
       </div>
     </div>
   );
@@ -240,7 +250,8 @@ function MonthsVisual({ months = [], labels = {}, limitLabel }) {
               className={`group rounded-md border ${m.limited ? "border-waves-gold/40 bg-waves-gold-light" : "border-zinc-200 bg-white"}`}
             >
               <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
-                <span className="w-10 flex-shrink-0 text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</span>
+                {/* min-w, not w: a Pest Control row is a season ("Winter"), wider than a month's three letters. */}
+                <span className="min-w-10 flex-shrink-0 text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</span>
                 <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
                   {m.main.map((step) => (
                     <span key={step} className="inline-flex items-center gap-1.5 text-sm font-semibold text-waves-blue-deeper">
@@ -291,7 +302,8 @@ function CategoriesVisual({ items = [] }) {
   return (
     <ul className="mt-4 grid gap-3 sm:grid-cols-2">
       {items.map((item) => (
-        <li key={item.key} className="flex gap-3 rounded-md border border-zinc-200 bg-white p-4">
+        // Two cards may share an icon key (the Tree & Shrub outline's two fertilizer cards), so the label keys the card.
+        <li key={`${item.key}-${item.label}`} className="flex gap-3 rounded-md border border-zinc-200 bg-white p-4">
           <IconBadge name={item.key} />
           <span>
             <span className="block text-base font-semibold text-waves-blue-deeper">{item.label}</span>
@@ -361,7 +373,6 @@ export default function ServiceOutlinePage() {
 
   useEffect(() => {
     let cancelled = false;
-    document.title = "Your Lawn Care Program Overview | Waves";
     const meta = document.querySelector('meta[name="robots"]') || document.createElement("meta");
     meta.setAttribute("name", "robots");
     meta.setAttribute("content", "noindex,nofollow,noarchive");
@@ -402,6 +413,11 @@ export default function ServiceOutlinePage() {
       cancelled = true;
     };
   }, [token, retryNonce]);
+
+  const program = programFor(packet?.content);
+  useEffect(() => {
+    document.title = program.pageTitle;
+  }, [program.pageTitle]);
 
   if (loading) return <LoadingState />;
   if (error) {
@@ -464,7 +480,7 @@ export default function ServiceOutlinePage() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-xs border border-waves-success-border bg-waves-success-bg px-3 py-1 text-sm font-semibold uppercase tracking-wide text-waves-success">
                 <Sprout size={14} strokeWidth={1.75} />
-                Lawn Care Program
+                {program.badge}
               </div>
               <h1 className="mt-4 max-w-3xl text-4xl font-semibold tracking-tight text-waves-blue-deeper">{content.title}</h1>
               <p className="mt-4 max-w-3xl text-lg leading-8 text-slate-600">{content.intro}</p>

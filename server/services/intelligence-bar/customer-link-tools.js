@@ -36,7 +36,20 @@
  *                              service before the provider call). A link-only
  *                              Auto Pay link stays on the Customers page.
  *
- * Both follow the write-gates.js two-step: unconfirmed → a PREVIEW (reads
+ *   search_quick_links       — read only: the Quick Links the text and email
+ *                              composers insert (the portal login and cancel
+ *                              plan links, then link-library.js listLinks:
+ *                              the per-office Google review links, the
+ *                              hand-managed rows (app stores, socials,
+ *                              Yelp/Facebook reviews) and every
+ *                              wavespestcontrol.com page from the sitemap),
+ *                              searched the way the sheet searches, with the
+ *                              ready "{clause}: {url}" line, for a text, an
+ *                              email, a blog post or a note. No customer
+ *                              data; nothing is built or sent. The How-to
+ *                              guides stay in the sheet (client data).
+ *
+ * The two writes follow the write-gates.js two-step: unconfirmed → a PREVIEW (reads
  * only); the route fingerprints it and the operator approves on the card;
  * confirmed → the mint/send, reported from what the handler returned.
  *
@@ -87,7 +100,33 @@ const KIND_NAMES = Object.keys(KINDS);
 // Fields the composer handlers return beside url/line that the operator can use.
 const LINK_FACT_FIELDS = ['balance', 'estimate', 'appointment', 'prep', 'report', 'receipt', 'projectReport', 'expiresAt', 'lanes', 'immediateOnly', 'standalone'];
 
+// The sheet's static account links (client/src/lib/composerLinks.js
+// STATIC_COMPOSER_LINKS; the tool test pins the two copies together): no
+// token, so any customer may get them, by text or email.
+const PORTAL_LINKS = [
+  { name: 'Portal login', url: 'https://portal.wavespestcontrol.com/login', clause: 'Manage your account and appointments here', keywords: 'portal login account app sign in manage' },
+  { name: 'Cancel plan link', url: 'https://portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan', clause: 'You can review or cancel your plan from your account here', keywords: 'cancel cancellation stop plan end service quit' },
+].map((link) => ({ ...link, category: 'customer' }));
+// The sheet's groups (InsertLinkSheet LINK_GROUP_ORDER) this tool searches.
+const LIBRARY_CATEGORIES = ['customer', 'reviews', 'booking', 'app', 'website', 'social'];
+const LIBRARY_CATEGORY_LABELS = { customer: 'For this customer', reviews: 'Reviews', booking: 'Booking & quotes', app: 'Waves app', website: 'Website', social: 'Social' };
+const QUICK_LINK_LIMIT = 15;
+
 const CUSTOMER_LINK_TOOLS = [
+  {
+    name: 'search_quick_links',
+    description: `Pull Waves Quick Links — the same links the text and email composers' Quick Links sheet inserts: the portal login and cancel plan links (customer), the Google review link for each office plus the Yelp and Facebook review pages (reviews), the App Store and Google Play links for the Waves app (app), the social profiles (social), the quote, book and pricing calculator pages (booking) and every page of wavespestcontrol.com: service, city, pest and blog pages (website). Every word of query must match the link's name, address, keywords or group, like the sheet's search; no query lists the group (or everything) up to the limit. Returns name, url, category and line (the ready sentence "{clause}: {url}"). Read only: builds nothing, sends nothing, no customer data.
+Use the url or line anywhere a link is wanted: a text (send_sms, operator confirms on the card, or draft_sms), an email reply or draft, a blog post or page draft, a visit or schedule note. These links carry no customer token: any customer may get them. Per-customer links (pay balance, estimate, reschedule, appointment, report, receipt, referral, prep guide) are create_customer_link, not this; a review REQUEST (tracked, with follow-ups) is trigger_review_request. The How-to guides (step-by-step app instructions) are only in the composers' Quick Links sheet.
+Use for: "what's our termite control link", "pull the Google review link for Parrish", "get me the app store links", "text Smith the app download links", "link our mosquito page in this blog post", "list our social links"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Words to match (e.g. "termite sarasota", "google review parrish", "app"). Omit to list a whole category.' },
+        category: { type: 'string', enum: LIBRARY_CATEGORIES, description: 'Only this group: customer (portal login, cancel plan), reviews, booking, app, website, social' },
+        limit: { type: 'integer', minimum: 1, maximum: 50, description: `Max links returned (default ${QUICK_LINK_LIMIT})` },
+      },
+    },
+  },
   {
     name: 'create_customer_link',
     description: `Build one of the customer links the Communications composer's Insert Link sheet offers, for ONE customer, exactly as that sheet builds it: reschedule, reservice, pay_balance, estimate, referral, consultation, appointment, prep_guide, service_report, receipt, project_report. The first call returns a PREVIEW and builds nothing: the customer, their number, what the link is and how it may be sent. The operator approves on the confirmation card; the confirmed run builds the link and returns url, line (a ready SMS sentence) and the link's facts (balance, estimate, appointment, expiry). NOTHING IS SENT by this tool. A kind with nothing to link (no open balance, no upcoming visit, no open estimate, no active plan, link switched off) is refused with the plain reason.
@@ -223,6 +262,36 @@ async function buildLink(input) {
     sent: false,
     send_how: spec.sendHow,
   };
+}
+
+// ── search_quick_links ──────────────────────────────────────────
+
+// The sheet's search (InsertLinkSheet linkMatchesQuery): every whitespace-
+// separated term must hit the name, url, keywords or group label.
+function quickLinkMatches(link, terms) {
+  if (!terms.length) return true;
+  const hay = [link.name, link.url, link.keywords, LIBRARY_CATEGORY_LABELS[link.category] || link.category]
+    .filter(Boolean).join(' ').toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+
+async function searchQuickLinks(input) {
+  const category = input.category === undefined || input.category === null || input.category === '' ? null : String(input.category);
+  if (category && !LIBRARY_CATEGORIES.includes(category)) return { error: `category must be one of ${LIBRARY_CATEGORIES.join(', ')}`, code: 'invalid_target' };
+  const limit = Math.min(Math.max(parseInt(input.limit, 10) || QUICK_LINK_LIMIT, 1), 50);
+  const terms = String(input.query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const all = [...PORTAL_LINKS, ...(await require('../link-library').listLinks())];
+  const matches = all.filter((l) => (!category || l.category === category) && quickLinkMatches(l, terms));
+  const rows = matches.slice(0, limit).map((l) => ({
+    name: l.name,
+    url: l.url,
+    category: l.category,
+    line: `${String(l.clause || l.name).trim()}: ${l.url}`,
+  }));
+  const result = { links: rows, total_matches: matches.length, sent: false };
+  if (matches.length > rows.length) result.note = `${matches.length - rows.length} more match — add a word to narrow it, or raise limit.`;
+  if (!matches.length) result.note = 'No Quick Link matches. Try fewer or different words, or drop the category.';
+  return result;
 }
 
 // ── send_autopay_setup_link ─────────────────────────────────────
@@ -366,6 +435,8 @@ async function executeCustomerLinkTool(toolName, input = {}, actionContext = {})
   }
   try {
     switch (toolName) {
+      case 'search_quick_links':
+        return await searchQuickLinks(input);
       case 'create_customer_link':
         // Only /confirm-action sets confirmed (route-derived, never a model param).
         return input.confirmed === true ? await buildLink(input) : await linkPlan(input);
@@ -383,6 +454,7 @@ async function executeCustomerLinkTool(toolName, input = {}, actionContext = {})
         error: toolName === 'send_autopay_setup_link' ? AUTOPAY_UNCERTAIN
           : 'The link build was interrupted — it may or may not have been built, and its side effects (a referral code, a tracked link, an office move approval) may have been recorded. Check before trying again. Nothing was sent.' };
     }
+    if (toolName === 'search_quick_links') return { error: 'Could not read the Quick Links library — try again in a moment' };
     return { error: toolName === 'send_autopay_setup_link' ? 'Could not prepare the Auto Pay setup link' : 'Could not prepare the customer link' };
   }
 }

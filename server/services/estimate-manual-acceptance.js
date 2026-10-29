@@ -184,7 +184,8 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     // the accept path. Tax dollars round to cents exactly as InvoiceService
     // does (rate * after-discount subtotal), so preview == minted total.
     const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
-      estimate.customer_id || estimate.customerId || null, {}
+      estimate.customer_id || estimate.customerId || null,
+      { propertyId: estimate.property_id || estimate.propertyId || undefined },
     );
     const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
       prepayDiscountApplied: Number(resolved.discount) > 0,
@@ -532,6 +533,13 @@ function manualAcceptLockedRowRefusal(estimate) {
 // accept's own locks: anything that changed since the operator saw the card
 // refuses before a write. The estimate page sends none.
 const versionText = (v) => (v == null ? null : (v instanceof Date ? v.toISOString() : String(v)));
+
+// The `expected` pin that accepts exactly this estimate row version (its updated_at, status and owner): a caller that
+// checked the row in its own transaction passes it, so an edit since then refuses the accept (preview_changed)
+// instead of accepting terms the caller never checked (commercial-first-visit.js).
+function estimateRowPin(row) {
+  return { estimateVersion: versionText(row.updated_at), estimateStatus: row.status, customerId: row.customer_id };
+}
 
 function cardChanged() {
   const err = httpError('The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', 409);
@@ -999,6 +1007,12 @@ async function winCommercialProposal(trx, updatedEstimate) {
     customerId: updatedEstimate.customer_id,
     proposal: normalizeProposal(updatedEstimate),
   });
+  // The proposal's building use, which decides the tax on later visits (GATE_BUILDING_USE_TAX).
+  await proposalWin.recordProposalBuildingUse({
+    trx,
+    customerId: updatedEstimate.customer_id,
+    proposal: normalizeProposal(updatedEstimate),
+  });
   // A NON-invoice-mode win with authored structured payment terms has no path
   // that consumes them (codex #3297 r4). Auto Pay is the exception and the
   // mirror (GATE_COMMERCIAL_AUTOPAY): the customer's Auto Pay enrollment
@@ -1431,5 +1445,6 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,
+  estimateRowPin,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

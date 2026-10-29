@@ -9,6 +9,13 @@ function pickOccurrence(row) {
   return out;
 }
 
+// The pending tasks this workflow raised before the office queue carry no metadata:
+// told apart by their subject (evaluateThreshold's, unchanged since).
+const LEGACY_TASK_SUBJECT = 'Recommended outreach: % missed appointments in 90 days';
+// How far back the nightly repair looks for a pending task to withdraw with the queue
+// on: the 90-day count window itself (a task is raised from misses inside it).
+const WITHDRAW_REPAIR_DAYS = 90;
+
 const STALE_CANDIDATE = Symbol('stale_candidate');
 const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
 // The nightly check's candidate, re-read under the visit lock: still open, same slot?
@@ -232,20 +239,25 @@ class MissedAppointment {
    * reason on it — whichever of the customer's misses the task was raised from.
    * Runs in the dismissal's transaction (after the confirmation is cleared), in a
    * savepoint, and never fails it.
+   * `legacy`: the nightly repair retiring the tasks raised before the queue (no
+   * metadata.source) instead; every other call touches this workflow's own tasks.
    */
-  async withdrawOutreachIfBelowThreshold(customerId, trx) {
+  async withdrawOutreachIfBelowThreshold(customerId, trx, { legacy = false } = {}) {
     if (!customerId || !trx) return { withdrawn: 0 };
     try {
       const withdrawn = await trx.transaction(async (sp) => {
         await this.lockOutreach(customerId, sp);
         if ((await this.countMisses(customerId, sp)) >= 2) return 0;
-        return sp('customer_interactions')
-          .where({ customer_id: customerId, interaction_type: 'task', status: 'pending' })
-          .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
-          .update({
-            status: 'cancelled',
-            body: sp.raw("concat('Withdrawn: the office marked a visit as not a miss; fewer than 2 misses remain.', E'\\n\\n', body)"),
-          });
+        const tasks = sp('customer_interactions')
+          .where({ customer_id: customerId, interaction_type: 'task', status: 'pending' });
+        if (legacy) tasks.whereRaw("metadata->>'source' IS NULL").where('subject', 'like', LEGACY_TASK_SUBJECT);
+        else tasks.whereRaw("metadata->>'source' = 'missed_appointment_threshold'");
+        return tasks.update({
+          status: 'cancelled',
+          body: legacy
+            ? sp.raw("concat('Retired: fewer than 2 person-marked misses in 90 days remain.', E'\\n\\n', body)")
+            : sp.raw("concat('Withdrawn: the office marked a visit as not a miss; fewer than 2 misses remain.', E'\\n\\n', body)"),
+        });
       });
       return { withdrawn: Number(withdrawn) || 0 };
     } catch (err) {
@@ -259,11 +271,17 @@ class MissedAppointment {
    * and withdrawing it (at a "Not a miss") are best-effort where they run, so a
    * failure there is repaired here:
    *   - a pending task this workflow raised in the last `days` days whose customer
-   *     no longer has two misses is cancelled;
+   *     no longer has two misses is cancelled (queue on: the last 90 days, the count
+   *     window, so an older task whose withdrawal failed is retried too);
    *   - a customer with a confirmed miss in the last `days` days, two misses, and
    *     NO task from this workflow in those days (whatever raised it — a
    *     confirmation or a no-show Quick Move — pending or done, not withdrawn) gets one.
    *     Conservative on purpose: it never adds a second task in the window.
+   *     Queue on: a no-show Quick Move in those days counts as a candidate too (its
+   *     immediate evaluation can fail), through the same once-per-customer check;
+   *   - queue on: a pending task raised before the queue existed (no metadata.source)
+   *     whose customer has fewer than two person-marked misses is retired.
+   * The queue-on parts are skipped with the queue off, so that path is unchanged.
    * Never throws.
    * @returns {Promise<{withdrawn: number, raised: number}>}
    */
@@ -271,13 +289,29 @@ class MissedAppointment {
     let withdrawn = 0;
     let raised = 0;
     try {
+      const queueOn = require('../not-closed-out').queueEnabled();
       const pending = await db('customer_interactions')
         .where({ interaction_type: 'task', status: 'pending' })
         .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
-        .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+        .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [queueOn ? Math.max(days, WITHDRAW_REPAIR_DAYS) : days]))
         .select('customer_id');
       for (const customerId of new Set((Array.isArray(pending) ? pending : []).map((r) => r.customer_id).filter(Boolean))) {
         withdrawn += (await db.transaction((t) => this.withdrawOutreachIfBelowThreshold(customerId, t))).withdrawn;
+      }
+      if (queueOn) {
+        // A closed set: nothing raises a task without metadata.source any more.
+        try {
+          const legacy = await db('customer_interactions')
+            .where({ interaction_type: 'task', status: 'pending' })
+            .whereRaw("metadata->>'source' IS NULL")
+            .where('subject', 'like', LEGACY_TASK_SUBJECT)
+            .select('customer_id');
+          for (const customerId of new Set((Array.isArray(legacy) ? legacy : []).map((r) => r.customer_id).filter(Boolean))) {
+            withdrawn += (await db.transaction((t) => this.withdrawOutreachIfBelowThreshold(customerId, t, { legacy: true }))).withdrawn;
+          }
+        } catch (err) {
+          logger.warn(`MissedAppointment: legacy outreach tasks not retired: ${err.message}`);
+        }
       }
       const confirmed = await db('reschedule_log')
         .where({ reason_code: 'customer_noshow' })
@@ -285,8 +319,18 @@ class MissedAppointment {
         .where('miss_confirmed_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
         .orderBy('miss_confirmed_at', 'desc')
         .select('id', 'customer_id');
+      // A no-show Quick Move is a person-marked miss that is evaluated right away
+      // (rain-out.js); if that failed, nothing else would look at it again.
+      const quickMoves = queueOn
+        ? await db('reschedule_log')
+          .where({ reason_code: 'customer_noshow' })
+          .whereNotNull('new_date')
+          .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+          .orderBy('created_at', 'desc')
+          .select('id', 'customer_id')
+        : [];
       const seen = new Set();
-      for (const row of Array.isArray(confirmed) ? confirmed : []) {
+      for (const row of [...(Array.isArray(confirmed) ? confirmed : []), ...(Array.isArray(quickMoves) ? quickMoves : [])]) {
         if (!row.customer_id || seen.has(String(row.customer_id))) continue;
         seen.add(String(row.customer_id)); // once per customer, linked to the latest confirmed miss
         try {

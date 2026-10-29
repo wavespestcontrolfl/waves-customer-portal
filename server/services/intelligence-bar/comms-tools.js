@@ -2058,4 +2058,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal, customerLinkSendRefusal };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal, customerLinkSendRefusal, smsIneligibilityReason };

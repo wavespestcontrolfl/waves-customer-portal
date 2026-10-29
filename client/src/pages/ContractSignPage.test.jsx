@@ -199,7 +199,21 @@ describe('ContractSignPage "Back to your estimate" (Florida consumer notice)', (
   });
 
   it('is hidden for any other document, even one carrying the marker', async () => {
-    const { queryByText } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest' });
+    const { queryByText } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.termite_annual_protection' });
+    expect(queryByText(BACK)).toBeNull();
+  });
+
+  // GATE_COMMERCIAL_FIRST_VISIT: the server marks a commercial agreement issued from the proposal page only while the
+  // gate is on, because the first visit is picked back on the estimate page.
+  it('after signing a commercial agreement the server marked, the button goes back to pick the first visit', async () => {
+    const { getByRole, back } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest', title: 'Commercial Pest Service Agreement' });
+    fireEvent.click(getByRole('button', { name: BACK }));
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+
+  it('is hidden for a commercial agreement the server did not mark (the gate off)', async () => {
+    const { fromEstimate: _drop, ...unmarked } = NOTICE;
+    const { queryByText } = await signContract({ ...unmarked, documentTemplateKey: 'service_agreement.commercial_pest' });
     expect(queryByText(BACK)).toBeNull();
   });
 });

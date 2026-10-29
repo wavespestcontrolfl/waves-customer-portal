@@ -56,7 +56,10 @@ jest.mock('../services/rain-out', () => ({
   ...jest.requireActual('../services/rain-out'),
   loadOccupancy: jest.fn(),
 }));
-jest.mock('../services/scheduling/hint-road-times', () => ({ priceChipsOnRoads: jest.fn(async (chips) => chips) }));
+jest.mock('../services/scheduling/hint-road-times', () => ({
+  priceChipsOnRoads: jest.fn(async (chips) => chips),
+  createPickerBudget: jest.fn(() => ({ traffic: 0, plain: 0, signal: null, refused: null })),
+}));
 jest.mock('../services/technician-capabilities', () => ({ inactiveCapabilitiesForServices: jest.fn(async () => []) }));
 
 const express = require('express');

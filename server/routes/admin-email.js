@@ -7,6 +7,7 @@ const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
+const { sendEmailMessage } = require('../services/email/send-message');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { emailSendLaterLive } = require('../config/feature-gates');
@@ -322,22 +323,19 @@ router.post('/message/:id/trash', async (req, res) => {
   }
 });
 
-// POST /send — send or reply
+// POST /send — send or reply. The send itself is services/email/send-message.js, shared with the Intelligence Bar's
+// compose_email card.
 router.post('/send', async (req, res) => {
   try {
     const { to, subject, body, threadId, inReplyTo } = req.body;
     if (!to || !body) return res.status(400).json({ status: 'failed', error: 'to and body required' });
 
-    const result = await gmailClient.sendMessage(to, subject || '(no subject)', body, threadId, inReplyTo);
-    // Log only the provider message id — no recipient address, even masked.
-    if (!result?.id) return res.status(202).json({ status: 'outcome_unknown', error: 'Check the Sent folder before retrying.' });
-    logger.info(`[email] Sent email: ${result.id}`);
-    res.json({ success: true, status: 'provider_accepted', messageId: result.id });
+    const { status, json } = await sendEmailMessage({ to, subject, body, threadId, inReplyTo });
+    res.status(status).json(json);
   } catch (err) {
-    const unknown = err.providerOutcome?.outcomeUnknown === true;
-    logger.error(`[email] Send outcome: ${unknown ? 'unknown' : 'failed'}`);
-    res.status(unknown ? 202 : 502).json({ status: unknown ? 'outcome_unknown' : 'failed',
-      error: unknown ? 'Check the Sent folder before retrying.' : 'The email was not accepted. Try again.' });
+    // A malformed body (no req.body) is the only way here: sendEmailMessage answers its own failures.
+    logger.error('[email] Send outcome: failed');
+    res.status(502).json({ status: 'failed', error: 'The email was not accepted. Try again.' });
   }
 });
 

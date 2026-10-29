@@ -8,7 +8,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const draftSvc = require('../services/price-scan/price-match-draft');
-const { runWeeklyScan } = require('../services/price-scan/weekly-scan');
+const { runWeeklyScan, throwIfScanFailed } = require('../services/price-scan/weekly-scan');
 const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -118,6 +118,8 @@ router.post('/scan', async (req, res, next) => {
       respond(202, { ok: true, started: true });
       const result = await runWeeklyScan();
       logger.info(`[price-match] manual scan run by ${req.technicianId}: ${JSON.stringify(result)}`);
+      // An interrupted or degraded scan records a failed job_health row, not a success.
+      throwIfScanFailed(result);
     })
       .then((outcome) => {
         if (outcome && outcome.skipped === true) {

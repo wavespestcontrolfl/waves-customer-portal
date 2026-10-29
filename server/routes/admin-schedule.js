@@ -10057,7 +10057,7 @@ async function scheduleCreateHandler(req, res, next) {
       // fails the booking; an unassigned, untimed or shared visit stays as it
       // was. Recurring children and boosters keep today's behavior.
       if (newApptStopOrderLive()) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment' });
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true });
       }
     });
 
@@ -15610,7 +15610,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
                 id: req.params.id, parentBefore: recurringParentBefore, updates,
               }),
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-              arrivalWindow: { serviceId: req.params.id, changes: updates },
+              arrivalWindow: { serviceId: req.params.id, changes: updates, roads: 'cache' },
             });
             if (adminMoveClash.length) {
               logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory — admin writes never block on conflicts)`);
@@ -17361,7 +17361,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             || deriveWindowEnd(start, parseInt(row.estimated_duration_minutes, 10) || 60) || '23:59';
           const conflicts = await findConflictingVisits({
             db: trx, date, windowStart: start, windowEnd: end, excludeServiceIds: [row.id],
-            excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES, arrivalWindow: { serviceId: row.id },
+            excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES, arrivalWindow: { serviceId: row.id, roads: 'cache' },
           });
           if (conflicts.length) {
             const warning = conflicts[0].warning || slotOverlapWarning(date);
@@ -17377,7 +17377,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       const routeNumberTyped = Number.isInteger(updates.route_order)
         && updates.route_order !== (commsPeek?.route_order ?? null);
       if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id });
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true });
       }
       // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
       // release run (they are external and cannot roll back with a rejected edit).
@@ -23890,6 +23890,11 @@ router.get('/:id/series-summary', async (req, res, next) => {
       canSetCount: isEnabled('editApptVisitCount'),
       // Same dark-ship contract for the price/service "Apply to" selector.
       canScopePriceService: isEnabled('editApptPriceServiceScope'),
+      // The service-line sheet's "Apply price change to" choice. The sheet
+      // posts the same priceServiceScope, which update-details refuses while
+      // editApptPriceServiceScope is off — so both gates, never the sheet's
+      // own alone.
+      canScopeSheetPrice: isEnabled('editApptPriceServiceScope') && isEnabled('serviceSheetPriceScope'),
     });
   } catch (err) { next(err); }
 });

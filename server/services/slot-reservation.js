@@ -45,7 +45,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const {
-  overlapsLunch, pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+  pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -1179,18 +1179,6 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
-      // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23):
-      // mirrors the offer-side filter (estimate-slot-availability.js
-      // slotWindowFitsDay) so a slot the generator wouldn't offer under the
-      // gate can't be forged past this commit gate either — in BOTH capacity
-      // modes (the shift-fit check is orthogonal to lunch). No-op (always
-      // false) while the gate is off — byte-identical to before this check.
-      if (overlapsLunch(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)) {
-        const err = new Error('slot is inside the lunch block');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
       if (useCapacity && !holdPin) throw capacityError('address_changed');
@@ -1944,25 +1932,6 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
-    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) on the
-    // FINAL resolved window (the accepted profile's duration, not the hold's
-    // original): estimate acceptance graduates an existing hold through this
-    // path without passing reserveSlot's guard, so a noon hold minted before
-    // the gate flipped on — or an 11:00 hold the accepted profile lengthens
-    // into lunch — must stop here, in both capacity modes. No-op while unset.
-    {
-      const { parseHHMM } = require('./scheduling/window-rules');
-      const lunchEndMin = windowEnd
-        ? parseHHMM(windowEnd)
-        : (row.window_end ? parseHHMM(row.window_end) : null);
-      if (windowStart && lunchEndMin != null && overlapsLunch(parseHHMM(windowStart), lunchEndMin)) {
-        const err = new Error('slot is inside the lunch block');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
-        throw err;
-      }
-    }
-
     // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28,
     // Codex round 2 P0 on #5314): a hold is certified ONCE, at reserveSlot — re-applying a
     // freshly re-read grace here would let a since-LOWERED

@@ -211,7 +211,10 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone }) {
+async function pickedByArrivalChecker({
+  pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone,
+  paidRoads = true, roadSpender = null, pickerBudget = null,
+}) {
   // Summary mode names WHY there is no verdict, so the strip can say
   // "can't check this day" instead of going silent; the three-line hint
   // keeps its no-verdict contract (undefined).
@@ -226,6 +229,9 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
+      // Staff only: a technician's own picker spends no Google (Codex #6881),
+      // counted against the staff user who asked (picker-road-spend.js).
+      roads: paidRoads === true, roadSpender, pickerBudget,
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at
@@ -301,7 +307,8 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false,
+  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false, paidRoads = true,
+  roadSpender = null, pickerBudget = null,
 }) {
   const pickedMin = toMin(pickedStart);
   // `withReason` (summary mode): an hour no verdict can cover still gets a
@@ -312,7 +319,9 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone })
+    ? pickedByArrivalChecker({
+      pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads, roadSpender, pickerBudget,
+    })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
 }
 
@@ -461,6 +470,9 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
+      // 'google' when the route check itself drove this hour on Google
+      // (GATE_PICKER_ROAD_CHECK); otherwise set by the road re-pricing.
+      ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
       [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
@@ -552,7 +564,8 @@ function publicChip(chip) {
  * the model's numbers, or shows no rain.
  */
 async function buildBestRows(days, {
-  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null, deps = {},
+  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null,
+  paidRoads, roadSpender, deps = {},
 }) {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
   // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
@@ -581,7 +594,8 @@ async function buildBestRows(days, {
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
-  const [priced, hourly] = await Promise.all([priceChips(chips), forecast]);
+  // Staff only, counted against the staff user who asked (Codex #6881 security).
+  const [priced, hourly] = await Promise.all([priceChips(chips, { paid: paidRoads, spender: roadSpender }), forecast]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
@@ -693,7 +707,7 @@ const OPEN_TIMES_SLOW_MS = 3000;
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
-  serviceTypes = [], rainSpan = null,
+  serviceTypes = [], rainSpan = null, paidRoads = false, roadSpender = null,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
@@ -707,6 +721,7 @@ async function buildHintSummary(plan, everyStart, {
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes, rainSpan,
+    paidRoads, roadSpender,
   }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {

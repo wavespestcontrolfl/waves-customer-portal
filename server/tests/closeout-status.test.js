@@ -754,14 +754,12 @@ describe('closeout-status: Agent D findings', () => {
     expect(facts.comms).toMatchObject({ state: 'done', reason: 'project_report_delivered' });
   });
 
-  test('project report on payment hold → pending on_hold; failed delivery → failed; legacy_sent → done; no token → pending', () => {
+  test('project report failed delivery → failed; legacy_sent → done; no token → pending', () => {
     const base = closedOutInputs({
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
       delivery: null,
     });
     const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'not_sent', ...o });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
-      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'failed' }) }).facts.reportDelivery.state).toBe('failed');
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'legacy_sent' }) }).facts.reportDelivery.state).toBe('done');
     expect(deriveCloseoutFacts({ ...base, project: proj({ report_token: null }) }).facts.report)
@@ -807,16 +805,12 @@ describe('closeout-status: Agent D findings', () => {
     expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'frozen_required_mint_not_minted', amount: 120, ruleSource: 'frozen_record', livePrediction: 'covered_membership' });
   });
 
-  test('project report payment hold wins over delivery_status sent; partial honors the channel ledger; released + sent is done', () => {
+  test('project report partial delivery honors the channel ledger', () => {
     const base = closedOutInputs({
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: { completionSmsStatus: 'sent' } },
       delivery: null,
     });
     const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent', ...o });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
-      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'releasing' }) }).facts.reportDelivery.state).toBe('pending');
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'released' }) }).facts.reportDelivery.state).toBe('done');
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: true }, sms: { ok: false } } }) }).facts.reportDelivery)
       .toMatchObject({ state: 'done', reason: 'project_delivery_partial', channelOk: { email: true, sms: false } });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: false }, sms: { ok: false } } }) }).facts.reportDelivery)

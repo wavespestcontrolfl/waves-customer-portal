@@ -57,6 +57,16 @@ describe('resolveDocNextSteps', () => {
     expect(resolve({ authoredProposal: true, cta: { ...cta, terminalState: 'expired' } })).toEqual({ variant: 'expired', primaryLabel: null });
   });
 
+  it('commercial first visit (cta.commercialFirstVisit): the signer picks the visit right after signing', () => {
+    const unsigned = { quoteRequired: true, commercialAgreement: { canSign: true, state: 'none' }, commercialFirstVisit: { state: 'after_signing' } };
+    expect(resolve({ authoredProposal: true, cta: unsigned })).toEqual({ variant: 'authored_sign_book', primaryLabel: 'Accept & sign agreement' });
+    const signed = { quoteRequired: true, commercialAgreement: { canSign: false, state: 'signed' }, commercialFirstVisit: { state: 'pick', durationMinutes: 30 } };
+    expect(resolve({ authoredProposal: true, cta: signed })).toEqual({ variant: 'authored_pick', primaryLabel: null });
+    // No first-visit block (gate off, or a proposal the office books): the signing wording is unchanged.
+    const { commercialFirstVisit: _drop, ...plain } = unsigned;
+    expect(resolve({ authoredProposal: true, cta: plain }).variant).toBe('authored_sign');
+  });
+
   it.each(Object.keys(ACCEPT_MODE_LABELS))('open + %s: go ahead with that mode\'s label', (mode) => {
     expect(resolve({ acceptanceMode: mode })).toEqual({ variant: 'go_ahead', primaryLabel: ACCEPT_MODE_LABELS[mode] });
   });
@@ -95,6 +105,18 @@ describe('NextSteps', () => {
     expect(neutral.text).toContain('has the details');
     expect(neutral.text).not.toContain('visit details');
     expect(neutral.container.querySelector(`a[href="${URL_}"]`)).not.toBeNull();
+  });
+
+  it('commercial first visit wording: sign, then pick the visit; signed, pick it below', () => {
+    const book = text({ authoredProposal: true, onPage: true, cta: { quoteRequired: true, commercialAgreement: { canSign: true, state: 'none' }, commercialFirstVisit: { state: 'after_signing' } } });
+    expect(book.text).toContain('tap Accept & sign agreement below');
+    expect(book.text).toContain('right after you sign you pick the day and time of your first visit.');
+    expect(book.text).not.toContain('follows up to schedule');
+    const pdf = text({ authoredProposal: true, cta: { quoteRequired: true, commercialAgreement: { canSign: true, state: 'none' }, commercialFirstVisit: { state: 'after_signing' } } });
+    expect(pdf.text).toContain('tap Accept & sign agreement above');
+    expect(pdf.container.querySelector(`a[href="${URL_}"]`)).not.toBeNull();
+    const pick = text({ authoredProposal: true, onPage: true, cta: { quoteRequired: true, commercialAgreement: { canSign: false, state: 'signed' }, commercialFirstVisit: { state: 'pick' } } });
+    expect(pick.text).toContain('Your service agreement is signed. Pick the day and time of your first visit below');
   });
 
   it('the go-ahead sentence names the mode\'s label and promises nothing the mode does not', () => {

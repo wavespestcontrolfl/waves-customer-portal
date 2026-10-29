@@ -27,6 +27,7 @@ const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { lawnVisitClosedLate } = require('./service-report/lawn-watering-late-close');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
@@ -390,6 +391,14 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, targets = n
       knex,
       // The report freezes this wording at completion, so the preview shows it.
       forCompletion: true,
+      // Owner 2026-10-27: a visit worked on an earlier day and completed now gets
+      // no steps; judged from the visit's own stamps, as the completion judges it
+      // (GATE_LAWN_WATERING_EVERY_VISIT, as there).
+      lateClose: featureGates.lawnWateringEveryVisitLive() && lawnVisitClosedLate({
+        arrivals: [svc.arrived_at, svc.actual_start_time, svc.check_in_time],
+        scheduledDates: [svc.scheduled_date],
+        completedAt: now,
+      }),
     });
   } catch (err) {
     // The report builds no instruction when its irrigation inputs cannot be read.
@@ -1008,8 +1017,6 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
     // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. The key exists only while the gate is live, so gate off is byte-identical.
     ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
-    // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. The key exists only while the gate is live.
-    ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
     // GATE_ESTIMATE_LAWN_LIMITS: the turf profile lists carpetgrass, so a Celsius WG row on the sheet shows
     // this line. The key exists only while the gate is live AND the flag is set, so gate off is byte-identical.
     ...await carpetgrassCelsiusWarningKey(svc, knex),

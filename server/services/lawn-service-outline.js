@@ -917,7 +917,8 @@ const V13_DETAIL_COPY = Object.freeze({
   // v13 confirms chinch bugs at the edge of the damage (the float test only if unsure). "Spot", not "any": May's one
   // whole-lawn insect pass goes on sunny turf with no count first.
   confirmedTile: Object.freeze({ icon: 'count', title: 'Confirmed before treating', text: 'Chinch bugs and other insects are confirmed where the damage starts before any spot treatment' }),
-  yearBody: 'This month and the next two are open. Tap any month to see what that visit does and one thing to do at home.',
+  // A 9-visit plan skips some months, so the list says each visit follows its month (the v13 outline's own sentence).
+  yearBody: 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.',
   // One thing to do at home each month, from the v13 visit rules (barrier water-in, holds, storm holds).
   atHome: Object.freeze({
     1: 'Run your normal watering day: that waters in the weed barrier.',
@@ -1061,6 +1062,29 @@ function activeIngredientText(row) {
     .filter(Boolean)
     .join(' + ');
   return text ? text.toLowerCase() : null;
+}
+
+// The catalog rows the Pest Control and Mosquito outlines read: one query by exact name, active rows only (a retired
+// product never prints), the first row per name (a duplicate row with a stale formula never wins). A failed read is [],
+// so the product section leaves out rather than showing names without their ingredients.
+async function loadActiveCatalogRows(db, names) {
+  let rows;
+  try {
+    rows = await db('products_catalog')
+      .whereIn('name', names)
+      .where('active', true)
+      .select('name', 'display_name', 'active_ingredient', 'category', 'product_type');
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  const first = [];
+  for (const row of rows || []) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    first.push(row);
+  }
+  return first;
 }
 
 // The catalog read is one query by exact name (the v13 recipe uses catalog names). A failed read leaves the section
@@ -1331,4 +1355,17 @@ module.exports = {
   resolveJurisdictionId,
   resolveSeasonBand,
   validateContent,
+  // Shared with the Tree & Shrub, Pest Control and Mosquito outlines (tree-shrub-, pest- and mosquito-service-outline.js).
+  V13_COPY,
+  WATERING_ORDER,
+  activeIngredientText,
+  loadActiveCatalogRows,
+  addressSummary,
+  estimateSnapshot,
+  estimateViewPath,
+  firstNonEmpty,
+  isRestrictedSeason,
+  loadFertilizerRule,
+  makeSection,
+  parseJsonMaybe,
 };

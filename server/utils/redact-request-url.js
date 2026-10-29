@@ -69,8 +69,11 @@ const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback
 // /estimate/jane-doe-9f8e7d6c and /api/estimates/jane-doe-9f8e7d6c/data stop
 // logging reusable quote links with customer pricing/contact details. The
 // -8hex suffix requirement keeps fixed admin children (slots, config,
-// extension-request, UUID row ids) out of scope.
-const ESTIMATE_BEARER_PARENTS = new Set(['estimate', 'estimates']);
+// extension-request, UUID row ids) out of scope. 'estimate-assessment' is the
+// estimate-token assessment booking API (/api/public/estimate-assessment/
+// <token>[/find-slots], GATE_ESTIMATE_ASSESSMENT_FIRST); its SPA page
+// (/estimate/<token>/assessment) is already under 'estimate'.
+const ESTIMATE_BEARER_PARENTS = new Set(['estimate', 'estimates', 'estimate-assessment']);
 const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;
 
 // Secure-card capture links (appointment-card-request.js) mint

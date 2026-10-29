@@ -432,6 +432,45 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(again.bidId).not.toBe(bidId);
     });
 
+    test('a county addendum in a new thread joins the bid it names, even after it was declined, and rings nothing', async () => {
+      // Charlotte County sends every addendum in its own thread; the notice template gives them one key.
+      // Its stored header as delivered: broken DKIM, SPF naming the bounce address only in a quoted string, DMARC pass.
+      const ccEmail = (subjectNumber, threadId) => storeEmail({
+        from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=permerror (no key for signature) header.i=@charlottecountyfl.gov header.s=s1; spf=pass (google.com: domain of bounces+1-2@em1.charlottecountyfl.gov designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.charlottecountyfl.gov"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=charlottecountyfl.gov',
+        subject: `Charlotte County Purchasing Addendum Notification for Bid ${subjectNumber}`, body_text: [
+          'Charlotte County Purchasing Division', '100 Sample Circle, Suite 1 Sampleport, FL 33948 941-555-0100',
+          `Addendum Notification for Bid ${subjectNumber}`,
+          `An addendum has been added to Charlotte County Purchasing Request for Bid: 20260601 - Sample Park Grounds Maintenance`,
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await ccEmail('26-601', 't-cc-1'));
+      expect(first.created).toBe(true);
+      expect(await bidRow(first.bidId)).toMatchObject({ solicitation_number: '26-601', group_key: expect.stringContaining('|26 601') });
+      const second = await service.ingestEmail(await ccEmail('26-601', 't-cc-2'));
+      expect(second).toMatchObject({ created: false, bidId: first.bidId });
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const third = await service.ingestEmail(await ccEmail('26-601', 't-cc-3'));
+      expect(third).toMatchObject({ created: false, bidId: first.bidId, kind: 'addendum' });
+      expect(await links(first.bidId)).toHaveLength(3);
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid' });
+      expect(rung('new')).toHaveLength(0);
+      expect(rung('addendum')).toHaveLength(0);
+    });
+
+    test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
+      const bare = BC_BODY().replace(': Pest Control', '');
+      const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));
+      await mockPg('bid_opportunities').where({ id: decided.bidId }).update({ status: 'no_bid' });
+      const open = await service.ingestEmail(await storeEmail());
+      expect(open.created).toBe(true);
+      raiseAdminAlert.mockClear();
+      const addendum = await service.ingestEmail(await storeEmail({ subject: 'Addendum 1 - Sample Ridge Residences', body_text: bare }));
+      expect(addendum).toMatchObject({ created: false, bidId: open.bidId, kind: 'addendum' });
+      expect(rung('addendum')).toHaveLength(1);
+    });
+
     test('the late pass pages past non-bid mail to a late bid row', async () => {
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
       await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });

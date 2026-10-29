@@ -374,7 +374,11 @@ postgres('customer-level overdue reminders: one customer through a whole episode
     }));
   }
   const ledgerCount = async (customerId) => Number((await app('collections_contact_ledger').where({ customer_id: customerId }).count('* as n').first()).n);
-  const noAlerts = () => expect(mockNotify).not.toHaveBeenCalled();
+  // The one alert promotion itself raises (a new combined schedule, owner 2026-10-29) is expected in every
+  // episode; "no alerts" means none beyond it.
+  const startedKey = /^customer-dunning-started:/;
+  const alertsBeyondStart = () => mockNotify.mock.calls.filter((call) => !startedKey.test(call[3]?.dedupeKey || ''));
+  const noAlerts = () => expect(alertsBeyondStart()).toEqual([]);
 
   // ══ the episode ═══════════════════════════════════════════════════════════
   describe('one customer, one episode, in order', () => {
@@ -430,6 +434,8 @@ postgres('customer-level overdue reminders: one customer through a whole episode
         B: { status: 'active', step_index: 0, touches_sent: 0, next_touch_at: time(Followups.computeNextTouchAt(B_SENT, 0)), claimed: false },
       });
       noAlerts();
+      // promotion told the office once, and sent the customer nothing
+      expect(mockNotify.mock.calls.filter((call) => startedKey.test(call[3].dedupeKey))).toHaveLength(1);
     });
 
     test('2. the first combined step is due: ONE reminder (email + text) names 2 invoices, and the schedule advances', async () => {

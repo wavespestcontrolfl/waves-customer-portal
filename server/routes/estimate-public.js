@@ -6973,7 +6973,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ['Price adjustment', proposalForCard.commercialTerms.priceAdjustment],
         ['Cancellation', proposalForCard.commercialTerms.cancellation],
         ['Property access', proposalForCard.commercialTerms.accessRequirements],
-      ].filter(([, value]) => value != null) : [];
+      ].filter(([label, value]) => value != null
+        // One-time-only proposal: the four fixed agreement terms do not apply (owner 2026-10-28).
+        && (Number(proposalCardTotals.annualRecurring) > 0
+          || !['Initial term', 'Renewal', 'Price adjustment', 'Cancellation'].includes(label))) : [];
       const proposalStructuredTermsHtml = proposalTermRows.length ? `
     <div class="proposal-section-title">Service terms</div>
     <div class="proposal-structured-terms">
@@ -9941,7 +9944,7 @@ async function handleEstimateView(req, res, next) {
     // total matches the tax-inclusive invoice the converter creates. Async, so
     // resolve here and pass into the (sync) renderPage. Non-commercial → 0.
     const prepayBaseRate = isCommercialAutoAcceptEstimate(estimate)
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true, propertyId: estimate.property_id || undefined })
       : 0;
 
     // Does accepting this estimate bill MONTHLY? (codex #3128 r6) The
@@ -11554,7 +11557,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
     }
     const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, {})
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, { propertyId: estimate.property_id || undefined })
       : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
@@ -15626,7 +15629,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (coveredInvoiceRow) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(coveredInvoiceRow);
           coverageTermSynced = true;
         } catch (e) { logger.warn(`[estimate-accept] term sync after in-trx coverage failed for ${invoiceId}: ${e.message}`); }
-        require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
         // termSyncPending keeps the durable job UNRESOLVED on a sync
         // failure (Codex r18): credit coverage has no Stripe webhook, so
         // without the sweep retry only the daily reconciliation would
@@ -19249,6 +19251,93 @@ router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (r
   } catch (err) {
     // err.code only, never err.message (PG constraint errors can quote customer data).
     logger.warn(`[estimate-public] commercial-agreement failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
+// "Pick your first visit" after a commercial agreement is signed (GATE_COMMERCIAL_FIRST_VISIT, owner 2026-10-26: decision
+// page choice 1B). services/commercial-first-visit.js owns the plan, the times and the booking; these routes decide only
+// that the token names an open estimate the customer is viewing. Gate-aware limiters: a dark gate answers the generic 404
+// on every probe, never a 429.
+const firstVisitAvailabilityLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.commercialFirstVisitLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many searches. Please try again in a minute.' },
+});
+const firstVisitBookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.commercialFirstVisitLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many booking attempts. Please try again in a minute.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
+// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+const FIRST_VISIT_PATH_RE = /^\/[^/]+\/first-visit(?:\/availability)?\/?$/i;
+function commercialFirstVisitPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !FIRST_VISIT_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.commercialFirstVisitLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// The open-estimate verdict both routes apply, and the booking transaction re-runs on its own fresh read.
+function firstVisitOpenFor(row) {
+  return isEstimateCustomerViewable(row) && isEstimateAcceptActive(row);
+}
+
+// The estimate a first-visit request may act on, or null (the generic 404): gate on, not a staff preview tap, a real
+// token, the durable call-side verdict, and an open, customer-viewable estimate.
+async function firstVisitEstimate(req) {
+  if (!featureGates.commercialFirstVisitLive() || req.query.adminPreview === '1') return null;
+  const estimate = await db('estimates').where({ token: req.params.token }).first();
+  if (!estimate) return null;
+  if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return null;
+  return firstVisitOpenFor(estimate) ? estimate : null;
+}
+
+function sendFirstVisitRefusal(res, result) {
+  if (result.status === 404) return res.status(404).json({ error: 'Estimate not found' });
+  return res.status(result.status).json({ error: result.error, code: result.code, ...(result.visit ? { visit: result.visit } : {}) });
+}
+
+// POST /api/estimates/:token/first-visit/availability — the open first-visit times for a signed proposal. Read-only.
+router.post('/:token/first-visit/availability', firstVisitAvailabilityLimiter, async (req, res, next) => {
+  stampCommercialAgreementHeaders(res);
+  try {
+    const estimate = await firstVisitEstimate(req);
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const result = await require('../services/commercial-first-visit').firstVisitAvailability(estimate);
+    if (!result.ok) return sendFirstVisitRefusal(res, result);
+    return res.json(result);
+  } catch (err) {
+    // err.code only, never err.message (a geocoder or PG error can quote an address).
+    logger.warn(`[estimate-public] first-visit availability failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
+// POST /api/estimates/:token/first-visit — body { date: 'YYYY-MM-DD', time: 'HH:MM' }: books the first visit, marks the
+// proposal won and seeds the series. The booking texts the customer its confirmation, like every self-booking.
+router.post('/:token/first-visit', firstVisitBookLimiter, async (req, res, next) => {
+  stampCommercialAgreementHeaders(res);
+  try {
+    const estimate = await firstVisitEstimate(req);
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
+    const time = typeof req.body?.time === 'string' ? req.body.time.trim() : '';
+    const result = await require('../services/commercial-first-visit').bookFirstVisit(estimate, { date, time, openFor: firstVisitOpenFor });
+    if (!result.ok) return sendFirstVisitRefusal(res, result);
+    return res.json({ booked: true, visit: result.visit });
+  } catch (err) {
+    logger.warn(`[estimate-public] first-visit booking failed (code=${err?.code || 'none'})`);
     next(err);
   }
 });
@@ -30875,6 +30964,18 @@ async function composeEstimateDataPayload(estimate, {
       && isEstimateAcceptActive(estimate)
       ? await require('../services/commercial-proposal-agreement').agreementCtaFor(estimate)
       : null;
+    // "Pick your first visit" after the agreement is signed (GATE_COMMERCIAL_FIRST_VISIT): nothing is read or added with
+    // the gate off. The booked visit shows on any view (an accepted proposal reads its date from it). `open` is the
+    // agreement card's own condition above, so the next-step copy says the customer picks the visit on the page and in
+    // the PDF alike; the picker itself only where the customer can tap it (never the document render).
+    const commercialFirstVisitOpen = terminalState === null && (isPdfRenderPass || !verifiedStaffPreview)
+      && isEstimateAcceptActive(estimate);
+    const commercialFirstVisitCta = featureGates.commercialFirstVisitLive() && !adminDraftPreview
+      ? await require('../services/commercial-first-visit').firstVisitCtaFor(estimate, {
+        open: commercialFirstVisitOpen,
+        picker: commercialFirstVisitOpen && !isPdfRenderPass,
+      })
+      : null;
     // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): an open estimate with a termite line asks for the signed
     // FDACS-13692 before it can be accepted. Nothing is read or added with the gate off; never a staff preview, a draft
     // preview or the headless document render.
@@ -31118,7 +31219,17 @@ async function composeEstimateDataPayload(estimate, {
     // on this page (returnVisit, softExit below) — never a staff draft/
     // preview or the headless document pass. Include-when-present; the
     // builder itself fails soft (never throws) on any ineligibility or error.
-    const consultationOffer = includeConsultationOffer && !isInternalRefresh
+    // "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+    // every eligible open estimate, booked from the estimate itself (routes/estimate-assessment-public.js). Nothing is
+    // read with the gate off. When it is offered it replaces the lead-only consultation offer below, which links to the
+    // same Waves Assessment through the lead.
+    const assessmentFirst = includeConsultationOffer && require('../config/feature-gates').estimateAssessmentFirstLive()
+      ? await require('./estimate-assessment-public')._internals.assessmentFirstFor(estimate, {
+        open: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
+        estimateData: estimateDataForIntelligence,
+      })
+      : null;
+    const consultationOffer = !assessmentFirst && includeConsultationOffer && !isInternalRefresh
       ? await buildEstimateConsultationOffer({
         estimate,
         estimateData: estimateDataForIntelligence,
@@ -31169,6 +31280,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(successReferral ? { referral: successReferral } : {}),
       ...(contactGaps ? { contactGaps } : {}),
       ...(consultationOffer ? { consultationOffer } : {}),
+      ...(assessmentFirst ? { assessmentFirst } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
       // frequency key, the program's annual application count when that
       // count is a catalog lawn plan (resolveLawnCareRecurringPlanByCount);
@@ -31187,10 +31299,11 @@ async function composeEstimateDataPayload(estimate, {
       // render (EstimateProposalDocument) prints it. The key is absent on an accepted, declined or
       // expired estimate. Copy only: no prices.
       ...beforeYouBookBlock(estimate, { open: terminalState === null }),
-      // "Proposed misting layout" (GATE_MISTING_LAYOUT_DESIGNER): the saved concept sketch and its counts, for the
-      // document render only. The key is absent with the gates off, with no saved layout, for an estimate with no
-      // misting system, and on every normal page load, so those responses stay byte-identical.
-      ...(isPdfRenderPass ? await mistingLayoutDocBlock(estimate) : {}),
+      // "Proposed misting layout" (GATE_MISTING_LAYOUT_DESIGNER): the saved concept sketch, its counts and the geometry
+      // the page animates the spray from. Page load and document render pass alike. The key is absent with the gates
+      // off, with no saved layout, for an estimate with no misting system, and for a layout drawn for another
+      // address, so those responses stay byte-identical.
+      ...(await mistingLayoutDocBlock(estimate)),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
@@ -31602,6 +31715,7 @@ async function composeEstimateDataPayload(estimate, {
         // about whether the PDF was actually emailed.
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
         ...(commercialAgreementCta ? { commercialAgreement: commercialAgreementCta } : {}),
+        ...(commercialFirstVisitCta ? { commercialFirstVisit: commercialFirstVisitCta } : {}),
         ...(consumerNoticeCta ? { consumerNotice: consumerNoticeCta } : {}),
         ...(serviceAgreementsCta ? { serviceAgreements: serviceAgreementsCta } : {}),
         // Auto-priced commercial (no quote-required proposal): React needs the
@@ -32078,6 +32192,7 @@ module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
 module.exports.serviceAgreementPreGuard = serviceAgreementPreGuard;
+module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;

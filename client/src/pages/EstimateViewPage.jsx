@@ -76,9 +76,11 @@ import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_T
 // appearance variables instead. Visual-only, applied whenever the glass theme is mounted.
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
+import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
+import { firstVisitLabel } from '../components/estimate/CommercialFirstVisitPicker';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
@@ -907,9 +909,13 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null }) {
   const phone = useIsMobile(560);
+  // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
+  // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
+  const [mistingFailed, setMistingFailed] = useState(false);
   if (!intelligence) return null;
+  const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
@@ -937,7 +943,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       </div>
 
       <p style={{
-        margin: satelliteUrl || metrics.length ? '0 0 14px' : '0',
+        margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
         lineHeight: 1.5,
@@ -945,7 +951,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         {intelligence.body || copy?.aiBody || 'We reviewed the available property details and pricing rules before preparing this estimate.'}
       </p>
 
-      {satelliteUrl ? (
+      {showMisting ? (
+        <MistingLayoutCard layout={mistingLayout} address={address} onImageError={() => setMistingFailed(true)} />
+      ) : satelliteUrl ? (
         <img
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
@@ -962,7 +970,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         />
       ) : null}
 
-      {showYourWork?.overlaySatelliteUrl ? (
+      {showYourWork?.overlaySatelliteUrl && !showMisting ? (
         <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
@@ -4820,8 +4828,10 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   const carried = {};
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
   // The offer is bound to the property it was matched against (GH codex
-  // #4853 r3 P0): a staff revision to another address drops it.
-  if (prev?.consultationOffer && !body.consultationOffer
+  // #4853 r3 P0): a staff revision to another address drops it. A refresh
+  // that now offers the free Waves Assessment (GATE_ESTIMATE_ASSESSMENT_FIRST,
+  // composed on every load) drops it too: the page carries one offer, never two.
+  if (prev?.consultationOffer && !body.consultationOffer && !body.assessmentFirst
     && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
 }
@@ -4847,6 +4857,36 @@ export function ConsultationOfferSection({ consultationOffer }) {
         target="_blank"
         rel="noopener noreferrer"
         style={estimateCallCtaStyle}
+      >
+        Pick a time
+      </a>
+    </section>
+  );
+}
+
+// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+// renders ONLY from /data's `assessmentFirst` ({ url }); the server decides eligibility (an open estimate the customer
+// is viewing, a customer account at the estimate's property, no open assessment). It links to the estimate-token
+// booking page (/estimate/:token/assessment) in a new tab, so a customer mid-configuration keeps their choices. It
+// replaces the lead-only consultation offer and never disables or replaces the estimate's own accept CTA. Glass card
+// (owner 2026-10-26: web pages keep the glass UI).
+export function AssessmentFirstSection({ assessmentFirst }) {
+  if (!assessmentFirst?.url) return null;
+  return (
+    <section data-glass="card" data-testid="assessment-first" aria-labelledby="assessment-first-title" style={estimateCard()}>
+      <h2 id="assessment-first-title" style={{ fontSize: 26, lineHeight: 1.25, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
+        Book a free Waves Assessment first
+      </h2>
+      <p style={{ fontSize: 16, color: W.textBody, lineHeight: 1.5, margin: 0 }}>
+        Want us to look before you decide? A Waves technician can visit, walk the property with you and answer your
+        questions. It&rsquo;s free, and there&rsquo;s no commitment.
+      </p>
+      <a
+        href={assessmentFirst.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-glass-accent=""
+        style={{ ...estimateCallCtaStyle, display: 'block', width: 'fit-content', marginLeft: 'auto', marginRight: 'auto' }}
       >
         Pick a time
       </a>
@@ -6653,9 +6693,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
-  // sees it signed without a manual reload. Listens only while the notice blocks the accept.
+  // sees it signed without a manual reload; so does the signer of an eligible commercial proposal, whose first-visit
+  // picker shows once the agreement is signed (GATE_COMMERCIAL_FIRST_VISIT). Listens only while one of them waits.
+  const awaitingSignature = consumerNoticeBlocked || data?.cta?.commercialFirstVisit?.state === 'after_signing';
   useEffect(() => {
-    if (!consumerNoticeBlocked) return undefined;
+    if (!awaitingSignature) return undefined;
     const refresh = () => {
       if (ctaPhaseRef.current === 'submitting') return;
       loadEstimate({ preserveSelection: true }).catch(() => {});
@@ -6668,7 +6710,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       window.removeEventListener('pageshow', onPageShow);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [consumerNoticeBlocked, loadEstimate]);
+  }, [awaitingSignature, loadEstimate]);
 
 
   // A different estimate token is a fresh session — let its first load count.
@@ -9816,8 +9858,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             state="accepted"
             customerFirstName={estimate.customerFirstName}
             address={estimate.address}
-            // Booked + upcoming visit → show the date, not "we'll follow up".
-            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            // Booked + upcoming visit → show the date, not "we'll follow up". A commercial proposal's
+            // self-booked first visit (GATE_COMMERCIAL_FIRST_VISIT) rides cta.commercialFirstVisit.
+            appointmentLabel={existingAppointment
+              ? formatAppointmentLabel(existingAppointment)
+              : (cta?.commercialFirstVisit?.state === 'booked' ? firstVisitLabel(cta.commercialFirstVisit.visit) : null)}
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
@@ -9853,6 +9898,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
@@ -9885,12 +9931,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
-        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
+        <CommercialAgreementSign
+          token={token}
+          commercialAgreement={cta?.commercialAgreement}
+          firstVisit={cta?.commercialFirstVisit}
+          // Booking the first visit accepts the proposal: reload, so the page shows the accepted card with the visit.
+          onFirstVisitBooked={() => { loadEstimate({ preserveSelection: true }).catch(() => {}); }}
+        />
         {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -9978,7 +10030,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -10021,6 +10073,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -10632,6 +10685,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {glassContent ? null : aiPanelBlock}
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+          {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
 
           {bookingContent}
 
@@ -10683,6 +10737,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 address={estimate.address}
                 copy={copy}
                 showYourWork={data.showYourWork || null}
+                mistingLayout={data.mistingLayout || null}
                 lockInCta={canShowSlotPicker
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}

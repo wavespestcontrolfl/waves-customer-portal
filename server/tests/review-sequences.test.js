@@ -8205,3 +8205,98 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
   });
 
 });
+
+// Owner 2026-10-27 ("FIX"): a real completion stamps the record with the CLOSE day, so a
+// visit worked days earlier and closed late got "Thanks for having us out today." The
+// drafter now gets the day the visit was worked (services/review-visit-day.js); the
+// request row keeps the record's date.
+describe('the drafter\'s date is the day the visit was worked (review-visit-day.js)', () => {
+  const { etCalendarDayOf } = require('../utils/datetime-et');
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000);
+
+  function lateCloseFixture({ id, arrivedAt, scheduledDate, recordDate = new Date(), email = false }) {
+    return makeMock({
+      ...(email ? {
+        email_templates: [{ id: `tpl-${id}`, template_key: 'review_request_email', active_version_id: `ver-${id}` }],
+        email_template_versions: [{ id: `ver-${id}`, blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+        notification_prefs: [{ customer_id: id, review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+      } : {}),
+      customers: [{ id, first_name: 'Lena', last_name: 'K', phone: '+19410000301', email: 'x@y.com', nearest_location_id: 'bradenton' }],
+      scheduled_services: [{ id: `ss-${id}`, customer_id: id, service_type: 'Quarterly Pest Control', scheduled_date: scheduledDate, arrived_at: arrivedAt, completed_at: recordDate, technician_id: 'tech-c' }],
+      service_records: [{ id: `sr-${id}`, customer_id: id, scheduled_service_id: `ss-${id}`, technician_id: 'tech-c', service_type: 'Quarterly Pest Control', status: 'completed', service_date: recordDate, created_at: recordDate }],
+      technicians: [{ id: 'tech-c', name: 'Christopher Adams' }],
+    });
+  }
+  const touch = (mock, id, extra = {}) => ReviewService.sendOutreachTouch({
+    customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'sequence',
+    sequenceId: `seq-${id}`, sequenceStep: 0, serviceRecordId: `sr-${id}`, scheduledServiceId: `ss-${id}`, manageRetryVia: 'sequence', ...extra,
+  });
+
+  test('tech voice Day-0, a visit worked 22 days before its close: the drafter gets the arrival; the row keeps the record date', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const arrived = daysAgo(22);
+    const mock = lateCloseFixture({ id: 'wd-1', arrivedAt: arrived, scheduledDate: etCalendarDayOf(arrived) });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-1');
+
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(etCalendarDayOf(mockDraftTechVoice.mock.calls[0][0].serviceDate)).toBe(etCalendarDayOf(arrived));
+    expect(etCalendarDayOf(mock.__state.rows.review_requests[0].service_date)).toBe(etCalendarDayOf(new Date()));
+  });
+
+  test('tech voice Day-0, a same-day close: the record\'s date, unchanged', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const closed = new Date();
+    const mock = lateCloseFixture({ id: 'wd-2', arrivedAt: closed, scheduledDate: etCalendarDayOf(closed), recordDate: closed });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-2');
+
+    expect(mockDraftTechVoice.mock.calls[0][0].serviceDate).toBe(closed);
+  });
+
+  test('no arrival stamp: the scheduled day, when it is earlier than the close', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const scheduled = etCalendarDayOf(daysAgo(3));
+    const mock = lateCloseFixture({ id: 'wd-3', arrivedAt: null, scheduledDate: scheduled });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-3');
+
+    expect(mockDraftTechVoice.mock.calls[0][0].serviceDate).toBe(scheduled);
+  });
+
+  test('an arrival stamp from an aborted earlier attempt (before the scheduled day) does not count', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const closed = new Date();
+    const mock = lateCloseFixture({ id: 'wd-4', arrivedAt: daysAgo(4), scheduledDate: etCalendarDayOf(closed), recordDate: closed });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-4');
+
+    expect(mockDraftTechVoice.mock.calls[0][0].serviceDate).toBe(closed);
+  });
+
+  test('tech voice off: a drafted follow-up text gets the same date', async () => {
+    const arrived = daysAgo(9);
+    const mock = lateCloseFixture({ id: 'wd-5', arrivedAt: arrived, scheduledDate: etCalendarDayOf(arrived) });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-5', { sequenceStep: 1 });
+
+    expect(mockDraftAskBody).toHaveBeenCalledTimes(1);
+    expect(etCalendarDayOf(mockDraftAskBody.mock.calls[0][0].serviceDate)).toBe(etCalendarDayOf(arrived));
+  });
+
+  test('tech voice off: a drafted email intro gets the same date', async () => {
+    const arrived = daysAgo(6);
+    const mock = lateCloseFixture({ id: 'wd-6', arrivedAt: arrived, scheduledDate: etCalendarDayOf(arrived), email: true });
+    db.mockImplementation(mock);
+
+    await touch(mock, 'wd-6', { channel: 'email', templateId: 'final_nudge', sequenceStep: 2 });
+
+    expect(mockDraftEmailIntro).toHaveBeenCalledTimes(1);
+    expect(etCalendarDayOf(mockDraftEmailIntro.mock.calls[0][0].serviceDate)).toBe(etCalendarDayOf(arrived));
+  });
+});

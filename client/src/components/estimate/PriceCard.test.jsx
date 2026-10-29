@@ -83,7 +83,7 @@ describe('PriceCard — estimate-wide no-guarantee policy', () => {
 
     expect(screen.queryByText(/Free re-service between recurring visits/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Exterior perimeter protection/i)).toBeInTheDocument();
-    expect(screen.getByText(/Interior service support/i)).toBeInTheDocument();
+    expect(screen.getByText(/Interior treatment on the first visit, then whenever you ask/i)).toBeInTheDocument();
   });
 });
 

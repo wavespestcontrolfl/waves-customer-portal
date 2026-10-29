@@ -236,12 +236,14 @@ describe('source contracts', () => {
     expect(completion).toMatch(/fromStatus = lockedSvcRow\.status;[\s\S]{0,1200}?const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS\.find\([\s\S]{0,300}?\{ code: 'issued_visit_identity_changed' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'issued_visit_identity_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     expect(completion).toMatch(/if \(\(!resumingCommittedCompletion \|\| packetEffects\) && !quietCloseoutActivity\) \{\s*try \{\s*const writeActivity = async/);
-    // r12: a settled issued invoice releases a live card hold instead of parking it; the referral credit posts quietly; the card mint runs on the silent backfill path.
+    // r12: a settled issued invoice releases a live card hold instead of parking it; the referral credit posts (the closeout stays quiet; the referrer's thank-you email goes at the next 9:00 AM ET, owner 2026-10-29); the card mint runs on the silent backfill path.
     expect(completion).toMatch(/\} else if \(isBackfillCompletion\) \{[\s\S]{0,1600}?if \(liveHold && issuedInvoiceCloseout && \['paid', 'prepaid'\]\.includes\(String\(invoice\.status\)\)\) \{\s*const release = await CardHolds\.releaseCardHold\(\{ scheduledServiceId: svc\.id, reason: 'issued_invoice_settled' \}\);/);
-    expect(completion).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);[\s\S]{0,400}?creditReferralOnFirstService\(\{ customerId: svc\.customer_id, serviceId: svc\.id, notify: !issuedInvoiceCloseout \}\)/);
+    expect(completion).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);[\s\S]{0,400}?creditReferralOnFirstService\(\{ customerId: svc\.customer_id, serviceId: svc\.id \}\)/);
     expect(completion).toMatch(/if \(!packetEffects && \(!isInternalOnlyCompletion \|\| issuedInvoiceCloseout\) && cardMintOutcomePerformed\) \{/);
     const referral = fs.readFileSync(path.join(__dirname, '../services/referral-engine.js'), 'utf8');
-    expect(referral).toMatch(/async function creditReferralOnFirstService\(\{ customerId, serviceId, notify = true \}\)[\s\S]*?if \(notify && outcome\.referral\.promoter_id\) \{/);
+    // The credit sends nothing itself; sendDueReferralRewardEmails emails the referrer at the next 9:00 AM ET.
+    expect(referral).toMatch(/async function creditReferralOnFirstService\(\{ customerId, serviceId \}\)/);
+    expect(referral).toMatch(/async function sendDueReferralRewardEmails\(/);
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     // The settled-statement retry rides the DAILY closeout cron (GitHub r4 P2 #5886), no longer the Tue–Fri dunning tick.
     expect(scheduler).toMatch(/runExclusive\('invoice-issued-closeout-retry', async \(\) => \{[\s\S]{0,900}?retrySettledStatementCloseouts\(\);/);

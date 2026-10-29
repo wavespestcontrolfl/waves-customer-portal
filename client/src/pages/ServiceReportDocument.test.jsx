@@ -66,7 +66,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/keep people and pets off treated areas/i)).toBeInTheDocument();
     // snake_case units and trailing zeros never reach the customer
     expect(screen.getByText('5 fl oz')).toBeInTheDocument();
-    expect(screen.getByText('10 g/gal')).toBeInTheDocument();
+    expect(screen.getByText('10 g per gal')).toBeInTheDocument();
   });
 
   // Owner ask 2026-09-28: every record of service links to the public Products

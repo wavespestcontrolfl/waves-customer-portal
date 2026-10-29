@@ -173,7 +173,17 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath('/estimate/termite')).toBe(false);
     expect(isEstimatePath('/estimate/bed-bug')).toBe(false);
     expect(isEstimatePath('/estimate/top-dressing')).toBe(false);
-    // Not single-segment estimate paths at all.
+    // The estimate's assessment booking page carries the same bearer token (GATE_ESTIMATE_ASSESSMENT_FIRST).
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/assessment`)).toBe(true);
+    expect(isEstimatePath('/estimate/jane-doe-9f8e7d6c/assessment/')).toBe(true);
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/Assessment`)).toBe(true);
+    const res = mockResponse();
+    applySensitiveSpaHeaders(`/estimate/${ESTIMATE_TOKEN}/assessment`, res);
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    // Not estimate pages at all.
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/other`)).toBe(false);
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
   });

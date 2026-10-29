@@ -824,18 +824,38 @@ async function acceptanceSetupFeeMatchesAuthority({ invoice, estimateId }, conn 
   return billedCents === waveGuardCents + claimCents;
 }
 
-function sumBaseApplicationCents(row) {
+// `alsoCount` (optional line predicate): lines that count beside the base
+// application, priced the same way — sumVisitChargeCents' own add-on lines.
+function sumBaseApplicationCents(row, { alsoCount = null } = {}) {
   let items = row?.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
   if (!Array.isArray(items)) return 0;
   const { lineIsBaseApplication } = require('./invoice');
+  const counts = (li) => lineIsBaseApplication(li) || (alsoCount !== null && alsoCount(li));
   return items.reduce((sum, li) => {
     const qty = li?.quantity != null ? Number(li.quantity) : 1;
     const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-    return Number.isFinite(amt) && amt > 0 && lineIsBaseApplication(li) ? sum + Math.round(amt * 100) : sum;
+    return Number.isFinite(amt) && amt > 0 && counts(li) ? sum + Math.round(amt * 100) : sum;
   }, 0);
+}
+
+// The visit's own charge across `rows`, in cents (GATE_SETUP_FEE_APPLICATION_SETTLED):
+// the base application lines sumBaseApplicationCents counts plus the visit's
+// own add-on lines (client_id `scheduled_<visitId>_addon_<row>`, written by the
+// service mint) — the same lines the frozen visit charge (mint amount or
+// estimated_price) was priced from, so coverage compares like with like. A
+// first visit carrying the setup fee as a "WaveGuard Membership" add-on is
+// frozen at base + fee and billed on exactly those two lines (prod alert of
+// 2026-08-25). Zero without a positive base line: add-ons billed on their own
+// never stand in for the application.
+function sumVisitChargeCents(rows, visitId) {
+  const baseCents = rows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0);
+  if (!visitId || baseCents <= 0) return 0;
+  const addonPrefix = `scheduled_${visitId}_addon_`;
+  const alsoCount = (li) => String(li?.client_id || '').startsWith(addonPrefix);
+  return rows.reduce((sum, r) => sum + sumBaseApplicationCents(r, { alsoCount }), 0);
 }
 
 module.exports = {
@@ -864,4 +884,5 @@ module.exports = {
   sumPositiveSetupFeeCents,
   acceptanceSetupFeeMatchesAuthority,
   sumBaseApplicationCents,
+  sumVisitChargeCents,
 };

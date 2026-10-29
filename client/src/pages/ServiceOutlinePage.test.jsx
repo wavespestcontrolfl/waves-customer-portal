@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServiceOutlinePage from './ServiceOutlinePage';
@@ -179,7 +179,7 @@ describe('ServiceOutlinePage drawn sections', () => {
   it('draws the detailed month list: open months show the visit text and the at-home line, the rest open on a tap', async () => {
     const content = v13Content();
     const year = content.sections.find((s) => s.key === 'program_year');
-    year.body = 'This month and the next two are open. Tap any month to see what that visit does and one thing to do at home.';
+    year.body = 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.';
     year.visual = {
       ...year.visual,
       type: 'months',
@@ -241,5 +241,104 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(screen.getByText('Turf type')).toBeInTheDocument();
     expect(screen.getByText('St. Augustine')).toBeInTheDocument();
     expect(screen.queryByText('Program')).not.toBeInTheDocument();
+  });
+
+  // GATE_TS_OUTLINE: a Tree & Shrub packet names its program; two treatment cards share the fertilizer icon.
+  it('names the Tree & Shrub program in the badge and the tab title, and draws cards that share an icon', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const content = {
+      ...v13Content(),
+      serviceLine: 'tree_shrub',
+      title: 'Your Waves Tree & Shrub Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every landscape' },
+      sections: [{
+        key: 'treatment_categories',
+        title: 'Treatments That May Be Used',
+        body: 'Which ones a visit uses depends on what the plants show.',
+        bullets: ['Palm fertilizer: Slow-release.', 'Shrub fertilizer: Slow-release, twice a year.'],
+        visual: { type: 'categories', items: [
+          { key: 'feeding', label: 'Palm fertilizer', text: 'Slow-release.' },
+          { key: 'feeding', label: 'Shrub fertilizer', text: 'Slow-release, twice a year.' },
+        ] },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Treatments That May Be Used' });
+    expect(screen.getByText('Tree & Shrub Program')).toBeInTheDocument();
+    expect(screen.queryByText('Lawn Care Program')).not.toBeInTheDocument();
+    // The tab title is set in an effect after the packet renders: wait for it (CI ran the check before the effect).
+    await waitFor(() => expect(document.title).toBe('Your Tree & Shrub Program Overview | Waves'));
+    const cards = within(sectionOf('Treatments That May Be Used')).getAllByRole('listitem');
+    expect(cards.map((card) => card.querySelector('span span').textContent)).toEqual(['Palm fertilizer', 'Shrub fertilizer']);
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+  });
+
+  it('a packet with no service line stays the lawn program', async () => {
+    renderWith(v13Content());
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Lawn Care Program')).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe('Your Lawn Care Program Overview | Waves'));
+  });
+
+  // GATE_PEST_OUTLINE: a Pest Control packet names its program and draws the year as four season rows.
+  it('names the Pest Control program and draws the year as season rows, the build season open', async () => {
+    const seasons = [['Winter', 1], ['Spring', 4], ['Summer', 7], ['Fall', 10]];
+    const content = {
+      ...v13Content(),
+      serviceLine: 'pest_control',
+      title: 'Your Waves Pest Control Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every home' },
+      sections: [{
+        key: 'program_year',
+        title: 'Your Year At A Glance',
+        body: 'Every visit follows the same routine, so each season shows what is active.',
+        bullets: seasons.map(([label]) => `${label}: visit. At home: tip.`),
+        visual: {
+          type: 'months',
+          labels: {},
+          limitLabel: null,
+          months: seasons.map(([label, month]) => ({ month, label, name: label, main: [], asNeeded: [], limited: false, visit: `${label} watch-for line.`, atHome: `${label} tip.`, open: label === 'Fall' })),
+        },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Pest Control Program')).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe('Your Pest Control Program Overview | Waves'));
+    const rows = [...sectionOf('Your Year At A Glance').querySelectorAll('details')];
+    expect(rows.map((row) => row.querySelector('summary span').textContent)).toEqual(['Winter', 'Spring', 'Summer', 'Fall']);
+    expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
+    expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
+  });
+
+  // GATE_MOSQUITO_OUTLINE: a Mosquito packet names its program and draws the year as four season rows.
+  it('names the Mosquito program and draws the year as season rows, the build season open', async () => {
+    const seasons = [['Winter', 1], ['Spring', 4], ['Summer', 7], ['Fall', 10]];
+    const content = {
+      ...v13Content(),
+      serviceLine: 'mosquito',
+      title: 'Your Waves Mosquito Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One routine for every yard' },
+      sections: [{
+        key: 'program_year',
+        title: 'Your Year At A Glance',
+        body: 'Every visit follows the same routine, so each season shows what is active.',
+        bullets: seasons.map(([label]) => `${label}: visit. At home: tip.`),
+        visual: {
+          type: 'months',
+          labels: {},
+          limitLabel: null,
+          months: seasons.map(([label, month]) => ({ month, label, name: label, main: [], asNeeded: [], limited: false, visit: `${label} watch-for line.`, atHome: `${label} tip.`, open: label === 'Fall' })),
+        },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Mosquito Program')).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe('Your Mosquito Program Overview | Waves'));
+    const rows = [...sectionOf('Your Year At A Glance').querySelectorAll('details')];
+    expect(rows.map((row) => row.querySelector('summary span').textContent)).toEqual(['Winter', 'Spring', 'Summer', 'Fall']);
+    expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
+    expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
   });
 });

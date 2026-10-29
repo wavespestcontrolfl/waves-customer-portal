@@ -1488,12 +1488,6 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       }
     }
     if (reviewNotRecorded) throw reviewNotRecorded;
-    // A settled invoice may be gating a payment-held WDO report — nudge
-    // the release sweep like the single-invoice path does (codex r22 P3);
-    // the 60s interval remains the fallback.
-    try {
-      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
-    } catch { /* interval-backed */ }
   }
 
   // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
@@ -2354,9 +2348,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
-    // report — nudge the release sweep (60s interval is the fallback).
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
   }
 
   // ── Bell + push for the admin team ──

@@ -38,7 +38,6 @@ jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async 
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => undefined) }));
-jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
@@ -533,22 +532,16 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
   const card = (over = {}) => openInvoice({ updated_at: SEEN, ...over });
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
-  // `projects` / `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
-    const calls = { update: null, updateArgs: null, paymentsInsert: null, projectsLocked: false };
+  // `terms` feed the fence's own lookups on the plain connection and on the trx.
+  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+    const calls = { update: null, updateArgs: null, paymentsInsert: null };
     const answer = (table, row) => {
-      if (table === 'projects') {
-        const r = recorder();
-        r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
-        r.select = jest.fn(async () => projects);
-        return r;
-      }
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
       return null || row;
     };
     db.mockImplementation((table) => {
       if (table === 'invoices') return recorder({ first: { ...pre } });
-      if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+      if (table === 'annual_prepay_terms') return answer(table);
       if (table === 'scheduled_services') return recorder({ first: visit });
       if (table === 'time_entries') return recorder({ first: timer });
       if (table === 'activity_log') return recorder();
@@ -568,7 +561,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
-        if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+        if (table === 'annual_prepay_terms') return answer(table);
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
@@ -658,32 +651,6 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
       expect(out.invoice).toBeDefined();
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-    });
-
-    test.each(['held', 'releasing'])('a %s report that appeared by the lock refuses and rolls back; the project rows are locked FOR UPDATE', async (status) => {
-      const calls = settle({ projects: [{ id: 'p1', report_hold_status: status }] });
-      const fence = settlementFenceFor(pin());
-      // The plain-connection run sees the report too, so the Stripe session is never retired for it.
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence }));
-      expect(err).toMatchObject({ statusCode: 409, drift: true });
-      expect(err.message).toMatch(/releases a held report to the customer/);
-      expect(calls.paymentsInsert).toBeNull();
-      expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
-    });
-
-    test('the lock-time report check locks the project rows, and a released or absent report records', async () => {
-      const calls = settle({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
-      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
-      expect(calls.projectsLocked).toBe(true);
-      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-    });
-
-    test('a report lookup that throws aborts the settlement and records nothing (fail closed)', async () => {
-      const calls = settle();
-      const base = db.getMockImplementation();
-      db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
-      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) })).rejects.toThrow(/report_hold_status/);
-      expect(calls.paymentsInsert).toBeNull();
     });
 
     test.each([

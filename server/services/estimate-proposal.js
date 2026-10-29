@@ -294,6 +294,9 @@ function normalizeProgram(raw = {}) {
   // payload — a caller-supplied annual that disagrees with its own factors
   // would let the rendered per-visit math contradict the billed total.
   const annual = roundMoney(pricePerApplication * frequencyPerYear);
+  // The builder's visit length in minutes (services/commercial-first-visit.js sizes a self-booked first visit and its
+  // series from it). Absent when unset, so a proposal saved before the field normalizes exactly as before.
+  const visitMinutes = cleanBoundedInt(raw.visitMinutes, { min: 5, max: 480 });
   return {
     // A stable id (same shape as a line's) so an editor save can carry a program's identity by identity, never by position.
     ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
@@ -303,6 +306,7 @@ function normalizeProgram(raw = {}) {
     frequencyPerYear,
     pricePerApplication,
     annual,
+    ...(visitMinutes ? { visitMinutes } : {}),
     taxable: raw.taxable === true,
     note: cleanString(raw.note, 300),
     inclusions: cleanStringList(raw.inclusions, { maxItems: 12, maxLen: 200 }),
@@ -357,6 +361,16 @@ function normalizeCommercialTerms(raw) {
     accessRequirements: cleanString(raw.accessRequirements, 200),
   };
   return Object.values(terms).some((v) => v !== null) ? terms : null;
+}
+
+// What the site is used for, which decides Florida sales tax on pest work (Rule 12A-1.009): homes, apartments,
+// condos and their common areas are residential and not taxed, whoever pays; a business building is taxed. The
+// builder's pick sets each row's Taxable default (owner 2026-10-28, proposal defaults check). Null when unset (every
+// proposal saved before the pick existed).
+const BUILDING_USES = new Set(['residential', 'nonresidential']);
+function normalizeBuildingUse(raw) {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return BUILDING_USES.has(value) ? value : null;
 }
 
 function normalizeBuilding(raw = {}, index = 0) {
@@ -777,6 +791,7 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
+  const buildingUse = normalizeBuildingUse(base.buildingUse);
 
   return {
     enabled: base.enabled === true,
@@ -786,6 +801,8 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     propertyAddress: String(base.propertyAddress || estimate.address || '').slice(0, 200),
     taxRate: Math.min(1, Math.max(0, num(base.taxRate, 0))),
     taxLabel: String(base.taxLabel || 'Sales tax').slice(0, 60),
+    // Present only when picked, so a proposal saved before the pick keeps its exact shape.
+    ...(buildingUse ? { buildingUse } : {}),
     terms: base.terms ? String(base.terms).slice(0, 2000) : null,
     ...(base.validThrough ? { validThrough: base.validThrough } : {}),
     buildings,
@@ -904,6 +921,7 @@ module.exports = {
   normalizeCorrectiveWork,
   normalizeCustomerResponsibilities,
   normalizeCommercialTerms,
+  normalizeBuildingUse,
   normalizePrograms,
   PROGRAM_FAMILIES,
   normalizePaymentTerms,

@@ -703,29 +703,20 @@ describe('products', () => {
     expect(pressedMethod(editorFor('Iron Plus'))).toBe('Spot treatment');
   });
 
-  describe('GATE_REPORT_CLEANUP_1020 methodCorrection', () => {
+  describe('granular method default', () => {
     const arena = { id: 'aaaaaaaa-0000-4000-8000-0000000000a1', name: 'Arena 0.25G', category: 'insecticide', formulation: 'granular' };
-    const ctxWith = (extra) => context({
-      ...extra,
+    const ctxWith = () => context({
       plannedProducts: { source: 'plan', items: [
         { productId: arena.id, name: arena.name, applicationMethod: 'broadcast_spray', amount: 8, amountUnit: 'lb' },
         PLANNED[0],
       ] },
     });
-    const open = (extra) => openSheet({ request: makeRequest({ ctx: ctxWith(extra) }), props: { catalog: [...CATALOG, arena] } });
+    const open = () => openSheet({ request: makeRequest({ ctx: ctxWith() }), props: { catalog: [...CATALOG, arena] } });
 
-    test('flag on: a granular product starts on Granular broadcast even when the plan carries a spray method; a spray product keeps it', async () => {
-      await open({ methodCorrection: true });
+    test('a granular product starts on Granular broadcast even when the plan carries a spray method; a spray product keeps it', async () => {
+      await open();
       expect(pressedMethod(editorFor('Arena 0.25G'))).toBe('Granular broadcast');
       expect(pressedMethod(editorFor('Talak 7.9%'))).toBe('Broadcast spray');
-    });
-
-    test('flag off or absent: the plan\'s method stands, as before', async () => {
-      await open({ methodCorrection: false });
-      expect(pressedMethod(editorFor('Arena 0.25G'))).toBe('Broadcast spray');
-      cleanup();
-      await open({});
-      expect(pressedMethod(editorFor('Arena 0.25G'))).toBe('Broadcast spray');
     });
   });
 

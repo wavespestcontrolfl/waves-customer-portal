@@ -121,10 +121,28 @@ function normalizeRisers(raw, lineCount) {
   });
 }
 
-// The pump is required: the layout shows where the cabinet sits and how far it is from the lines.
+// Pynamite's Cube Pro owner's manual and Nozzle and Riser guide: what staff confirm about the pump spot. Same keys as
+// client/src/lib/mistingLayoutExtras.js PUMP_CHECKS.
+const PUMP_CHECK_KEYS = Object.freeze(['outlet', 'level', 'dry', 'stucco']);
+
+// All four must be exactly true to save; an unknown key or a non-boolean value is a malformed payload.
+function normalizePumpChecks(raw) {
+  if (raw === undefined || raw === null) throw operationalError('Confirm the pump checklist');
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw operationalError('pump checks must be an object');
+  Object.keys(raw).forEach((key) => {
+    if (!PUMP_CHECK_KEYS.includes(key)) throw operationalError(`pump checks has an unknown key: ${key.slice(0, 40)}`);
+    if (typeof raw[key] !== 'boolean') throw operationalError(`pump check ${key} must be true or false`);
+  });
+  if (!PUMP_CHECK_KEYS.every((key) => raw[key] === true)) throw operationalError('Confirm the pump checklist');
+  return Object.fromEntries(PUMP_CHECK_KEYS.map((key) => [key, true]));
+}
+
+// The pump is required: the layout shows where the cabinet sits and how far it is from the lines. It carries the checklist
+// for its spot (stored in the same jsonb, so no migration); an older saved pump has none and still reads.
 function normalizePump(raw) {
   if (raw === undefined || raw === null) throw operationalError('A layout needs the pump placed');
-  return point(raw, 'pump');
+  const spot = point(raw, 'pump');
+  return { ...spot, checks: normalizePumpChecks(raw.checks) };
 }
 
 function normalizeZones(raw) {

@@ -14,7 +14,7 @@ const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
-const { validateLayoutPayload, looksLikePng, operationalError, sameProperty } = require('./misting-layout-validate');
+const { validateLayoutPayload, looksLikePng, operationalError, sameProperty, ZONE_KINDS } = require('./misting-layout-validate');
 const { estimateDataCarriesMosquitoMisting } = require('./pricing-engine/v1-legacy-mapper');
 
 const MISTING_LAYOUT_PREFIX = 'service-photos/misting-layouts/';
@@ -179,10 +179,59 @@ function estimateHasMisting(estimate) {
   }
 }
 
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+const pointOf = (p) => (p && num(p.x) !== null && num(p.y) !== null ? { x: num(p.x), y: num(p.y) } : null);
+
 /**
- * The /data key for the estimate document (EstimateProposalDocument): `{ mistingLayout }`, or `{}`.
+ * The geometry the customer estimate page animates the spray from: positions in the 1280 by 960 map space, the
+ * lines (an aim is derived from them), manual aims, zones, the pump and the map center and zoom. Projected field
+ * by field from the stored jsonb, so nothing else the row holds (line ids, staff ids, the picture key, prices)
+ * can ride along. Entries that are not valid points are dropped.
+ */
+function publicGeometry(row) {
+  const list = (v) => (Array.isArray(parsed(v, [])) ? parsed(v, []) : []);
+  const lines = list(row.lines).map((line) => ({
+    kind: line?.kind === 'fence' || line?.kind === 'bed' ? line.kind : 'eave',
+    points: (Array.isArray(line?.points) ? line.points : []).map(pointOf).filter(Boolean),
+  })).filter((line) => line.points.length > 1);
+  const nozzles = list(row.nozzles).map((n) => {
+    const p = pointOf(n);
+    if (!p) return null;
+    const out = { ...p, kind: n.kind === 'fence' ? 'fence' : 'eave', lineIndex: Number.isInteger(n.lineIndex) ? n.lineIndex : null };
+    if (num(n.aim) !== null && n.aim !== null && n.aim !== '') out.aim = num(n.aim);
+    return out;
+  }).filter(Boolean);
+  const risers = list(row.risers).map((r) => {
+    const p = pointOf(r);
+    if (!p) return null;
+    const out = { ...p };
+    if (r.source === 'bed' || r.source === 'manual') out.source = r.source;
+    if (Number.isInteger(r.lineIndex)) out.lineIndex = r.lineIndex;
+    return out;
+  }).filter(Boolean);
+  const zones = list(row.zones).map((z) => {
+    const p = pointOf(z);
+    return p && ZONE_KINDS.includes(z.kind) && num(z.radiusFt) !== null ? { kind: z.kind, ...p, radiusFt: num(z.radiusFt) } : null;
+  }).filter(Boolean);
+  return {
+    center: { lat: num(row.center_lat), lng: num(row.center_lng) },
+    zoom: num(row.zoom),
+    mapWidth: num(row.map_width),
+    mapHeight: num(row.map_height),
+    lines,
+    nozzles,
+    risers,
+    pump: pointOf(parsed(row.pump, null)),
+    zones,
+  };
+}
+
+/**
+ * The /data key for the customer estimate: `{ mistingLayout }`, or `{}`. It rides the normal page load (the page shows
+ * the layout in place of the satellite photo and animates the spray from `geometry`) and the document render pass
+ * (EstimateProposalDocument, which ignores `geometry`).
  * `{}` with the gates off, with no saved layout, or for an estimate with no misting system, so those
- * documents stay byte-identical. Fail-soft: a storage hiccup omits the section, never the document.
+ * responses stay byte-identical. Fail-soft: a storage hiccup omits the section, never the response.
  */
 async function mistingLayoutDocBlock(estimate, { knex = db } = {}) {
   if (!layoutEnabled() || !estimate?.id || !estimateHasMisting(estimate)) return {};
@@ -200,6 +249,7 @@ async function mistingLayoutDocBlock(estimate, { knex = db } = {}) {
         imageUrl,
         // Stable per save (each save writes a new picture key) and safe to publish: the emailed-PDF fingerprint
         // reads this instead of the expiring signed link, so replacing a layout invalidates a rendered attachment.
+        // `geometry` stays out of that fingerprint for the same reason: every save changes the revision.
         revision: crypto.createHash('sha256').update(row.snapshot_s3_key).digest('hex').slice(0, 16),
         address: row.address || null,
         counts: {
@@ -211,6 +261,7 @@ async function mistingLayoutDocBlock(estimate, { knex = db } = {}) {
           zones: Array.isArray(zones) ? zones.length : 0,
           pump: Boolean(parsed(row.pump, null)),
         },
+        geometry: publicGeometry(row),
       },
     };
   } catch (err) {

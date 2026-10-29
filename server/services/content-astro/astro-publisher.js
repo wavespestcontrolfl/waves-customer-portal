@@ -4315,6 +4315,8 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
       if (hold.pending) throw new Error(`PR #${pr.number} cannot merge: ${hold.reason}`);
     }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
+    // Unpublish PRs only remove a page, so a spoke brand leak cannot ship on them.
+    if (!isUnpublish) await assertBrandIsolationClear(pr);
 
     const doMerge = () => gh.mergePr(post.astro_pr_number, {
       method: 'squash',
@@ -5225,6 +5227,60 @@ async function assertCodexReviewClear(prNumber, { headSha = null } = {}) {
   throw err;
 }
 
+// The astro repo's `brand-isolation` job catches hub brand/links leaking onto
+// spoke sites. That leak is invisible to the Cloudflare hub preview and to
+// Codex, so every portal merge must wait for the job to pass on the PR's
+// CURRENT head. The content PAT lacks Checks read (check-runs is a 403), so
+// this reads the Actions API instead. It fails closed: no run yet, a run still
+// going, a missing job or a lookup error all block the merge.
+const BRAND_ISOLATION_WORKFLOW_PATH = '.github/workflows/brand-isolation.yml';
+const BRAND_ISOLATION_JOB_NAME = 'brand-isolation';
+
+function brandIsolationError(pr, message, code, reason, transient) {
+  const err = new Error(`PR #${pr?.number ?? '?'}: ${message}`);
+  err.code = code;
+  err.reason = reason;
+  err.transient = transient;
+  return err;
+}
+
+async function assertBrandIsolationClear(pr) {
+  if (process.env.ASTRO_REQUIRE_BRAND_ISOLATION === 'false') return true;
+  const headSha = String(pr?.head?.sha || '').trim().toLowerCase();
+  if (!headSha) {
+    throw brandIsolationError(pr, 'brand-isolation cannot be checked without a head commit', 'BRAND_ISOLATION_REQUIRED', 'brand_isolation_no_head', false);
+  }
+  let runs;
+  try {
+    runs = await gh.listWorkflowRunsForHead(headSha);
+  } catch (e) {
+    throw brandIsolationError(pr, `brand-isolation lookup failed: ${e.message}`, 'BRAND_ISOLATION_LOOKUP_FAILED', 'brand_isolation_lookup_failed', true);
+  }
+  const run = (runs || [])
+    .filter((r) => r?.path === BRAND_ISOLATION_WORKFLOW_PATH
+      && String(r.head_sha || '').trim().toLowerCase() === headSha)
+    .sort((a, b) => Number(b.id) - Number(a.id))[0];
+  if (!run) {
+    throw brandIsolationError(pr, `brand-isolation has not started on head ${headSha.slice(0, 7)}`, 'BRAND_ISOLATION_REQUIRED', 'brand_isolation_pending', true);
+  }
+  if (run.status !== 'completed') {
+    throw brandIsolationError(pr, `brand-isolation is still running on head ${headSha.slice(0, 7)}`, 'BRAND_ISOLATION_REQUIRED', 'brand_isolation_pending', false);
+  }
+  let jobs;
+  try {
+    jobs = await gh.listWorkflowRunJobs(run.id);
+  } catch (e) {
+    throw brandIsolationError(pr, `brand-isolation lookup failed: ${e.message}`, 'BRAND_ISOLATION_LOOKUP_FAILED', 'brand_isolation_lookup_failed', true);
+  }
+  const job = (jobs || []).find((j) => j?.name === BRAND_ISOLATION_JOB_NAME);
+  if (!job) {
+    throw brandIsolationError(pr, `brand-isolation job is missing from run ${run.id}`, 'BRAND_ISOLATION_REQUIRED', 'brand_isolation_job_missing', false);
+  }
+  if (job.status === 'completed' && job.conclusion === 'success') return true;
+  const outcome = job.conclusion || job.status || 'unknown';
+  throw brandIsolationError(pr, `brand-isolation did not pass on head ${headSha.slice(0, 7)} (${outcome})`, 'BRAND_ISOLATION_REQUIRED', `brand_isolation_${outcome}`, false);
+}
+
 function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {}) {
   const requestedAt = latestReviewRequestAt(comments, headSha);
   const codexComments = comments
@@ -5472,6 +5528,7 @@ module.exports = {
   planInternalLinksForTarget,
   internalLinkPlanningDisabled,
   assertCodexReviewClear,
+  assertBrandIsolationClear,
   // Merge-time body-image contract for the autonomous PR poller.
   assertBodyImagesAtHead,
   scheduledBlogFilePath,

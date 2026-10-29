@@ -35,8 +35,13 @@ const DRAWN_SIGNATURE_LIMITS = Object.freeze({
 // mark their snapshots) also carries fromEstimate: true, so the signing page can offer "Back to your
 // estimate". The estimate id and token never leave the server.
 const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice', 'estimate_service_agreement']);
+// A Commercial Pest Service Agreement issued from the proposal page offers the way back too while
+// GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the estimate page.
 function publicContract(row) {
-  const fromEstimate = FROM_ESTIMATE_SOURCES.has(row.document_variables_snapshot?.estimate?.source);
+  const source = row.document_variables_snapshot?.estimate?.source;
+  const fromEstimate = FROM_ESTIMATE_SOURCES.has(source)
+    || (source === require('../services/commercial-proposal-agreement').SNAPSHOT_SOURCE
+      && require('../config/feature-gates').commercialFirstVisitLive());
   return { ...serializeContract(row, { includeAudit: false }), ...(fromEstimate ? { fromEstimate: true } : {}) };
 }
 

@@ -136,6 +136,36 @@ function formatInches(value) {
   return String(Math.round(n * 100) / 100);
 }
 
+// A week whose rain rounds to 0" has no amount to quote: "About 0" of rain"
+// read as a glitch (owner 2026-10-26). A sentence that would print a zero
+// amount says "no measurable rain" instead; the details rows keep the number
+// ("Rain at your home last week: 0"" is a reading, not a phrase).
+function noMeasurableRain(rainFmt) {
+  return rainFmt != null && Number(rainFmt) === 0;
+}
+
+// {{rain_sentence}} (the setup emails' opening sentence) and {{rain_preview}}
+// (the inbox preview). Both are OPTIONAL template variables
+// (20261026230000): empty drops the sentence rather than leaving half of it.
+function rainSentence(rainFmt) {
+  if (rainFmt == null) return '';
+  return noMeasurableRain(rainFmt)
+    ? 'No measurable rain fell near your home last week.'
+    : `About ${rainFmt}" of rain fell near your home last week.`;
+}
+
+// "Rain was light (0")" for a dry week reads wrong; the deficit lead names it.
+function lightRainLead(rainFmt) {
+  return noMeasurableRain(rainFmt)
+    ? 'There was no measurable rain near your home last week'
+    : `Rain was light near your home last week (${rainFmt}")`;
+}
+
+function rainPreview(rainFmt) {
+  if (rainFmt == null) return '';
+  return noMeasurableRain(rainFmt) ? 'No measurable rain near your home.' : `About ${rainFmt}" of rain near your home.`;
+}
+
 function roundHundredth(value) {
   const n = numberOrNull(value);
   return n == null ? null : Math.round(n * 100) / 100;
@@ -624,6 +654,8 @@ function decideWeeklyEmail({
         grass_label: grassLabelSetup,
         week_ending: weekEnding,
         rain_last_week: rainSetup,
+        rain_sentence: rainSentence(rainSetup),
+        rain_preview: rainPreview(rainSetup),
         target_inches: targetSetup,
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
@@ -731,6 +763,7 @@ function decideWeeklyEmail({
         grass_label: grassLabel,
         week_ending: weekEnding,
         rain_last_week: rain,
+        rain_preview: rainPreview(rain),
         schedule_inches: scheduleFmt,
         total_inches: totalFmt,
         target_inches: targetFmt,
@@ -767,7 +800,7 @@ function decideWeeklyEmail({
   } else if (reason === 'deficit_rain_forecast') {
     summaryLine = `Last week ran a touch light (${total}" against the ${target}" your ${grassLabel} needs), but with about ${formatInches(forecast)}" of rain in this week's forecast, your current schedule has it covered.`;
   } else if (reason === 'deficit') {
-    summaryLine = `Rain was light near your home last week (${rain}"), so with your irrigation schedule (${irrigationFmt}" per week) your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`;
+    summaryLine = `${lightRainLead(rain)}, so with your irrigation schedule (${irrigationFmt}" per week) your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`;
   } else if (reason === 'balanced_dry_forecast') {
     const projectedShortfall = formatInches(Math.round(Math.abs(projectedDifferential) * 4) / 4);
     summaryLine = `Last week landed right on target (${total}"), but rain did part of the work. With little rain in this week's forecast, your current schedule (${irrigationFmt}" per week) would come up about ${projectedShortfall}" short of the ${target}" your ${grassLabel} needs — a small bump this week will cover it.`;
@@ -867,7 +900,7 @@ function decideWeeklyEmail({
       const priorPlanPartlySkipped = priorPlanSkipped && priorPlanIrrig > 0;
       const priorPlanTotal = priorPlanIrrig != null ? roundHundredth(rainDisplayNum + priorPlanIrrig) : null;
       const lastWeekLine = scheduleUnconfirmed
-        ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        ? `${noMeasurableRain(rain) ? 'No measurable rain fell near your home last week' : `Rain near your home last week came to ${rain}"`}; your ${grassLabel} needs about ${target}" this time of year.`
         // Whether the run actually went ahead is unknowable from a weekly
         // total (the rain may have come after it) — the copy states the rule
         // and the accounting, never that the run was skipped (hook P1 on
@@ -876,12 +909,15 @@ function decideWeeklyEmail({
         ? `Last week brought ${rain}" of rain near your home — enough to trigger last week's plan's skip-one-run rule, so the rain plus one run (${formatInches(priorPlanIrrig)}" of irrigation) is counted, about ${formatInches(priorPlanTotal)}" of water in all (if both runs went ahead, your lawn is a little ahead, not behind); your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanSkipped
         ? `Last week brought ${rain}" of rain near your home — enough to trigger last week's plan's skip-the-run rule, so only the rain is counted (if the run went ahead anyway, your lawn is a little ahead, not behind); your ${grassLabel} needs about ${target}" this time of year.`
+        // Nothing fell and last week's plan was a hold: no amount to quote.
+        : priorPlanIrrig != null && noMeasurableRain(formatInches(priorPlanTotal))
+        ? `Last week brought no measurable rain near your home, and last week's plan said to skip watering, so your lawn got no measurable water; your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanIrrig != null
         ? `Between last week's rain (${rain}") and last week's watering plan (${formatInches(priorPlanIrrig)}" of irrigation), your lawn got about ${formatInches(priorPlanTotal)}" of water; your ${grassLabel} needs about ${target}" this time of year.`
         : advice.status === 'surplus'
         ? `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" more than the ${target}" your ${grassLabel} needs this time of year.`
         : advice.status === 'deficit'
-          ? `Rain was light near your home last week (${rain}"), so with ${scheduleClause} your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`
+          ? `${lightRainLead(rain)}, so with ${scheduleClause} your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`
           : `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — right in line with the ${target}" your ${grassLabel} needs this time of year.`;
       // Provenance of a derived figure (same sentence confirm_schedule uses)
       // rides the note, INCLUDING the sensor upper-bound disclosure — the
@@ -2141,6 +2177,8 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
       // Fields the exact membership predicates below read.
       'c.waveguard_tier', 'c.monthly_rate', 'c.waveguard_tier_source', 'c.billing_mode',
+      // Read by the shared whole-account hold rule below.
+      'c.service_paused_at', 'c.service_pause_reason',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
       // The most recent visit evidencing the class, so the watchdog can key
@@ -2163,7 +2201,14 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
   const { hasMembership } = require('./membership-state');
   const { isAutoDerivedTierLabelRow } = require('./self-booking-plan-sync');
   const { resolveBillingLane } = require('./billing-lane');
+  const { isCustomerServiceHeld } = require('./series-customer-eligibility');
   const gaps = [];
+  // A whole-account hold (a paused plan, owner 2026-10-28) is never pageable:
+  // a held account is not expected to have a recurring series booked, so
+  // "stamp the series" is not the fix (it paged 2026-09-12 for a customer
+  // paused 2026-09-11). Same shared rule the series top-up uses — an
+  // 'autopay_final_failure' pause stops only the dues cron, visits continue,
+  // so it still pages; an unset/unknown reason fails closed as a hold.
   // Intentional opt-out: never pageable, same rule as the evidence legs.
   // Membership must hold under the EXACT shared predicates: hasMembership
   // (real tier or paid monthly rate) minus auto-derived label-only rows —
@@ -2175,6 +2220,7 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
   // existing resolver; per_visit/per_application stay in — a real tier
   // billed at completion IS an ongoing plan.
   for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok
+    && !isCustomerServiceHeld(row)
     && hasMembership(row) && !isAutoDerivedTierLabelRow(row)
     && resolveBillingLane(row).mode !== 'one_time')) {
     // Same prerequisite validators as findLawnEmailAudienceGaps (codex

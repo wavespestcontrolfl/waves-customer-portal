@@ -112,27 +112,41 @@ describe('turf-derived add-ons inherit the review contract', () => {
       expect({ service, flagged: line?.requiresCustomQuote === true }).toEqual({ service, flagged: true });
       expect(line.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
     }
+    // Top dressing keeps the turf reason as the customQuoteReason and also
+    // lists its own quote-only reason (owner 2026-10-29).
+    const topDressing = estimate.lineItems.find((l) => l.service === 'top_dressing');
+    expect(topDressing.customQuoteReason).toBe('low_confidence_turf_requires_field_verification');
+    expect(topDressing.manualReviewReasons).toEqual(expect.arrayContaining([
+      'low_confidence_turf_requires_field_verification',
+      'top_dressing_quote_only',
+    ]));
   });
 
-  test('an explicitly entered add-on area stays exempt', () => {
+  test('an explicitly entered plugging area stays exempt; top dressing is quote-only regardless (owner 2026-10-29)', () => {
     const estimate = generateEstimate({
       ...BASE,
       services: { topDressing: { depth: 'eighth', lawnSqFt: 2000 }, plugging: { spacing: 12, area: 800 } },
     });
-    for (const service of ['top_dressing', 'plugging']) {
-      const line = estimate.lineItems.find((l) => l.service === service);
-      expect({ service, flagged: line?.requiresCustomQuote === true }).toEqual({ service, flagged: false });
-    }
+    const plugging = estimate.lineItems.find((l) => l.service === 'plugging');
+    expect(plugging?.requiresCustomQuote === true).toBe(false);
+    // Was exempt before the quote-only rule: an exact area no longer prices top dressing.
+    const topDressing = estimate.lineItems.find((l) => l.service === 'top_dressing');
+    expect(topDressing.requiresCustomQuote).toBe(true);
+    expect(topDressing.customQuoteReason).toBe('top_dressing_quote_only');
+    expect(topDressing.manualReviewReasons).not.toContain('low_confidence_turf_requires_field_verification');
   });
 
-  test('a vision turf estimate (MEDIUM, unflagged) does not park add-ons', () => {
+  test('a vision turf estimate (MEDIUM, unflagged) adds no turf-review reason to top dressing', () => {
     const estimate = generateEstimate({
       ...BASE,
       estimatedTurfSf: 4500,
       services: { topDressing: { depth: 'eighth' } },
     });
     const line = estimate.lineItems.find((l) => l.service === 'top_dressing');
-    expect(line?.requiresCustomQuote === true).toBe(false);
+    // Was `false` before the quote-only rule; the turf-review reason must still be absent.
+    expect(line.requiresCustomQuote).toBe(true);
+    expect(line.customQuoteReason).toBe('top_dressing_quote_only');
+    expect(line.manualReviewReasons).toEqual(['top_dressing_quote_only']);
   });
 });
 

@@ -17,7 +17,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots, _resetSlideShadowSample } = require('../services/scheduling/find-time');
 const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
 
-const ENV_KEYS = ['GATE_SLOT_SLIDE_OFFER', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SLOT_TRAVEL_GAP', 'GATE_BOOKING_LUNCH_BLOCK'];
+const ENV_KEYS = ['GATE_SLOT_SLIDE_OFFER', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SLOT_TRAVEL_GAP'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {

@@ -164,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const {
-  CUSTOMER_HOUR_GRID, lunchBlockEnabled, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+  CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
@@ -1045,8 +1045,7 @@ const NEARBY_DETOUR_MINUTES = 15;
 // Whole-hour windows offered on a day with no existing stops, so a customer
 // who picks/searches an otherwise-empty day gets real choice across the open
 // block instead of just the 8 AM gap start. Shared grid
-// (scheduling/customer-windows.js); addCandidate's lunchBlockEnabled() check
-// below still strips noon when GATE_BOOKING_LUNCH_BLOCK is on.
+// (scheduling/customer-windows.js); noon is a normal hour.
 const OPEN_DAY_WINDOWS = CUSTOMER_HOUR_GRID;
 
 // Rain chips (GATE_BOOKING_RAIN_CHIPS): office point for the NWS daily rain
@@ -1207,11 +1206,6 @@ function bookingSlotWindow(config = {}) {
     slotGridMinutes: 60,
     dayStartMin: timeToMin(config.day_start || '08:00'),
     dayEndMin: timeToMin(config.day_end || '18:00'),
-    // Lunch bounds are still derived unconditionally — callers gate their USE
-    // with lunchBlockEnabled() (addCandidate, validateBookingSlotGeometry) so
-    // GATE_BOOKING_LUNCH_BLOCK is the single point of control.
-    lunchStartMin: timeToMin(config.lunch_start || '12:00'),
-    lunchEndMin: timeToMin(config.lunch_end || '13:00'),
   };
 }
 
@@ -1445,10 +1439,10 @@ function resolveCallbackDuration(requested, config = {}) {
 }
 
 // Commit-time mirror of the builder's addCandidate constraints (grid
-// alignment, day window, lunch block). Returns null when the slot is one the
+// alignment, day window). Returns null when the slot is one the
 // builder could have offered, else a customer-facing rejection message.
 function validateBookingSlotGeometry({ startMin, duration, config }) {
-  const { slotGridMinutes, dayStartMin, dayEndMin, lunchStartMin, lunchEndMin } = bookingSlotWindow(config);
+  const { slotGridMinutes, dayStartMin, dayEndMin } = bookingSlotWindow(config);
   const endMin = startMin + duration;
   if (startMin % slotGridMinutes !== 0) {
     return 'That start time isn\'t one of our bookable slots — please pick another.';
@@ -1456,12 +1450,6 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
   if (startMin < dayStartMin || endMin > dayEndMin
     || (capacityEnabled() && !placementFitsShift(startMin, endMin))) {
     return 'That time is outside our working hours — please pick another slot.';
-  }
-  // Lunch windows are reserved for route health and never self-bookable —
-  // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
-  // unset by default). Off, noon is a normal bookable hour like any other.
-  if (lunchBlockEnabled() && startMin < lunchEndMin && endMin > lunchStartMin) {
-    return 'That time isn\'t available — please pick another slot.';
   }
   return null;
 }
@@ -1584,7 +1572,7 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 }
 
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
-// rangeTo], applies the lunch / whole-hour rules, then returns the
+// rangeTo], applies the whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
 // below) plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
@@ -1633,13 +1621,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // zero-grace date.
   const offerPolicyFor = (slotGrace) => bookOfferPolicy({ insertion: capacityPlacement, graceLive: slotGrace > 0 });
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
-  // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
+  // currentDayEndMinutes() — read from
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
   // estimate-slot-availability.js and slot-reservation.js (which both
   // explicitly warm it before relying on it), this file never had to before
-  // customerWindowAdmits existed — its own day-end/lunch bounds always came
+  // customerWindowAdmits existed — its own day-end bound always came
   // straight from the freshly-loaded `config` above. Warm it here too, so a
-  // reconfigured booking_config.day_end/lunch_start/_end can't leave this
+  // reconfigured booking_config.day_end can't leave this
   // offer generator on a stale or never-initialized cached value while
   // validateBookingSlotGeometry (the commit-side check in this same file)
   // reads a fresh config row on every request — the exact offer/commit
@@ -1753,10 +1741,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 
   // Slot rules come from the shared bookingSlotWindow derivation so the
   // /confirm commit path enforces exactly what is offered here.
-  const {
-    slotGridMinutes, dayStartMin, dayEndMin,
-    lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
-  } = bookingSlotWindow(config);
+  const { slotGridMinutes, dayStartMin, dayEndMin } = bookingSlotWindow(config);
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
   // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
   // blocks on unassigned zone rows and live customer-NULL estimate holds,
@@ -1838,16 +1823,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // (08:00, this file's own day-start default — matched to the voice
     // agent's 8am-6pm business-hours bound, call-recording-processor.js) —
     // self-serve callers only (selfServeNotice, same split as the notice
-    // window and the lunch gate below): an idle route's earliest-feasible
+    // window below): an idle route's earliest-feasible
     // 08:00 candidate must not reach a self-serve surface just because it
     // clears dayStartMin. Voice-agent callers keep the full shift (Codex r4
     // P0 on #4663 — capacity mode's own generator already applies this via
     // customerFacing; this closes the identical gate-off leak).
     if (selfServeNotice && !customerWindowAdmits({ startMin, endMin })) return;
-    // Lunch windows are reserved for route health and never self-booked —
-    // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
-    // unset by default). Off, noon is a normal offerable hour.
-    if (lunchBlockEnabled() && startMin < lunchEnd && endMin > lunchStart) return;
     // Self-serve notice window (owner ruling 2026-09-23) — self-serve
     // callers only (selfServeNotice opt-in; the voice agent never sets it).
     // Offer/commit parity: createSelfBooking's commit gate runs the same
@@ -1978,7 +1959,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         // the packed 11 AM sits lower in score-only ranking. A middle gap
         // (both sides real stops) offers both ends, one candidate when they
         // coincide. No fallback fan-out when the packed position collides
-        // with lunch/occupancy — that gap simply offers nothing, same as
+        // with occupancy — that gap simply offers nothing, same as
         // find-time's own packEnds rule (scheduling/find-time.js).
         const wantEarliest = !!slot.insertion?.after_stop_id;
         const wantLatest = !!slot.insertion?.before_stop_id;
@@ -1992,7 +1973,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         // Open day (no committed stops at all): fan out every grid-aligned
         // start the gap can hold, not just the earliest — find-time's
         // single-candidate-per-gap legacy shape combined with an hour-snap
-        // landing in the lunch block or on an occupied hour otherwise
+        // landing on an occupied hour otherwise
         // silently discarded the gap's genuinely free later hours (2026-08-05
         // field report). No neighbouring stop exists to create a hole
         // against, so every hour is an equally valid pick.
@@ -2504,6 +2485,18 @@ async function createSelfBooking(payload = {}) {
     // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
     // spread at every public call site (/confirm nulls it) — a crafted body
     // must never mint itself a free callback or skip the offer sig.
+    //
+    // callbackVisit.billing ({ estimatedPrice }, commercial-first-visit.js
+    // only, GATE_COMMERCIAL_FIRST_VISIT): a PAID internal booking, never a
+    // callback — the visit carries the server-resolved per-visit price and
+    // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
+    // revalidate(trx) }): a booking made from an estimate's page
+    // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
+    // that estimate inside the booking transaction (see the lock below).
+    const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
+      && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
+      ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
+      : null;
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -2985,7 +2978,7 @@ async function createSelfBooking(payload = {}) {
     const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
 
     // Commit-time re-check of the availability builder's slot rules (grid
-    // alignment, working hours, lunch block): the builder only OFFERS
+    // alignment, working hours): the builder only OFFERS
     // conforming slots, but this endpoint is public, so a crafted payload
     // must not be able to book a slot the builder would never have offered.
     const geometryError = validateBookingSlotGeometry({
@@ -3563,8 +3556,13 @@ async function createSelfBooking(payload = {}) {
       // that same fallback when the legacy profile has no saved pin. The
       // assessment caller already supplies expectedLocation from its own
       // resolved/fenced property flow, so it must not trigger a second,
-      // potentially divergent geocode here.
-      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      // potentially divergent geocode here. A booking from an estimate's page
+      // (callbackVisit.estimateGuard: commercial-first-visit.js,
+      // estimate-assessment-public.js) offers its times at
+      // customerBookingLocation, which is this same fallback, so it resolves
+      // here too and its expectedLocation fence checks the re-derived pin
+      // (Codex #6869 P1).
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false || !!callbackVisit.estimateGuard;
       const preloadedBookingLocation = shouldResolveMissingBookingLocation
         ? await preloadBookingLocation(preFenceCustomer)
         : null;
@@ -4020,6 +4018,36 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
+      // callbackVisit.estimateGuard (a booking from an estimate's page:
+      // commercial-first-visit.js, estimate-assessment-public.js): a per-estimate
+      // lock taken after every shared rung and the lane/lead locks (only these
+      // callers take the namespace, and it is the terminal lock, so no cycle),
+      // then the caller's re-check on THIS transaction: 'booked' when the one
+      // visit the caller allows landed since its read (the first visit), any
+      // other verdict but 'ok' when the estimate no longer qualifies (no longer
+      // open, signed, or clear on the call side) refuses before the insert.
+      if (callbackVisit?.estimateGuard?.estimateId) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['estimate-booking-guard', String(callbackVisit.estimateGuard.estimateId)],
+        );
+        const { revalidate } = callbackVisit.estimateGuard;
+        const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ineligible';
+        if (verdict === 'booked') {
+          throw Object.assign(new Error('Your first visit is already booked.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+        if (verdict !== 'ok') {
+          throw Object.assign(new Error('This estimate just changed — please refresh the page.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ESTIMATE_CHANGED',
+          });
+        }
+      }
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate. A
@@ -4033,6 +4061,20 @@ async function createSelfBooking(payload = {}) {
         .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
+      // A paid estimate-page booking replays only its OWN estimate's booking:
+      // another signed proposal's booking for this customer at the same start
+      // is not this one, and replaying it would mark this proposal won against
+      // that visit and price (pre-push audit P0). Its estimate guard already
+      // answers a visit linked to its own estimate as ALREADY_BOOKED, above.
+      if (paidInternalVisit) {
+        const ownEstimateId = callbackVisit.estimateGuard?.estimateId;
+        if (!ownEstimateId) replayQuery.whereRaw('false');
+        else {
+          replayQuery.whereExists((visit) => visit.select(trx.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.self_booking_id = self_booked_appointments.id')
+            .where('scheduled_services.source_estimate_id', String(ownEstimateId)));
+        }
+      }
       const existing = await replayQuery.first();
       if (existing) {
         // A callback/consultation replay (round-10 P2) must also confirm the
@@ -4374,11 +4416,14 @@ async function createSelfBooking(payload = {}) {
         // assessment. service_id still links the catalog row either way
         // (completion-profile resolution + isAssessmentServiceRow also match
         // on it), and no-invoice-on-complete is correct for both: neither
-        // visit ever bills.
+        // visit ever bills. The one billed internal visit (paidInternalVisit,
+        // a commercial first visit) carries its per-visit price and invoices
+        // on completion like a priced /book visit.
         ...(callbackVisit ? {
           is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
-          create_invoice_on_complete: false,
+          create_invoice_on_complete: !!paidInternalVisit,
+          ...(paidInternalVisit ? { estimated_price: paidInternalVisit.estimatedPrice } : {}),
         } : {}),
         // Clean re-service request storage (customer_request/_source/_pests,
         // migration 20260927100000) — internal callers only (reservice-public
@@ -4504,7 +4549,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED') {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.

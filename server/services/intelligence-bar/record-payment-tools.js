@@ -23,9 +23,8 @@
  * writes the payments ledger row and completes any active payment plan, all in one transaction; stops the
  * invoice's reminder sequence; may clear a billing pause that was waiting on a payment; may enroll the
  * customer in the post-service review sequence (a visit-completion invoice); completes the linked visit
- * quietly when GATE_INVOICE_ISSUED_CLOSES_VISIT is on; writes an activity row; and nudges the held-report release sweep.
- * An invoice a project's held report waits on (WDO payment hold) is REFUSED, because paying releases that report to the customer
- * (email, copies, text): code payment_releases_report_unsupported. Nothing else the settlement does contacts the customer at once
+ * quietly when GATE_INVOICE_ISSUED_CLOSES_VISIT is on; and writes an activity row.
+ * Nothing else the settlement does contacts the customer at once
  * (checked: billing-pause clear, payment-plan completion, reminder stop and the payment-failed bell close send nothing). The screen's
  * "Send receipt" switch is NOT offered: this card always sends the handler sendReceipt=false and sends the customer nothing. A receipt
  * is a separate act with its own card and its own queue rules: resend_receipt after recording, or the Invoices page. (Scope cut after
@@ -66,7 +65,7 @@ const RECORD_PAYMENT_TOOLS = [
     description: `Record a payment the office ALREADY RECEIVED outside the portal (cash, a check, Zelle, Venmo, PayPal or another manual payment) against ONE existing open invoice: the Invoices page "Record payment". It marks the invoice paid; it never charges a card, creates a Stripe payment, refunds or voids anything. The first call returns a PREVIEW and writes nothing: the invoice, the customer, the balance due, the method and reference, that no receipt is sent, and every change. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
 The Invoices page records the WHOLE balance due, as of today. So amount must equal the balance due on the invoice: a larger amount (overpayment) and a smaller one (a partial payment) are refused with the balance, and a payment date other than today is refused. Effects: the invoice becomes paid with the method and reference, a payment row is added, the invoice's reminders stop, an open pay-page card session on the invoice is cancelled, and a linked visit may be completed or a review ask enrolled (the card lists what applies). The customer is sent nothing: this tool does not send receipts. To send one afterwards, use resend_receipt or the Invoices page.
 Pass amount in dollars, method (cash, check, zelle, venmo, paypal or other), and reference when there is one (check number, confirmation number). send_receipt is not accepted: it is refused as capability_unimplemented. Takes invoice_id OR invoice_number, exactly one.
-Refused: a paid, prepaid, void, refunded or canceled invoice, one billed to a payer or a payer's statement, an annual-plan invoice, an invoice with nothing due, an invoice a held report (payment-held WDO report) waits on, because paying releases that report to the customer, a card payment (the bar does not take cards), a refund or negative amount, an amount that is not the balance due, a date other than today.
+Refused: a paid, prepaid, void, refunded or canceled invoice, one billed to a payer or a payer's statement, an annual-plan invoice, an invoice with nothing due, a card payment (the bar does not take cards), a refund or negative amount, an amount that is not the balance due, a date other than today.
 Use for: "record a payment", "customer paid cash", "mark paid by check", "she paid by check number 1042", "got a Zelle for this invoice", "log a Venmo payment", "mark this invoice paid".`,
     input_schema: {
       type: 'object',
@@ -204,21 +203,6 @@ async function invoiceRefusal(invoice, dueCents, amountCents) {
   return null;
 }
 
-// Recording the payment nudges the held-report release sweep (services/project-report-hold.js): a project whose report is
-// held for THIS invoice's payment ('held', or 'releasing' mid-claim) is released to the customer (email, copies, text) as soon
-// as the invoice reads paid, with no receipt switch to stop it. The card cannot disclose or pin that delivery, so it refuses
-// (preview and Confirm); a lookup that fails refuses too (fail closed).
-const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page.';
-async function heldReportRefusal(invoice) {
-  const at = { invoice_id: invoice.id };
-  try {
-    const held = await db('projects').where({ invoice_id: invoice.id }).whereIn('report_hold_status', ['held', 'releasing']).first('id');
-    return held ? refusal(HELD_REPORT_TEXT, 'payment_releases_report_unsupported', at) : null;
-  } catch {
-    return refusal(`The bar could not check whether this payment releases a held report to the customer, so it was not offered; record it on the Invoices page.`, 'payment_releases_report_unsupported', at);
-  }
-}
-
 // The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed).
 async function closeoutProbe(invoice) {
   try {
@@ -300,8 +284,6 @@ async function buildPlan(input) {
   const dueCents = toCents(invoiceAmountDue(invoice));
   const refused = await invoiceRefusal(invoice, dueCents, read.amountCents);
   if (refused) return refused;
-  const held = await heldReportRefusal(invoice);
-  if (held) return held;
   const probe = await closeoutProbe(invoice);
   if (probe.error) return probe.error;
   const { closeout } = probe;
