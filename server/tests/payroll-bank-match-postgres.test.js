@@ -249,6 +249,18 @@ postgres('payroll bank match in the bank import', () => {
         expect(await row(id)).toMatchObject({ status: 'unmatched', matched_expense_id: null });
       });
 
+      it('finds an expense entered on payday when the check clears two weeks later, and the owner may reuse it', async () => {
+        const expenseId = await manual({ expense_date: '2026-10-23' });
+        const id = await line('CHECK 1042', '812.63', '2026-11-09');
+        await bankImport.runDeterministicMatching();
+        const r = await row(id);
+        expect(r.status).toBe('unmatched');
+        expect(r.suggestion.payrollCandidates[0].existingExpenses).toEqual([expect.objectContaining({ id: expenseId })]);
+        const ok = await bankImport.claimPayrollLink({ row: r, check: { id: checkA }, by: 'owner', expenseId });
+        expect(ok).toMatchObject({ ok: true, reused: true });
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
       it('the owner\'s Unlink gives the reused expense its category and deduction back and keeps the evidence', async () => {
         const expenseId = await manual({ tax_deductible_amount: '812.63' });
         const id = await line('CHECK 1042', '812.63', '2026-10-28');

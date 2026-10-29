@@ -333,10 +333,14 @@ async function refundCandidatesForRow(row, dbOrTrx = db) {
 // by the matcher, its in-transaction recheck and post-claim verify, the
 // crash-recovery sweep for verifyPending claims, and the on-demand
 // candidate route.
-async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
+// opts.window ({ from, to }): the payroll match widens the dates for a paper check, which clears up to 45 days
+// after the pay date; every other caller keeps the +/- 5 days around the bank date.
+async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db, { window = null } = {}) {
   const txnDate = toDateStr(row.txn_date);
+  const dateFrom = window ? window.from : addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS);
+  const dateTo = window ? window.to : addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS);
   let expenseQuery = dbOrTrx('expenses')
-    .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+    .whereBetween('expense_date', [dateFrom, dateTo])
     .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
     // claims by OTHER rows only — excluding our own row's (nonexistent
     // pre-claim) claim keeps this survey valid for the post-claim
@@ -371,7 +375,7 @@ async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
       // applied OR released — both leave the expense reduced
       this.on(db.raw("((rbt.status = 'refund_applied' and rbt.suggestion->>'refundAppliedTo' = e.id::text) or (rbt.status = 'ignored' and rbt.suggestion->>'releasedRefundOf' = e.id::text))"));
     })
-    .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+    .whereBetween('e.expense_date', [dateFrom, dateTo])
     .whereNotExists(function claimed() {
       this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id').whereRaw('bt.id <> ?', [row.id]);
     })
@@ -1471,6 +1475,13 @@ function payrollPlanFor(row, txnDate, ctx, sug) {
   return payrollMatch.planTaxPayment({ row: planRow, filings: ctx.filings, peers: ctx.peers, rejected: sug.rejectedTaxFilingIds || [] });
 }
 
+// The dates an expense for this payment may carry: around the bank date as always, and for a paper check
+// back to a few days before the pay date (an expense entered on payday, the check clearing weeks later).
+function payrollExpenseWindow(txnDate, payDates) {
+  const from = [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), ...payDates.map(d => addDays(d, -EXPENSE_DATE_WINDOW_DAYS))].sort()[0];
+  return { from, to: addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS) };
+}
+
 // Claim one bank line for a paycheck or a payroll tax row: ONE transaction, the bank row and the
 // target locked, an expense in the pay-run category inserted, the line linked. by = 'auto'
 // re-plans on a fresh read under the lock (a rival line or check that appeared since the
@@ -1526,10 +1537,12 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
           .first('id', 'amount', 'expense_date', 'category_id', 'tax_deductible_amount');
         if (!existing) { result = { ok: false, reason: 'expense_gone' }; return; }
         const refunded = await appliedRefundTotal(existing.id, trx);
-        if (refunded > 0 || !isPlausibleExpenseLink(planRow, existing)) { result = { ok: false, reason: 'implausible_expense' }; return; }
+        const win = payrollExpenseWindow(txnDate, check ? [target.pay_date] : []);
+        const expDate = toDateStr(existing.expense_date);
+        if (refunded > 0 || !withinCandidateTolerance(existing.amount, live.amount) || expDate < win.from || expDate > win.to) { result = { ok: false, reason: 'implausible_expense' }; return; }
         reused = existing;
       } else if (!(by === 'owner' && createNew)) {
-        const survey = await surveyExpenseCandidatesForRow(live, rejectedTargets(live.suggestion), trx);
+        const survey = await surveyExpenseCandidatesForRow(live, rejectedTargets(live.suggestion), trx, { window: payrollExpenseWindow(txnDate, check ? [target.pay_date] : []) });
         if (survey.length) { result = { ok: false, reason: 'existing_expense', existing: survey }; return; }
       }
 
@@ -1609,7 +1622,7 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
     // The same payment may already be an expense the owner entered: name it next to the paycheck / tax row.
     // Suggested candidates (ties, one cent off, a held line) get the same survey as an automatic link.
     if (planned.length && !held) {
-      const found = await surveyExpenseCandidatesForRow(row, rejectedTargets(sug));
+      const found = await surveyExpenseCandidatesForRow(row, rejectedTargets(sug), db, { window: payrollExpenseWindow(txnDate, planned.filter(c => c.kind === 'check' && c.payDate).map(c => c.payDate)) });
       if (found.length) held = found;
     }
     const candidates = held
