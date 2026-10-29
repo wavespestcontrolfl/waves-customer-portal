@@ -279,6 +279,8 @@ postgres('commission sold by', () => {
         'checked_at', 'distance_m', 'mode', 'radius_m', 'result', 'scheduled_service_id', 'truck_reported_at',
       ]);
       expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified, \d+ m$/);
+      // The owner's alert names the Neighbor (first name, last initial), not "Unknown customer".
+      expect(TwilioService.sendSMS.mock.calls.at(-1)[1]).toBe('🔔 Field Lead: Sample Alpha flagged Pest opportunity at Neighbor S. (neighbor).\nNotes: Ants');
     });
 
     it('is not verified when the truck is too far, and says how far', async () => {
@@ -449,7 +451,15 @@ postgres('commission sold by', () => {
       const events = await trx('audit_log').where({ action: 'estimate.sold_by_set', resource_id: est });
       expect(events).toHaveLength(1);
       expect(events[0].actor_id).toBe(ADMIN_ID);
+      expect(events[0].actor_type).toBe('admin');
       expect(events[0].metadata).toEqual({ previous_technician_id: null, previous_source: null, technician_id: t, source: 'office' });
+    });
+
+    it('answers a malformed estimate id with 404 and a malformed technician id with 400', async () => {
+      const est = await estimate();
+      expect((await admin('PUT', '/not-an-id/sold-by', { technicianId: null })).status).toBe(404);
+      expect((await admin('PUT', `/${est}/sold-by`, { technicianId: 'not-an-id' })).status).toBe(400);
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
     });
 
     it('clears with null, and the flag does not refill it', async () => {
@@ -625,23 +635,30 @@ postgres('commission sold by', () => {
       expect(await rejects({ sold_by_source: 'bogus' })).toBe(true);
       expect(await rejects({ sold_by_technician_id: t })).toBe(true); // technician with no source
       expect(await rejects({ sold_by_lead_id: lead })).toBe(true); // lead with no source
-      expect(await rejects({ sold_by_source: 'flag', sold_by_technician_id: t })).toBe(true); // flag without lead
       expect(await rejects({ sold_by_source: 'flag', sold_by_lead_id: lead })).toBe(true); // flag without technician
       expect(await rejects({ sold_by_source: 'office' })).toBe(true); // office without technician
       expect(await rejects({ sold_by_source: 'cleared', sold_by_technician_id: t })).toBe(true); // cleared with technician
       expect(await rejects({ sold_by_source: 'flag', sold_by_technician_id: t, sold_by_lead_id: lead })).toBe(false);
+      expect(await rejects({ sold_by_source: 'flag', sold_by_technician_id: t })).toBe(false); // the flag's lead was deleted
       expect(await rejects({ sold_by_source: 'office', sold_by_technician_id: t })).toBe(false);
       expect(await rejects({ sold_by_source: 'cleared' })).toBe(false);
       expect(await rejects({})).toBe(false);
     });
 
-    it('refuses to delete a technician who is the recorded seller of an office or flag estimate', async () => {
-      // ON DELETE SET NULL would leave source office with no technician, which the shape check forbids.
+    it('refuses to delete a technician who is the recorded seller (the foreign key, not the shape check)', async () => {
       const t = await tech('Sample Alpha');
       await estimate({ sold_by_source: 'office', sold_by_technician_id: t });
       const sp = await trx.transaction();
-      await expect(sp('technicians').where({ id: t }).del()).rejects.toThrow(/estimates_sold_by_shape_check/);
+      await expect(sp('technicians').where({ id: t }).del()).rejects.toThrow(/sold_by_technician_id_foreign|estimates_sold_by_technician_id_fkey|foreign key/);
       await sp.rollback().catch(() => {});
+    });
+
+    it("lets a flag's lead be deleted: the link empties and the seller stays", async () => {
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t);
+      const est = await estimate({ sold_by_source: 'flag', sold_by_technician_id: t, sold_by_lead_id: lead });
+      await trx('leads').where({ id: lead }).del();
+      expect(await estimateRow(est)).toMatchObject({ sold_by_source: 'flag', sold_by_technician_id: t, sold_by_lead_id: null });
     });
 
     it('lets a technician who is only the setting admin be deleted: the admin id is nulled', async () => {

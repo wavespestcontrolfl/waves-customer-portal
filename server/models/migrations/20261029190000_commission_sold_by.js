@@ -15,6 +15,9 @@
  * never refills it), sold_by_lead_id (the flag), sold_by_set_by (the admin, for 'office' and
  * 'cleared') and sold_by_set_at. created_by_technician_id is the admin who saved the form; it is
  * NOT the seller and is left alone.
+ *
+ * A recorded seller cannot be deleted (plain foreign key: payroll reads the seller). A flag's lead
+ * can: its link empties and the estimate keeps source 'flag' and the seller.
  */
 exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE leads
@@ -22,7 +25,7 @@ exports.up = async function up(knex) {
     ADD COLUMN IF NOT EXISTS gps_check jsonb NULL`);
 
   await knex.raw(`ALTER TABLE estimates
-    ADD COLUMN IF NOT EXISTS sold_by_technician_id uuid NULL REFERENCES technicians(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS sold_by_technician_id uuid NULL REFERENCES technicians(id),
     ADD COLUMN IF NOT EXISTS sold_by_source varchar(10) NULL,
     ADD COLUMN IF NOT EXISTS sold_by_lead_id uuid NULL REFERENCES leads(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS sold_by_set_by uuid NULL REFERENCES technicians(id) ON DELETE SET NULL,
@@ -31,7 +34,7 @@ exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE estimates
     ADD CONSTRAINT estimates_sold_by_source_check CHECK (sold_by_source IS NULL OR sold_by_source IN ('flag', 'office', 'cleared')),
     ADD CONSTRAINT estimates_sold_by_shape_check CHECK (CASE sold_by_source
-      WHEN 'flag' THEN sold_by_technician_id IS NOT NULL AND sold_by_lead_id IS NOT NULL
+      WHEN 'flag' THEN sold_by_technician_id IS NOT NULL
       WHEN 'office' THEN sold_by_technician_id IS NOT NULL
       WHEN 'cleared' THEN sold_by_technician_id IS NULL
       ELSE sold_by_technician_id IS NULL AND sold_by_lead_id IS NULL

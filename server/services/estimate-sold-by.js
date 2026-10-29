@@ -16,6 +16,7 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 
 const FLAG_LOOKBACK_DAYS = 60;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCKED_MESSAGE = 'Sold by is locked once the customer accepts.';
 
 // Call-time read, guarded so a test that mocks the whole feature-gates module keeps working.
@@ -103,9 +104,10 @@ async function loadSellerCandidate(database, technicianId) {
  * event, ids and sources only. Returns the new values.
  */
 async function setEstimateSoldBy({ database = db, estimateId, technicianId, actorId, now = () => new Date() }) {
-  if (technicianId !== null && typeof technicianId !== 'string') {
+  if (technicianId !== null && (typeof technicianId !== 'string' || !UUID_RE.test(technicianId))) {
     throw errorWithStatus('technicianId must be a technician id or null.', 400);
   }
+  if (typeof estimateId !== 'string' || !UUID_RE.test(estimateId)) throw errorWithStatus('Estimate not found', 404);
   return database.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate()
       .first('id', 'accepted_at', 'sold_by_technician_id', 'sold_by_source');
@@ -121,7 +123,7 @@ async function setEstimateSoldBy({ database = db, estimateId, technicianId, acto
     };
     await trx('estimates').where({ id: estimateId }).update(next);
     await recordAuditEvent({
-      actor_type: 'technician',
+      actor_type: 'admin',
       actor_id: actorId || null,
       action: 'estimate.sold_by_set',
       resource_type: 'estimate',

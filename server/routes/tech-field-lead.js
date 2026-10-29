@@ -42,6 +42,12 @@ function prospectLeadColumns(prospect) {
   };
 }
 
+// The owner's alert names a Neighbor by first name and last initial (no Neighbor = as before).
+function neighborLabel(prospect) {
+  if (!prospect) return 'Unknown customer';
+  return `${prospect.firstName}${prospect.lastName ? ` ${prospect.lastName.charAt(0)}.` : ''} (neighbor)`;
+}
+
 function gpsLeadColumns(gpsCheck) {
   if (!gpsCheck) return {};
   return { gps_verified: gpsCheck.result === 'verified', gps_check: JSON.stringify(gpsCheck) };
@@ -124,7 +130,7 @@ router.post('/', async (req, res, next) => {
     try {
       const TwilioService = require('../services/twilio');
       const ADMIN_PHONE = process.env.ADAM_PHONE || '+19415993489';
-      const customerLabel = customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown customer';
+      const customerLabel = customer ? `${customer.first_name} ${customer.last_name}` : neighborLabel(gpsSetup.prospect);
       await TwilioService.sendSMS(ADMIN_PHONE,
         `🔔 Field Lead: ${req.technician.name} flagged ${leadServiceType} opportunity at ${customerLabel}.${notes ? '\nNotes: ' + notes : ''}${urgency === 'high' ? '\n⚡ URGENT' : ''}`,
         { messageType: 'internal_alert' }
