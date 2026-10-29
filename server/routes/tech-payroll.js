@@ -11,7 +11,7 @@
  * client-sent id. Another person's check, a draft or voided pay run, and a bad id all answer 404, so
  * ids cannot be probed. An admin sees only their own stubs here; pay runs, W-4s, other people's
  * checks, employer taxes and tax forms stay on /api/admin/payroll. Off answers 404 { enabled: false }
- * before any query. Responses are no-store.
+ * after the staff login check and before any pay query. Responses are no-store.
  */
 const express = require('express');
 const logger = require('../services/logger');
@@ -21,11 +21,12 @@ const payrollRuns = require('../services/payroll-runs');
 
 const router = express.Router();
 
+// The staff login first: no route here answers anyone without it (the public-route allowlist test), then the gate.
+router.use(adminAuthenticate, requireTechOrAdmin);
 router.use((req, res, next) => {
   if (!(typeof techPayStubsLive === 'function' && techPayStubsLive())) return res.status(404).json({ enabled: false });
   return next();
 });
-router.use(adminAuthenticate, requireTechOrAdmin);
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
 
 function fail(res, what, err) {
