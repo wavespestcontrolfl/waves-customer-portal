@@ -1915,20 +1915,24 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
     const sentBeforeAcceptedAfter = estimate({ accept_witness_at: '2040-03-12T16:44:00Z' });
     const sentAfter = estimate({ sent_at: '2040-03-11T15:00:00Z', handed_off_at: '2040-03-11T15:00:00Z', accepted_at: null });
     const acceptedBefore = estimate({ accepted_at: '2040-03-09T16:44:00Z' });
-    const manualAccept = estimate({ handed_off_at: null, sent_at: null });
+    // A staff manual accept after the ask: of an estimate delivered before it, or of one never delivered.
+    const manualAccept = estimate();
+    const neverDelivered = estimate({ handed_off_at: null, sent_at: null });
     for (const value of [undefined, 'shadow', 'true']) {
       if (value === undefined) delete process.env.GATE_PROMISE_RECORD_EVIDENCE; else process.env.GATE_PROMISE_RECORD_EVIDENCE = value;
       expect(admissibleWitness(sentAfter, estimateRequest, [sentAfter])).toBe(true);
       expect(admissibleWitness(acceptedBefore, estimateRequest, [acceptedBefore])).toBe(false);
-      // Sent before the ask and handed off before it: only the customer's acceptance after the ask can count.
+      // Delivered before the ask: only its acceptance after the ask can count, and a manual one only with the gate true.
       expect(admissibleWitness(manualAccept, estimateRequest, [manualAccept])).toBe(value === 'true');
+      // A quote that never reached the customer is never "the estimate sent", whoever accepted it.
+      expect(admissibleWitness(neverDelivered, estimateRequest, [neverDelivered])).toBe(false);
       expect(admissibleWitness(sentBeforeAcceptedAfter, estimateRequest, [sentBeforeAcceptedAfter])).toBe(true);
     }
   });
 
   test('rule 2: acceptance keeps the property rule, the kind rule, and is not a witness for anything but send_estimate', () => {
     process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-    const accepted = estimate({ handed_off_at: null, sent_at: null });
+    const accepted = estimate();
     expect(admissibleWitness({ ...accepted, property_id: 'another-property' }, estimateRequest, [accepted])).toBe(false);
     expect(admissibleWitness(accepted, { ...estimateRequest, kind: 'schedule_visit' }, [accepted])).toBe(false);
     expect(admissibleWitness(accepted, { ...estimateRequest, kind: 'other' }, [accepted])).toBe(false);

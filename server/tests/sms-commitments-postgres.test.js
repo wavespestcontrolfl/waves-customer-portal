@@ -4306,6 +4306,59 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(rings()).toBe(1);
       });
 
+      // An alert an earlier ring left open (the promise was overdue before the visit was booked).
+      const openAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+        title: 'Comms — follow up with Synthetic Fixture', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) })
+        .returning('id').then(([alert]) => alert.id);
+      const alertOf = (id) => mockPg('notifications').where({ id }).first('done_at', 'done_by', 'resolution');
+
+      test('gate true: an alert that rang before the visit was booked closes while the visit is ahead; after the window a fresh one rings', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(0);
+          const closed = await alertOf(alert);
+          expect(closed.done_at).not.toBeNull();
+          expect(closed).toMatchObject({ done_by: 'sms-commitments', resolution: expect.stringMatching(/^On track: a visit is booked until /) });
+          await tick(5 * 3600000);
+          expect(rings()).toBe(1);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true: the shared alert stays open while another promise from the text is open; the held promise\'s own alert closes', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          const row = await staffPromise();
+          // A second open promise from the same text, of a kind rule 3 never holds, due later.
+          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
+            description: 'send the service report', channel: 'sms', due_at: at(3 * 86400000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+            evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          const own = await openAlert(`sms-commitment:${row.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(0);
+          expect((await alertOf(shared)).done_at).toBeNull();
+          expect((await alertOf(own)).done_at).not.toBeNull();
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true without GATE_ALERT_RING_ONCE: the earlier alert stays open (a closed row would absorb the next ring for a day)', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        await staffPromise();
+        const alert = await openAlert(`sms-commitment-source:${message.id}`);
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        expect((await alertOf(alert)).done_at).toBeNull();
+      });
+
       test.each(['other', 'callback', 'technician_follow_up'])('gate true: a %s promise is held the same way', async (kind) => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         await staffPromise(kindOf(kind));

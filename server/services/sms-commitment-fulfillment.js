@@ -7,7 +7,7 @@ const { scrubSegments } = require('../utils/pan-scrub');
 const { VERSION, stringifySmsEvidence } = require('./sms-operational-extractor');
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
 const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeysShareLocality, scopeKeyLacksLocality } = require('./estimate-property-linkage');
-const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
+const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, latestHandoffAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // Who counts as a person reaching the customer, shared with the call-promise
 // ledger's callback proof (staff-contact.js).
@@ -803,13 +803,16 @@ function visitWitnessAt(record, commitment) {
 // An invoice in one of these states was withdrawn: it carried nothing out.
 const INVOICE_NOT_SENT_STATUSES = ['draft', 'void', 'voided', 'cancelled', 'canceled', 'refunded'];
 // When an estimate answers the ask: its handoff after the ask, or, under
-// GATE_PROMISE_RECORD_EVIDENCE, the customer accepting it after the ask for a
+// GATE_PROMISE_RECORD_EVIDENCE, its acceptance after the ask for a
 // send_estimate request (the estimate may have been sent before the ask).
+// The customer's own acceptance is already a handoff (accept_witness_at); a
+// staff manual accept (a verbal yes) counts only for an estimate that really
+// reached the customer at some time, never for a quote never delivered.
 function estimateWitnessAt(record, commitment) {
   const after = new Date(commitment.sms_context?.source_at);
   const handoff = witnessAt(record, after);
   if (handoff) return handoff;
-  if (commitment.kind !== 'send_estimate' || !extendedEvidence(commitment) || !record.accepted_at) return null;
+  if (commitment.kind !== 'send_estimate' || !extendedEvidence(commitment) || !record.accepted_at || !latestHandoffAt(record)) return null;
   const accepted = new Date(record.accepted_at);
   return !Number.isNaN(accepted.getTime()) && accepted > after ? accepted : null;
 }

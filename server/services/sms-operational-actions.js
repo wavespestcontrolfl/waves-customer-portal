@@ -1482,6 +1482,24 @@ async function recordFulfillmentShadow(conn, { current, message, evidence, baseV
   }
 }
 
+// Rule 3 in 'true' mode: an overdue alert that rang before the visit was
+// booked closes while that visit is still to come. A shared alert closes only
+// when no other promise from its text is open (it still speaks for those). The
+// ring after the window ends then raises a fresh alert: the open-only probe
+// (GATE_ALERT_RING_ONCE) ignores a closed row, and the ring's supersede step
+// leaves a system close alone. Without that probe a closed row would absorb
+// the next ring for a day, so the alert stays as it is.
+async function closeOnTrackAlerts(trx, { commitmentId, smsLogId, onTrack, now }) {
+  if (!require('../config/feature-gates').alertRingOnceLive?.()) return;
+  const others = await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
+  const keys = [legacyCommitmentAlertKey(commitmentId), ...(others ? [] : [smsSourceAlertKey(smsLogId)])];
+  const until = new Date(onTrack.window_end).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereIn(trx.raw("metadata->>'dedupeKey'"), keys)
+    .update(require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
+      resolution: `On track: a visit is booked until ${until} ET`, at: now, keepExisting: true, conn: trx }));
+}
+
 // The shadow rows of one refresh, written after its transaction so an audit
 // write can never undo a persisted verdict. Shadow mode only; both writers
 // never throw.
@@ -1589,7 +1607,11 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // never rings a bell on its own (there is no stated deadline to have
     // passed). The fulfillment_check above is still stored so a later
     // pass with new evidence does not repeat the same model call for free.
-    if (deadlinePassed && !holdBell) {
+    if (holdBell) {
+      await closeOnTrackAlerts(trx, { commitmentId: row.id, smsLogId: source.id, onTrack, now });
+      return;
+    }
+    if (deadlinePassed) {
       await ringSmsSourceBell(trx, { row, message, verdict });
       rang = true;
     }
