@@ -88,6 +88,7 @@ beforeAll(() => {
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
   process.env.GATE_IB_CREATE_INVOICE = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
+  process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_RECORD_PAYMENT = 'true';
@@ -108,6 +109,7 @@ afterAll(() => {
   delete process.env.GATE_IB_PAYMENT_PLAN;
   delete process.env.GATE_IB_CREATE_INVOICE;
   delete process.env.GATE_IB_SET_BILL_TO;
+  delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -209,6 +211,9 @@ const WRITE_TWO_STEP = [
   'cancel_payment_plan',
   'create_invoice',
   'set_customer_bill_to',
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -338,7 +343,7 @@ const READ_ONLY = [
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
   'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
-  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages',
+  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages', 'list_agent_review_drafts',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',
   'get_quarterly_estimate', 'get_pnl', 'get_advisor_alerts', 'get_mileage_summary', 'get_ar_aging',
   'get_lead_overview', 'query_leads', 'get_stale_leads', 'get_lead_funnel',
@@ -861,6 +866,15 @@ const UNCONFIRMED_CALLS = [
       payers: [{ id: 7, display_name: 'Synthetic Property Co', active: true }],
       invoices: [], scheduled_services: [], service_records: [], annual_prepay_terms: [],
     }],
+    // The Agent Review draft cards' previews read the decision, the thread's newest inbound text and the customer; they may not
+    // write without confirmed (intelligence-bar-agent-review.test.js covers the cards themselves).
+    ...['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].map((name) => ['agent-review-tools', 'executeAgentReviewTool', name, {
+      decision_id: '00000000-0000-0000-0000-00000000a701', ...(name === 'revise_agent_review_draft' ? { revised_text: 'Thursday works. See you then.' } : {}),
+    }, {
+      // The tool reads the decision joined to its inbound text and customer in one aliased query: the recorder keys on that table string.
+      'agent_decisions as ad': [{ id: '00000000-0000-0000-0000-00000000a701', status: 'pending_review', workflow: 'synthetic_reply_agent', source_channel: 'sms', customer_id: '00000000-0000-0000-0000-00000000a703', sms_log_id: '00000000-0000-0000-0000-00000000a702', suggested_message: 'Yes, Thursday works. See you then!', input_snapshot: {}, created_at: '2026-10-28T12:00:00Z', sms_from_phone: '+19415550142', sms_to_phone: '+19415550100', inbound_message: 'Can you come Thursday?', first_name: 'Pat', last_name: 'Tester', customer_phone: '+19415550142' }],
+      sms_log: [{ id: '00000000-0000-0000-0000-00000000a702' }],
+    }]),
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -1320,7 +1334,8 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
+    // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'propose_admin_edit']);
   });
 });

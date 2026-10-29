@@ -127,6 +127,11 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',
+  // Agent Review drafts (owner ask 2026-10-28, gap 7, GATE_IB_AGENT_REVIEW_DRAFTS): the composer's Use Draft send, run in process behind
+  // a card. approve and revise TEXT the customer (always a card, owner login included); ignore sends nothing.
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

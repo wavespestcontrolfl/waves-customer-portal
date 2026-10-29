@@ -131,7 +131,9 @@ function normalizeReplyForComparison(value) {
 // draft may only resolve a decision the sender actually owns — pending,
 // phone-matched through its inbound sms_log or customer record, and (when a
 // customer is selected) belonging to that customer.
-async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
+// expectedSuggestedMessage is set only by the Intelligence Bar's card (sendSmsFromBar): the card showed that exact draft, so a
+// card whose stored draft is anything else reads as handled elsewhere.
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody, expectedSuggestedMessage }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
     // A scheduling card whose gate was rolled back is not sendable either
@@ -172,6 +174,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
     if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
+    if (typeof expectedSuggestedMessage === 'string' && decision.suggested_message !== expectedSuggestedMessage) return null;
 
     // House rule at the send boundary: check the OUTGOING body — the text
     // that will actually reach the customer — not the stored suggestion.
@@ -367,7 +370,9 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
 // POST /api/admin/communications/sms — send an SMS from admin
 const { linkedVisitIdsFrom } = require('../services/street-level-hold');
 
-router.post('/sms', async (req, res, next) => {
+async function sendSmsHandler(req, res, next) {
+  // req.ibAgentPins is set only by sendSmsFromBar (never an HTTP field); see the adapter below.
+  const barPins = req.ibAgentPins || null;
   let claimedDecisionId = null;
   let manualReservationId = null;
   let parkedThreadIds = [];
@@ -690,7 +695,7 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body, expectedSuggestedMessage: barPins?.suggestedMessage });
       // A supplied draft id that fails verification means the card the
       // operator is acting on is stale — most often another operator just
       // handled the same suggestion. Sending anyway risks a duplicate reply.
@@ -710,8 +715,10 @@ router.post('/sms', async (req, res, next) => {
       // exception and resolved accepted/corrected on success. The linked
       // reservation below tells recovery whether a crashed attempt is stale
       // or carries explicit provider uncertainty.
-      const claimed = await db('agent_decisions')
-        .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+      let claimQuery = db('agent_decisions').where({ id: verifiedAgentDecision.id, status: 'pending_review' });
+      // Bar only: the same atomic UPDATE also holds the card's exact draft.
+      if (barPins) claimQuery = claimQuery.where('suggested_message', barPins.suggestedMessage);
+      const claimed = await claimQuery
         .update({
           status: 'scheduled',
           correction_note: 'Claimed for an immediate send from the SMS inbox.',
@@ -1206,6 +1213,11 @@ router.post('/sms', async (req, res, next) => {
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
+            // Bar only (undefined, and filtered out, for the composer): the customer has not texted again since the card.
+            barPins ? async ({ dbi } = {}) => (await require('../services/sms-suggest-mode')
+              .newestInboundIdForThread(normalizePhoneLast10(to), dbi || db)) === barPins.latestInboundId
+              ? { ok: true }
+              : { ok: false, code: 'preview_changed', reason: 'The customer sent a new message after the card was shown; nothing was sent.' } : undefined,
           );
         })(),
       // a translation card's reply: the same boundary checks, from the trial's stored snapshot
@@ -1775,7 +1787,8 @@ router.post('/sms', async (req, res, next) => {
     });
     next(err);
   }
-});
+}
+router.post('/sms', sendSmsHandler);
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
 // customer picked by name ("Send prep guide" button). Smart channel: emails
@@ -4775,5 +4788,28 @@ async function runLinkHandler(handler, body) {
 module.exports.customerLinkInsert = (body) => runLinkHandler(customerLinkHandler, body);
 module.exports.rescheduleLinkInsert = (body) => runLinkHandler(rescheduleLinkHandler, body);
 module.exports.reserviceLinkInsert = (body) => runLinkHandler(reserviceLinkHandler, body);
+// The Intelligence Bar's approve / revise cards for an Agent Review draft run the SAME handler as POST /sms with the body the
+// composer's Use Draft posts ({ to, body, customerId, fromNumber, agentDecisionId, agentDraft }), without an HTTP request: the
+// handler's own verification, claim, thread parking, provider-boundary checks, send and accepted / corrected settlement
+// are the composer's. Resolves { status, json }; an error passed to next() rejects. `pins` is bar-only: suggestedMessage
+// (the draft the card showed, held by the verification and the claim) and latestInboundId (re-read at the provider boundary).
+function sendSmsFromBar({ body, actor, pins }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      body: body || {},
+      technicianId: actor?.technicianId || null,
+      technician: actor?.technician || null,
+      techRole: 'admin',
+      ibAgentPins: pins,
+    };
+    Promise.resolve(sendSmsHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.sendSmsFromBar = sendSmsFromBar;
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;
