@@ -865,6 +865,10 @@ const PINNED_DISPLAY_BUILDERS = {
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
   send_sms: pinnedRecipientDisplay,
+  // compose_email: the card names the recipient (name and address), From, subject and the exact body; the lines ride the contract.
+  compose_email: (params, preview) => (preview?.preview === true && preview.tool === 'compose_email'
+    ? { to: preview.to_label, from: preview.from, subject: preview.subject, body: preview.body, sends: 'one new email' }
+    : null),
   send_email_reply: (params, preview) => (preview?.pinned_recipient
     ? { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined }
     : null),
@@ -1063,6 +1067,8 @@ const VERIFIED_VERSION_PARAMS = {
   create_invoice: '_verified_invoice_create_version',
   // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
   set_customer_bill_to: '_verified_bill_to_version',
+  // compose_email binds the recipient, customer link, From, subject and a digest of the exact body the card showed.
+  compose_email: '_verified_compose_email_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -2283,7 +2289,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
-      || (toolUse.name === 'block_sender' ? await TaskContext.validateSenderBlock(params, taskContext) : null);
+      || (toolUse.name === 'block_sender' ? await TaskContext.validateSenderBlock(params, taskContext) : null)
+      || (toolUse.name === 'compose_email' ? await TaskContext.validateComposeRecipient(params, taskContext) : null);
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {
@@ -3561,6 +3568,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Duplicate customer records (when these tools are available): merge_customers folds a duplicate with ANY history into the real record; delete_duplicate_customer only soft-deletes a record that holds nothing at all. Prefer merge_customers when unsure.
 - You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
+- New email: compose_email (when it is in your tools) sends ONE new email, not a reply, to ONE person (a customer's email on file, or one address the operator named), always on a confirmation card, the owner's login too. It is plain text exactly as shown: write the body as the operator asked, with no signature and no invented facts. It takes no CC, BCC or attachment and cannot send to a list; a portal link to a customer's account in the body is refused. To answer an existing email use draft_email_reply and send_email_reply.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 - Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. send_autopay_setup_link texts or emails a customer their Auto Pay setup link behind a confirmation card (it refuses a customer with a saved card: enrolling one is a billing change for the Customers page, and a link-only Auto Pay link is also the Customers page button). Never say there is no link tool. search_quick_links pulls Waves Quick Links (portal login and cancel plan, office Google review links, Yelp/Facebook review pages, app store links, socials, booking pages and every wavespestcontrol.com page) with a ready line, for a text (send_sms behind its card, or draft_sms), an email, a blog post or a note. Never invent a Waves URL: pull it. Card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.

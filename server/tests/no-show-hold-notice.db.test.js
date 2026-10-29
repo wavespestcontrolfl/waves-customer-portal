@@ -24,10 +24,14 @@ postgres('the no-show detector dismisses a tracking notice for a visit that beca
   let knex;
   const made = { customers: [], techs: [], visits: [], calls: [] };
   let savedGate;
+  let savedPing;
 
   beforeAll(() => {
     savedGate = process.env.GATE_NOSHOW_DETECTOR;
+    savedPing = process.env.NOSHOW_TECH_PING_ENABLED;
     process.env.GATE_NOSHOW_DETECTOR = 'true';
+    // This suite exercises the stage-1 tech notice, which is off by default (office cards only).
+    process.env.NOSHOW_TECH_PING_ENABLED = 'true';
     knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 6 } });
   });
   afterEach(async () => {
@@ -45,6 +49,7 @@ postgres('the no-show detector dismisses a tracking notice for a visit that beca
   });
   afterAll(async () => {
     if (savedGate === undefined) delete process.env.GATE_NOSHOW_DETECTOR; else process.env.GATE_NOSHOW_DETECTOR = savedGate;
+    if (savedPing === undefined) delete process.env.NOSHOW_TECH_PING_ENABLED; else process.env.NOSHOW_TECH_PING_ENABLED = savedPing;
     await knex.destroy();
     await require('../models/db').destroy();
   });

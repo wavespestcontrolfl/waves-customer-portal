@@ -39,6 +39,7 @@
  *   GATE_BILL_TO_NO_VISIT_INVOICES=true (owner ruling 2026-10-22 "move": an unpaid self-pay invoice that rides no visit (a manual or project invoice) changes hands with the customer's default payer like a visit-linked one. Setting a customer default payer (customer page Bill-To, payer activation, a customer merge) withdraws it to the payer: pay link stops, its checkout is cancelled, applied credit returns, reminders pause; clearing the default releases it. The live owner answer already reads such an invoice as the payer's. Sends nothing. Read at call time via billToNoVisitInvoicesLive(), strict 'true', dark by default; off = such invoices are not moved, as before.)
  *   GATE_IB_VOID_INVOICE=true (the Intelligence Bar's void_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can void ONE invoice that has collected nothing on a confirm card (never owner-direct), by running the Invoices page's own Void handler (POST /admin/invoices/:id/void) in process. Voids the invoice, stops its reminders, returns applied account credit, cancels an unconfirmed pay-page session; sends nothing. Refuses (by_owner_rule) any invoice with money received or in flight: refunds and card charges stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibVoidInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_INVOICE_REMINDERS=true (the Intelligence Bar's invoice reminder and scheduled-send write tools, dark: an admin can pause, resume or stop ONE invoice's automatic reminders (send nothing), send the invoice's next reminder now (texts and emails the customer; the card shows the channel, the masked recipient and the exact message), or schedule an unsent invoice to go out at a set Eastern time, each on a confirm card (never owner-direct), by running the Invoices page's own handlers (POST /admin/invoices/:id/followup/pause|resume|stop|send-now and /schedule-send) in process. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceRemindersLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
+ *   GATE_IB_COMPOSE_EMAIL=true (the Intelligence Bar's compose_email write tool, owner ask 2026-10-28 IB gap #9: an admin can send ONE new email (not a reply) to ONE person on a confirm card, every time, the owner's login included (never owner-direct), by running the Email page's own Send (POST /admin/email/send) through the shared sendEmailMessage. It EMAILS the person (a customer on file, or any one address the operator names) from the office Gmail address: plain text exactly as carded, no signature, attachment, tracking or unsubscribe link, no copy saved, no opt-out check (the page's Send runs none). One recipient only; a portal link to a customer's account in the body is refused. The card pins the recipient, From, subject and body. Needs GATE_IB_PLATFORM. Read at call time via ibComposeEmailLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, sending nothing. An owner flip: it emails customers.)
  *   GATE_IB_PAYMENT_PLAN=true (the Intelligence Bar's create_payment_plan and cancel_payment_plan write tools, dark: an admin can create a payment plan on ONE invoice (the card lists each installment date and amount, says the plan charges no card, and says the customer is emailed the plan confirmation) or cancel the invoice's active plan (reminders re-arm), each on a confirm card (never owner-direct), by running the Invoices page's own handlers (POST /admin/invoices/:id/payment-plan and /payment-plan/cancel) in process. Needs GATE_IB_PLATFORM. Read at call time via ibPaymentPlanLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_CREATE_INVOICE=true (the Intelligence Bar's create_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can create ONE DRAFT invoice for a customer on a confirm card (never owner-direct), by running the Invoices page's own create handler (POST /admin/invoices, or POST /admin/invoices/from-service when the operator names a completed visit and one amount) in process. A draft only: it sends no text, email or call, charges no card and records no payment; send_invoice sends it afterwards. The card pins the customer, every line and the server-computed total; the create rolls back if the total differs. A customer billed through a third-party payer, and a visit invoice that would use an estimate deposit or a retention offer, stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibCreateInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_MULTI_CARD=true (owner request 2026-10-20: the Intelligence Bar may show up to five separate confirm cards in one answer when each is for a different record and none needs another card's result. Only open edits qualify (contact, address, status, schedule, text and booking cards); a refund, card charge, price, setting, delete or bulk card never joins a set. Each card confirms or cancels on its own and keeps its own pins. Needs GATE_IB_PLATFORM. Read at call time via ibMultiCardLive(), strict 'true', dark by default; off = one card per request, exactly as before.)
@@ -1900,13 +1901,6 @@ const gates = {
   // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
   localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
 
-  // Lead Alert Call — the business-hours phone call to Adam's cell when a
-  // website quote form lands (announce, or Press-1 bridge under
-  // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
-  // 'true'; off, the lead is handled like an after-hours lead (new_lead
-  // bell, legacy SMS only as delivery fallback).
-  leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
-
   // Lead Call-Reply Ring — a web lead who answers our lead text with a bare
   // CALL between 8 AM and 8 PM ET rings Adam's cell with the press-1 bridge
   // (owner 2026-10-24, "ring my cell, like we had before"). One ring per
@@ -1942,11 +1936,6 @@ const gates = {
   // sms_reply_outcomes, with the AI draft's prompt_version. Measurement only:
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
-
-  // Lead Auto-Bridge — when a website lead comes in during business hours,
-  // ring Adam and offer Press-1 to bridge directly to the customer. Off by
-  // default in prod until verified; admin-click bridge is unaffected.
-  leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
 
   // Lead Estimate Automation — generates priced draft estimates from new
   // lead-webhook submissions. Explicit opt-in everywhere so leads can keep
@@ -3415,6 +3404,14 @@ const gates = {
   // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
+
+  // DRIVE CLOCK (owner 2026-10-28, "add drive clock if its free"): every drive
+  // leg in the scheduling math carries what our own GPS measured (estimate legs
+  // 7.9 + 2.2 per straight-line mile, Google legs +4 minutes of parking). Read
+  // at CALL time via gateEnvValue (scheduling/drive-clock.js); this entry is for
+  // logGateStatus only. Moves scheduling numbers only; sends nothing. Dark.
+  // Kill switch: unset GATE_DRIVE_CLOCK.
+  driveClock: gateEnvValue('GATE_DRIVE_CLOCK'),
 
   // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
   // stops on a tech's day start within 30 minutes of each other, the one
@@ -5851,6 +5848,14 @@ function ibSetBillToLive() {
 // default. Kill: unset.
 function billToNoVisitInvoicesLive() {
   return process.env.GATE_BILL_TO_NO_VISIT_INVOICES === 'true';
+}
+
+// GATE_IB_COMPOSE_EMAIL read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
+// Bar's compose_email tool (services/intelligence-bar/compose-email-tools.js):
+// offered and executable only while on. It emails a person: an owner flip. Kill: unset.
+function ibComposeEmailLive() {
+  return process.env.GATE_IB_COMPOSE_EMAIL === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
 // GATE_IB_GENERAL_READ read at CALL time — strict `=== 'true'`, dark, and it
@@ -8403,6 +8408,8 @@ module.exports.ibPaymentPlanLive = ibPaymentPlanLive;
 module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
 // GATE_IB_SET_BILL_TO reader, on its own line so gate PRs never conflict.
 module.exports.ibSetBillToLive = ibSetBillToLive;
+// GATE_IB_COMPOSE_EMAIL reader, on its own line so gate PRs never conflict.
+module.exports.ibComposeEmailLive = ibComposeEmailLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
 // GATE_IB_READ_NOTES reader, on its own line so gate PRs never conflict.

@@ -135,7 +135,7 @@ async function findSingleCustomerByPhone(dbLike, phone) {
 // name; an unmatched caller (or a number shared by 2+ records, which
 // findSingleCustomerByPhone deliberately returns null for) yields null and the
 // announcement falls back to the number. Mirrors the sanitize-and-cap pattern
-// used by /outbound-admin-prompt and /lead-alert-announce.
+// used by /outbound-admin-prompt.
 function spokenCallerName(customer) {
   if (!customer) return null;
   const name = [customer.first_name, customer.last_name]
@@ -3128,31 +3128,6 @@ router.post('/transcription', async (req, res) => {
   } catch (err) {
     logger.error(`Transcription webhook error: ${err.message}`);
     res.sendStatus(200);
-  }
-});
-
-// =========================================================================
-// POST /api/webhooks/twilio/lead-alert-announce — One-way voice alert on new lead
-// Reads the lead name + phone aloud (twice) and hangs up. Never dials the lead.
-// =========================================================================
-router.post('/lead-alert-announce', async (req, res) => {
-  try {
-    const leadName = req.query.leadName || req.body.leadName || 'a new caller';
-    const leadPhoneRaw = req.query.leadPhone || req.body.leadPhone || '';
-    const eventLabel = String(req.query.eventLabel || req.body.eventLabel || 'New Waves lead')
-      .replace(/[^\w\s.,:-]/g, '')
-      .trim()
-      .slice(0, 80) || 'New Waves lead';
-    const spokenPhone = leadPhoneRaw.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1. $2. $3.');
-    const twiml = new VoiceResponse();
-    twiml.pause({ length: 1 });
-    twiml.say({ voice: SAY_VOICE }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
-    twiml.pause({ length: 1 });
-    twiml.say({ voice: SAY_VOICE }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
-    res.type('text/xml').send(twiml.toString());
-  } catch (err) {
-    logger.error(`Lead alert announce error: ${err.message}`);
-    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">New lead received. Check admin portal.</Say></Response>`);
   }
 });
 
