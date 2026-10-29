@@ -3837,6 +3837,15 @@ const gates = {
   // buildingUseTaxLive(); dark by default. Off = commercial accounts are taxed
   // by property_type exactly as before.
   buildingUseTax: gateEnvValue('GATE_BUILDING_USE_TAX'),
+  // Tax follows the serviced property's county (2026-10-29, fix 4 of the
+  // proposal defaults check): Florida's surtax is due in the county where the
+  // service is delivered (s. 212.054(3)(a); Rule 12A-15.003(5)(a)). On,
+  // TaxCalculator.calculateTax reads the county from the visit's or the
+  // estimate's saved property before the customer's own ZIP, maps DeSoto ZIPs,
+  // and uses the 2026 Lee, Collier and DeSoto rates when no tax_rates row
+  // covers the county. Read at call time via taxServiceCountyLive(); dark by
+  // default. Off = the customer's ZIP and the 7% fallback, as before.
+  taxServiceCounty: gateEnvValue('GATE_TAX_SERVICE_COUNTY'),
 
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
@@ -6236,6 +6245,11 @@ function slabHomeNoTaxLive() {
 // GATE_BUILDING_USE_TAX read at CALL time (so a flip needs no redeploy).
 function buildingUseTaxLive() {
   return gateEnvValue('GATE_BUILDING_USE_TAX');
+}
+
+// GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
+function taxServiceCountyLive() {
+  return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -8913,3 +8927,5 @@ module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNot
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
 // GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.buildingUseTaxLive = buildingUseTaxLive;
+// GATE_TAX_SERVICE_COUNTY reader, on its own line so gate PRs never conflict.
+module.exports.taxServiceCountyLive = taxServiceCountyLive;
