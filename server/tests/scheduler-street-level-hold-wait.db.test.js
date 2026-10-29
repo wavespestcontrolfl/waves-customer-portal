@@ -35,6 +35,7 @@ jest.mock('../utils/scheduled-cron', () => ({
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: async (_name, fn) => fn(),
   recordMissedTick: jest.fn(),
+  recordLeaseFreeJobEnd: jest.fn(async () => {}),
   settleDeadRunningJobs: jest.fn(async () => ({})),
 }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550199') }));
