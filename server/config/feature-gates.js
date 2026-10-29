@@ -239,6 +239,7 @@
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
+ *   GATE_EXTERNAL_HEARTBEAT_WATCH=true (outside daily jobs: an hourly cron rings ONE admin bell per silence episode when a job's job_health row shows no complete run today by its due time (appt-sweep on the office Mac, 07:00 ET) and closes it when one lands; writes only admin notifications; strict opt-in via gateEnvValue, read at call time; dark; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
  *   GATE_IB_DELETE_CUSTOMER=true (Intelligence Bar delete_duplicate_customer, owner ruling 2026-10-07: an admin can ARCHIVE ONLY (soft-delete, nothing merged or moved, the other record untouched) ONE empty duplicate customer record - one that holds only the fields the unknown-caller stub creator writes, no linked rows, and that the duplicate queue lists as a confirmed same-identity duplicate of a record sharing its phone (a possible match, such as a different name, goes to merge_customers) - from a confirm card, through the customer page's own DELETE /api/admin/customers/:id handler; restorable via PATCH /api/admin/customers/:id/restore; never owner-direct; sends nothing to a customer. Strict opt-in: exactly 'true', read at call time via ibDeleteCustomerLive(). Ships DARK; off = the tool is not offered on either path and a forced call refuses; kill = unset)
@@ -4312,6 +4313,18 @@ const gates = {
   // CALL time, so a flip needs no redeploy. Still requires GATE_HERMES_WORKER
   // (the shared link-worker auth gate) to reach the router at all.
   hermesWatchdog: gateEnvValue('GATE_HERMES_WATCHDOG'),
+
+  // EXTERNAL JOB HEARTBEAT WATCH (owner 2026-10-28, "the sweep writes a
+  // heartbeat, and the portal rings if no complete run lands by 07:00"): the
+  // hourly cron (scheduler.js, 07:05-22:05 ET) reads the job_health row an
+  // outside job (first: appt-sweep on the office Mac) writes at the end of
+  // each run, and rings ONE admin bell per silence episode when no complete
+  // run has landed today by the job's due time; the bell closes itself when
+  // one does. Read at CALL time via gateEnvValue in
+  // services/external-job-heartbeat-watch.js; this entry is for logGateStatus
+  // only. Writes only admin notifications; sends nothing to a customer.
+  // Dark. Kill switch: unset GATE_EXTERNAL_HEARTBEAT_WATCH.
+  externalHeartbeatWatch: gateEnvValue('GATE_EXTERNAL_HEARTBEAT_WATCH'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
   // `toolActivity` list — one operator-facing line per tool call the exchange
   // ran (label, done / error / proposed, duration, round) — and the ⌘K
