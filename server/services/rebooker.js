@@ -1224,7 +1224,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // forward off a closed day with the nudge the Edit appointment cadence
   // rewrite and the seeder share (scheduling/blackout-nudge.js); the anchor
   // stays as picked. Null = projected as before.
-  const projectSeriesDate = (raw) => {
+  // `roundSlot` (lawn rounds only): the cadence slot whose round the date must
+  // stay in. Defaults to `raw`'s own round, which is right for a cadence date.
+  const projectSeriesDate = (raw, roundSlot = null) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
     // the old seasonal-only scoping predates the ruling): a weekend-
@@ -1245,11 +1247,14 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     // (its write sites are not null-safe).
     out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
     // A lawn round is a window too: the weekend shift or a closed-day nudge
-    // must not carry the date into the next round. `raw` is the date the
-    // cadence (or an exception's shifted date) intended; its round is the one
-    // to stay in. Exhausts only if every day of the round is closed.
+    // must not carry the date into the next round. A cadence date stays in its
+    // own round. A date exception's shifted date (the anchor delta can carry it
+    // past its round's end) stays in the round of the occurrence's own cadence
+    // slot, never the shifted date's round: that would leave a round empty and
+    // put two visits in the next one. Exhausts only if every day of the round
+    // is closed.
     if (pattern === LAWN_ROUNDS_9) {
-      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate: String(raw).split('T')[0] }) || out;
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate: String(roundSlot || raw).split('T')[0] }) || out;
     }
     if (pattern !== SEASONAL_FEB_OCT) return out;
     // The clamp can exhaust only on 75 straight in-season closed or weekend
@@ -1286,7 +1291,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // landings — so no two rows are written on one day and no exception's
   // recorded position ties with a written date.
   const usedDates = new Set();
-  const advancePastUsed = (start) => {
+  // `roundSlot` (lawn rounds only): the cadence slot whose round the walk stays
+  // in; defaults to `start`.
+  const advancePastUsed = (start, roundSlot = start) => {
     let out = start;
     for (let guard = 0; guard < 31 && usedDates.has(out); guard++) {
       let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
@@ -1302,7 +1309,7 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         out = clampDateToRound(pattern, out, {
           skipWeekends: seriesSkipWeekends,
           blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
-          intendedDate: start,
+          intendedDate: roundSlot,
         }) || out;
       }
       if (pattern === SEASONAL_FEB_OCT) {
@@ -1342,9 +1349,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     const slot = cadenceSlotDate(occurrenceIndex);
     let out = slot;
     if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
-      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)));
+      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot);
       // Landing exactly on its own slot = the row rejoins the cadence.
-      out = shifted === slot ? slot : advancePastUsed(shifted);
+      out = shifted === slot ? slot : advancePastUsed(shifted, slot);
     }
     projectedByOccurrence.set(occurrenceIndex, out);
     return out;
