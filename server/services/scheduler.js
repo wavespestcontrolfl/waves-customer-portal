@@ -123,7 +123,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue, aioGapSweepMonthlyLive } = require('../config/feature-gates');
-const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick, recordLeaseFreeJobEnd } = require('../utils/cron-lock');
 const { registerDeployKillRetry, retryDeployKilledJobs } = require('../utils/deploy-kill-retry');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 // Required HERE, at scheduler init (= process boot), not lazily inside the
@@ -137,6 +137,12 @@ const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
+// job_health row for the 5-minute tick's recovery + claim. Recorded the
+// lease-free way: every replica claims (FOR UPDATE SKIP LOCKED is the fence),
+// so cron-lock does not wrap the tick. A claim that keeps failing reads as a
+// failing job in the Agents queue, the Intelligence Bar and the Hermes
+// watchdog's page.
+const SCHEDULED_SMS_CLAIM_JOB = 'scheduled-sms-claim';
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -5182,7 +5188,15 @@ function initScheduledJobs() {
           logger.warn(`[scheduled-sms] pending terminal-hook sweep failed: ${termErr.message}`);
         }
         scheduled = await claimDueScheduledSms(now);
-      } catch { return; /* scheduled_for column may not exist yet */ }
+      } catch (err) {
+        // Nothing is sent this tick, and a claim that keeps throwing stops
+        // every scheduled text. name/code only: knex errors can carry bound
+        // customer text (PII); job_health keeps the digit-masked message.
+        logger.error(`[scheduled-sms] claim failed, no scheduled texts sent this tick: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+        await recordLeaseFreeJobEnd(SCHEDULED_SMS_CLAIM_JOB, now.getTime(), err);
+        return;
+      }
+      await recordLeaseFreeJobEnd(SCHEDULED_SMS_CLAIM_JOB, now.getTime(), null);
 
       for (const msg of scheduled) {
         // Decision linkage is read FRESH after each terminal update, not

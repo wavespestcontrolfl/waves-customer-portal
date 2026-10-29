@@ -40,6 +40,15 @@ const HOME = { homeSqFt: 2000, lotSqFt: 7500 };
 const TODAY = '2026-10-09';
 const daysBefore = (n) => limits.addDays(TODAY, -n);
 const hist = (byKey) => ({ available: true, asOf: TODAY, byKey: Object.fromEntries(Object.entries(byKey).map(([k, dates]) => [k, { dates }])) });
+// The service judges "today" from the clock whenever a call names no day, and every fixture is dated from TODAY: pin the
+// clock to TODAY (noon ET) for the whole file, so no result depends on the day the suite runs. On 2026-10-29 a Snapshot
+// row 40 days before TODAY reached the 60-day gap in real time and its refusal turned into a pass. Pinned at load too, so
+// the fixtures a describe builds from Date.now() (holds that expire soon, holds that lapsed) sit on the pinned clock.
+// Only Date is faked; timers stay real so the fake database's promises settle.
+const PINNED_CLOCK = { now: new Date(`${TODAY}T16:00:00.000Z`), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] };
+jest.useFakeTimers(PINNED_CLOCK);
+beforeEach(() => { jest.useFakeTimers(PINNED_CLOCK); });
+afterAll(() => { jest.useRealTimers(); });
 
 let savedGate;
 beforeEach(() => { savedGate = process.env.GATE_AREA_ADDONS; process.env.GATE_AREA_ADDONS = 'true'; });
@@ -740,13 +749,8 @@ describe('a backdated booking is judged against its own window', () => {
 });
 
 describe('the day of the visit is judged on every path (Codex round 9)', () => {
-  // These calls name no day, so the service judges "today" from the clock. Pin the clock to
-  // TODAY (noon ET) so the 360-day-old application stays inside the 12 months on any run date.
-  // Only Date is faked; timers stay real so the fake database's promises settle.
-  beforeEach(() => {
-    jest.useFakeTimers({ now: new Date(`${TODAY}T16:00:00.000Z`), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] });
-  });
-  afterEach(() => { jest.useRealTimers(); });
+  // These calls name no day, so the service judges "today" from the clock: the file's clock pin
+  // (PINNED_CLOCK) keeps the 360-day-old application inside the 12 months on any run date.
 
   const lastYear = world({ property_application_history: [ledger('p-top', 360)] });
   const fireAnt = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['fire_ant_yard']) };
