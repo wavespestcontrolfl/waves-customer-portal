@@ -3623,8 +3623,8 @@ async function handleChargeRefunded(charge) {
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
-  // A full refund that terminalized an invoice paid partly by hand: the office is told after commit (alertMixedRefund).
-  let mixedRefund = null;
+  // Full refunds that terminalized an invoice paid partly by hand (single or combined): the office is told after commit (alertMixedRefund).
+  const mixedRefunds = [];
   const refundedPayment = await db.transaction(async (trx) => {
     // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate is
     // this transaction's FIRST lock — the refund stamp below (and the credit
@@ -3820,6 +3820,8 @@ async function handleChargeRefunded(charge) {
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
                 .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+              const combinedHandCents = await handPartsPaidCents(trx, invId);
+              if (combinedHandCents > 0) mixedRefunds.push({ invoiceId: invId, handCents: combinedHandCents });
             } else {
               const resolvedReinstated = await trx('stripe_orphan_charges')
                 .where({ resolved: false, source: 'combined_pay_webhook' })
@@ -4063,7 +4065,7 @@ async function handleChargeRefunded(charge) {
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
         // Part of this bill was paid by hand (a part payment): the card refund cannot return it, so the office decides.
         const handCents = await handPartsPaidCents(trx, invId);
-        if (handCents > 0) mixedRefund = { invoiceId: invId, handCents };
+        if (handCents > 0) mixedRefunds.push({ invoiceId: invId, handCents });
         // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded
         // wrote the payments row (the update above hit 0 rows → pmt is null), but the
         // invoice still resolved + was marked 'refunded'. The later succeeded handler
@@ -4097,7 +4099,7 @@ async function handleChargeRefunded(charge) {
   // was stamped, and no refund email/notification may fire for money
   // Stripe kept (the refund.failed handler already notified the office).
   if (feeRefundFencedInLock) return;
-  if (mixedRefund) await alertMixedRefund(mixedRefund, { chargeId, refundId });
+  for (const mixed of mixedRefunds) await alertMixedRefund(mixed, { chargeId, refundId });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
