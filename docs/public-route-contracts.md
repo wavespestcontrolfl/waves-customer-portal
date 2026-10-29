@@ -4874,6 +4874,25 @@ and priced on site — we'll call to schedule your free design visit."
 instead of the generic copy. No pricing, no self-book slot, no new auth
 surface — additive response-copy branching only.
 
+Top dressing is quote-only (owner 2026-10-29, top dressing scope option A; the
+engine formula is a floor that loses money on larger lawns, so the office
+prices every job by hand). Every `top_dressing` engine line carries
+`requiresManualReview` + the enforced `requiresCustomQuote` with
+`customQuoteReason: 'top_dressing_quote_only'` (`estimate-engine.js`), measured
+turf and an explicit top-dress area included. A low-confidence turf reason
+stays the line's `customQuoteReason` and both reasons are listed in
+`manualReviewReasons`. A direct `services.topDressing` request to `/calculate`
+therefore answers `202 { quote_required: true, service: 'top_dressing', reason:
+'top_dressing_quote_only', service_interest, message }` (it priced instantly
+before). `message` reuses the quote-on-request copy ("{service interest} is
+priced by our team, not the calculator — we'll send your estimate shortly."),
+and the office notice reads as an estimate request. When the turf reason wins
+(`low_confidence_turf_requires_field_verification`) the response is that
+reason's existing turf copy, unchanged. The lead is captured with zero totals
+and no self-book handoff. The keyed `top_dressing` catalog key was already
+quote-on-request and is unchanged. Additive: no new field, no new copy, no new
+auth surface, no migration, no gate.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -5100,7 +5119,7 @@ dependency).
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
 `/api/public/pricing-ranges` (read-only engine-derived per-service price
-ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
+ranges; `top_dressing` is no longer published (quote-only, owner 2026-10-29) — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all

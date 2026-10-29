@@ -7192,13 +7192,13 @@ const InvoiceService = {
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database: sp, skipCustomerExemption: !!resolvedPayerId },
+              { database: sp, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ))
           : TaxCalculator.calculateTax(
               customerId,
               serviceData.service_type || title,
               afterDiscount,
-              { database, skipCustomerExemption: !!resolvedPayerId },
+              { database, skipCustomerExemption: !!resolvedPayerId, scheduledServiceId: linkedScheduledServiceId || undefined },
             ));
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
@@ -7469,13 +7469,15 @@ const InvoiceService = {
     // created (esp. for WDO report+invoice bundles billed to an exempt builder).
     let payerTaxExempt = false;
     let previewPayerBilled = false;
+    // The visit (direct, or the service record's) also names the tax county
+    // below, through its saved property, as in create() (GATE_TAX_SERVICE_COUNTY).
+    let previewScheduledServiceId = scheduledServiceId;
     try {
       const PayerService = require("./payer");
       // Mirror create(): when linked only by serviceRecordId, derive the visit's
       // scheduled_service_id so a per-job (tax-exempt) payer override is reflected
       // in the dry-run total — otherwise the preview shows tax the real, exempt
       // invoice won't actually bill.
-      let previewScheduledServiceId = scheduledServiceId;
       if (!previewScheduledServiceId && serviceRecordId) {
         const srLink = await database("service_records")
           .where({ id: serviceRecordId, customer_id: customerId })
@@ -7515,7 +7517,12 @@ const InvoiceService = {
           customerId,
           serviceType || title,
           subtotal,
-          { database, skipCustomerExemption: previewPayerBilled, ...(assumeCommercial === true ? { isCommercial: true } : {}) },
+          {
+            database,
+            skipCustomerExemption: previewPayerBilled,
+            scheduledServiceId: previewScheduledServiceId || undefined,
+            ...(assumeCommercial === true ? { isCommercial: true } : {}),
+          },
         );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;

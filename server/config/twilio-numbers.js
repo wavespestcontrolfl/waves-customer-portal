@@ -245,6 +245,19 @@ const TWILIO_NUMBERS = {
     return this.fieldTech.some((t) => t.number === phoneNumber);
   },
 
+  // Website tracking entries carry no label, and the voice/SMS webhooks stamp
+  // `location: numberConfig.label || 'unknown'`, so every website call was
+  // logged as 'unknown' and its missed-call alert showed no line. Name the
+  // office the site routes to; the domain itself stays in metadata.domain.
+  // Kept short: the missed-call alert cuts the line at 26 characters.
+  _websiteLabel(entry, line) {
+    if (entry.label) return entry.label;
+    if (entry.number === this.mainLine.number) return this.mainLine.label;
+    const { WAVES_LOCATIONS } = require('./locations');
+    const office = WAVES_LOCATIONS.find((l) => l.id === entry.location)?.name || entry.area;
+    return office ? `${office} website (${line})` : `Website (${line})`;
+  },
+
   findByNumber(phoneNumber) {
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {
@@ -252,10 +265,10 @@ const TWILIO_NUMBERS = {
     }
     // Pest domain tracking
     const domain = this.domainTracking.find(d => d.number === phoneNumber);
-    if (domain) return { ...domain, type: 'domain_tracking', locationId: domain.location };
+    if (domain) return { ...domain, label: this._websiteLabel(domain, 'Pest'), type: 'domain_tracking', locationId: domain.location };
     // Lawn domain tracking
     const lawn = this.lawnDomainTracking.find(d => d.number === phoneNumber);
-    if (lawn) return { ...lawn, type: 'domain_tracking', locationId: lawn.location };
+    if (lawn) return { ...lawn, label: this._websiteLabel(lawn, 'Lawn'), type: 'domain_tracking', locationId: lawn.location };
     // Paid campaign tracking
     for (const [id, paid] of Object.entries(this.paidTracking)) {
       if (paid.number === phoneNumber) return { ...paid, type: paid.source, trackingId: id, locationId: paid.location };

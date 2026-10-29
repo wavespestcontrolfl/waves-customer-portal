@@ -282,6 +282,12 @@ async function consumeCompletionSupplies(db, {
         const unitCost = Number.isFinite(costPerUnit) && costPerUnit >= 0 && costUnitMatches ? costPerUnit : null;
         const costUsed = unitCost != null ? Number((usage * unitCost).toFixed(4)) : null;
 
+        // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest count was already counted out of
+        // stock, so the use is recorded with stock unchanged (inventory-count-guard.js).
+        const guard = require('./inventory-count-guard');
+        const countHold = await guard.stockHoldFor(trx, locked.id, () => guard.loadVisit(trx, { scheduledServiceId, serviceRecordId }));
+        const stockAfter = countHold ? before : after;
+
         const inserted = await trx('product_inventory_movements')
           .insert({
             product_id: locked.id,
@@ -293,18 +299,18 @@ async function consumeCompletionSupplies(db, {
             quantity: usage,
             unit,
             stock_before: before,
-            stock_after: after,
+            stock_after: stockAfter,
             unit_cost: unitCost,
             cost_used: costUsed,
-            metadata: { source: SOURCE, reason: 'Completed visit consumable' },
+            metadata: { source: SOURCE, reason: 'Completed visit consumable', ...(countHold || {}) },
           })
           .onConflict(trx.raw("(product_id, scheduled_service_id) WHERE (metadata->>'source') = 'completion_consumable'"))
           .ignore()
           .returning('id');
         if (!inserted || inserted.length === 0) return { skipped: 'already_consumed' };
 
-        await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
-        return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
+        if (!countHold) await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
+        return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after: stockAfter, costUsed, ...(countHold ? { stockUnchanged: true } : {}) } };
       });
       if (outcome.consumed) result.consumed.push(outcome.consumed);
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });

@@ -106,8 +106,13 @@ function clientTopDressingPrice(calculateEstimate, { lawnSqFt, depth, hasRecurri
   const tierName = depth === 'eighth' ? '1/8" Depth' : '1/4" Depth';
   const tier = estimate.results.tdTiers.find(t => t.name === tierName);
   expect(tier).toBeDefined();
-  if (depth === 'eighth') expect(estimate.results.td).toBe(tier.price);
-  return tier.price;
+  // Top dressing is quote-only (owner 2026-10-29): no tier carries a sendable
+  // price. The formula survives only as baseEstimatePrice, which keeps this
+  // parity check on the constants the server pricer still uses.
+  expect(tier.price).toBeNull();
+  expect(tier.quoteRequired).toBe(true);
+  if (depth === 'eighth') expect(estimate.results.td).toBeUndefined();
+  return tier.baseEstimatePrice;
 }
 
 function clientDethatchingLine(calculateEstimate, { lawnSqFt, options }) {
