@@ -96,6 +96,11 @@ function bodyCanReplay(body) {
   return false;
 }
 
+function modelOf(body) {
+  const match = /"model"\s*:\s*"([^"\\]{1,120})"/.exec(body);
+  return match ? match[1] : '';
+}
+
 function resolveTarget(input, init) {
   // Returns { provider, pathname } when this call may be swapped, else null.
   let url;
@@ -148,8 +153,14 @@ async function failoverDecision(provider, response) {
   const { message, code, type } = errorFields(json);
   const status = response.status;
 
-  if (status === 401 || status === 403) {
-    return { pauseMs: AUTH_PAUSE_MS, reason: `credit key rejected (HTTP ${status})`, level: 'error' };
+  if (status === 401) {
+    return { pauseMs: AUTH_PAUSE_MS, reason: 'credit key rejected (HTTP 401)', level: 'error' };
+  }
+  // A 403 / 404 is usually a model the credit organization cannot use (its
+  // tier, a new model) while the main organization can: pause the key for
+  // that model only, so the key keeps serving every other model.
+  if (status === 403) {
+    return { pauseMs: AUTH_PAUSE_MS, reason: 'credit key refused (HTTP 403)', level: 'error', scope: 'model' };
   }
   if (provider === 'anthropic' && status === 400) {
     if (/credit balance is too low/i.test(message) || /reached your specified API usage limits/i.test(message)) {
@@ -160,8 +171,8 @@ async function failoverDecision(provider, response) {
   if (provider === 'openai' && status === 429 && (code === 'insufficient_quota' || type === 'insufficient_quota')) {
     return { pauseMs: CREDIT_PAUSE_MS, reason: 'insufficient quota', level: 'warn' };
   }
-  if (provider === 'openai' && status === 404 && code === 'model_not_found') {
-    return { pauseMs: MODEL_PAUSE_MS, reason: 'model not found for this key', level: 'warn' };
+  if (status === 404 && ((provider === 'openai' && code === 'model_not_found') || (provider === 'anthropic' && type === 'not_found_error'))) {
+    return { pauseMs: MODEL_PAUSE_MS, reason: 'model not found for this key', level: 'warn', scope: 'model' };
   }
   if (status === 429) {
     const pauseMs = parseRetryAfterMs(response);
@@ -217,19 +228,24 @@ function createCreditKeyFetch(baseFetch, opts = {}) {
     return have === wanted ? headers : null;
   }
 
-  function isPaused(provider, index) {
+  // A pause is keyed by the key's index (the whole key) or by `${index}|${model}`
+  // (that key for one model only).
+  function isPaused(provider, index, model) {
     const pool = pools[provider];
-    const pause = pool.pauses.get(index);
-    if (!pause) return false;
-    if (pause.until > now()) return true;
-    pool.pauses.delete(index);
-    log('info', `[credit-keys] ${provider} key ${index + 1} back in use`);
+    for (const pauseKey of model ? [index, `${index}|${model}`] : [index]) {
+      const pause = pool.pauses.get(pauseKey);
+      if (!pause) continue;
+      if (pause.until > now()) return true;
+      pool.pauses.delete(pauseKey);
+      log('info', `[credit-keys] ${provider} key ${index + 1} back in use${pauseKey === index ? '' : ` for ${model}`}`);
+    }
     return false;
   }
 
-  function pause(provider, index, decision) {
-    pools[provider].pauses.set(index, { until: now() + decision.pauseMs, reason: decision.reason });
-    log(decision.level, `[credit-keys] ${provider} key ${index + 1} paused ${formatPause(decision.pauseMs)}: ${decision.reason}`);
+  function pause(provider, index, decision, model) {
+    const forModel = decision.scope === 'model' && model ? model : '';
+    pools[provider].pauses.set(forModel ? `${index}|${forModel}` : index, { until: now() + decision.pauseMs, reason: decision.reason });
+    log(decision.level, `[credit-keys] ${provider} key ${index + 1} paused ${formatPause(decision.pauseMs)}${forModel ? ` for ${forModel}` : ''}: ${decision.reason}`);
   }
 
   async function creditFetch(input, init) {
@@ -249,9 +265,10 @@ function createCreditKeyFetch(baseFetch, opts = {}) {
     }
     const original = mainKeyMatches(provider, init);
     if (!original) return baseFetch(input, init);
+    const model = typeof body === 'string' ? modelOf(body) : '';
 
     for (let index = 0; index < pool.keys.length; index += 1) {
-      if (isPaused(provider, index)) continue;
+      if (isPaused(provider, index, model)) continue;
       const headers = new Headers(original);
       if (provider === 'anthropic') headers.set('x-api-key', pool.keys[index]);
       else headers.set('authorization', `Bearer ${pool.keys[index]}`);
@@ -263,7 +280,7 @@ function createCreditKeyFetch(baseFetch, opts = {}) {
       const decision = await failoverDecision(provider, response);
       if (!decision) return response;
       discard(response);
-      pause(provider, index, decision);
+      pause(provider, index, decision, model);
     }
     return baseFetch(input, init);
   }

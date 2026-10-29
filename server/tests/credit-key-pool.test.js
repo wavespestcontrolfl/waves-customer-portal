@@ -373,11 +373,35 @@ describe('failover', () => {
     expect(base.calls[3].key).toBe(A1);
   });
 
-  test('403 on openai pauses 1 h', async () => {
-    const base = makeBase((call) => (call.key === `Bearer ${O1}` ? json(403, { error: { message: 'no' } }) : ok()));
-    const { f } = pool(base);
+  test('a 403 pauses the key 1 h for that model only', async () => {
+    let t = 0;
+    const base = makeBase((call) => (call.key === `Bearer ${O1}` && JSON.parse(call.init.body).model === 'm'
+      ? json(403, { error: { message: 'no access to this model' } })
+      : ok()));
+    const { f, logger } = pool(base, { now: () => t });
     await f(OPENAI_CHAT, openaiInit());
     expect(base.calls.map((c) => c.key)).toEqual([`Bearer ${O1}`, `Bearer ${O2}`]);
+    expect(logger.error).toHaveBeenCalledWith('[credit-keys] openai key 1 paused 1h for m: credit key refused (HTTP 403)');
+    await f(OPENAI_CHAT, openaiInit());
+    expect(base.calls[2].key).toBe(`Bearer ${O2}`);
+    await f(OPENAI_CHAT, openaiInit(MAIN_O, { body: JSON.stringify({ model: 'other', messages: [] }) }));
+    expect(base.calls[3].key).toBe(`Bearer ${O1}`);
+    t = 60 * 60 * 1000;
+    await f(OPENAI_CHAT, openaiInit());
+    expect(base.calls[4].key).toBe(`Bearer ${O1}`);
+    expect(logger.info).toHaveBeenCalledWith('[credit-keys] openai key 1 back in use for m');
+  });
+
+  test('an anthropic not_found_error 404 moves that model to the next key, other models stay', async () => {
+    const base = makeBase((call) => (call.key === A1 && JSON.parse(call.init.body).model === 'claude-new'
+      ? json(404, { type: 'error', error: { type: 'not_found_error', message: 'model: claude-new' } })
+      : ok()));
+    const { f } = pool(base);
+    const res = await f(ANTHROPIC_URL, anthropicInit(MAIN_A, { body: JSON.stringify({ model: 'claude-new', messages: [] }) }));
+    expect(res.status).toBe(200);
+    expect(base.calls.map((c) => c.key)).toEqual([A1, A2]);
+    await f(ANTHROPIC_URL, anthropicInit());
+    expect(base.calls[2].key).toBe(A1);
   });
 
   test('an ordinary 400 goes back to the caller without failover', async () => {
