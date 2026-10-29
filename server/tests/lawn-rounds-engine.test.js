@@ -249,7 +249,7 @@ describe('reseed after a cancel adds the next round after the series end', () =>
 });
 
 describe('rebooker: a round visit stays in its round', () => {
-  const { leavesOwnRound, roundSweepHasGap } = rebooker;
+  const { leavesOwnRound } = rebooker;
 
   test('leavesOwnRound: inside the round is fine, either side is not, other patterns are free', () => {
     // Round 3 of 2027 is Mar 15 - Apr 23; today (pinned) is 2027-01-05.
@@ -264,15 +264,44 @@ describe('rebooker: a round visit stays in its round', () => {
     expect(leavesOwnRound(LAWN_ROUNDS_9, '2026-12-01', '2027-02-10', '2027-01-05')).toBe(false);
   });
 
-  test('a series move is refused when the rows are not in consecutive rounds', () => {
-    const pos = (row) => row.d;
-    const consecutive = [0, 1, 2].map((k) => ({ d: lawnRoundDate('2027-03-17', k) }));
-    const gap = [0, 1, 3].map((k) => ({ d: lawnRoundDate('2027-03-17', k) }));
-    const doubled = [{ d: '2027-03-17' }, { d: '2027-04-01' }, { d: lawnRoundDate('2027-03-17', 1) }];
-    expect(roundSweepHasGap(consecutive, 0, pos)).toBe(false);
-    expect(roundSweepHasGap(gap, 0, pos)).toBe(true);
-    expect(roundSweepHasGap(doubled, 0, pos)).toBe(true);
-    expect(roundSweepHasGap(gap, 2, pos)).toBe(false);
+  describe('a series move over a skipped round keeps it skipped', () => {
+    // Series anchored Wed Mar 17 (round 3). The round 5 visit was cancelled, so the rows
+    // from the anchor sit in rounds 3, 4, 6 and 7.
+    const oldAnchor = '2027-03-17';
+    const rows = [0, 1, 3, 4].map((k) => ({ date_exception: false, scheduled_date: lawnRoundDate(oldAnchor, k) }));
+    const project = (newAnchor) => rebooker.makeSeriesProjector({
+      service: { scheduled_date: oldAnchor, customer_id: 'c', skip_weekends: true },
+      parent: { recurring_pattern: LAWN_ROUNDS_9, customer_id: 'c', skip_weekends: true },
+      newDate: newAnchor, seriesDateStr: newAnchor, prefersNoWeekends: true,
+    });
+
+    test('a customer move inside the round: every later visit keeps its distance in rounds, on the new day', async () => {
+      const { projectOccurrenceDate } = await project('2027-03-26');
+      const dates = rows.map((row, i) => projectOccurrenceDate(i, row));
+      expect(dates).toEqual(['2027-03-26', '2027-05-07', '2027-07-23', '2027-09-03']);
+      expect(dates.map((d) => ord(d) - ord(oldAnchor))).toEqual([0, 1, 3, 4]);
+    });
+
+    test('an admin move into the next round moves every later visit one round, gap included', async () => {
+      const { projectOccurrenceDate } = await project('2027-04-30');
+      const dates = rows.map((row, i) => projectOccurrenceDate(i, row));
+      expect(dates.map((d) => ord(d) - ord(oldAnchor))).toEqual([1, 2, 4, 5]);
+      expect(dates).toEqual([0, 1, 3, 4].map((k) => lawnRoundDate('2027-04-30', k)));
+    });
+
+    test('a row that does not move still reserves its own round, so the rows behind it keep theirs', async () => {
+      const { projectOccurrenceDate, cadenceSlotDate } = await project('2027-03-26');
+      projectOccurrenceDate(0, rows[0]);
+      projectOccurrenceDate(1, rows[1]);
+      expect(cadenceSlotDate(2, rows[2])).toBe('2027-07-23');
+      expect(projectOccurrenceDate(3, rows[3])).toBe('2027-09-03');
+    });
+
+    test('every caller names the row: no projection call counts by list position alone', () => {
+      const src = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
+      expect(src.match(/cadenceSlotDate\([^,()]+\)/g)).toBeNull();
+      expect(src.match(/projectOccurrenceDate\([^,()]+\)/g)).toBeNull();
+    });
   });
 
   describe('series projector', () => {

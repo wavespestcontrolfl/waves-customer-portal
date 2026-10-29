@@ -310,16 +310,6 @@ function leavesOwnRound(pattern, currentDate, targetDate, today = etDateString()
   return !!target && (target < round.start || target > round.end);
 }
 
-// Lawn rounds: a series move re-places the rows from the anchor on by their
-// LIST position (occurrence 1, 2, 3...). That is only right when the rows
-// sit in consecutive rounds. After a skipped or cancelled round the move would
-// pull every later visit one round earlier, so it is refused: the caller moves
-// the one visit instead. `positionOf` is the row's series position date.
-function roundSweepHasGap(rows, startIdx, positionOf) {
-  const first = roundOrdinal(positionOf(rows[startIdx]));
-  return rows.slice(startIdx).some((row, k) => roundOrdinal(positionOf(row)) !== first + k);
-}
-
 const OUT_OF_ROUND_MESSAGE = 'This lawn visit has to stay inside its round. Contact the office if you need a different date.';
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -1288,9 +1278,23 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // weekend/season rules still apply to the shifted date.
   const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
   const anchorDate = String(newDate).split('T')[0];
-  const pureCadenceDate = (occurrenceIndex) => projectSeriesDate(
-    nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts),
+  // `step`: how many cadence steps after the anchor (see cadenceStep).
+  const pureCadenceDate = (step) => projectSeriesDate(
+    nextRecurringDate(newDate, parent.recurring_pattern, step, opts),
   );
+  // Lawn rounds: a later visit keeps its distance in ROUNDS from the moved
+  // visit (its series position against the anchor's), not its place in the
+  // list. After a skipped or cancelled round the list is shorter than the
+  // rounds it spans, and counting by list position would pull every later
+  // visit a round early (the skipped round filled, each later visit on another
+  // round's step). Every other pattern, and a caller that names no row,
+  // counts by list position.
+  const anchorRoundOrdinal = pattern === LAWN_ROUNDS_9 ? roundOrdinal(seriesPosition(service)) : null;
+  const cadenceStep = (occurrenceIndex, sib) => {
+    if (anchorRoundOrdinal == null || occurrenceIndex === 0 || !sib) return occurrenceIndex;
+    const own = roundOrdinal(seriesPosition(sib));
+    return own == null ? occurrenceIndex : Math.max(0, own - anchorRoundOrdinal);
+  };
   // Every date this projection has handed out — cadence slots AND exception
   // landings — so no two rows are written on one day and no exception's
   // recorded position ties with a written date.
@@ -1341,16 +1345,16 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // Slots are reserved in index order, so positions stay strictly
   // increasing and unique against every date the sweep writes.
   const cadenceSlotByOccurrence = new Map();
-  const cadenceSlotDate = (occurrenceIndex) => {
+  const cadenceSlotDate = (occurrenceIndex, sib = null) => {
     if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
-    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(occurrenceIndex));
+    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib)));
     cadenceSlotByOccurrence.set(occurrenceIndex, slot);
     return slot;
   };
   const projectedByOccurrence = new Map();
   const projectOccurrenceDate = (occurrenceIndex, sib = null) => {
     if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
-    const slot = cadenceSlotDate(occurrenceIndex);
+    const slot = cadenceSlotDate(occurrenceIndex, sib);
     let out = slot;
     if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
       const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot);
@@ -3050,13 +3054,6 @@ class SmartRebooker {
       };
       const droppedIdx = assertAnchorMovable(siblings);
       const startIdx = droppedIdx;
-      if (parent.recurring_pattern === LAWN_ROUNDS_9 && roundSweepHasGap(siblings, startIdx, seriesPosition)) {
-        throw Object.assign(new Error('This lawn plan skips a round, so the visits cannot move together. Move this visit only.'), {
-          statusCode: 409,
-          isOperational: true,
-          code: 'ROUND_GAP',
-        });
-      }
       // What the sweep is about to write, as a comparable shape: identity,
       // position, technician and movability — the lock/projection inputs.
       // Window and tracker columns come fresh from the locked read.
@@ -3159,7 +3156,7 @@ class SmartRebooker {
             // the movable Sunday behind it collapses onto the same Monday
             // (codex r9 P1). Same rule the cadence-math comment above
             // states for counting.
-            cadenceSlotDate(oi);
+            cadenceSlotDate(oi, sib);
             continue;
           }
           const projected = projectOccurrenceDate(oi, sib);
@@ -3909,7 +3906,7 @@ class SmartRebooker {
         // rejoined the series — clear the flag (the only clearing path until
         // an explicit rejoin operation exists).
         const rejoinsCadence = !isAnchor && sib.date_exception === true
-          && String(date).split('T')[0] === cadenceSlotDate(occurrenceIndex);
+          && String(date).split('T')[0] === cadenceSlotDate(occurrenceIndex, sib);
         // Exception bookkeeping: the anchor now DEFINES the cadence (any
         // exception it carried is spent); a kept exception's series position
         // moves to its new cadence slot; a rejoined row is plain cadence again.
@@ -3917,7 +3914,7 @@ class SmartRebooker {
           ? (sib.date_exception === true ? DATE_EXCEPTION_CLEAR : {})
           : (rejoinsCadence
             ? DATE_EXCEPTION_CLEAR
-            : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex) } : {}));
+            : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex, sib) } : {}));
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
@@ -4693,7 +4690,7 @@ class SmartRebooker {
       // row that does not move still reserves its cadence slot.
       for (let i = 0; i < nextIdx; i++) {
         if (i === 0 || RESCHEDULABLE_STATUSES.has(swept[i].status)) projectOccurrenceDate(i, swept[i]);
-        else cadenceSlotDate(i);
+        else cadenceSlotDate(i, swept[i]);
       }
       byDate[seriesDateStr] = projectOccurrenceDate(nextIdx, next);
     }
@@ -4758,7 +4755,7 @@ class SmartRebooker {
       if (!movable.includes(row)) {
         // Same slot reservation the sweep makes for a skipped/live row, so
         // the disclosed dates are the dates the move writes (codex r10 P2).
-        cadenceSlotDate(i);
+        cadenceSlotDate(i, row);
         continue;
       }
       const date = projectOccurrenceDate(i, row);
@@ -4939,7 +4936,6 @@ module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
 module.exports.leavesOwnRound = leavesOwnRound;
-module.exports.roundSweepHasGap = roundSweepHasGap;
 module.exports.makeSeriesProjector = makeSeriesProjector;
 // Exported for tests: the per-occurrence window derivation (rollback toggle +
 // admin window rules) the series mover applies to every sibling.

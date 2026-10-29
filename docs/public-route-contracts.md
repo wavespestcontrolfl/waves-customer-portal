@@ -997,8 +997,8 @@ rounds a year and a customer move stays inside the round the visit sits in:
 - **Expired-round exception.** A visit whose round has already ended (a missed
   visit being rebooked) is not held to a round: the filter is a no-op and the
   picker offers the usual days. The office places that visit.
-- **Refusals from the move itself** (`SmartRebooker`, non-admin initiators; an
-  admin move is never refused for a round). Both answer through the route's
+- **Refusal from the move itself** (`SmartRebooker`, non-admin initiators; an
+  admin move is never refused for a round). It answers through the route's
   existing error branch, `409 { "error": <message>, "code": <code> }` (no
   `subcode`), and nothing moves:
   - `OUT_OF_ROUND`: a single move, or a series re-anchor whose new date is
@@ -1006,14 +1006,10 @@ rounds a year and a customer move stays inside the round the visit sits in:
     stay inside its round. Contact the office if you need a different date." The
     picker filter above already hides such dates, so this fires only on a race
     or a direct call that got past the anti-forgery re-check.
-  - `ROUND_GAP`: a series re-anchor (big pull-forward, `rescheduleSeries`) on a
-    lawn plan whose remaining visits do not sit in consecutive rounds (a round
-    was skipped or cancelled), since moving them together would pull every later
-    visit a round early. Message: "This lawn plan skips a round, so the visits
-    cannot move together. Move this visit only."
-- A series re-anchor keeps each later visit in its own round (a date exception
-  stays in the round of its own place in the series). No token, eligibility,
-  rate-limit or privacy change.
+- A series re-anchor keeps each later visit in its own round: a visit keeps its
+  distance in rounds from the moved visit, so a skipped or cancelled round stays
+  empty, and a date exception stays in the round of its own place in the
+  series. No token, eligibility, rate-limit or privacy change.
 
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
