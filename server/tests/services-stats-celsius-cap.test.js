@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
   const rows = { count: '0' };
   const make = () => {
     const q = {};
-    for (const m of ['whereNotNull', 'whereIn', 'whereNull', 'orderBy', 'select', 'leftJoin', 'join', 'count']) q[m] = jest.fn(() => q);
+    for (const m of ['whereNotNull', 'whereIn', 'whereNull', 'orderBy', 'select', 'leftJoin', 'join', 'count', 'countDistinct']) q[m] = jest.fn(() => q);
     q.where = jest.fn((...args) => { mockWhereCalls.push(args); return q; });
     q.first = jest.fn(async () => rows);
     q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);

@@ -3418,7 +3418,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary, visitStatsRow] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -3544,6 +3544,21 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] address_neighbors: ${e.message}`); return []; }),
       req.techRole === 'technician' ? null : openBalanceSummary(c.id, { displayLimit: 0 })
         .catch(e => { logger.warn(`[customers:${c.id}] balance_summary: ${e.message}`); return null; }),
+      // Visit stats count trips to the property, not service_records rows:
+      // one stop can carry several appointments (pest + lawn) and one
+      // appointment can carry sibling records from different completion
+      // rails, and scheduled / in_progress / incomplete / cancelled rows are
+      // not visits. A completed record per ET service day is one visit, over
+      // the whole history (the `services` list above is capped at 20).
+      db('service_records')
+        .where({ customer_id: c.id, status: 'completed' })
+        .whereNotNull('service_date')
+        .first(
+          db.raw('COUNT(DISTINCT service_date)::int AS count'),
+          db.raw('MIN(service_date) AS first_date'),
+          db.raw('MAX(service_date) AS last_date'),
+        )
+        .catch(e => { logger.warn(`[customers:${c.id}] visit_stats: ${e.message}`); return null; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -3656,6 +3671,11 @@ router.get('/:id', async (req, res, next) => {
       })),
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      visitStats: visitStatsRow ? {
+        count: Number(visitStatsRow.count || 0),
+        firstDate: dateOnlyForApi(visitStatsRow.first_date),
+        lastDate: dateOnlyForApi(visitStatsRow.last_date),
+      } : null,
       // Reference the stored quote through the existing net-price mapper.
       // No live catalog or current plan repricing belongs in historical quotes.
       estimates: estimates.map((estimate) => ({
