@@ -3698,6 +3698,12 @@ function ServicesTab() {
   const thisYearServices = services.filter(s => parseDate(s.date).getFullYear() === currentYear);
   const totalProducts = thisYearServices.reduce((sum, s) => sum + (s.products?.length || 0), 0);
   const uniqueTechs = new Set(thisYearServices.map(s => s.technician).filter(Boolean)).size;
+  // A visit is a day with a completed service, not a record: one stop can
+  // carry several appointments, sibling records, or a record that never
+  // completed (scheduled / in_progress / incomplete / cancelled).
+  const visitDay = (s) => String(s.date || '').split('T')[0];
+  const isCompletedVisit = (s) => s.status === 'completed' && visitDay(s);
+  const thisYearVisits = new Set(thisYearServices.filter(isCompletedVisit).map(visitDay)).size;
   // WaveGuard memberships don't account for an hourly/per-visit time figure in the
   // customer portal — the average visit duration is intentionally not tallied (reads as zero).
   const avgMinutes = 0;
@@ -3712,19 +3718,22 @@ function ServicesTab() {
   });
   const sortedMonths = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
-  // --- Visit numbering --- single pass: assign visit number, then fill totals via map lookup.
-  const visitCounts = {};
+  // --- Visit numbering --- per service line and year, one number per
+  // completed visit day (same-day records share it); a record that did not
+  // complete gets no number.
+  const visitDays = {};
   const sortedAll = [...services].sort((a, b) => parseDate(a.date) - parseDate(b.date));
-  const visitKeys = new Array(sortedAll.length);
-  sortedAll.forEach((s, idx) => {
-    const cat = classifyType(s.type);
-    const yr = parseDate(s.date).getFullYear();
-    const k = `${cat}-${yr}`;
-    visitKeys[idx] = k;
-    visitCounts[k] = (visitCounts[k] || 0) + 1;
-    s._visitNum = visitCounts[k];
+  sortedAll.forEach((s) => {
+    s._visitNum = null;
+    s._visitTotal = null;
+    if (!isCompletedVisit(s)) return;
+    const k = `${classifyType(s.type)}-${parseDate(s.date).getFullYear()}`;
+    const days = visitDays[k] || (visitDays[k] = []);
+    if (days[days.length - 1] !== visitDay(s)) days.push(visitDay(s));
+    s._visitKey = k;
+    s._visitNum = days.length;
   });
-  sortedAll.forEach((s, idx) => { s._visitTotal = visitCounts[visitKeys[idx]]; });
+  sortedAll.forEach((s) => { if (s._visitNum) s._visitTotal = visitDays[s._visitKey].length; });
 
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
@@ -3754,7 +3763,7 @@ function ServicesTab() {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
           {[
-            { val: thisYearServices.length, label: `${currentYear} visits` },
+            { val: thisYearVisits, label: `${currentYear} visits` },
             { val: totalProducts, label: 'Products applied' },
             { val: uniqueTechs, label: 'Technicians' },
             { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },

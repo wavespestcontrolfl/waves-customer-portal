@@ -194,9 +194,14 @@ router.get('/stats/summary', async (req, res, next) => {
         ? scopeContactRecords(q.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'), scope)
         : q;
     };
+    // Visits, not records: one completed service day is one visit. A stop
+    // with several appointments, sibling records from two completion rails,
+    // and scheduled / in_progress / incomplete / cancelled rows each counted
+    // before.
     const servicesYTD = await records()
       .where('service_records.service_date', '>=', etYearStart)
-      .count('service_records.id as count')
+      .where('service_records.status', 'completed')
+      .countDistinct('service_records.service_date as count')
       .first();
 
     const latestThatch = await records()
