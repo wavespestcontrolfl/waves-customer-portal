@@ -2441,7 +2441,6 @@ server/services/recurring-appointment-seeder.js,529,/admin/schedule
 server/services/recurring-card-on-file.js,587,/admin/customers/${…}
 server/services/recurring-card-on-file.js,587,/admin/dashboard
 server/services/recurring-card-on-file.js,815,/admin/invoices
-server/services/reschedule-intent-watcher.js,415,/admin/communications
 server/services/review-reply/runner.js,467,/admin/reviews?review=${…}
 server/services/review-reply/runner.js,504,/admin/reviews?responded=all&review=${…}
 server/services/review-reply/runner.js,844,/admin/reviews?responded=responded&review=${…}

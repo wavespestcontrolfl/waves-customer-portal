@@ -2071,45 +2071,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
+  // COMMS GUARDS — daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
   // deliberately unused elsewhere in this file (#3208 pool-timeout outage:
   // never share a minute with other jobs).
   // =========================================================================
-
-  // Reschedule/away texts whose visit never moved (kill:
-  // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:53am ET.
-  cron.schedule('30 53 6 * * *', async () => {
-    try {
-      const lockRes = await runExclusive('reschedule-intent-watcher', async () => {
-        const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
-        const result = await runRescheduleIntentWatcher();
-        logger.info(`[reschedule-intent-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
-        // Delivery-BLOCKING skips count as failures; expected skips
-        // (nothing_found / disabled / recent_send) stay healthy.
-        if (result?.skipped === 'query_failed' || result?.error
-            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
-          throw new Error(`reschedule-intent watcher did not complete (${result.skipped || 'send_failed'})`);
-        }
-      });
-      // A pool-exhausted tick returns {skipped} instead of throwing —
-      // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
-        // lease_held = another instance is running this watcher (deploy
-        // overlap) — that IS the daily run, not a miss (codex r18).
-        // job_health must record the missed daily run (codex r17) — the
-        // skip path returns before runExclusive's own bookkeeping.
-        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-        const t0 = Date.now();
-        await recordJobStart('reschedule-intent-watcher').catch(() => {});
-        await recordJobEnd('reschedule-intent-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
-        throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
-      }
-    } catch (err) {
-      logger.error(`Reschedule-intent watcher failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
 
   // Quotes promised on calls with no estimate sent since (kill:
   // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:11am ET.
@@ -7371,11 +7338,6 @@ function initScheduledJobs() {
       const verifyLock = await runExclusive('csr-follow-up-verify', async () => {
         const CSRCoach = require('./csr/csr-coach');
         await CSRCoach.verifyFollowUps();
-        // Hourly: resolve actioned flags FIRST, then replay bells
-        // (codex #3232 r21/r23).
-        const riw = require('./reschedule-intent-watcher');
-        await riw.resolveActionedFlags();
-        await riw.replayPendingBells();
       });
       if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
@@ -9025,49 +8987,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Plan-hold lifecycle failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // WEEKLY MONDAY 10AM — Seasonal reactivation campaign (drafts V1)
-  // =========================================================================
-  // NEVER sends. Writes message_drafts status='pending' rows for owner
-  // approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log candidate
-  // counts only. Sending happens exclusively through the drafts approve route.
-  cron.schedule('20 10 * * 1', async () => {
-    logger.info('Running: seasonal reactivation campaign');
-    try {
-      await runExclusive('seasonal-reactivation', async () => {
-        const seasonalReactivation = require('./workflows/seasonal-reactivation');
-        if (seasonalReactivation.run) {
-          const result = await seasonalReactivation.run();
-          logger.info(`Seasonal reactivation done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate} (month ${result.month}, type: ${result.hookType})`);
-        }
-      });
-    } catch (err) {
-      logger.error(`Seasonal reactivation failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 9:30AM — Existing-customer upsell campaign drafts (V1)
-  // =========================================================================
-  // NEVER sends. Reads upsell_opportunities status='identified', applies the
-  // guards (live customer, prefs, unified 30d cross-lane cooldown, prepay
-  // notice suppression) and writes message_drafts status='pending' rows for
-  // owner approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log
-  // candidate counts only. Sending happens exclusively through the drafts
-  // approve route.
-  cron.schedule('30 9 * * *', async () => {
-    logger.info('Running: upsell campaign draft generator');
-    try {
-      await runExclusive('campaign-drafts-upsell', async () => {
-        const campaignDrafts = require('./campaign-drafts');
-        const result = await campaignDrafts.generateUpsellDrafts();
-        logger.info(`Upsell campaign drafts done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate}`);
-      });
-    } catch (err) {
-      logger.error(`Upsell campaign draft generator failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

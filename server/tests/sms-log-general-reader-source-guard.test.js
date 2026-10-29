@@ -346,11 +346,6 @@ const ALLOWLIST = [
     reason: 'message_type restricted to \'confirmation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
-    file: 'services/campaign-drafts-gate.js',
-    snippet: 'const recentCampaignSms = await db(\'sms_log\')',
-    reason: 'message_type restricted to CAMPAIGN_SMS_TYPES (upsell / renewal / reactivation / retention_outreach / retention), disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
     file: 'services/collections/consent-provenance.js',
     snippet: 'return db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
