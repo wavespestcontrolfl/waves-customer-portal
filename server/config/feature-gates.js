@@ -183,7 +183,6 @@
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
- *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
@@ -678,20 +677,6 @@ const gates = {
   // fail-closed ==='true' in EVERY environment. Gate off: emails
   // byte-identical to today.
   balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
-
-  // Past-due balance line on the completion SMS (owner directive
-  // 2026-08-15): customers whose invoices deliver via the completion-SMS
-  // rail never see the balanceVisibility email note — the with-invoice
-  // completion texts get a one-sentence past-due reminder instead. The line
-  // is code-built (open-balance.pastDueSmsLineForCustomer) from the SAME
-  // self-pay open-invoice authority as the email note, excluding the visit's
-  // own invoice, and renders '' while this gate is off — the {past_due_line}
-  // token ships expand/contract like {reservice_line}, so sends stay
-  // byte-identical until Adam approves the copy and flips. Display-only; no
-  // money moves and no sibling data ever rides the public /pay surface.
-  // Customer-facing copy change, so fail-closed ==='true' in EVERY
-  // environment. Kill switch: unset or any non-'true' value.
-  completionSmsBalance: process.env.GATE_COMPLETION_SMS_BALANCE === 'true',
 
   // Completion full-balance Auto Pay pull (owner ruling 2026-08-08: "when
   // autopay runs after a visit and the customer also has an old unpaid
@@ -3633,17 +3618,6 @@ const gates = {
   // Explicit opt-in everywhere; email plan and property-alert gates still apply.
   irrigationAppPlan: process.env.GATE_IRRIGATION_APP_PLAN === 'true',
 
-  // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
-  // the daily upsell generator write message_drafts status='pending' rows
-  // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
-  // This lane NEVER auto-sends: the only send path is the operator's explicit
-  // approve/revise click on /api/admin/drafts, which runs the full messaging
-  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs).
-  // With the gate OFF the generators only shadow-log candidate counts —
-  // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
-  // too) so campaign drafts never accumulate silently in a preview/dev queue.
-  campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
-
   // WDO Report Payment Hold — "pay before you get the report". Arms the
   // hold option on the WDO send-with-invoice flow: the customer gets the
   // invoice + pay link only, and the FDACS-13645 report is emailed
@@ -3799,14 +3773,6 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
-
-  // Real-time reschedule/away-intent flag lane (flagger bell/push + the
-  // durable agent_decisions flag rows). Owner ruling 2026-08-15: the bells
-  // fired on consent-shaped replies ("I will not be there but okay") and
-  // tapbacks — silence the whole lane. Opt-in in EVERY environment; the
-  // daily watcher keeps its own RESCHEDULE_INTENT_WATCHER_DISABLED switch.
-  // Revert: GATE_RESCHEDULE_INTENT_FLAGS=true restores the lane unchanged.
-  rescheduleIntentFlags: process.env.GATE_RESCHEDULE_INTENT_FLAGS === 'true',
 
   // Auto-apply customer-stated contact corrections (owner ruling
   // 2026-08-15, the 08-13 SMS-correction incident): name/email/address ONLY, never
