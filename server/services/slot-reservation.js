@@ -253,6 +253,8 @@ function serviceKeyForLabel(value = '') {
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
+  // Own identity (see estimate-public classifyServiceFamilyText): never the bait bucket below.
+  if (/dead[\s_-]*(?:rodent|animal)/.test(raw)) return 'rodent_dead_animal_removal';
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   if (/rodent.*exclusion|exclusion.*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
@@ -349,6 +351,7 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   if (key === 'rodent_trapping') return 'Rodent Trapping Service';
   if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
   if (key === 'rodent_sanitation') return 'Rodent Sanitation Service';
+  if (key === 'rodent_dead_animal_removal') return 'Dead Rodent Removal & Odor Treatment';
   if (key === 'rodent_bait') return 'Rodent Bait';
   return cappedServiceType(fallback);
 }

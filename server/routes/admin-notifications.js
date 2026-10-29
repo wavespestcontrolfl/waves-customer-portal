@@ -11,6 +11,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // unread count) lives in services/admin-unread.js — shared with the push
 // app-icon badge in notification-triggers so the two counts can't drift.
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
+const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
 
 router.use(adminAuthenticate);
 
@@ -87,7 +88,8 @@ router.get('/', async (req, res, next) => {
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     const lastServed = persisted.slice(0, limit).at(-1);
     res.json({
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...dedupedPersisted.map(withoutCursorFields)],
+      // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole })],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
@@ -460,6 +462,27 @@ router.put('/:id/done', async (req, res, next) => {
       catch (err) { logger.warn(`[admin-notifications] follow-up not settled for done alert ${id}: ${err.message}`); }
     }
     res.json({ success: true, updated: updated > 0 });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/actions/:actionId — press one of the row's own buttons
+// (docs/admin-notifications.md section 2, part 9). Admin only. `version` (required): the content version the
+// bell list served for the row, as for Done, so a button runs only on the row the admin saw. The server runs
+// only a button the row carries, through its kind's handler, which reads the record again; on success the row
+// is done. A changed row, a second tap or a refused step answers 409 with a short message.
+router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const { status, body } = await runAlertButton({
+      notificationId: id, actionId: String(req.params.actionId), version: version.toLowerCase(),
+      technicianId: req.technicianId, role: req.techRole,
+    });
+    res.status(status).json(body);
   } catch (err) { next(err); }
 });
 

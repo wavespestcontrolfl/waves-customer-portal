@@ -796,6 +796,15 @@ export function nextFormForOfferTiers(form, estimate) {
   return form;
 }
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
+// Dead Rodent Removal & Odor Treatment access choices. The values are the engine's tiers
+// (reachable | attic | in_wall); the empty value is the placeholder, never a default tier.
+const DEAD_ANIMAL_ACCESS_OPTIONS = [
+  { value: "", label: "Choose access" },
+  { value: "reachable", label: "Easy reach (garage, crawl-space opening, under a cabinet, attic floor near the hatch)" },
+  { value: "attic", label: "Attic search (found by smell, insulation moved as needed)" },
+  { value: "in_wall", label: "Inside a wall or ceiling (needs an opening) - custom quote" },
+];
+const DEAD_ANIMAL_ACCESS_VALUES = DEAD_ANIMAL_ACCESS_OPTIONS.map((o) => o.value).filter(Boolean);
 // The four rodent-guarantee eligibility confirmations. They are per-job
 // affirmations (work actually completed for THIS property), so they must reset
 // on a fresh estimate / customer-or-address change / when the guarantee toggle
@@ -1699,6 +1708,9 @@ export default function EstimateToolViewV2({
     sanitationArea: "",
     sanitationDebris: "0",
     sanitationAccess: "normal",
+    // Dead Rodent Removal & Odor Treatment: no default access tier. An unchosen
+    // tier goes to the server as a custom-quote line.
+    deadAnimalAccess: "",
     bedbugRooms: "1",
     bedbugMethod: "CHEMICAL",
     bedbugSeverity: "light",
@@ -1777,6 +1789,7 @@ export default function EstimateToolViewV2({
     birdBoxType: "standard_bird_box",
     birdBoxQuantity: "1",
     svcRodentSanitation: false,
+    svcRodentDeadAnimal: false,
     svcFlea: false,
     fleaOfferKey: "flea_elimination_two_visit",
     fleaComplexity: "light",
@@ -2009,6 +2022,7 @@ export default function EstimateToolViewV2({
       "svcFoam",
       "svcRodentTrap",
       "svcRodentSanitation",
+      "svcRodentDeadAnimal",
       "svcFlea",
       "svcWasp",
       "svcRoach",
@@ -3385,6 +3399,10 @@ export default function EstimateToolViewV2({
   // Area add-on catalog + availability, read from the same lawn_pricing_v2 row.
   // Fail closed: enabled false (or a missing field) hides the whole group.
   const [areaAddOnCatalog, setAreaAddOnCatalog] = useState({ enabled: false, items: [] });
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, new quotes only).
+  // Explicit true only: a 404, a transport failure or an older server keeps the choice
+  // hidden rather than offering a service the engine would refuse with a 400.
+  const [deadAnimalAvailable, setDeadAnimalAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3511,6 +3529,23 @@ export default function EstimateToolViewV2({
         // rental choice hidden rather than offering an option the engine
         // would silently discard.
         if (active) setTermiteRentalAvailable(row?.featureAvailable === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/rodent_dead_animal_removal");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setDeadAnimalAvailable(row?.featureAvailable === true);
       } catch {
         /* ignore — stays unavailable */
       }
@@ -4096,6 +4131,7 @@ export default function EstimateToolViewV2({
       if (form.svcTrapOnlyRetainer) selectedServices.push("TRAP_ONLY_RETAINER");
       // Legacy RODENT_WIRE_MESH / RODENT_BIRD_BOX — folded into EXCLUSION V2
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
+      if (form.svcRodentDeadAnimal) selectedServices.push("RODENT_DEAD_ANIMAL");
       if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
       if (form.svcRoach) selectedServices.push("ROACH");
@@ -4401,6 +4437,10 @@ export default function EstimateToolViewV2({
         sanitationArea: parseInt(form.sanitationArea, 10) || 0,
         sanitationDebris: parseInt(form.sanitationDebris, 10) || 0,
         sanitationAccess: form.sanitationAccess || "normal",
+        // Only when the service is ticked: with it off the request is byte-for-byte what it was before.
+        ...(form.svcRodentDeadAnimal
+          ? { deadAnimalAccess: DEAD_ANIMAL_ACCESS_VALUES.includes(form.deadAnimalAccess) ? form.deadAnimalAccess : "" }
+          : {}),
         roachType: form.roachType || "REGULAR",
         standaloneRoachTreatment: !!form.svcRoach && form.roachType === "REGULAR",
         germanRoachCleanoutSelected: !!form.svcRoach && form.roachType === "GERMAN",
@@ -8017,6 +8057,27 @@ export default function EstimateToolViewV2({
                     </Field>{" "}
                   </div>{" "}
                 </div>
+              )}
+              {/* New quotes only: hidden while the gate is off, unless this estimate already carries it
+                  (a reopened draft keeps the box so the rep sees it and the server's refusal, never a silent drop). */}
+              {(deadAnimalAvailable || form.svcRodentDeadAnimal) && (
+                <>
+                  <CheckboxV2 k="svcRodentDeadAnimal" label="Dead Rodent Removal & Odor Treatment" />
+                  {form.svcRodentDeadAnimal && (
+                    <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                      <Field label="Access (required)" id="estimate-deadAnimalAccess" className="mb-4">
+                        <SelectV2 k="deadAnimalAccess" options={DEAD_ANIMAL_ACCESS_OPTIONS} />
+                      </Field>
+                      <div className="text-14 text-zinc-600" data-testid="dead-animal-note">
+                        {form.deadAnimalAccess === "in_wall"
+                          ? "Custom quote: the price is set after we look at the opening."
+                          : form.deadAnimalAccess
+                            ? "Fixed price. It drops when this estimate has other rodent work."
+                            : "Pick the access. With no access chosen this line is a custom quote."}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (

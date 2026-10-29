@@ -982,6 +982,35 @@ loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets
 the same reload when a date would be named.
 
+Lawn rounds on the public reschedule link (owner 2026-10-28, `lawn_rounds_9`;
+no gate, inert until a visit carries that pattern; every other pattern is
+byte-identical). A `lawn_rounds_9` visit has one visit in each of nine fixed
+rounds a year and a customer move stays inside the round the visit sits in:
+- **Picker.** `buildAvailabilityForService` (behind `GET
+  /api/public/reschedule/:token`, `POST /:token/find-slots` and the commit's
+  anti-forgery re-check) drops every day and slot dated outside the visit's own
+  round, for a visit whose `recurring_pattern` is `lawn_rounds_9` only. The
+  payload shape is unchanged: fewer `days` and `slots`. A date outside the round
+  that a client posts anyway is not in the rebuilt availability, so
+  `POST /api/public/reschedule/:token` answers the existing `409 { code:
+  'SLOT_TAKEN', ... }` recovery response, not a new code.
+- **Expired-round exception.** A visit whose round has already ended (a missed
+  visit being rebooked) is not held to a round: the filter is a no-op and the
+  picker offers the usual days. The office places that visit.
+- **Refusal from the move itself** (`SmartRebooker`, non-admin initiators; an
+  admin move is never refused for a round). It answers through the route's
+  existing error branch, `409 { "error": <message>, "code": <code> }` (no
+  `subcode`), and nothing moves:
+  - `OUT_OF_ROUND`: a single move, or a series re-anchor whose new date is
+    outside the round of the visit being moved. Message: "This lawn visit has to
+    stay inside its round. Contact the office if you need a different date." The
+    picker filter above already hides such dates, so this fires only on a race
+    or a direct call that got past the anti-forgery re-check.
+- A series re-anchor keeps each later visit in its own round: a visit keeps its
+  distance in rounds from the moved visit, so a skipped or cancelled round stays
+  empty, and a date exception stays in the round of its own place in the
+  series. No token, eligibility, rate-limit or privacy change.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
@@ -5800,6 +5829,11 @@ and rodent-trapping rows may carry the sold allowance used to render that
 copy: `includedFollowUps` / `includedCallbacks` (number, `'unlimited'`, or
 null), `unlimitedCallbacks` (boolean or null), and `includedScope` (string or
 null). These are terms from the saved pricing snapshot, not live job counts.
+Dead Rodent Removal & Odor Treatment rows (`rodent_dead_animal_removal`, dark behind
+`GATE_DEAD_ANIMAL_REMOVAL`) never carry `deadAnimalTier` or `onSiteMinutes`: the sold access
+tier and its on-site minutes stay in the unsanitized breakdown the booking path reads
+(`sanitizePublicOneTimeBreakdown` strips both), and the row shows its label, price and copy like
+the other rodent one-time rows.
 A one-time-ONLY estimate whose billable rows all resolve to one copy
 pack may carry `pricing.oneTimeServiceCopy` — `{ key, hero: { eyebrow, h1,
 sub }, aiTitle?, aiBody?, askChips[] }` (hero strings keep `{first}`/`{city}`

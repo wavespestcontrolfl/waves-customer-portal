@@ -80,8 +80,9 @@ const TRACKING_TYPES = new Set(['follow_through_tracking']);
 // The 7 PM open-visits reminder (tech-open-visit-nudge.js) is kept too: it is
 // the durable copy when the push reaches no device. The 9 PM clock-out
 // reminder and the 11 PM automatic clock-out notice (time-tracking-crons.js,
-// GATE_SHIFT_CLOSE_REVIEW) use the same card: headline + server message.
-const NUDGE_TYPES = new Set(['tech_open_visit_nudge', 'tech_clock_out_reminder', 'tech_auto_clock_out']);
+// GATE_SHIFT_CLOSE_REVIEW) use the same card: headline + server message. So does the one
+// summary card a series handover sends the new technician (ops/agents/second-tech-handover-execute.js).
+const NUDGE_TYPES = new Set(['tech_open_visit_nudge', 'tech_clock_out_reminder', 'tech_auto_clock_out', 'series_handover']);
 // A customer's visit-prep photo submission (visit-prep-tech-alert.js) —
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.

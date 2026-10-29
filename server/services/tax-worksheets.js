@@ -20,6 +20,7 @@ const db = require('../models/db');
 const { buildPnlReport, salesTaxLegsForWindow, dateCellStr } = require('./pnl-report');
 const sharedBills = require('./tax-shared-bills');
 const { etDateString } = require('../utils/datetime-et');
+const { form1099ThresholdDollars } = require('./form-1099-threshold');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -189,7 +190,7 @@ async function salesTaxSheet({ kind = 'month', year, index } = {}) {
 // 1099-NEC threshold: $600 for payments through 2025, $2,000 for payments made
 // after 2025 (P.L. 119-21; indexed for inflation after 2026). Due Jan 31 of
 // the next year, or the next business day.
-const necThreshold = (year) => (year >= 2026 ? 2000 : 600);
+const necThreshold = form1099ThresholdDollars; // one shared rule: services/form-1099-threshold.js
 const necDueDate = (year) => nextBusinessDay(isoDate(year + 1, 1, 31));
 
 const SCHEDULE_C_1099_LINES = ['11', '17'];

@@ -1786,3 +1786,57 @@ describe('extendSeriesOnceLocked — series price guards', () => {
     expect(raise).not.toHaveBeenCalled();
   });
 });
+
+describe('topUpRecurringSeriesLocked — lawn_rounds_9 (one visit per round)', () => {
+  const { roundOf, lawnRoundDate } = require('../services/lawn-rounds');
+  const ordinalOf = (d) => { const r = roundOf(d); return r.programYear * 9 + (r.round - 1); };
+  const weekdayOf = (d) => new Date(`${d}T12:00:00Z`).getUTCDay();
+  const nextSaturday = () => { let n = 0; while (weekdayOf(daysOut(n)) !== 6) n += 1; return daysOut(n); };
+
+  test('fills the horizon one visit per round, on the anchor offset (no drift from hopping off the latest visit)', async () => {
+    const anchor = daysOut(0);
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'lawn_rounds_9', scheduled_date: anchor, service_type: 'Lawn Care' },
+      seriesDates: [anchor],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBeNull();
+    // 365 days is at least eight rounds ahead of today.
+    expect(inserted.length).toBeGreaterThanOrEqual(8);
+    inserted.forEach((row, idx) => {
+      expect(row.scheduled_date).toBe(lawnRoundDate(anchor, idx + 1));
+      expect(ordinalOf(row.scheduled_date)).toBe(ordinalOf(anchor) + idx + 1);
+    });
+    expect(new Set(inserted.map((r) => ordinalOf(r.scheduled_date))).size).toBe(inserted.length);
+  });
+
+  test('with the weekend rule on a Saturday-anchored series: still one visit per round, none on a weekend', async () => {
+    const anchor = nextSaturday();
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'lawn_rounds_9', scheduled_date: anchor, service_type: 'Lawn Care', skip_weekends: true,
+      },
+      seriesDates: [anchor],
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(inserted.length).toBeGreaterThanOrEqual(8);
+    inserted.forEach((row, idx) => {
+      expect(ordinalOf(row.scheduled_date)).toBe(ordinalOf(anchor) + idx + 1);
+      expect([0, 6]).not.toContain(weekdayOf(row.scheduled_date));
+    });
+  });
+
+  test('a customer-moved visit still owns its round: top-up adds the next round, not a second visit in that one', async () => {
+    const anchor = daysOut(0);
+    const next = roundOf(lawnRoundDate(anchor, 1));
+    // The round after the anchor's already has a visit, on the last day of that round.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'lawn_rounds_9', scheduled_date: anchor, service_type: 'Lawn Care' },
+      seriesDates: [anchor, next.end],
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    const rounds = [anchor, next.end, ...inserted.map((r) => r.scheduled_date)].map(ordinalOf);
+    expect(new Set(rounds).size).toBe(rounds.length);
+    rounds.forEach((r, idx) => expect(r).toBe(rounds[0] + idx));
+  });
+});

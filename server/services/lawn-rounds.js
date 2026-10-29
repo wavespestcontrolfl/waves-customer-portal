@@ -116,6 +116,89 @@ function lawnRoundDate(anchorDateStr, i = 0) {
   return snapped;
 }
 
+// The i-th round date after `base` (a visit in the series), counted in rounds
+// and placed from the SERIES ANCHOR's offset and weekday. lawnRoundDate hops
+// from whatever date it is given, and each hop snaps to the weekday again
+// (a hop gains 2 days a round), so extending a series one visit at a time from
+// its latest visit drifts toward the end of every round (a Jan 12 anchor ends
+// a year later on Jan 25). Extension, top-up and reseed hop from the latest
+// visit, so they pass the anchor: the answer is then the same date the series
+// was seeded with. No anchor, or an unreadable one: hop from `base`, as
+// lawnRoundDate does. i = 0 is `base` itself.
+function lawnRoundDateFrom(anchorDateStr, baseDateStr, i = 0) {
+  const base = dateOnly(baseDateStr);
+  const steps = Math.trunc(Number(i) || 0);
+  const anchorRound = roundOf(anchorDateStr);
+  const baseRound = roundOf(base);
+  if (!anchorRound || !baseRound) return lawnRoundDate(base, steps);
+  if (steps === 0) return base;
+  return lawnRoundDate(dateOnly(anchorDateStr), roundOrdinal(base) - roundOrdinal(anchorDateStr) + steps);
+}
+
+// Position of a date on the continuous round timeline: round 1 of program
+// year Y is Y * 9. Null for an unreadable date.
+function roundOrdinal(dateStr) {
+  const home = roundOf(dateStr);
+  return home ? home.programYear * ROUNDS_PER_YEAR + (home.round - 1) : null;
+}
+
+// The dates a recurring series already occupies, for a walk that places new
+// visits. Every date blocks its own day (the Set itself). Only a CADENCE
+// visit owns a lawn round (`cadence`): a booster extra shares
+// recurring_parent_id but carries is_recurring = false and sits on top of the
+// plan, so it must never stand in for a round's regular visit. add() records
+// a cadence date (every date a walk places is one); addExtra() a booster's.
+// Copying another SeriesDates keeps which dates are extras.
+class SeriesDates extends Set {
+  constructor(dates = []) {
+    super();
+    this.cadence = new Set();
+    if (dates instanceof SeriesDates) {
+      for (const d of dates) super.add(d);
+      for (const d of dates.cadence) this.cadence.add(d);
+      return;
+    }
+    for (const d of dates || []) this.add(d);
+  }
+
+  add(date) {
+    super.add(date);
+    this.cadence.add(date);
+    return this;
+  }
+
+  addExtra(date) {
+    super.add(date);
+    return this;
+  }
+}
+
+// A SeriesDates from scheduled_services rows ({ scheduled_date, is_recurring }).
+// A row without is_recurring counts as a cadence visit (the reading before
+// boosters were told apart). `toDate` normalizes the stored date.
+function seriesDatesFromRows(rows, toDate = dateOnly) {
+  const out = new SeriesDates();
+  for (const row of rows || []) {
+    const d = toDate(row?.scheduled_date);
+    if (!d) continue;
+    if (row.is_recurring === false) out.addExtra(d);
+    else out.add(d);
+  }
+  return out;
+}
+
+// True when `dates` (any iterable of 'YYYY-MM-DD', or a SeriesDates) already
+// holds a visit in the same round as `dateStr`. A series owes one visit a
+// round: a candidate whose round is taken is not a missing visit, it is a
+// second one. A SeriesDates answers from its cadence visits only.
+function roundTaken(dates, dateStr) {
+  const want = roundOrdinal(dateStr);
+  if (want == null) return false;
+  const pool = dates instanceof SeriesDates ? dates.cadence : dates;
+  for (const d of pool || []) if (roundOrdinal(d) === want) return true;
+  return false;
+}
+
 module.exports = {
   LAWN_ROUNDS_9,
   ROUNDS_PER_YEAR,
@@ -124,4 +207,9 @@ module.exports = {
   roundStart,
   roundEnd,
   lawnRoundDate,
+  lawnRoundDateFrom,
+  roundOrdinal,
+  roundTaken,
+  SeriesDates,
+  seriesDatesFromRows,
 };

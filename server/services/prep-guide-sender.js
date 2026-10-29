@@ -141,7 +141,9 @@ const PREP_CONFIG = Object.freeze({
     // is a cleanup visit and gets none of it; a combined "Rodent Trapping &
     // Sanitation" keeps the prep (GH Codex #3856 r30 P1). Inspections stay:
     // the guide covers them itself.
-    excludeKeywords: [{ keyword: 'sanitation', unless: ['trap', 'exclusion', 'bait', 'control'] }],
+    // A standalone "Dead Rodent Removal & Odor Treatment" (GATE_DEAD_ANIMAL_REMOVAL) is a one-off pickup
+    // and odor visit: prep.rodent's trapping-first steps do not describe it, so it gets none of them.
+    excludeKeywords: [{ keyword: 'sanitation', unless: ['trap', 'exclusion', 'bait', 'control'] }, { keyword: 'dead rodent', unless: ['trap', 'exclusion', 'bait', 'control'] }],
     emailTemplateKey: 'prep.rodent',
     smsStandaloneKey: null,
   },
