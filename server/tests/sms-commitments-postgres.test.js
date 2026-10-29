@@ -4359,6 +4359,24 @@ postgres('SMS commitments on PostgreSQL', () => {
         } finally { delete process.env.GATE_ALERT_RING_ONCE; }
       });
 
+      test('gate true: two overdue promises from one text, both held by the visit: the shared alert closes, no refresh', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          // A second overdue promise from the same text, of a kind rule 3 holds too.
+          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
+            description: 'call them back Monday', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+            evidence: JSON.stringify([{ quote: 'follow up with you Monday', sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(0);
+          expect((await alertOf(shared)).done_at).not.toBeNull();
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
       test('gate true: an alert a person already marked done stays theirs (the on-track close touches open rows only)', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         process.env.GATE_ALERT_RING_ONCE = 'true';

@@ -1175,10 +1175,13 @@ const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
 // open while another promise from the same text is still open. `openOnly`
 // touches open rows only: a temporary close (GATE_PROMISE_RECORD_EVIDENCE
 // rule 3, on track until a visit) never takes over a row a person marked done.
-async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false }, update) {
+// `needsAlert` (optional) narrows the text's other open promises to those that
+// still need the alert (rule 3: one the same visit rule holds does not).
+async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false, needsAlert = null }, update) {
   // A non-settling update (edit, snooze) marks both alerts read; a settling
   // one finishes the shared alert only when no other promise from the text is open.
-  const remaining = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
+  const others = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
+  const remaining = needsAlert ? await needsAlert(others) : others;
   const keys = [legacyCommitmentAlertKey(commitmentId), ...(remaining.length ? [] : [smsSourceAlertKey(smsLogId)])];
   await trx('notifications').where({ recipient_type: 'admin' }).modify((q) => { if (openOnly) q.whereNull('done_at'); })
     .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
@@ -1378,6 +1381,16 @@ const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
 // Extra model calls per refresh run in shadow mode.
 const SHADOW_MODEL_CALLS_PER_RUN = 10;
 const alertRingOnce = () => require('../config/feature-gates').alertRingOnceLive?.() === true;
+// The text's other open promises that still need its shared alert: every one
+// rule 3 does not hold in 'true' mode (findOnTrackVisit; a failed read holds
+// nothing, so that promise keeps the alert).
+async function notOnTrack(conn, promises, message, now) {
+  const kept = [];
+  for (const item of promises) {
+    if ((await findOnTrackVisit(conn, item, message, now))?.mode !== 'true') kept.push(item);
+  }
+  return kept;
+}
 const etShortDateTime = (at) => new Date(at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 // Rule 3: a waves row of these kinds (a promise Waves made or a customer's
 // request, whatever its basis) that is booked onto a visit is on track until
@@ -1601,9 +1614,10 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // close alone. Without it a closed row would absorb that ring for a day.
     if (holdBell) {
       if (alertRingOnce()) {
-        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true },
-          require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
-            resolution: `On track: a visit is booked until ${etShortDateTime(onTrack.window_end)} ET`, at: now, keepExisting: true, conn: trx }));
+        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true,
+          needsAlert: (others) => notOnTrack(trx, others, message, now) },
+        require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
+          resolution: `On track: a visit is booked until ${etShortDateTime(onTrack.window_end)} ET`, at: now, keepExisting: true, conn: trx }));
       }
       return;
     }
