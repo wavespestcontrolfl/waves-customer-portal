@@ -88,6 +88,18 @@ describe('muted alert record (GATE_ALERT_CATALOG=watch)', () => {
     expect(auditInsert).toHaveBeenCalledTimes(2);
   });
 
+  test('a composed alert also leaves its declared area, severity and who, and its kind with ids stripped; a raw one leaves none', async () => {
+    // The E1 ring-rule evaluator judges a muted alert by its rule; a raw alert has none and stays on the legacy policy.
+    await NotificationService.create({
+      recipientType: 'admin', category: 'billing', title: 'Billing — charge the Fixture invoice', body: 'body', connection,
+      metadata: { area: 'Billing', severity: 'needs-you', who: 'person', dedupeKey: 'invoice-overdue-3f2c9a1e-1b2c-4d5e-8f90-123456789abc:7' },
+    });
+    await muted('A raw note', 'system');
+    const [composed, raw] = auditRows();
+    expect(composed.metadata).toEqual(expect.objectContaining({ area: 'Billing', severity: 'needs-you', who: 'person', kind: 'invoice-overdue-#' }));
+    expect(Object.keys(raw.metadata).sort()).toEqual(['category', 'etDay', 'titleStem', 'triggerKey']);
+  });
+
   test('the stem cuts at 80 characters', async () => {
     await auditBellPolicyMuted({ category: 'alert', title: `${'word '.repeat(30)}12345` });
     expect(auditRows()[0].metadata.titleStem).toHaveLength(80);

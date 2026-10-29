@@ -537,7 +537,7 @@ const NotificationService = {
               // muted alert, so a muted alert can be counted. The module's own db, never `connection` (it may roll
               // back); a failure costs the record, never the return below, and the log line carries no title text.
               try {
-                await require('./audit-log').auditBellPolicyMuted({ category, triggerKey: metadata?.triggerKey || null, title });
+                await require('./audit-log').auditBellPolicyMuted({ category, triggerKey: metadata?.triggerKey || null, title, metadata });
               } catch (auditErr) {
                 logger.warn(`[notifications] muted-alert audit failed: ${safeErrorSummary(auditErr)}`);
               }
