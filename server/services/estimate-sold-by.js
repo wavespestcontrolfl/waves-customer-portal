@@ -6,8 +6,8 @@
  * charges anyone.
  *
  * Three ways the column gets its value:
- *  - 'flag': a GPS-verified field lead of an active W-2 technician bound to the estimate (its lead
- *    or its customer; one flag credits one estimate). The auto-fill runs from
+ *  - 'flag': a GPS-verified field lead of an active W-2 technician that the office built this
+ *    estimate from (leads.estimate_id; one flag credits one estimate). The auto-fill runs from
  *    createOrReuseAdminEstimate and reviseAdminEstimate;
  *  - 'office': an admin chose the technician;
  *  - 'cleared': an admin chose no one. Auto-fill never refills a cleared estimate.
@@ -36,14 +36,15 @@ const SOLD_BY_COLUMNS = [
   'sold_by_technician_id', 'sold_by_source', 'sold_by_lead_id', 'sold_by_set_by', 'sold_by_set_at',
 ];
 
-// The newest qualifying field flag for the estimate, or null. A flag counts only when it is bound
-// to this estimate by a link the office made or the GPS proved: the estimate's own lead
-// (leads.estimate_id) or the estimate's customer (leads.customer_id: the visited customer of a
-// visit flag, or the customer the office made from a Neighbor). A typed phone alone never binds:
-// the GPS proves where the truck was, not whose phone it is. One flag credits one estimate: a lead
-// already filling another estimate's Sold by is skipped, and the lead row is locked so two saves
-// cannot both take it. The seller is the technician who flagged (gps_check.technician_id, written
-// once by the flag), never leads.assigned_to, which the office may reassign.
+// The newest qualifying field flag for the estimate, or null. A flag counts only for the
+// estimate the office built from it (leads.estimate_id, set when the office makes the estimate
+// from the flagged lead): the office's own act binds the flag to the service being quoted. A
+// flag on the same customer or with the same typed phone never binds by itself (another
+// service the customer asked the office for must not credit the technician; the GPS proves where
+// the truck was, not whose phone it is). One flag credits one estimate: a lead already filling
+// another estimate's Sold by is skipped, and the lead row is locked so two saves cannot both take
+// it. The seller is the technician who flagged (gps_check.technician_id, written once by the
+// flag), never leads.assigned_to, which the office may reassign.
 async function findMatchingFlag(trx, estimate, now) {
   const since = new Date(now.getTime() - FLAG_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const query = trx('leads')
@@ -55,10 +56,7 @@ async function findMatchingFlag(trx, estimate, now) {
     .where('leads.created_at', '<=', now)
     .where('technicians.employment_type', 'w2')
     .where('technicians.active', true)
-    .where(function boundToEstimate() {
-      this.where('leads.estimate_id', estimate.id);
-      if (estimate.customer_id) this.orWhere('leads.customer_id', estimate.customer_id);
-    })
+    .where('leads.estimate_id', estimate.id)
     .whereNotExists(function creditedElsewhere() {
       this.select(trx.raw('1')).from('estimates as credited')
         .whereRaw('credited.sold_by_lead_id = leads.id')

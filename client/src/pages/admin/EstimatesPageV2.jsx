@@ -3510,6 +3510,7 @@ function ViewErrorNote({ message, className }) {
 // non-interactive avoids nesting buttons and links inside a role="button" row.
 export function MobileEstimateRow({
   estimate,
+  onSoldByChanged,
   onCreateFromAddress,
   onOpenCustomerPanel,
   onSend,
@@ -3756,6 +3757,7 @@ export function MobileEstimateRow({
               </span>{" "}
             </div>
           )}
+          <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />
         </div>
         {estimate.customerPhone && (
           <Button
@@ -4439,6 +4441,7 @@ function EstimatesMobileListView({
             <MobileEstimateRow
               key={e.id}
               estimate={e}
+              onSoldByChanged={refreshEstimates}
               highlighted={String(e.id) === String(highlightId)}
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}

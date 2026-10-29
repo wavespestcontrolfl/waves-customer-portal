@@ -375,83 +375,68 @@ postgres('commission sold by', () => {
     });
   });
 
-  describe('Sold by auto-fill, lead reassigned by the office', () => {
-    it('credits the technician who flagged, not the one the lead was reassigned to', async () => {
-      const flagger = await tech('Sample Alpha');
-      const other = await tech('Sample Bravo');
-      const cust = await customer();
-      await flagLead(flagger, { customer_id: cust });
-      await trx('leads').where({ customer_id: cust }).update({ assigned_to: other });
-      const est = await estimate({ customer_id: cust });
-      await autoFillSoldBy(trx, await estimateRow(est));
-      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: flagger, sold_by_source: 'flag' });
-    });
-  });
-
   describe('Sold by auto-fill', () => {
-    const fill = async (id) => {
-      const row = await estimateRow(id);
-      return autoFillSoldBy(trx, row);
-    };
+    const fill = async (id) => autoFillSoldBy(trx, await estimateRow(id));
 
-    it('fills from a verified flag matched by customer', async () => {
+    it('fills from a verified flag the estimate was built from (leads.estimate_id)', async () => {
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      const lead = await flagLead(t, { customer_id: cust });
-      const est = await estimate({ customer_id: cust });
+      const est = await estimate();
+      const lead = await flagLead(t, { estimate_id: est });
       const filled = await fill(est);
       expect(filled).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
       expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
       expect((await estimateRow(est)).sold_by_set_at).toBeInstanceOf(Date);
     });
 
-    it('never fills from a typed phone alone: a Neighbor flag needs the office to link it', async () => {
+    it('never fills from the same customer or a typed phone alone: only the lead the estimate was built from', async () => {
       const t = await tech('Sample Alpha');
-      const lead = await flagLead(t, { phone: '+19415550142' });
-      const est = await estimate({ customer_phone: '(941) 555-0142' });
+      const cust = await customer();
+      const lead = await flagLead(t, { customer_id: cust, phone: '+19415550142' });
+      // An estimate for another service the customer asked the office for: same customer, same phone, no link.
+      const est = await estimate({ customer_id: cust, customer_phone: '(941) 555-0142' });
       expect((await fill(est)).sold_by_source).toBeFalsy();
       await trx('leads').where({ id: lead }).update({ estimate_id: est });
       expect((await fill(est)).sold_by_lead_id).toBe(lead);
     });
 
-    it('credits one estimate per flag', async () => {
+    it('credits the technician who flagged, not the one the lead was reassigned to', async () => {
+      const flagger = await tech('Sample Alpha');
+      const other = await tech('Sample Bravo');
+      const est = await estimate();
+      const lead = await flagLead(flagger, { estimate_id: est });
+      await trx('leads').where({ id: lead }).update({ assigned_to: other });
+      await fill(est);
+      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: flagger, sold_by_source: 'flag' });
+    });
+
+    it('credits one estimate per flag, and an office clear frees it', async () => {
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      const lead = await flagLead(t, { customer_id: cust });
-      const first = await estimate({ customer_id: cust });
-      const second = await estimate({ customer_id: cust });
+      const first = await estimate();
+      const second = await estimate();
+      const lead = await flagLead(t, { estimate_id: first });
       expect((await fill(first)).sold_by_lead_id).toBe(lead);
+      // The office moves the lead to another estimate: the flag already credits the first one.
+      await trx('leads').where({ id: lead }).update({ estimate_id: second });
       expect((await fill(second)).sold_by_source).toBeFalsy();
-      expect((await estimateRow(second)).sold_by_technician_id).toBeNull();
-      // Cleared by the office, the flag is free again.
       await admin('PUT', `/${first}/sold-by`, { technicianId: null });
       expect((await fill(second)).sold_by_lead_id).toBe(lead);
     });
 
-    it('fills from a flag whose estimate_id points at the estimate', async () => {
-      const t = await tech('Sample Alpha');
-      const est = await estimate();
-      const lead = await flagLead(t, { estimate_id: est });
-      expect((await fill(est)).sold_by_lead_id).toBe(lead);
-    });
-
     it('ignores a flag older than 60 days, an unverified flag and a flag with another channel', async () => {
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      await flagLead(t, { customer_id: cust, created_at: new Date(Date.now() - 61 * DAY) });
-      await flagLead(t, { customer_id: cust, gps_verified: false });
-      await flagLead(t, { customer_id: cust, first_contact_channel: 'web_form' });
-      const est = await estimate({ customer_id: cust });
+      const est = await estimate();
+      await flagLead(t, { estimate_id: est, created_at: new Date(Date.now() - 61 * DAY) });
+      await flagLead(t, { estimate_id: est, gps_verified: false });
+      await flagLead(t, { estimate_id: est, first_contact_channel: 'web_form' });
       expect((await fill(est)).sold_by_source).toBeFalsy();
     });
 
     it('ignores a 1099 technician, an inactive technician and the owner', async () => {
-      const cust = await customer();
+      const est = await estimate();
       for (const patch of [{ employment_type: '1099' }, { active: false }]) {
-        await flagLead(await tech(`Sample ${JSON.stringify(patch)}`, patch), { customer_id: cust });
+        await flagLead(await tech(`Sample ${JSON.stringify(patch)}`, patch), { estimate_id: est });
       }
-      await flagLead(ADMIN_ID, { customer_id: cust });
-      const est = await estimate({ customer_id: cust });
+      await flagLead(ADMIN_ID, { estimate_id: est });
       expect((await fill(est)).sold_by_source).toBeFalsy();
       expect((await estimateRow(est)).sold_by_technician_id).toBeNull();
     });
@@ -459,30 +444,28 @@ postgres('commission sold by', () => {
     it('takes the newest of two flags', async () => {
       const older = await tech('Sample Alpha');
       const newer = await tech('Sample Bravo');
-      const cust = await customer();
-      await flagLead(older, { customer_id: cust, created_at: new Date(Date.now() - 5 * DAY) });
-      const newest = await flagLead(newer, { customer_id: cust, created_at: new Date(Date.now() - 1 * DAY) });
-      const est = await estimate({ customer_id: cust });
+      const est = await estimate();
+      await flagLead(older, { estimate_id: est, created_at: new Date(Date.now() - 5 * DAY) });
+      const newest = await flagLead(newer, { estimate_id: est, created_at: new Date(Date.now() - 1 * DAY) });
       expect(await fill(est)).toMatchObject({ sold_by_technician_id: newer, sold_by_lead_id: newest });
     });
 
     it('never refills a cleared estimate or overwrites an office choice', async () => {
       const t = await tech('Sample Alpha');
       const chosen = await tech('Sample Bravo');
-      const cust = await customer();
-      await flagLead(t, { customer_id: cust });
-      const cleared = await estimate({ customer_id: cust, sold_by_source: 'cleared', sold_by_set_by: ADMIN_ID });
+      const cleared = await estimate({ sold_by_source: 'cleared', sold_by_set_by: ADMIN_ID });
+      await flagLead(t, { estimate_id: cleared });
       expect((await fill(cleared)).sold_by_technician_id).toBeFalsy();
-      const office = await estimate({ customer_id: cust, sold_by_source: 'office', sold_by_technician_id: chosen, sold_by_set_by: ADMIN_ID });
+      const office = await estimate({ sold_by_source: 'office', sold_by_technician_id: chosen, sold_by_set_by: ADMIN_ID });
+      await flagLead(t, { estimate_id: office });
       expect((await fill(office)).sold_by_technician_id).toBe(chosen);
       expect((await estimateRow(office)).sold_by_technician_id).toBe(chosen);
     });
 
     it('does nothing once the customer accepted', async () => {
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      await flagLead(t, { customer_id: cust });
-      const est = await estimate({ customer_id: cust, accepted_at: new Date() });
+      const est = await estimate({ accepted_at: new Date() });
+      await flagLead(t, { estimate_id: est });
       await fill(est);
       expect((await estimateRow(est)).sold_by_source).toBeNull();
     });
@@ -490,9 +473,8 @@ postgres('commission sold by', () => {
     it('does nothing with the gate off', async () => {
       delete process.env.GATE_COMMISSION_SOLD_BY;
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      await flagLead(t, { customer_id: cust });
-      const est = await estimate({ customer_id: cust });
+      const est = await estimate();
+      await flagLead(t, { estimate_id: est });
       await fill(est);
       expect((await estimateRow(est)).sold_by_source).toBeNull();
     });
@@ -641,11 +623,10 @@ postgres('commission sold by', () => {
       database: trx, body: body(patch), technicianId: ADMIN_ID, technician: { id: ADMIN_ID, name: 'Sample Admin' }, recompute: NO_INPUTS,
     });
 
-    it("fills a new estimate from a verified flag on the estimate's customer, and returns it", async () => {
+    it('fills a new estimate built from a verified flag (leadId), and returns it', async () => {
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      const lead = await flagLead(t, { customer_id: cust });
-      const { estimate: created } = await create({ customerId: cust });
+      const lead = await flagLead(t, { phone: '+19415550142' });
+      const { estimate: created } = await create({ leadId: lead });
       expect(created).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
       expect(await estimateRow(created.id)).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag' });
       expect(created.created_by_technician_id).toBe(ADMIN_ID);
@@ -654,9 +635,8 @@ postgres('commission sold by', () => {
     it('leaves a new estimate alone with the gate off', async () => {
       delete process.env.GATE_COMMISSION_SOLD_BY;
       const t = await tech('Sample Alpha');
-      const cust = await customer();
-      await flagLead(t, { customer_id: cust });
-      const { estimate: created } = await create({ customerId: cust });
+      const lead = await flagLead(t, { phone: '+19415550142' });
+      const { estimate: created } = await create({ leadId: lead });
       expect(await estimateRow(created.id)).toMatchObject({ sold_by_technician_id: null, sold_by_source: null });
     });
 
