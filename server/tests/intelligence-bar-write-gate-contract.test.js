@@ -87,6 +87,7 @@ beforeAll(() => {
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
   process.env.GATE_IB_CREATE_INVOICE = 'true';
+  process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
   process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
@@ -108,6 +109,7 @@ afterAll(() => {
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
   delete process.env.GATE_IB_CREATE_INVOICE;
+  delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
@@ -210,6 +212,7 @@ const WRITE_TWO_STEP = [
   'create_payment_plan',
   'cancel_payment_plan',
   'create_invoice',
+  'compose_email',
   'set_customer_bill_to',
   'approve_agent_review_draft',
   'revise_agent_review_draft',
@@ -852,6 +855,13 @@ const UNCONFIRMED_CALLS = [
       ...REMINDER_SEED,
       payment_plans: [{ id: '00000000-0000-0000-0000-00000000f402', invoice_id: '00000000-0000-0000-0000-00000000f401', status: 'active', total_balance: '129.00', payment_amount: '50.00', payment_frequency: 'monthly', next_payment_date: '2099-02-01' }],
     }],
+    // compose_email's preview reads the recipient and runs the link check; it may not send without confirmed
+    // (intelligence-bar-compose-email.test.js covers the card itself).
+    ['compose-email-tools', 'executeComposeEmailTool', 'compose_email', {
+      customer_id: '00000000-0000-0000-0000-00000000f401', subject: 'Visit tomorrow', body: 'Hi Pat, we are coming tomorrow.',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f401', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.invalid' }],
+    }],
     // create_invoice's preview reads the customer and the service's own totals mirror (spied below); it may not write
     // without confirmed (intelligence-bar-create-invoice.test.js covers the card itself).
     ['create-invoice-tools', 'executeCreateInvoiceTool', 'create_invoice', {
@@ -1333,9 +1343,10 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
     // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
+    // compose_email (_sideEffects): its confirmed run sends an email (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'propose_admin_edit']);
   });
 });

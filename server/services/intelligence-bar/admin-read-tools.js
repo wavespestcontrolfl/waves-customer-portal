@@ -23,6 +23,13 @@
  * Dark behind GATE_IB_GENERAL_READ (ibGeneralReadLive, read at call time; needs
  * GATE_IB_PLATFORM, which has the owner-only access model) and
  * owner-login only (ibFullAccess, carried as actionContext.fullAccess).
+ *
+ * OFFICE login (owner ruling 2026-10-28 "A1", GATE_IB_GENERAL_READ_OFFICE, which needs GATE_IB_GENERAL_READ): a non-owner ADMIN login
+ * gets the same two tools limited to the catalog rows a person marked `office: true` (admin-read-reviewed.json). find_admin_reads lists
+ * only those rows; read_admin_data refuses any other row ("not available on this login"). Free-text notes are always withheld on that
+ * login, whatever GATE_IB_READ_NOTES says, and a keep-mode row never adds its keepNotes there. The loopback GET still carries her own
+ * bearer token, so each endpoint's own auth applies. Technicians never reach this module's tools (the registry refuses them first, and
+ * isAdmin is checked again here).
  */
 const config = require('../../config');
 const logger = require('../logger');
@@ -101,6 +108,11 @@ function readNotesLive() {
   return require('../../config/feature-gates').ibReadNotesLive() === true;
 }
 
+// GATE_IB_GENERAL_READ_OFFICE: the non-owner admin login's limited read. Read at call time.
+function officeReadLive() {
+  return require('../../config/feature-gates').ibGeneralReadOfficeLive() === true;
+}
+
 function refusal(error, code, extra = {}) {
   return { error, code, ...extra };
 }
@@ -135,10 +147,11 @@ function scoreEntry({ pathWords, otherWords, keywordWords }, terms) {
   return score;
 }
 
-function findAdminReads(input) {
+function findAdminReads(input, { office = false } = {}) {
   const query = typeof input?.query === 'string' ? input.query : '';
   const terms = [...new Set(wordsOf(query).filter(word => !STOPWORDS.has(word)).map(stem))];
   const ranked = terms.length ? SEARCH_INDEX
+    .filter(item => !office || item.entry.office === true)
     .map(item => ({ entry: item.entry, score: scoreEntry(item, terms) }))
     .filter(row => row.score > 0)
     .sort((a, b) => b.score - a.score || a.entry.endpoint.length - b.entry.endpoint.length || a.entry.endpoint.localeCompare(b.entry.endpoint))
@@ -307,7 +320,7 @@ function scrubToken(text, authorization) {
   return token && noMarker.includes(token) ? noMarker.split(token).join('[redacted]') : noMarker;
 }
 
-async function shapeResponse(response, entry, authorization) {
+async function shapeResponse(response, entry, authorization, options = {}) {
   const status = response.status;
   const type = String(response.headers?.get?.('content-type') || '').toLowerCase();
   const length = Number(response.headers?.get?.('content-length') || 0);
@@ -324,7 +337,7 @@ async function shapeResponse(response, entry, authorization) {
   try { parsed = JSON.parse(scrubToken(await response.text(), authorization)); } catch { parsed = undefined; }
   if (status < 200 || status >= 300) return rejected(status, entry, errorText(parsed, status));
   if (parsed === undefined) return { status, endpoint: entry.endpoint, error: 'The admin endpoint did not return readable JSON' };
-  return answerFrom(parsed, status, entry);
+  return answerFrom(parsed, status, entry, options);
 }
 
 // The answer: credentials removed first (signed links, private links, credential
@@ -350,13 +363,14 @@ function projectRow(parsed, entry, withNotes = false) {
   return keepPaths(omitted, withNotes && entry.keepNotes ? [...entry.keep, ...entry.keepNotes] : entry.keep);
 }
 
-function answerFrom(parsed, status, entry) {
+function answerFrom(parsed, status, entry, { office = false } = {}) {
   const state = newState();
   // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read,
   // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
   // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
   // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
-  const returning = readNotesLive();
+  // The office login never receives notes, whatever GATE_IB_READ_NOTES says (that gate is the owner login's ruling).
+  const returning = readNotesLive() && !office;
   const projected = projectRow(parsed, entry, returning);
   const clean = returning
     ? redactSecrets(projected, state, 0, { freeText: entry.freeText || {} })
@@ -389,7 +403,7 @@ function answerFrom(parsed, status, entry) {
   };
 }
 
-async function fetchAdminRead(entry, path, search, authorization, paramIndexes = []) {
+async function fetchAdminRead(entry, path, search, authorization, paramIndexes = [], options = {}) {
   const origin = loopbackOrigin();
   if (!origin) return refusal('The admin read could not find this server', 'read_connection_failed');
   try {
@@ -399,7 +413,7 @@ async function fetchAdminRead(entry, path, search, authorization, paramIndexes =
       redirect: 'manual',
       signal: AbortSignal.timeout(READ_TIMEOUT_MS),
     });
-    return await shapeResponse(response, entry, authorization);
+    return await shapeResponse(response, entry, authorization, options);
   } catch (err) {
     const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
     logger.warn(`[admin-read] ${entry.endpoint} ${timedOut ? 'timed out' : 'failed'}`);
@@ -419,14 +433,18 @@ function scopeBinding(input) {
   return kind ? { kind, param: entry.scopeParam, inPath: entry.params.includes(entry.scopeParam) } : null;
 }
 
-async function readAdminData(input, actionContext) {
+async function readAdminData(input, actionContext, { office = false } = {}) {
   const authorization = actionContext.staffAuthorization;
   if (typeof authorization !== 'string' || !BEARER_RE.test(authorization)) {
     return refusal('This read needs the logged-in owner session, which is missing', 'permission_denied');
   }
+  // The office login reads only the rows reviewed as office rows; any other row is refused first, whatever its parameters, with no request made.
+  if (office && typeof input?.endpoint === 'string' && BY_ENDPOINT.get(input.endpoint)?.office !== true && BY_ENDPOINT.has(input.endpoint)) {
+    return refusal('That read is not available on this login.', 'permission_denied');
+  }
   const built = buildRequestPath(input?.endpoint, input || {});
   if (built.refusal) return built.refusal;
-  return fetchAdminRead(built.entry, built.path, built.search, authorization, built.paramIndexes);
+  return fetchAdminRead(built.entry, built.path, built.search, authorization, built.paramIndexes, { office });
 }
 
 async function executeAdminReadTool(name, input, actionContext = {}) {
@@ -436,13 +454,16 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
   if (!adminReadLive()) {
     return refusal('Reading admin screen data from the bar is turned off (GATE_IB_GENERAL_READ, which needs GATE_IB_PLATFORM). Nothing was read.', 'gate_off');
   }
-  if (actionContext?.fullAccess !== true || actionContext?.isAdmin === false) {
+  const owner = actionContext?.fullAccess === true && actionContext?.isAdmin !== false;
+  // A non-owner login: only an authenticated ADMIN (isAdmin true, set by the route from the token's role), only with the office gate on.
+  const office = !owner && actionContext?.isAdmin === true && officeReadLive();
+  if (!owner && !office) {
     return refusal('This read is limited to the owner account.', 'permission_denied');
   }
-  return name === ADMIN_READ_FIND_TOOL ? findAdminReads(input) : readAdminData(input, actionContext);
+  return name === ADMIN_READ_FIND_TOOL ? findAdminReads(input, { office }) : readAdminData(input, actionContext, { office });
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, officeReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
 };

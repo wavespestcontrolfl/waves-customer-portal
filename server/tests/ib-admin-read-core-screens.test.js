@@ -169,7 +169,8 @@ describe('keep mode (an allow-list) in the response projection', () => {
     }
   });
   test('the 35 rows that were on main are unchanged: none is in keep mode', () => {
-    expect(catalog.entries.filter(entry => entry.keep).length).toBe(NEW_ENDPOINTS.length);
+    // The two email-template rows (2026-10-28) were reviewed in keep mode too.
+    expect(catalog.entries.filter(entry => entry.keep).length).toBe(NEW_ENDPOINTS.length + 2);
   });
   test('a row that is not in keep mode does not carry the reviewed-list note', async () => {
     process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true';

@@ -1693,4 +1693,21 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+// compose_email inside a customer-scoped task may only email the task customer: its customer_id, or that customer's own
+// saved address typed out. Any other address cannot be tied to the task's customer, so it is refused there.
+async function validateComposeRecipient(params, context) {
+  if (!context?.targets?.length || context.ownerDirect === true) return null;
+  const targets = context.targets.map(target => String(target.customer_id).toLowerCase());
+  if (params.customer_id) {
+    return targets.includes(String(params.customer_id).trim().toLowerCase()) ? null
+      : { error: 'Use the task customer for this email', code: 'target_relationship_mismatch' };
+  }
+  const email = normalizeEmail(params.email_address);
+  const owners = await db('customers').whereIn('id', targets).whereNull('deleted_at').select('email');
+  if (!email || !owners.some(owner => normalizeEmail(owner.email) === email)) {
+    return { error: 'Use the task customer\'s own email address for this email', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, validateComposeRecipient, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

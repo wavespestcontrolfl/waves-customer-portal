@@ -492,6 +492,7 @@
       "endpoint": "/admin/dispatch/alerts",
       "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
+      "office": true,
       "query": [
         "limit",
         "unresolved"
@@ -703,6 +704,83 @@
       "signals": [],
       "unresolved": [],
       "hash": "fff055e70de321e980fb41bf0337fbfc"
+    },
+    {
+      "endpoint": "/admin/email-templates",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "office": true,
+      "query": [
+        "mode",
+        "purpose",
+        "q",
+        "status"
+      ],
+      "keywords": [
+        "email templates",
+        "email template list",
+        "is an email template active",
+        "which email templates exist",
+        "customer email templates"
+      ],
+      "keep": [
+        "templates.*.id",
+        "templates.*.name",
+        "templates.*.description",
+        "templates.*.mode",
+        "templates.*.purpose",
+        "templates.*.audience",
+        "templates.*.status",
+        "templates.*.from_name",
+        "templates.*.default_cta_label",
+        "templates.*.last_published_at",
+        "templates.*.version_count",
+        "templates.*.draft_count",
+        "templates.*.automation_count"
+      ],
+      "freeText": {
+        "description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "7eca8f5c382949092cebdbb948877d81"
+    },
+    {
+      "endpoint": "/admin/email-templates/automations",
+      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "office": true,
+      "keywords": [
+        "email automations",
+        "automatic emails",
+        "what emails go out automatically",
+        "email triggers",
+        "email automation status",
+        "which emails are active"
+      ],
+      "keep": [
+        "automations.*.name",
+        "automations.*.description",
+        "automations.*.trigger_description",
+        "automations.*.template_name",
+        "automations.*.template_status",
+        "automations.*.delay_minutes",
+        "automations.*.audience",
+        "automations.*.status",
+        "automations.*.frequency_cap",
+        "automations.*.timezone",
+        "automations.*.send_count_30d",
+        "automations.*.would_send_30d",
+        "automations.*.would_block_30d",
+        "automations.*.last_published_at"
+      ],
+      "freeText": {
+        "description": "content",
+        "trigger_description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "19248f920bdbcbfd4dcb1e5d3019ad67"
     },
     {
       "endpoint": "/admin/estimates",
@@ -1189,6 +1267,23 @@
       "hash": "221af5cdec979b70c219d9f873ac8b98"
     },
     {
+      "endpoint": "/admin/kpi-targets",
+      "reviewed": "Handler (admin-kpi-targets.js GET /, behind the router's adminAuthenticate + requireAdmin and cacheRoute(60), a response cache): kpi_targets select of metric, target, amber band, lower-is-better, updated_by, updated_at, mapped to numbers. No customer data, no write; read end to end.",
+      "scope": "broad",
+      "keywords": [
+        "kpi targets",
+        "revenue target",
+        "dashboard targets",
+        "goal for a metric",
+        "what is our target"
+      ],
+      "signals": [],
+      "unresolved": [
+        "routes/admin-kpi-targets.js#middleware cacheRoute()"
+      ],
+      "hash": "2d7b6590446c2e3e496ac8263fafe670"
+    },
+    {
       "endpoint": "/admin/leads",
       "reviewed": "Handler (admin-leads.js GET /): leads joined to lead_sources, technicians and estimates, leads.* plus source name and type, channel, estimate status and assigned name; filters status (open expands to the working statuses), source_name, channel, search, start_date, end_date, sort, order, page and limit (default 50, max 200); deleted leads are excluded. The estimates join selects only estimates.status (credential_table:estimates is the join, not a token read). The id, source, estimate_attachable and builder_warranty filters are not offered. The row omits the raw Twilio recording URL, the anonymous visitor id and the Google click id. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary and the other note-like keys are withheld by the key-name default; service_interest and extracted_data (typed or spoken lead text) are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
@@ -1630,6 +1725,36 @@
       "hash": "ba82ea574fd8734f90e320a09edb33f4"
     },
     {
+      "endpoint": "/admin/schedule/blackout-dates",
+      "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note.",
+      "scope": "broad",
+      "office": true,
+      "keywords": [
+        "blackout dates",
+        "days we are closed",
+        "closed days",
+        "holidays we are closed",
+        "weekly days off",
+        "are we open on a date",
+        "schedule closures"
+      ],
+      "freeText": {
+        "reason": "note"
+      },
+      "acceptSignals": [
+        "write:transaction"
+      ],
+      "signals": [
+        "write:transaction"
+      ],
+      "unresolved": [
+        "services/scheduling/blackout-dates.js#conn.transaction",
+        "services/scheduling/blackout-dates.js#fn",
+        "services/scheduling/holidays.js#holiday.dateIn"
+      ],
+      "hash": "9e35587b23a1c44cfd4e183dba6a15b0"
+    },
+    {
       "endpoint": "/admin/schedule/list",
       "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only. Re-reviewed for #6503 (mosquito misting pricer, dark): utils/service-normalizer.js, followed by this handler for service_type labels, now classifies a label through isMistingSystemIdentity (utils/mosquito-misting-system.js, a pure string predicate: exact mosquito_misting* key or the phrase 'misting system' / 'misting service plan') before the mosquito patterns, and its bare /misting/ entry is narrowed to the plan phrase; a design-visit label keeps its catalog name. No table, column, query or response key changed; the mapped columns are the same. Re-signed for #6503 round 7: utils/service-normalizer.js gained three label entries ahead of the design-visit one (Mosquito Misting System Installation / Refill / Maintenance keep their own labels); pure label mapping, no table, column, query or response key changed.",
       "scope": "broad",
@@ -1715,6 +1840,27 @@
       "signals": [],
       "unresolved": [],
       "hash": "bd907b8a4a1a71aa228546b03fdd60a9"
+    },
+    {
+      "endpoint": "/admin/settings/call-routing/status",
+      "reviewed": "Handler (admin-settings.js GET /call-routing/status, adminAuthenticate + requireAdmin): one system_settings read, mergeCallRoutingConfig (call-routing-config.js: pure normalization), isEnabled('voiceAiAgent') and decideVoiceRoute (voice-route-decision.js: pure decision on the config and the clock); returns booleans, the mode, the decision reason and two numbers. The agent endpoint URL is never returned (only whether one is set). No customer data, no write; read end to end. answersFirstReason is decideVoiceRoute's fixed reason code (system text), declared content.",
+      "scope": "broad",
+      "keywords": [
+        "call routing",
+        "where do calls ring",
+        "does the ai answer calls",
+        "voice agent status",
+        "call routing status",
+        "after hours calls"
+      ],
+      "signals": [
+        "effect_call:mergeCallRoutingConfig"
+      ],
+      "unresolved": [],
+      "hash": "6f5e691d782bb355a42980c2369ec13c",
+      "freeText": {
+        "answersFirstReason": "content"
+      }
     }
   ]
 }

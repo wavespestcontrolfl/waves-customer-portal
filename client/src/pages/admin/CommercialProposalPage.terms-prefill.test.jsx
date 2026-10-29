@@ -51,6 +51,8 @@ const mount = async (data) => {
     cancellation: screen.getByLabelText('Cancellation'),
   };
 };
+// The terms section starts folded; option roles need it open.
+const openTerms = () => fireEvent.click(screen.getByRole('button', { name: /^Commercial terms/ }));
 const UNSAVED = 'Unsaved changes';
 const savedTerms = async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
@@ -96,6 +98,7 @@ it('sets Net 30 only when Bill by invoice is on', async () => {
 it('with Auto Pay on, an empty proposal without Bill by invoice opens on Auto Pay; Net terms stay unavailable', async () => {
   const f = await mount({ autopay: true });
   await waitFor(() => expect(f.payment).toHaveValue('autopay'));
+  openTerms();
   expect(f.payment).not.toBeDisabled();
   expect(screen.getByRole('option', { name: 'Auto Pay' })).toBeInTheDocument();
   expect(screen.getByRole('option', { name: 'Net-30' })).toBeDisabled();
@@ -105,26 +108,31 @@ it('with Auto Pay on, an empty proposal without Bill by invoice opens on Auto Pa
 it('with Auto Pay on, a Bill-by-invoice proposal still opens on Net 30 and offers no Auto Pay', async () => {
   const f = await mount({ autopay: true, billByInvoice: true });
   await waitFor(() => expect(f.payment).toHaveValue('net30'));
+  openTerms();
   expect(screen.queryByRole('option', { name: 'Auto Pay' })).not.toBeInTheDocument();
   expect(screen.getByRole('option', { name: 'Net-30' })).not.toBeDisabled();
 });
 
 it('with Auto Pay off, no Auto Pay choice is offered, but a proposal already on Auto Pay keeps it', async () => {
   await mount({});
+  openTerms();
   expect(screen.queryByRole('option', { name: 'Auto Pay' })).not.toBeInTheDocument();
   cleanup();
   const f = await mount({ commercialTerms: { paymentTerms: 'autopay' } });
   await waitFor(() => expect(f.payment).toHaveValue('autopay'));
+  openTerms();
   expect(screen.getByRole('option', { name: 'Auto Pay' })).toBeInTheDocument();
 });
 
 it('offers no Net-15 or Due on receipt; a proposal already on one shows it, marked, so it can be changed', async () => {
   await mount({ billByInvoice: true });
+  openTerms();
   expect(screen.queryByRole('option', { name: /Net-15/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('option', { name: /Due on receipt/ })).not.toBeInTheDocument();
   cleanup();
   const f = await mount({ billByInvoice: true, commercialTerms: { paymentTerms: 'net15' } });
   await waitFor(() => expect(f.payment).toHaveValue('net15'));
+  openTerms();
   expect(screen.getByRole('option', { name: 'Net-15 (no online signing)' })).toBeInTheDocument();
   expect(screen.queryByRole('option', { name: /Due on receipt/ })).not.toBeInTheDocument();
   fireEvent.change(f.payment, { target: { value: 'net30' } });

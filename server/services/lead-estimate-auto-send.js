@@ -38,8 +38,31 @@ function parseAllowedReviewReasons(value) {
   return items.length ? items : DEFAULT_ALLOWED_REVIEW_REASONS;
 }
 
+// The created-after cutoff (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER) is the moment
+// the auto-send gate became effective: only drafts created strictly after it
+// may be texted or emailed, so turning the gate on can never send a quote to
+// an old website lead. Strict ISO 8601 WITH an explicit zone (Z or +/-hh:mm);
+// unset or unparseable fails closed, the scan sends nothing and says why.
+const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function parseCreatedAfter(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return { createdAfter: null, createdAfterProblem: 'unset' };
+  if (!ISO_WITH_ZONE.test(raw)) return { createdAfter: null, createdAfterProblem: 'unparseable' };
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return { createdAfter: null, createdAfterProblem: 'unparseable' };
+  return { createdAfter: parsed, createdAfterProblem: null };
+}
+
+function createdAfterProblemMessage(problem) {
+  return problem === 'unparseable'
+    ? 'LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER is not an ISO 8601 timestamp with a zone (for example 2026-10-28T12:00:00Z)'
+    : 'LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER is not set';
+}
+
 function leadEstimateAutoSendConfigFromEnv(env = process.env) {
   return {
+    ...parseCreatedAfter(env.LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER),
     delayMinutes: parsePositiveInt(env.LEAD_ESTIMATE_AUTO_SEND_DELAY_MINUTES, DEFAULT_DELAY_MINUTES),
     limit: parsePositiveInt(env.LEAD_ESTIMATE_AUTO_SEND_LIMIT, DEFAULT_LIMIT),
     staleClaimMinutes: parsePositiveInt(
@@ -123,6 +146,9 @@ function leadAutomationSummary(estimateData) {
   };
 }
 
+// Never stamped blocked: a cutoff miss is a skip, not a verdict on the draft.
+const CUTOFF_SKIP_REASONS = ['created_before_cutoff', 'created_after_cutoff_unset'];
+
 function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   const config = {
     delayMinutes: DEFAULT_DELAY_MINUTES,
@@ -173,6 +199,18 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
     return { eligible: false, reason: 'missing_delivery_contact' };
   }
   if (!Number.isFinite(createdTime)) return { eligible: false, reason: 'missing_created_at' };
+  // Created-after cutoff. Config built by leadEstimateAutoSendConfigFromEnv
+  // always carries `createdAfter` (a Date, or null = unset/unparseable = fail
+  // closed). A caller that passes no `createdAfter` key at all is a pure
+  // policy check and is not cut off.
+  if (config.createdAfter !== undefined) {
+    if (!(config.createdAfter instanceof Date) || !Number.isFinite(config.createdAfter.getTime())) {
+      return { eligible: false, reason: 'created_after_cutoff_unset' };
+    }
+    if (createdTime <= config.createdAfter.getTime()) {
+      return { eligible: false, reason: 'created_before_cutoff' };
+    }
+  }
   if ((now.getTime() - createdTime) < delayMs) return { eligible: false, reason: 'delay_not_elapsed' };
 
   return { eligible: true, reason: null };
@@ -264,7 +302,8 @@ function leadEstimateAutoSendAuditRow(estimate = {}, options = {}) {
   let action = 'blocked';
   if (eligibility.eligible) action = 'would_send';
   else if (eligibility.reason === 'delay_not_elapsed') action = 'waiting';
-  else if (['already_attempted', 'already_blocked', 'already_claimed'].includes(eligibility.reason)) action = 'skipped';
+  else if (CUTOFF_SKIP_REASONS.includes(eligibility.reason)
+    || ['already_attempted', 'already_blocked', 'already_claimed'].includes(eligibility.reason)) action = 'skipped';
 
   return {
     ...base,
@@ -282,11 +321,15 @@ async function candidateLeadEstimateAutoSends({
   now = new Date(),
   delayMinutes = DEFAULT_DELAY_MINUTES,
   limit = DEFAULT_LIMIT,
+  createdAfter = null,
 } = {}) {
+  // Fail closed: no valid created-after cutoff, no candidates.
+  if (!(createdAfter instanceof Date) || !Number.isFinite(createdAfter.getTime())) return [];
   const cutoff = new Date(now.getTime() - delayMinutes * 60 * 1000);
   return database('estimates')
     .where({ source: 'lead_webhook', status: 'draft' })
     .where('created_at', '<=', cutoff)
+    .where('created_at', '>', createdAfter)
     // A draft staff superseded with the lead's real estimate is archived;
     // mailing it would send the customer a second quote.
     .whereNull('archived_at')
@@ -344,6 +387,7 @@ async function previewLeadEstimateAutoSendAudit({
       now,
       delayMinutes: config.delayMinutes,
       limit,
+      createdAfter: config.createdAfter,
     }),
   ]);
 
@@ -384,6 +428,8 @@ async function previewLeadEstimateAutoSendAudit({
       allowedReviewReasons: config.allowedReviewReasons,
       sendMethod: config.sendMethod,
       limit,
+      createdAfter: config.createdAfter instanceof Date ? config.createdAfter.toISOString() : null,
+      createdAfterProblem: config.createdAfter instanceof Date ? null : (config.createdAfterProblem || 'unset'),
     },
     counts,
     phases: {
@@ -509,6 +555,9 @@ async function updateAutoSendMetadata(database, estimate, patch, status = estima
   return updated;
 }
 
+// Log the missing/bad cutoff once per change, not every 5-minute tick.
+let lastLoggedCutoffProblem = null;
+
 async function processLeadEstimateAutoSendBatch({
   database = db,
   now = new Date(),
@@ -522,14 +571,26 @@ async function processLeadEstimateAutoSendBatch({
     limit: config.limit,
   });
 
+  const hasCutoff = config.createdAfter instanceof Date && Number.isFinite(config.createdAfter.getTime());
+  if (!hasCutoff) {
+    const problem = config.createdAfterProblem || 'unset';
+    if (lastLoggedCutoffProblem !== problem) {
+      lastLoggedCutoffProblem = problem;
+      logger.warn(`[lead-estimate-auto-send] sending nothing: ${createdAfterProblemMessage(problem)}`);
+    }
+  } else {
+    lastLoggedCutoffProblem = null;
+  }
   const candidates = await candidateLeadEstimateAutoSends({
     database,
     now,
     delayMinutes: config.delayMinutes,
     limit: config.limit,
+    createdAfter: hasCutoff ? config.createdAfter : null,
   });
 
   const results = {
+    cutoffProblem: hasCutoff ? null : (config.createdAfterProblem || 'unset'),
     scanned: candidates.length,
     sent: 0,
     blocked: 0,
@@ -543,7 +604,8 @@ async function processLeadEstimateAutoSendBatch({
   for (const estimate of candidates) {
     const eligibility = leadEstimateAutoSendEligibility(estimate, { ...config, now });
     if (!eligibility.eligible) {
-      if (['delay_not_elapsed', 'already_attempted', 'already_blocked', 'already_claimed'].includes(eligibility.reason)) {
+      if (CUTOFF_SKIP_REASONS.includes(eligibility.reason)
+        || ['delay_not_elapsed', 'already_attempted', 'already_blocked', 'already_claimed'].includes(eligibility.reason)) {
         results.skipped += 1;
         continue;
       }
@@ -664,6 +726,8 @@ module.exports = {
   isStaleAutoSendClaim,
   staleAutoSendRecoveryDecision,
   leadEstimateAutoSendConfigFromEnv,
+  parseCreatedAfter,
+  candidateLeadEstimateAutoSends,
   leadEstimateAutoSendAuditRow,
   leadEstimateAutoSendEligibility,
   leadAutomationSummary,

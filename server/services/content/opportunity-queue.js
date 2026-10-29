@@ -359,7 +359,7 @@ class OpportunityQueue {
    * if nothing's available. Caller is responsible for calling complete()
    * or skip() (or letting the stale-claim timeout recover it).
    */
-  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
+  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [], onlyIds } = {}) {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
@@ -377,6 +377,11 @@ class OpportunityQueue {
     // every iteration instead of letting the rest of the queue advance.
     const exclude = Array.isArray(excludeIds) ? excludeIds.filter((id) => id != null) : [];
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
+    // onlyIds scopes the claim to these rows (the daily batch takes the rows
+    // whose terminal draft is written first). Every other eligibility rule
+    // still applies; an empty list claims nothing.
+    const only = Array.isArray(onlyIds) ? onlyIds.filter((id) => id != null) : null;
+    const whereOnly = only ? 'AND id = ANY(?)' : '';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
     // See citabilityBackfillLaneOpen — gate-off backfill rows are unclaimable.
@@ -432,6 +437,7 @@ class OpportunityQueue {
            ${whereActionType}
            ${whereBucket}
            ${whereExclude}
+           ${whereOnly}
            ${whereFamilyGate}
            ${whereCitabilityGate}
            ${whereAeoQuestionGate}
@@ -446,6 +452,7 @@ class OpportunityQueue {
         .concat(actionType ? [actionType] : [])
         .concat(bucket ? [bucket] : [])
         .concat(exclude.length ? [exclude] : [])
+        .concat(only ? [only] : [])
       );
     });
     const row = result.rows?.[0];

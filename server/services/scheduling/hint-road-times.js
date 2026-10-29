@@ -22,6 +22,7 @@
 const { gateEnvValue } = require('../../config/feature-gates');
 const { GAP_LEGS } = require('./find-time');
 const logger = require('../logger');
+const { parkedMinutes, withDriveClockPark } = require('./drive-clock');
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const CACHE_MAX = 5000;
@@ -42,6 +43,13 @@ function cachedMinutes(leg, now) {
   if (!hit) return null;
   if (now - hit.at > CACHE_TTL_MS) { roadCache.delete(legKey(leg)); return null; }
   return hit.minutes;
+}
+
+// A travel source's stored answer: createSchedulingTravel's lookupRaw keeps
+// Google's own minutes (GATE_DRIVE_CLOCK adds its park minutes only when a
+// caller reads, never into the caches below); a source without one is raw.
+function rawLookup(source, leg) {
+  return (source.lookupRaw || source.lookup).call(source, leg);
 }
 
 function remember(leg, minutes, now) {
@@ -144,11 +152,12 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
     }
     const minutesFor = (leg) => {
       const hit = cachedMinutes(leg, t);
-      if (hit != null) return hit;
-      const answer = travel?.lookup(leg);
+      // GATE_DRIVE_CLOCK: the park minutes join a Google leg here, once.
+      if (hit != null) return parkedMinutes(hit);
+      const answer = travel && rawLookup(travel, leg);
       if (answer?.source !== 'google_traffic' || !Number.isFinite(answer.minutes)) return null;
       remember(leg, answer.minutes, t);
-      return answer.minutes;
+      return parkedMinutes(answer.minutes);
     };
     return chips.map((chip, i) => {
       const legs = plans[i];
@@ -333,10 +342,12 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (!r) return sources.traffic.lookup(leg);
     const m = MODES[r.mode];
     const hit = m.cached(r.key, r.asLeg, t);
-    if (hit != null) return { minutes: hit, source: m.source, reason: null };
-    const answer = sources[r.mode].lookup(r.asLeg);
+    // GATE_DRIVE_CLOCK: the park minutes join a Google leg on this read only;
+    // both caches hold Google's own minutes.
+    if (hit != null) return withDriveClockPark({ minutes: hit, source: m.source, reason: null });
+    const answer = rawLookup(sources[r.mode], r.asLeg);
     if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(r.key, r.asLeg, answer.minutes, t);
-    return answer;
+    return withDriveClockPark(answer);
   }
   // Buys `entries` ([key, leg as Google is asked for it]) from the mode's
   // source; returns how many it never sent and how many Google answered.
@@ -352,7 +363,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     const t = now();
     let answered = 0;
     for (const [key, leg] of entries) {
-      const answer = sources[mode].lookup(leg);
+      const answer = rawLookup(sources[mode], leg);
       if (answer?.source !== m.source || !Number.isFinite(answer.minutes)) continue;
       m.remember(key, leg, answer.minutes, t);
       answered += 1;

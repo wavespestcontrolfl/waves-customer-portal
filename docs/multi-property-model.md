@@ -86,8 +86,8 @@ default.
   anchor applies as before. A linked estimate quoted for a different property
   is refused (422 `ESTIMATE_PROPERTY_MISMATCH`); the modal narrows the estimate
   list to the chosen property (`schedule-estimates` / `schedule-source` return
-  `propertyId`) and drops a mismatched quote's lines on switch. Find-a-Time and
-  the best-times hint score at the chosen property's coords, or geocode its
+  `propertyId`) and drops a mismatched quote's lines on switch. The open-times
+  box and the best-times hint score at the chosen property's coords, or geocode its
   address before any customer-primary fallback.
 - Known limit (Phase 3): auto-priced lines (the one-time mosquito lot ladder)
   still read `customers.lot_sqft` — the PRIMARY's lot — so the picker says so
