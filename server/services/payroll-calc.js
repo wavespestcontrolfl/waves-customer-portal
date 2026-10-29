@@ -39,6 +39,14 @@
  * (qualified overtime) is filled only when the technician is covered by federal
  * overtime law. Without `payLines` the output is exactly what it was before.
  *
+ * Family employee (GATE_PAYROLL_FAMILY_EMPLOYEE, owner 2026-10-29, D5 part 2): a caller
+ * may pass `unemploymentExempt` (the employee is the owner's parent or spouse, 26 U.S.C.
+ * 3306(c)(5) and F.S. 443.1216(13)(d)) and `ytdUnemploymentWages` (the employee's year-to-date
+ * wages that already counted toward the $7,000 base; omitted = ytdGrossWages, same unit).
+ * Exempt pay is no FUTA or RT-6 wage: both taxes and both taxable wage lines are zero and
+ * it never uses up the base. Social Security, Medicare, Additional Medicare and income tax
+ * withholding never change. Without `unemploymentExempt` the output is exactly what it was.
+ *
  * The tax year is the pay date's calendar year, because wages are taxed when
  * paid. A pay date in a year without tables throws: the calculator never
  * falls back to an older year's tables. Money is integer cents; each tax line
@@ -220,6 +228,8 @@ function computePaycheck({
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
   payLines,
   flsaCovered,
+  unemploymentExempt,
+  ytdUnemploymentWages,
 }) {
   const taxYear = taxYearOf(payDate);
   const tables = schedulesForYear(taxYear);
@@ -245,12 +255,14 @@ function computePaycheck({
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
   // Pay lines ride on the check only when the caller passes them.
+  // (wholeCents reads an omitted figure as zero.)
   const withPayLines = payLines != null;
-  const reviewBonus = withPayLines ? wholeCents(payLines.reviewBonusCents, 'Review bonus') : 0n;
-  const commission = withPayLines ? wholeCents(payLines.commissionCents, 'Commission') : 0n;
-  const healthAllowance = withPayLines ? wholeCents(payLines.healthAllowanceCents, 'Health allowance') : 0n;
-  const hsaEmployer = withPayLines ? wholeCents(payLines.hsaEmployerCents, 'Employer HSA') : 0n;
-  const lineOvertimePremium = withPayLines ? wholeCents(payLines.lineOvertimePremiumCents, 'Overtime on pay lines') : 0n;
+  const lineFigures = payLines || {};
+  const reviewBonus = wholeCents(lineFigures.reviewBonusCents, 'Review bonus');
+  const commission = wholeCents(lineFigures.commissionCents, 'Commission');
+  const healthAllowance = wholeCents(lineFigures.healthAllowanceCents, 'Health allowance');
+  const hsaEmployer = wholeCents(lineFigures.hsaEmployerCents, 'Employer HSA');
+  const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
   const gross = regularPay + overtimePay + ptoPay + holidayPay
     + reviewBonus + commission + healthAllowance + lineOvertimePremium;
 
@@ -261,7 +273,9 @@ function computePaycheck({
   const additionalMedicareWages = max0(ytd + gross - ADDITIONAL_MEDICARE_THRESHOLD_CENTS)
     - max0(ytd - ADDITIONAL_MEDICARE_THRESHOLD_CENTS);
   const additionalMedicare = roundDiv(additionalMedicareWages * ADDITIONAL_MEDICARE_BP, 10000n);
-  const capWages = min(gross, max0(STATE_AND_FUTA_WAGE_BASE_CENTS - ytd));
+  // The $7,000 base is used up by the year's non-exempt wages only (family pay is never FUTA wages).
+  const ytdBase = ytdUnemploymentWages == null ? ytd : nonNegativeCents(ytdUnemploymentWages, 'Year-to-date unemployment wages');
+  const capWages = unemploymentExempt === true ? 0n : min(gross, max0(STATE_AND_FUTA_WAGE_BASE_CENTS - ytdBase));
   const futa = roundDiv(capWages * FUTA_BP, 10000n);
   const floridaReemployment = roundDiv(capWages * BigInt(reemploymentRateBp), 10000n);
 
@@ -320,6 +334,7 @@ function computePaycheck({
       floridaReemploymentCents: capWages,
     }),
     withholdingWorksheet: toNumbers(lines),
+    ...(unemploymentExempt == null ? {} : { unemploymentExempt: unemploymentExempt === true }),
   };
 }
 
