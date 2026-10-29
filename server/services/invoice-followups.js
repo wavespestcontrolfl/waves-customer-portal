@@ -2980,13 +2980,14 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
 }
 
 // The facts the visit-bill verdict (visitBillVerdict) reads, as one hash: the invoice's subtotal, discount, total and
-// payer, the visit's price and payer, and the customer's per-application fee, dues rate, billing mode and payer. An
+// payer, the visit's price, payer and prepayment stamp (prepaid_amount, prepaid_method), and the customer's per-application fee, dues rate, billing mode and payer. An
 // office review is stored with this hash, and the same SQL reads it again, so an unchanged bill is not reviewed twice
 // and a changed one is (a new event). The caller names the invoice and customer columns (`s.invoice_id`, `s.customer_id`).
 function chargeFactsFingerprintSql(invoiceRef, customerRef) {
   const field = (column) => `COALESCE(${column}::text, '~')`;
   return `(SELECT md5(concat_ws('|', ${[
     'fi.subtotal', 'fi.discount_amount', 'fi.total', 'fi.payer_id', 'fv.estimated_price', 'fv.primary_line_price', 'fv.payer_id',
+    'fv.prepaid_amount', 'fv.prepaid_method',
     'fc.per_application_fee', 'fc.monthly_rate', 'fc.billing_mode', 'fc.payer_id',
   ].map(field).join(', ')}))
     FROM invoices fi
@@ -3144,6 +3145,7 @@ const AUTOPAY_HOLD_REASON_TEXT = {
   no_cap: 'no agreed visit price or dues rate is on file to cap the charge',
   not_performed: 'the visit is not a finished, performed visit',
   payer: 'the bill goes to a third-party payer',
+  prepaid: 'the visit carries a prepayment the bill does not show',
 };
 const AUTOPAY_HOLD_ALERT_COPY = {
   ambiguous: {
@@ -3277,8 +3279,10 @@ async function readVisitBillFacts(row, invoiceId) {
   return { fingerprint: fingerprintRow.fingerprint, invoice, svc, record };
 }
 
-// The completion route's lane admission for this visit bill: the same read-only verdict functions it runs, strict
-// (a lookup failure throws, so the hold waits and is retried), and the same Auto Pay test (customerOnAutopay).
+// The completion route's lane for this visit bill: the same read-only verdict functions it runs, strict (a lookup
+// failure throws, so the hold waits and is retried), and the same Auto Pay test (customerOnAutopay). `candidate` is the
+// lane as if Auto Pay were active: the cap review must not depend on it (a bill over the cap is reviewed even for a
+// customer with no method); `autopayActive` alone decides charge versus release afterwards.
 async function visitBillLane(svc, invoice) {
   const verdicts = require('./completion-charge-verdict');
   const customerAutopayActive = await require('./autopay-eligibility').customerOnAutopay({
@@ -3296,11 +3300,11 @@ async function visitBillLane(svc, invoice) {
   });
   const ext = await verdicts.resolveExtendedLane({
     svc, invoice, alreadyPaid: false, visitPerformed: true, perApplicationBilling,
-    apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved, customerAutopayActive,
+    apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved, customerAutopayActive: true,
     conn: db, strict: true,
   });
-  const admitted = customerAutopayActive && (perApplicationBilling || appt.apptCardOneTimeCharge || ext.extendedChargeCandidate);
-  return { admitted, perApplicationBilling, appt, ext };
+  const candidate = perApplicationBilling || appt.apptCardOneTimeCharge || ext.extendedChargeCandidate;
+  return { candidate, autopayActive: customerAutopayActive, perApplicationBilling, appt, ext };
 }
 
 // The completion route's charge options (complete-scheduled-service.js), by name, plus the hold's own guards. The
@@ -3319,6 +3323,7 @@ function visitBillChargeOptions(row, invoice, svc, lane, cap) {
     requireCompletedVisit: true,
     requirePerformedVisit: true,
     allowIssuedInvoiceCloseoutFor: invoice.id,
+    requireNoUnappliedVisitPrepayment: true,
     requireBankDebitDue: true,
     ...(extended ? { maxAuthorizedChargeCents: Math.round(invoiceAmountDue(invoice) * 100) } : {}),
   };
@@ -3336,8 +3341,11 @@ async function decideVisitBill(row, { fingerprint, invoice, svc, record }) {
     database: db, customerId: String(svc.customer_id), scheduledServiceId: String(svc.id), throwOnError: true,
   });
   if (payer?.payerId) return review('payer');
+  // A prepayment stamped on the visit that this bill does not show (a backfill closeout skips applying it) would be
+  // charged over, on any lane.
+  if (await require('./billing-lane').visitCarriesUnappliedPrepayment({ dbConn: db, svc, invoice })) return review('prepaid');
   const lane = await visitBillLane(svc, invoice);
-  if (!lane.admitted) return { kind: 'release_true' };
+  if (!lane.candidate) return { kind: 'release_true' };
   const cap = await require('./completion-charge-verdict').resolveCompletionChargeCap({
     svc, invoice, perApplicationBilling: lane.perApplicationBilling,
     apptCardOneTimeCharge: lane.appt.apptCardOneTimeCharge, apptCardAcceptedAmount: lane.appt.apptCardAcceptedAmount,
@@ -3345,6 +3353,7 @@ async function decideVisitBill(row, { fingerprint, invoice, svc, record }) {
   });
   if (cap.verdict === 'above_cap') return review('over_cap');
   if (cap.verdict === 'no_accepted_amount') return review('no_cap');
+  if (!lane.autopayActive) return { kind: 'release_true' };
   return { kind: 'proceed', fingerprint, options: visitBillChargeOptions(row, invoice, svc, lane, cap) };
 }
 
@@ -3385,8 +3394,8 @@ async function writeChargeStartMarker(row, invoice, quote) {
 
 // Why the charge path refused a visit bill before submitting anything (the review alert's reason).
 function refusalReviewReason(err) {
-  if (err?.code === 'PAYER_BILLED_GUARD') return 'payer';
-  return err?.code === 'VISIT_NOT_COMPLETED' ? 'not_performed' : 'refused';
+  const byCode = { PAYER_BILLED_GUARD: 'payer', VISIT_NOT_COMPLETED: 'not_performed', UNAPPLIED_VISIT_PREPAYMENT: 'prepaid' };
+  return byCode[err?.code] || 'refused';
 }
 
 /**
@@ -3417,10 +3426,15 @@ async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
     return { kind: 'skipped' };
   }
   const decision = (fields) => ({ kind: 'declined', reason: null, chargeCalled: false, err: null, result: null, status: null, quote: null, method, fingerprint: null, ...fields });
-  if (!method) return decision({ reason: 'no_method' });
   // A dispute hold that appeared since the select (or one that cannot be read): the charge would refuse it, so
   // nothing is attempted. No marker, no attempt, no release, no alert; the next run tries again.
   if (await disputeHoldBlocksCharge(row.customer_id)) return { kind: 'held_off' };
+  // The mandatory office-review conditions come BEFORE every release decision below (no method, no bank debit date):
+  // a payer, an unperformed visit, a bill over its cap or an unapplied prepayment is never released into reminders.
+  const verdict = await visitBillVerdict(row, invoice.id);
+  if (verdict.kind === 'review') return decision({ kind: 'review', reason: verdict.reason, fingerprint: verdict.fingerprint });
+  if (verdict.kind === 'skipped') return verdict;
+  if (!method) return decision({ reason: 'no_method' });
   // The bank consent (payment-method-consent-text.js) authorizes a debit for the invoice on or after its due date (or
   // on the Auto Pay billing day the customer selected, an alternative EARLIER date: waiting for the due date never
   // exceeds the authorization, so the billing day is ignored). Date-only ET strings. No due date = no authorized
@@ -3429,8 +3443,6 @@ async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
     if (!invoice.due_date) return { kind: 'no_debit_date' };
     if (etCalendarDayOf(invoice.due_date) > etDateString(now)) return { kind: 'bank_wait' };
   }
-  const verdict = await visitBillVerdict(row, invoice.id);
-  if (verdict.kind === 'review') return decision({ kind: 'review', reason: verdict.reason, fingerprint: verdict.fingerprint });
   if (verdict.kind !== 'proceed') return verdict;
 
   let quote;

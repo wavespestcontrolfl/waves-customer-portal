@@ -2190,6 +2190,8 @@ const StripeService = {
   // mode): the visit's latest record may be the issued-invoice closeout job's own (backfill true, visitOutcome
   // 'completed', structured_notes.issuedInvoiceCloseout.invoiceId = THIS invoice) and still count as performed.
   // Any other backfill, or a marker for another invoice, is refused as before (closeoutPerformedForCharge).
+  // opts.requireNoUnappliedVisitPrepayment — with requireSelfPayScheduledServiceId (the Auto Pay hold charge, every
+  // lane): refuse (UNAPPLIED_VISIT_PREPAYMENT) when the locked visit carries a prepayment not applied to this invoice.
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
   // (admin card-on-file): skips the default collections-dispute-hold guard and
   // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
@@ -2201,7 +2203,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2486,6 +2488,13 @@ const StripeService = {
             if (!require('./visit-outcomes').closeoutPerformedForCharge(latestRecord, { issuedCloseoutInvoiceId: String(allowIssuedInvoiceCloseoutFor) === String(invoiceId) ? invoiceId : null })) {
               throw Object.assign(new Error('The visit\'s current closeout is not a performed visit. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
             }
+          }
+          // Opt-in (the Auto Pay hold charge, every lane): a cash/Zelle prepayment stamped on the visit that no paid
+          // scheduled_service_prepaid payment applied to THIS invoice (a backfill closeout skips that application) is
+          // never charged over. Read under this visit lock; the extended anchor check below shares the predicate.
+          if (requireNoUnappliedVisitPrepayment
+            && await require('./billing-lane').visitCarriesUnappliedPrepayment({ dbConn: trx, svc: lockedSvc, invoice: lockedInvoice })) {
+            throw Object.assign(new Error('The visit carries a prepayment this invoice does not show. Review before charging.'), { code: 'UNAPPLIED_VISIT_PREPAYMENT' });
           }
           // Opt-in (deferred annual prepay): the visit must still carry the
           // year's held stamp a closeout wrote; a re-closeout paid another

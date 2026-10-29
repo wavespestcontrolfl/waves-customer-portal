@@ -65,7 +65,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       per_application_fee numeric, payer_id uuid, autopay_enabled boolean, autopay_paused_until date, autopay_payment_method_id uuid, ach_status text)`);
     await mockPg.raw(`CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text, customer_id uuid, estimated_price numeric, primary_line_price numeric,
       payer_id uuid, is_callback boolean DEFAULT false, service_type text, is_recurring boolean DEFAULT false, recurring_parent_id uuid, recurring_pattern text,
-      source_estimate_id uuid)`);
+      source_estimate_id uuid, prepaid_amount numeric, prepaid_method text)`);
     await mockPg.raw('CREATE TABLE service_records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, status text, structured_notes jsonb, created_at timestamptz NOT NULL DEFAULT now())');
     await mockPg.raw('CREATE TABLE estimate_card_holds (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, status text)');
     await mockPg.raw('CREATE TABLE appointment_card_requests (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scheduled_service_id uuid, customer_id uuid, status text, accepted_amount numeric, selected_plan text)');
@@ -642,6 +642,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         requireCompletedVisit: true,
         requirePerformedVisit: true,
         allowIssuedInvoiceCloseoutFor: h.invoiceId,
+        requireNoUnappliedVisitPrepayment: true,
         requireBankDebitDue: true,
         maxAuthorizedTotalCents: 10309,
       }]);
@@ -696,6 +697,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
           requireCompletedVisit: true,
           requirePerformedVisit: true,
           allowIssuedInvoiceCloseoutFor: h.invoiceId,
+          requireNoUnappliedVisitPrepayment: true,
           requireBankDebitDue: true,
           maxAuthorizedChargeCents: 12000,
           maxAuthorizedTotalCents: 10309,
@@ -817,6 +819,117 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         expect(payerLookup).toHaveBeenCalledWith(expect.objectContaining({ customerId: h.customerId, scheduledServiceId: h.visitId, throwOnError: true }));
         expect(await sweep()).toMatchObject({ candidates: 0 });
         await untouched(h);
+      });
+
+      // P0: a backfill closeout skips applying the visit's cash/Zelle prepayment, so the visit keeps the stamp while the
+      // invoice shows nothing. Every admitted lane refuses to charge over it.
+      const issuedCloseout = (h) => ({ visitOutcome: 'completed', backfill: true, invoiceAlreadySent: true, issuedInvoiceCloseout: { invoiceId: h.invoiceId, trigger: 'sent', completedAt: new Date().toISOString() } });
+      const closeoutOf = async (h) => mockPg('service_records').insert({ scheduled_service_id: h.visitId, status: 'completed', structured_notes: JSON.stringify(issuedCloseout(h)) });
+      const prepaid = { prepaid_amount: 40, prepaid_method: 'cash' };
+      const lanes = {
+        'per-application': async () => heldBound({ record: null, visitFields: prepaid }),
+        extended: async () => {
+          FeatureGates.gates.completionAutopayCharge = true;
+          return heldBound({ record: null, customerFields: { billing_mode: null, per_application_fee: null }, visitFields: prepaid });
+        },
+        'appointment-card': async () => {
+          FeatureGates.gates.apptCardCompletionCharge = true;
+          const h = await heldBound({ record: null, customerFields: { billing_mode: null, per_application_fee: null }, visitFields: prepaid });
+          await mockPg('appointment_card_requests').insert({ scheduled_service_id: h.visitId, customer_id: h.customerId, status: 'completed', accepted_amount: 100 });
+          return h;
+        },
+      };
+
+      test.each(Object.keys(lanes))('P0: an issued-invoice closeout whose visit has an unapplied prepayment is an office review on the %s lane: no quote, no charge', async (lane) => {
+        const h = await lanes[lane]();
+        await closeoutOf(h);
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1, charged: 0 });
+        expect(await reviewed(h, 'prepaid')).toContain('the visit carries a prepayment the bill does not show');
+      });
+
+      test('P0: a prepayment the completion route applied to THIS invoice (paid scheduled_service_prepaid marker) is not unapplied: charged', async () => {
+        const h = await heldBound({ visitFields: prepaid });
+        await mockPg('payments').insert({
+          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() - 30 * DAY),
+          metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
+        });
+        expect(await sweep()).toMatchObject({ charged: 1, review: 0 });
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ requireNoUnappliedVisitPrepayment: true });
+      });
+
+      test('P0 race: the prepayment appears after the unlocked read, the charge refuses under the visit lock: review (hold kept, not released); re-evaluated once after the prepayment is applied', async () => {
+        const h = await heldBound();
+        quote.mockImplementation(async () => {
+          await mockPg('scheduled_services').where({ id: h.visitId }).update(prepaid);
+          return { base: 100, surcharge: 3.09, total: 103.09 };
+        });
+        chargeCall.mockImplementationOnce(async () => {
+          await leaveDeclineRows(h, null);
+          throw Object.assign(new Error('The visit carries a prepayment this invoice does not show. Review before charging.'), { code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+        });
+        expect(await sweep()).toMatchObject({ candidates: 1, review: 1, declined_released: 0, true_released: 0, charged: 0 });
+        await untouched(h);
+        const [row] = await reviewRows();
+        expect(row.metadata).toMatchObject({ outcome: 'review', reason: 'prepaid', error_code: 'UNAPPLIED_VISIT_PREPAYMENT', released: false });
+        // Unchanged facts (the stamp was read into the fingerprint only at the next evaluation): the failed attempt holds it out.
+        // The office applies the prepayment: the invoice total drops and the marker payment exists.
+        await mockPg('payments').insert({
+          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() + 1000),
+          metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
+        });
+        await changeBill(h, { total: 80 });
+        quote.mockResolvedValue({ base: 80, surcharge: 2.47, total: 82.47 });
+        // The applied-marker payment since the hold is this customer's, for THIS invoice: it blocks the candidate rule
+        // (a settled payment for the invoice), so the hold waits for the payment sweep to close it. Keep it older.
+        await mockPg('payments').update({ created_at: new Date(Date.now() - 30 * DAY) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+      });
+
+      test('P1: no method + a visit/customer payer is an office review, never a release', async () => {
+        payerLookup.mockResolvedValue({ payerId: randomUUID() });
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound();
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0, true_released: 0 });
+        await reviewed(h, 'payer');
+      });
+
+      test('P1: no method + a visit that was not performed is an office review', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound({ record: { visitOutcome: 'inspection_only' } });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0 });
+        await reviewed(h, 'not_performed');
+      });
+
+      test('P1: no method + a bill over its cap is an office review (the cap does not depend on Auto Pay being active)', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        autopayActive.mockResolvedValue(false);
+        const h = await heldBound({ subtotal: 140 });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0, true_released: 0 });
+        await reviewed(h, 'over_cap');
+      });
+
+      test('P1: no method + an unapplied prepayment is an office review', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(null);
+        const h = await heldBound({ visitFields: prepaid });
+        expect(await sweep()).toMatchObject({ review: 1, declined_released: 0 });
+        await reviewed(h, 'prepaid');
+      });
+
+      test('P1: a bank method on an invoice with no due date + a payer is an office review, not a release', async () => {
+        payerLookup.mockResolvedValue({ payerId: randomUUID() });
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
+        const h = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ review: 1, true_released: 0 });
+        await reviewed(h, 'payer');
+      });
+
+      test('P1: a bank method with no due date, performed and inside the cap, is still released as true releases it', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
+        const h = await heldBound({ dueDate: null });
+        expect(await sweep()).toMatchObject({ true_released: 1, review: 0, charged: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(quote).not.toHaveBeenCalled();
       });
 
       test('a strict lookup error in the verdict keeps the hold, writes nothing and retries the next run', async () => {
