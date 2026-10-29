@@ -233,7 +233,7 @@ async function assistantServiceKey(estimateId) {
 function logComparison({ surface, loaded, oldDays, startedAt, commitFilter }) {
   const ms = Date.now() - startedAt;
   const raw = loaded.rawDays || loaded.days;
-  const dropped = commitFilter ? ` commit_dropped=${loaded.commitDropped ?? '-'}` : '';
+  const dropped = commitFilter ? ` commit_dropped=${loaded.commitDropped ?? '-'}${loaded.days?.length === 0 ? ' fallback=old_empty' : ''}` : '';
   if (!raw) {
     logger.info(`[assistant-route-times] surface=${surface} mode=shadow old=${compareDays(oldDays, []).old} new=- reason=${loaded.reason || 'none'} ms=${ms}`);
     return;
@@ -265,7 +265,8 @@ async function shadowCompare({ surface, customerId, estimateId = null, serviceKe
  *   shadow  the same, plus a detached comparison (`settled` resolves when it is logged),
  *           with `commit_dropped=N`: the starts confirmBooking would refuse.
  *   on      the customer pages' list WITHOUT the starts confirmBooking would refuse,
- *           in the old shape, else the old finder.
+ *           in the old shape, else the old finder (also when that leaves nothing:
+ *           `fallback=old_empty`, never an empty picker when times exist).
  */
 async function serveAssistantTimes({ surface = 'assistant', customerId, estimateId = null, loadOld }) {
   const mode = assistantRouteTimesMode();
@@ -277,8 +278,11 @@ async function serveAssistantTimes({ surface = 'assistant', customerId, estimate
   }
   const serviceKey = await assistantServiceKey(estimateId);
   const loaded = await loadRouteDays({ customerId, estimateId, serviceKey, commitFilter: true });
-  if (loaded.days) return { engine: 'route_times', result: { zone: null, days: toOldShape(loaded.days) } };
-  logger.info(`[assistant-route-times] surface=${surface} mode=on served=old reason=${loaded.reason || 'none'}`);
+  if (loaded.days?.length) return { engine: 'route_times', result: { zone: null, days: toOldShape(loaded.days) } };
+  // Never an empty picker when times exist (owner ruling): a list the commit filter emptied falls back to the
+  // old zone list, the engine confirmBooking's own zone check reads.
+  const reason = loaded.days ? 'fallback=old_empty' : `reason=${loaded.reason || 'none'}`;
+  logger.info(`[assistant-route-times] surface=${surface} mode=on served=old ${reason}`);
   return { engine: 'old', result: await loadOld() };
 }
 

@@ -6308,7 +6308,8 @@ error code, limiter or token changes, and no message is sent.
   occupancy probe with the travel gap), so a time the assistant offers is a
   time `book_appointment` accepts. A start that only one technician has free,
   while another technician's visit overlaps it, is not offered. A filter that
-  fails or takes over 1 second serves the old list. Text quotes are not
+  fails or takes over 1 second, or that leaves no time at all, serves the old
+  list (never an empty picker when times exist). Text quotes are not
   filtered (a person books them).
 - Text quotes carry the list that produced them (`open_times_snapshot.lookup.source`
   is `route_times`); the send-time recheck asks that same list, whatever the

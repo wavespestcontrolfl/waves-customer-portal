@@ -545,21 +545,37 @@ describe('offer == commit: the assistant\'s list is filtered against confirmBook
     findConflictingVisits.mock.calls.forEach(([args]) => expect(args.technicianId).toBeUndefined());
   });
 
-  test('true: a day whose every start would be refused disappears; if nothing is bookable the answer is empty, not the old list', async () => {
+  test('true: a day whose every start would be refused disappears; if nothing is left the OLD list is served (never an empty picker), logged fallback=old_empty', async () => {
     process.env[GATE] = 'true';
+    // Day 1 loses 09:00 and 11:00: one day short of empty is still the new list.
+    visits.splice(0, visits.length, { technician_id: 'A', date: '2026-11-02', start: '09:00', end: '12:00' });
+    const partial = await run();
+    expect(partial.engine).toBe('route_times');
+    expect(startsOf(partial.result)).toEqual([['2026-11-03', ['13:00']]]);
     visits.push({ technician_id: 'A', date: '2026-11-03', start: '12:30', end: '13:30' });
-    visits.push({ technician_id: 'B', date: '2026-11-02', start: '11:00', end: '11:30' });
     const out = await run();
-    expect(out.engine).toBe('route_times');
-    expect(out.result.days).toEqual([]);
+    expect(out.engine).toBe('old');
+    expect(out.result.days).toBe(OLD_DAYS);
+    expect(logger.info.mock.calls.map((c) => String(c[0]))).toContain('[assistant-route-times] surface=assistant mode=on served=old fallback=old_empty');
+  });
+
+  test('shadow: a list the commit filter would empty is logged as fallback=old_empty', async () => {
+    process.env[GATE] = 'shadow';
+    visits.splice(0, visits.length, { technician_id: 'A', date: '2026-11-02', start: '08:00', end: '23:00' },
+      { technician_id: 'A', date: '2026-11-03', start: '08:00', end: '23:00' });
+    const out = await run();
+    await out.settled;
+    expect(out.engine).toBe('old');
+    expect(infoLines()[0]).toMatch(/new=3 .*commit_dropped=3 fallback=old_empty ms=\d+$/);
   });
 
   test('true: the commit\'s other refusals drop a start too: a closed day, the notice window', async () => {
     process.env[GATE] = 'true';
+    visits.length = 0;
     isBlackoutDate.mockImplementation(async (date) => date === '2026-11-03');
     violatesSelfServeNotice.mockImplementation(({ date, startTime }) => date === '2026-11-02' && startTime === '11:00');
     const out = await run();
-    expect(startsOf(out.result)).toEqual([]);
+    expect(startsOf(out.result)).toEqual([['2026-11-02', ['09:00']]]);
     expect(violatesSelfServeNotice).toHaveBeenCalledWith({ date: '2026-11-02', startTime: '11:00' });
   });
 
