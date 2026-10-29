@@ -46,7 +46,9 @@ afterEach(() => cleanup());
 describe('Visit history counts visit days, not records', () => {
   it('shows 2 visits this year and numbers the latest #2 of 2', async () => {
     render(<VisitsTab customer={customer} properties={[{ id: 'cust-1' }]} activePropertyId="cust-1" subTab="completed" onSubTabChange={() => {}} />);
-    const label = await screen.findByText(`${year} visits`);
+    // Wait for the loaded history: the tile renders (as 0) before it arrives.
+    expect(await screen.findByText('#1 of 2')).toBeInTheDocument();
+    const label = screen.getByText(`${year} visits`);
     expect(label.previousSibling).toHaveTextContent(/^2$/);
     expect(screen.getAllByText('#2 of 2')).toHaveLength(2);
     expect(screen.getByText('#1 of 2')).toBeInTheDocument();
