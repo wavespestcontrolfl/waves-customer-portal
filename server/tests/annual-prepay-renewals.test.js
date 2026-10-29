@@ -706,12 +706,13 @@ describe('annual prepay renewal helpers', () => {
       // Round 6 (Jul 13 - Aug 21) already holds a visit, 6 days after the round 5 slot.
       const existing = {
         id: 'svc-x', customer_id: 'customer-r', scheduled_date: '2026-07-13', service_type: 'Lawn Care', status: 'pending',
-        is_recurring: true, recurring_pattern: 'lawn_rounds_9',
+        is_recurring: true, recurring_pattern: 'lawn_rounds_9', recurring_parent_id: 'svc-p',
       };
       expect(roundOf(existing.scheduled_date).round).toBe(roundOf(dates[1]).round);
       expect(roundOf(dates[0]).round).not.toBe(roundOf(existing.scheduled_date).round);
       const inserts = [dates[0], ...dates.slice(2)].map((d, i) => query({ returning: [{ id: `svc-n${i}`, scheduled_date: d }] }));
-      setDbQueues({ scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [existing] }), ...inserts] });
+      const parentLookup = query({ first: { id: 'svc-p', scheduled_date: '2026-03-17', recurring_round_anchor_date: anchor } });
+      setDbQueues({ scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [existing] }), parentLookup, ...inserts] });
       const result = await _private.ensureCoverageRowsForTerm({
         id: 'term-r3', customer_id: 'customer-r', term_start: anchor, term_end: '2027-07-06',
         coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9',
@@ -777,8 +778,8 @@ describe('annual prepay renewal helpers', () => {
         expect(lookup.where).toHaveBeenCalledWith({ id: 'svc-old', customer_id: 'customer-r' });
       });
 
-      test('a parent without a stored anchor keeps the plain walk', async () => {
-        const { result, plain } = await run({ id: 'svc-old', recurring_round_anchor_date: null });
+      test('a parent with no stored anchor anchors the walk at its cadence position (here the term base itself: the plain walk)', async () => {
+        const { result, plain } = await run({ id: 'svc-old', scheduled_date: base, recurring_round_anchor_date: null });
         expect(result.targetDates).toEqual(plain);
       });
 
@@ -793,48 +794,89 @@ describe('annual prepay renewal helpers', () => {
 
     describe('seriesRoundAnchorForTerm (the shared resolver)', () => {
       const term = { id: 'term-s', customer_id: 'customer-r' };
+      const child = [{ id: 'svc-c', recurring_parent_id: 'svc-old', scheduled_date: '2026-08-11' }];
       const resolve = (over = {}) => _private.seriesRoundAnchorForTerm({
-        term, coverageCadence: 'lawn_rounds_9', cols: ROUNDS_COLS, ...over,
+        term, coverageCadence: 'lawn_rounds_9', cols: { ...ROUNDS_COLS, date_exception: {}, date_exception_cadence_date: {}, recurring_dispatch_due_date: {} }, existingRows: child, ...over,
       });
-
-      test('the parent is among the in-window rows: its stored anchor, no read', async () => {
-        setDbQueues({});
-        const rows = [
-          { id: 'svc-c', recurring_parent_id: 'svc-p', scheduled_date: '2026-09-08' },
-          { id: 'svc-p', scheduled_date: '2026-07-14', recurring_round_anchor_date: '2026-01-13T00:00:00.000Z' },
-        ];
-        await expect(resolve({ existingRows: rows })).resolves.toBe('2026-01-13');
-      });
-
-      test('a visit with no parent id is its own parent', async () => {
-        await expect(resolve({ existingRows: [{ id: 'svc-p', scheduled_date: '2026-07-14', recurring_round_anchor_date: '2026-01-13' }] }))
-          .resolves.toBe('2026-01-13');
-      });
-
-      test('the parent outside the window is read by id, scoped to the customer', async () => {
-        const lookup = query({ first: { id: 'svc-old', recurring_round_anchor_date: '2026-01-13' } });
+      const parentIs = (row) => {
+        const lookup = query({ first: row });
         setDbQueues({ scheduled_services: [lookup] });
-        await expect(resolve({ existingRows: [{ id: 'svc-c', recurring_parent_id: 'svc-old', scheduled_date: '2026-08-11' }] }))
-          .resolves.toBe('2026-01-13');
+        return lookup;
+      };
+
+      test('the parent is always read by id, scoped to the customer, and its stored anchor wins', async () => {
+        const lookup = parentIs({ id: 'svc-old', scheduled_date: '2026-01-13', recurring_round_anchor_date: '2026-03-17T00:00:00.000Z' });
+        await expect(resolve()).resolves.toBe('2026-03-17');
         expect(lookup.where).toHaveBeenCalledWith({ id: 'svc-old', customer_id: 'customer-r' });
+        expect(lookup.first).toHaveBeenCalledWith('id', 'scheduled_date', 'recurring_round_anchor_date', 'date_exception', 'date_exception_cadence_date', 'recurring_dispatch_due_date');
       });
 
-      test('no stored anchor, a missing column, a failed read, another cadence or no rows: null', async () => {
-        const child = [{ id: 'svc-c', recurring_parent_id: 'svc-old', scheduled_date: '2026-08-11' }];
-        setDbQueues({ scheduled_services: [query({ first: { id: 'svc-old', recurring_round_anchor_date: null } })] });
-        await expect(resolve({ existingRows: child })).resolves.toBeNull();
-        setDbQueues({});
-        await expect(resolve({ existingRows: child, cols: { scheduled_date: {} } })).resolves.toBeNull();
+      test('a visit with no parent id is its own parent; the in-window row is not trusted for the fields', async () => {
+        const lookup = parentIs({ id: 'svc-p', scheduled_date: '2026-01-13', recurring_round_anchor_date: null });
+        await expect(resolve({ existingRows: [{ id: 'svc-p', scheduled_date: '2026-07-14', recurring_round_anchor_date: '2099-01-01' }] }))
+          .resolves.toBe('2026-01-13');
+        expect(lookup.where).toHaveBeenCalledWith({ id: 'svc-p', customer_id: 'customer-r' });
+      });
+
+      test('no explicit anchor: the parent cadence position (its own date), the same rule the series extends from', async () => {
+        parentIs({ id: 'svc-old', scheduled_date: '2026-01-13', recurring_round_anchor_date: null });
+        const anchor = await resolve();
+        expect(anchor).toBe('2026-01-13');
+        // Codex's example: a term from 2026-08-11 lists Sep 8, not the Sep 22 a restart from the term date gives.
+        expect(lawnRoundDateFrom(anchor, '2026-08-11', 1)).toBe('2026-09-08');
+        expect(lawnRoundDate('2026-08-11', 1)).toBe('2026-09-22');
+      });
+
+      test('an exception parent uses its cadence date; a handed-off parent its due date', async () => {
+        parentIs({ id: 'svc-old', scheduled_date: '2026-01-20', date_exception: true, date_exception_cadence_date: '2026-01-13' });
+        await expect(resolve()).resolves.toBe('2026-01-13');
+        parentIs({ id: 'svc-old', scheduled_date: '2026-01-15', recurring_dispatch_due_date: '2026-01-13' });
+        await expect(resolve()).resolves.toBe('2026-01-13');
+      });
+
+      test('only the columns that exist are selected', async () => {
+        const lookup = parentIs({ id: 'svc-old', scheduled_date: '2026-01-13' });
+        await resolve({ cols: { scheduled_date: {} } });
+        expect(lookup.first).toHaveBeenCalledWith('id', 'scheduled_date');
+      });
+
+      test('a missing parent, a failed read, another cadence or no rows: null (failure logs a warning)', async () => {
+        parentIs(undefined);
+        await expect(resolve()).resolves.toBeNull();
         const failing = query({});
         failing.first = jest.fn(async () => { throw new Error('db down'); });
         setDbQueues({ scheduled_services: [failing] });
         const logger = require('../services/logger');
         logger.warn.mockClear();
-        await expect(resolve({ existingRows: child })).resolves.toBeNull();
+        await expect(resolve()).resolves.toBeNull();
         expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('series round anchor lookup failed'));
-        await expect(resolve({ existingRows: child, coverageCadence: 'every_6_weeks' })).resolves.toBeNull();
+        await expect(resolve({ coverageCadence: 'every_6_weeks' })).resolves.toBeNull();
         await expect(resolve({ existingRows: [] })).resolves.toBeNull();
       });
+    });
+
+    test('gap-fill of a term starting midway through a series with NO explicit anchor seeds the series\' own dates (Sep 8)', async () => {
+      const base = '2026-08-11';
+      const seriesAnchor = '2026-01-13';
+      const expected = Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(seriesAnchor, base, i));
+      expect(expected[1]).toBe('2026-09-08');
+      const childRow = {
+        id: 'svc-child', customer_id: 'customer-r', scheduled_date: base, service_type: 'Lawn Care', status: 'pending',
+        is_recurring: true, recurring_pattern: 'lawn_rounds_9', recurring_parent_id: 'svc-old',
+      };
+      const inserts = expected.slice(1).map((d, i) => query({ returning: [{ id: `svc-s${i}`, scheduled_date: d }] }));
+      setDbQueues({
+        scheduled_services: [
+          query({ columnInfo: ROUNDS_COLS }), query({ rows: [childRow] }),
+          query({ first: { id: 'svc-old', scheduled_date: seriesAnchor, recurring_round_anchor_date: null } }), ...inserts,
+        ],
+      });
+      const result = await _private.ensureCoverageRowsForTerm({
+        id: 'term-r6', customer_id: 'customer-r', term_start: base, term_end: '2027-08-10',
+        coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9',
+      }, undefined, { today: '2026-08-01', gapFillOnly: true, seedNotBefore: '2026-08-01' });
+      expect(result.targetDates).toEqual(expected);
+      expect(inserts.map((q) => q.insert.mock.calls[0][0].scheduled_date)).toEqual(expected.slice(1));
     });
 
     test('a 9-visit term with no stored cadence still seeds the 42-day series (infer keeps every_6_weeks)', async () => {
@@ -871,7 +913,8 @@ describe('annual prepay renewal helpers', () => {
       const inserts = dates.slice(2).map((d, i) => query({ returning: [{ id: `svc-g${i}`, scheduled_date: d }] }));
       setDbQueues({
         scheduled_services: [
-          query({ columnInfo: ROUNDS_COLS }), query({ rows: [parent, moved] }), ...inserts,
+          query({ columnInfo: ROUNDS_COLS }), query({ rows: [parent, moved] }),
+          query({ first: { id: 'svc-p', scheduled_date: anchor, recurring_round_anchor_date: anchor } }), ...inserts,
         ],
       });
       const result = await _private.ensureCoverageRowsForTerm({

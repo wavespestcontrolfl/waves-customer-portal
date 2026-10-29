@@ -183,6 +183,26 @@ function dateOnly(value) {
   return String(value).slice(0, 10);
 }
 
+// A series row's cadence position (see seriesExtendAnchor in admin-schedule.js): an exception's
+// recorded cadence date, else a hand-off's due date, else its own date.
+function seriesCadencePosition(row) {
+  const position = (row?.date_exception && row?.date_exception_cadence_date)
+    ? row.date_exception_cadence_date
+    : (row?.recurring_dispatch_due_date || row?.scheduled_date);
+  return dateOnly(position) || '';
+}
+
+// Lawn rounds: the date whose offset in its round and weekday place every
+// visit of the series. A write that re-places the series from a new date
+// (a series move on a later visit, an Edit appointment cadence rewrite, make
+// recurring) stores that date on the parent, recurring_round_anchor_date: the
+// parent's own date is history and usually a completed visit. Unset, it is
+// the parent's cadence position, which a one-off move or a hand-off placement
+// does not change.
+function seriesRoundAnchor(parent) {
+  return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
+}
+
 function positiveInt(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
@@ -1604,6 +1624,8 @@ function separateProgramMatches(existingSeries, reviewedIds) {
 }
 
 module.exports = {
+  seriesCadencePosition,
+  seriesRoundAnchor,
   separateProgramMatches,
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,

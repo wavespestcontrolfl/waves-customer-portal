@@ -74,8 +74,15 @@ describe('invoice-prepay — lawn_rounds_9 schedule', () => {
     expect(rowsSpy).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'customer-r', term_start: TERM_START, term_end: '2027-08-10' }), expect.anything());
   });
 
-  test('no stored anchor: the plain round walk from the term anchor, as before', async () => {
-    const { child } = setup({ parent: { id: 'svc-old', recurring_round_anchor_date: null } });
+  test('no explicit anchor: the series parent cadence position places the dates (Sep 8), as the series extends', async () => {
+    const { child } = setup({ parent: { id: 'svc-old', scheduled_date: STORED_ANCHOR, recurring_round_anchor_date: null } });
+    const result = await load(child);
+    expect(result.coverageVisits.map((v) => v.date)).toEqual(NINE((i) => lawnRoundDateFrom(STORED_ANCHOR, TERM_START, i)));
+    expect(result.coverageVisits[1].date).toBe('2026-09-08');
+  });
+
+  test('no parent found: the plain round walk from the term anchor, as before', async () => {
+    const { child } = setup({ parent: null });
     const result = await load(child);
     expect(result.coverageVisits.map((v) => v.date)).toEqual(NINE((i) => lawnRoundDate(TERM_START, i)));
   });

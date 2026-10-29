@@ -595,7 +595,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern, seriesCadencePosition, seriesRoundAnchor } = require('../services/recurring-appointment-seeder');
 const { lawn9xRoundsLive } = require('../config/feature-gates');
 // GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
@@ -656,17 +656,6 @@ function seriesRecurrenceOptions(parent) {
     intervalDays: parent.recurring_interval_days,
     roundAnchor: seriesRoundAnchor(parent),
   };
-}
-
-// Lawn rounds: the date whose offset in its round and weekday place every
-// visit of the series. A write that re-places the series from a new date
-// (a series move on a later visit, an Edit appointment cadence rewrite, make
-// recurring) stores that date on the parent, recurring_round_anchor_date: the
-// parent's own date is history and usually a completed visit. Unset, it is
-// the parent's cadence position, which a one-off move or a hand-off placement
-// does not change.
-function seriesRoundAnchor(parent) {
-  return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
 }
 
 // Lawn rounds: store `anchorDateStr` as the series round anchor
@@ -873,15 +862,6 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   const latestStr = seriesCadencePosition(latest);
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
-}
-
-// A series row's cadence position (see seriesExtendAnchor): an exception's
-// recorded cadence date, else a hand-off's due date, else its own date.
-function seriesCadencePosition(row) {
-  const position = (row?.date_exception && row?.date_exception_cadence_date)
-    ? row.date_exception_cadence_date
-    : (row?.recurring_dispatch_due_date || row?.scheduled_date);
-  return dateOnly(position) || '';
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
