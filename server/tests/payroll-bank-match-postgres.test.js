@@ -516,6 +516,33 @@ postgres('payroll bank match in the bank import', () => {
       expect(await row(id)).toMatchObject({ matched_payroll_check_id: null, status: 'unmatched' });
     });
 
+    it('with the gate off, a line whose payroll expense was deleted loses its paycheck link in the next pass', async () => {
+      const id = await line('CHECK 1042', '812.63', '2026-10-28');
+      await bankImport.runDeterministicMatching();
+      const { matched_expense_id: expenseId } = await row(id);
+      expect(await row(id)).toMatchObject({ matched_payroll_check_id: checkA });
+      delete process.env[GATE];
+      await trx('expenses').where({ id: expenseId }).del();
+      await bankImport.runDeterministicMatching();
+      const after = await row(id);
+      expect(after).toMatchObject({ status: 'unmatched', matched_payroll_check_id: null, matched_expense_id: null });
+      expect(after.suggestion.payrollMatch).toBeUndefined();
+    });
+
+    it('with the gate off, deleting a payroll expense frees its line and clears the payroll link in the same step', async () => {
+      const id = await line('CHECK 1042', '812.63', '2026-10-28');
+      await bankImport.runDeterministicMatching();
+      const { matched_expense_id: expenseId } = await row(id);
+      expect(await row(id)).toMatchObject({ matched_payroll_check_id: checkA });
+      delete process.env[GATE];
+      await trx('expenses').where({ id: expenseId }).del();
+      await bankImport.resetDanglingLinks();
+      const after = await row(id);
+      expect(after).toMatchObject({ status: 'unmatched', matched_payroll_check_id: null, matched_expense_id: null });
+      expect(after.suggestion.payrollMatch).toBeUndefined();
+      expect(after.suggestion.rejectedPayrollCheckIds).toEqual([checkA]);
+    });
+
     it('is idempotent: a second pass links nothing new', async () => {
       await seedLines();
       await bankImport.runDeterministicMatching();

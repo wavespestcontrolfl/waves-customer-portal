@@ -1092,6 +1092,9 @@ async function healEditedExpenseLinks() {
 // without this, ledgerCoverage (and the UI) would keep counting a row whose
 // ledger side no longer exists. Deterministic self-heal at the top of every
 // matching pass.
+// A bank line that carries payroll provenance: a payroll FK, or the stored payrollMatch.
+const PAYROLL_PROVENANCE_SQL = "(matched_payroll_check_id IS NOT NULL OR matched_tax_filing_id IS NOT NULL OR jsonb_exists(coalesce(suggestion, '{}'::jsonb), 'payrollMatch'))";
+
 async function resetDanglingLinks() {
   // claim-generation markers are stripped WITH the heal: a claim whose
   // ledger side was deleted mid-verification would otherwise leave
@@ -1099,10 +1102,23 @@ async function resetDanglingLinks() {
   // link would inherit them — the sweeps could then revert that new link
   // as if it were the abandoned automatic claim.
   const dropMarkers = db.raw("coalesce(suggestion, '{}'::jsonb) - 'reconcilePending' - 'verifyPending'");
-  const healedExpense = await db('bank_transactions')
-    .whereIn('status', ['matched_expense', 'created_expense'])
-    .whereNull('matched_expense_id')
-    .update({ status: 'unmatched', match_method: null, matched_at: null, suggestion: dropMarkers, updated_at: new Date() });
+  const dangling = (q) => q.whereIn('status', ['matched_expense', 'created_expense']).whereNull('matched_expense_id');
+  const healTo = { status: 'unmatched', match_method: null, matched_at: null, suggestion: dropMarkers, updated_at: new Date() };
+  // A line with a payroll link is freed one at a time, its payroll link cleared in the same transaction, gate on
+  // or off: a freed line must never keep a payroll link that reserves the paycheck (clearPayrollLinks records
+  // the rejection, so the matcher does not re-book it). Only lines the payroll gate once linked carry one.
+  let healedPayroll = 0;
+  for (const { id } of await dangling(db('bank_transactions')).whereRaw(PAYROLL_PROVENANCE_SQL).select('id')) {
+    await db.transaction(async (trx) => {
+      if (await dangling(trx('bank_transactions').where({ id })).update(healTo)) {
+        healedPayroll += 1;
+        await clearPayrollLinks(trx, id);
+      }
+    });
+  }
+  const healedExpense = healedPayroll + await dangling(db('bank_transactions'))
+    .whereRaw(`NOT ${PAYROLL_PROVENANCE_SQL}`)
+    .update(healTo);
   const healedPayout = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNull('matched_payout_id')
