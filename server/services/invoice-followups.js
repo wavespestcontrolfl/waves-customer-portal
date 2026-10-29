@@ -46,7 +46,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
 const { approvalDigest, phoneKey, emailKey } = require('../utils/approval-digest');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, formatETDayDate } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const {
@@ -846,9 +846,10 @@ function adoptGateSetWithCheckerRunning() {
  * it and never lands on a day already stale by the time it is picked up.
  * null = every step's day has passed (Fable #5202 P1): arming it would
  * stale-complete without a single reminder, so it is left for a person.
+ * `fromIndex` starts the walk past steps a row already sent (the Auto Pay hold timeout).
  */
-function adoptionLanding(anchorAt, now) {
-  let stepIndex = 0;
+function adoptionLanding(anchorAt, now, fromIndex = 0) {
+  let stepIndex = fromIndex;
   let nextAt = computeNextTouchAt(anchorAt, stepIndex);
   while (nextAt && isStaleTouch(nextAt, now)) {
     stepIndex += 1;
@@ -2860,6 +2861,12 @@ function autopayReleaseFields(seq, invoice) {
 const AUTOPAY_HOLD_TIMEOUT_DAYS = 3;
 const AUTOPAY_HOLD_SWEEP_PAGE = 500;
 const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow';
+// A payments row that is money a person took, not Auto Pay acting: paid, with no gateway (processor), charge or
+// PaymentIntent. recordManualPayment writes exactly this for cash, check, Zelle, Venmo, PayPal and other, and so do
+// the prepaid-credit rows (complete-scheduled-service, admin-schedule) and the check/cash branch of the payment
+// reconcile. Every Auto Pay and pay-page writer (stripe.js, pay-combined, the Stripe webhook, billing-cron's
+// failed or deferred monthly rows) sets processor 'stripe' or a Stripe id, or is not 'paid', so it still blocks.
+const OFF_GATEWAY_PAID_TENDER = "p.status = 'paid' AND p.processor IS NULL AND p.stripe_charge_id IS NULL AND p.stripe_payment_intent_id IS NULL";
 
 /**
  * The SQL half of the timeout rule, on a builder over `invoice_followup_sequences as s`. The sweep's
@@ -2869,12 +2876,14 @@ const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow
  *   before the cutoff;
  * - no stripe_invoice_charge_attempts row for the invoice at all (any age, any state: an attempt means
  *   Auto Pay acted, and an unresolved one still needs its reconciliation);
- * - no payments row (any status) for the customer created since the hold began, and no failed one still
- *   on billing-cron's retry ladder (next_retry_at set);
+ * - no payments row (any status) for the customer created since the hold began, other than an off-gateway
+ *   paid tender (see OFF_GATEWAY_PAID_TENDER: cash, check, Zelle and the like), and no failed one still on
+ *   billing-cron's retry ladder (next_retry_at set);
  * - no active payment plan for the invoice;
  * - no linked visit that is still open (Auto Pay charges when the visit closes: an invoice sent before
  *   its visit is waiting for that charge);
- * - no open customer-level schedule for the customer (that engine owns its reminders).
+ * - no open customer-level schedule for the customer (that engine owns its reminders: it promotes only
+ *   `active` rows, so a hold it never touched would otherwise sit, but a row it owns is judged by it).
  */
 function staleAutopayHoldClause(query, cutoff) {
   return query
@@ -2887,7 +2896,8 @@ function staleAutopayHoldClause(query, cutoff) {
     .whereNotExists(function noPayment() {
       this.select(db.raw('1')).from('payments as p')
         .whereRaw('p.customer_id = s.customer_id')
-        .whereRaw('p.created_at >= s.updated_at');
+        .whereRaw('p.created_at >= s.updated_at')
+        .whereRaw(`NOT (${OFF_GATEWAY_PAID_TENDER})`);
     })
     .whereNotExists(function noPendingRetry() {
       this.select(db.raw('1')).from('payments as r')
@@ -2911,27 +2921,53 @@ function staleAutopayHoldClause(query, cutoff) {
     .where(notOwnedByCustomerSchedule);
 }
 
-// The timeout's release: releaseFromAutopayHold's fields, written only while the row is still the hold
-// the sweep observed (the same updated_at, to the microsecond, compared as text so no JS Date rounding
-// enters) and the whole SQL rule still holds in the same statement. Returns whether it released.
-async function releaseStaleAutopayHold(row, cutoff) {
+// The office hears once per released invoice, a day or more before its first reminder, so a person can charge
+// the card on file first (owner 2026-10-29). The key carries the hold's own stamp: one alert per invoice and
+// hold episode, and a re-run finds the row active and never reaches here. Best effort: alertStaff never throws.
+// `landing` null = every step's day has passed, so the released row completes without a reminder.
+async function alertAutopayHoldReleased(row, invoice, landing) {
+  const due = `invoice ${invoice.invoice_number} ($${invoiceHelpers.invoiceAmountDue(invoice).toFixed(2)})`;
+  await require('./customer-dunning/schedule').alertStaff({
+    verb: 'charge the card on file',
+    generic: 'charge a customer\'s card on file',
+    short: true,
+    why: landing
+      ? `Auto Pay did not charge ${due}; reminders start ${formatETDayDate(landing.nextAt)}.`
+      : `Auto Pay did not charge ${due}, and no reminder steps are left to send.`,
+    doneWhen: 'invoice_charged',
+    dedupeKey: `autopay-hold-timeout:${row.invoice_id}:${row.hold_stamp}`,
+    customerId: row.customer_id,
+    metadata: { invoice_id: row.invoice_id, sequence_id: row.id },
+  });
+}
+
+// The timeout's release: releaseFromAutopayHold's fields, except the first touch lands no earlier than the next
+// send-window run (adoptionLanding, the rule promotion uses): releasing in the run that then sends would give the
+// office no day to charge the card first. Written only while the row is still the hold the sweep observed (the
+// same updated_at, to the microsecond, compared as text so no JS Date rounding enters) and the whole SQL rule
+// still holds in the same statement. Returns whether it released.
+async function releaseStaleAutopayHold(row, cutoff, now = new Date()) {
   const seq = await db('invoice_followup_sequences').where({ id: row.id }).first('anchor_at', 'step_index');
   const invoice = await db('invoices').where({ id: row.invoice_id }).first();
   if (!seq || !invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return false;
+  const fields = autopayReleaseFields(seq, invoice);
+  const landing = adoptionLanding(seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at, now, seq.step_index);
   const count = await staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff)
     .where('s.id', row.id)
     .whereRaw('s.updated_at = ?::timestamptz', [row.hold_stamp])
-    .update(autopayReleaseFields(seq, invoice));
+    .update(landing ? { ...fields, step_index: landing.stepIndex, next_touch_at: landing.nextAt } : fields);
+  if (count > 0) await alertAutopayHoldReleased(row, invoice, landing);
   return count > 0;
 }
 
 /**
  * Release Auto Pay holds that Auto Pay never acted on: `autopay_hold` sequences that meet
  * staleAutopayHoldClause, on an invoice that is not terminal, not payer-billed and still schedulable,
- * for a customer the live customer-level engine does not cover (GATE_DUNNING_CUSTOMER_SCHEDULE live for
- * them: that engine holds the whole set while the customer is on Auto Pay and can promote a released
- * row back into its hold). Every held row is read, in id-keyset pages, so rows the skips pass over
- * never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
+ * for a customer with no OPEN customer-level schedule (an open one owns its reminders and judges Auto Pay
+ * itself). The live engine's coverage (GATE_DUNNING_CUSTOMER_SCHEDULE, its allowlist) is not a skip: with no
+ * allowlist it covers every customer, and the engine never promotes an `autopay_hold` row, so skipping
+ * covered customers would leave every uncharged Auto Pay invoice held for good. Every held row is read, in
+ * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
  * writes at most one audit_log row per invoice per ET day and changes nothing; off returns before any
  * query.
  */
@@ -2940,10 +2976,6 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
   if (mode !== 'shadow' && mode !== 'true') return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
 
   const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
-  const engineGates = customerDunningGates();
-  const coveredByCustomerEngine = engineGates && engineGates.dunningCustomerScheduleLive()
-    ? require('./customer-dunning/wiring').liveForCustomer
-    : () => false;
   const due = [];
   let afterId = null;
   for (;;) {
@@ -2955,7 +2987,6 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
     const rows = await page;
 
     for (const row of rows) {
-      if (coveredByCustomerEngine(row.customer_id)) continue;
       const invoice = await db('invoices').where({ id: row.invoice_id }).first();
       if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
       due.push(row);
@@ -2968,7 +2999,7 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
   let recorded = 0;
   if (mode === 'true') {
     for (const row of due) {
-      if (await releaseStaleAutopayHold(row, cutoff)) released += 1;
+      if (await releaseStaleAutopayHold(row, cutoff, now)) released += 1;
     }
     logger.info(`[invoice-followups] autopay hold timeout: released ${released} of ${due.length} stale hold(s)`);
   } else {
