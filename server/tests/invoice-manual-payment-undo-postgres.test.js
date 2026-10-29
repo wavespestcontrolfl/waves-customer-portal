@@ -13,6 +13,8 @@ jest.mock('../models/db', () => {
   db.transaction = (...args) => db.connection.transaction(...args);
   Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
   Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  // The receipt send lock opens its own unpooled session through db.client.
+  Object.defineProperty(db, 'client', { get: () => db.connection.client });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -274,6 +276,63 @@ postgres('Undo last manual payment against migrated PostgreSQL', () => {
     await record(invoice.id);
     await expect(undo(invoice.id, { paymentId: undefined })).rejects.toMatchObject({ statusCode: 400 });
     expect((await row(invoice.id)).status).toBe('paid');
+  });
+
+  // Receipt senders claim a receipt_delivery_jobs row (no invoice lock, no invoice foreign key) and then send. The claim lock
+  // (lockInvoiceReceiptClaim) is what orders a claim against an Undo; these two cases hold it by hand to fix which side goes first.
+  async function waitForBlockedAdvisoryLock() {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const { rows } = await database.raw("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+      if (rows.length) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('nothing is waiting on an advisory lock');
+  }
+
+  it('a receipt send that meets an Undo holding the claim lock re-reads the reopened invoice and sends nothing', async () => {
+    const { lockInvoiceReceiptClaim } = require('../services/receipt-delivery-queue');
+    const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+    const emailSpy = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockResolvedValue({ ok: true });
+    const textSpy = jest.spyOn(require('../services/invoice'), 'sendReceipt').mockResolvedValue({ sent: true });
+    const invoice = await makeInvoice();
+    await record(invoice.id);
+    const holder = await database.transaction();
+    try {
+      // What Undo does inside its transaction: take the claim lock, reopen the invoice. Not committed yet.
+      await lockInvoiceReceiptClaim(holder, invoice.id);
+      await holder('invoices').where({ id: invoice.id }).update({ status: 'viewed', paid_at: null });
+      // The sender's own paid check reads the committed row (still paid), then blocks on the claim lock.
+      const sending = sendInvoiceReceipt(invoice.id);
+      await waitForBlockedAdvisoryLock();
+      await holder.commit();
+      await expect(sending).resolves.toMatchObject({ status: 409, body: { code: 'invoice_not_paid' } });
+      expect(emailSpy).not.toHaveBeenCalled();
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(await database('receipt_delivery_jobs').where({ invoice_id: invoice.id })).toHaveLength(0);
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+      emailSpy.mockRestore();
+      textSpy.mockRestore();
+    }
+  });
+
+  it('an Undo that meets a receipt claim committed first sees it and refuses with the receipt reason', async () => {
+    const { lockInvoiceReceiptClaim } = require('../services/receipt-delivery-queue');
+    const invoice = await makeInvoice();
+    await record(invoice.id);
+    const holder = await database.transaction();
+    try {
+      // What the sender does inside its claim transaction: take the claim lock, insert the claim row. Not committed yet.
+      await lockInvoiceReceiptClaim(holder, invoice.id);
+      await holder('receipt_delivery_jobs').insert({ invoice_id: invoice.id, source: 'operator_send', status: 'running', locked_by: 'operator:synthetic' });
+      const undoing = undo(invoice.id);
+      await waitForBlockedAdvisoryLock();
+      await holder.commit();
+      await expect(undoing).rejects.toMatchObject({ statusCode: 409, code: 'receipt' });
+      expect((await row(invoice.id)).status).toBe('paid');
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+    }
   });
 
   it('describes eligibility with the same rules, for the Invoices page', async () => {

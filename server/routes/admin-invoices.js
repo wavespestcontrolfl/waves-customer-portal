@@ -1623,13 +1623,14 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       // the closeout so a queued receipt cannot deliver during it.
       let claim;
       try {
-        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at });
+        // requirePaid: the status read above can be overtaken by an Undo of the payment; the claim re-reads it under the claim lock.
+        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at, requirePaid: true });
       } catch (err) {
         failed.push({ invoiceId, error: `receipt claim failed: ${err.message}` });
         continue;
       }
-      if (claim.inFlight || claim.alreadySent) {
-        skipped.push({ invoiceId, reason: claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
+      if (claim.inFlight || claim.alreadySent || claim.notPaid) {
+        skipped.push({ invoiceId, reason: claim.notPaid ? 'invoice_not_paid' : claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
         continue;
       }
 

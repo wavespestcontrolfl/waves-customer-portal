@@ -20,12 +20,13 @@
  * after the reminder stop, pause clear, review ask, closeout and receipt). A crash or a lost marker leaves a payment un-undoable here.
  *
  * Every rule runs again under the invoice row lock, in the order the payment writer locks (the per-customer combined-session
- * lock, then the invoice). The payment writer's effects and what Undo does about each:
+ * lock, the receipt-claim lock, then the invoice). The payment writer's effects and what Undo does about each:
  *   paid flip + operator note            reversed exactly from the marker
  *   payments row                         kept as history, status 'canceled' + the undo note (every revenue reader counts 'paid')
  *   follow-up sequence completed         re-armed after commit (resumeSequenceIfSystemResumable + scheduleForInvoice)
  *   payment-failed admin bells closed    reopened
- *   receipt (inline or queued)           refused when any exists
+ *   receipt (inline or queued)           refused when any exists; Undo and every receipt claim take the per-invoice claim lock
+ *                                        (lockInvoiceReceiptClaim), and a claiming sender re-reads 'paid' under it (requirePaid)
  *   review ask enrolled                  refused when one exists
  *   visit closed out                     refused when one was
  *   billing pause auto-cleared           refused when it was
@@ -38,6 +39,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { undoManualPaymentLive } = require('../config/feature-gates');
+const { lockInvoiceReceiptClaim } = require('./receipt-delivery-queue');
 const {
   VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, MANUAL_PAYMENT_EFFECTS_DONE_ACTION, PAID_FIELDS, refusal,
 } = require('./invoice-manual-payment');
@@ -194,8 +196,12 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
   if (!unlocked) throw refusal(404, 'Invoice not found');
 
   const done = await db.transaction(async (trx) => {
-    // The payment writer's lock order: the per-customer combined-session lock first (re-read until the owner is stable), then the invoice.
+    // The payment writer's lock order: the per-customer combined-session lock first (re-read until the owner is stable), then the invoice
+    // (with the receipt-claim lock between them, below).
     await require('./pay-combined').lockCombinedCustomerStable(trx, invoiceId, unlocked.customer_id);
+    // Then the receipt-claim lock: a sender claiming a receipt either committed before this point (the receipt probe below sees its claim row)
+    // or waits here and re-reads the invoice after this commit (see lockInvoiceReceiptClaim in receipt-delivery-queue.js).
+    await lockInvoiceReceiptClaim(trx, invoiceId);
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!locked) throw refusal(404, 'Invoice not found');
     const { refusal: refused, marker, payment } = await manualPaymentUndoRefusal(trx, locked);
