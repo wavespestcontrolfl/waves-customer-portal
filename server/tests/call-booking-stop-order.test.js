@@ -54,6 +54,54 @@ describe('placeCallBookingInRoute', () => {
   });
 });
 
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b): the
+// umbrella places a call booking through the shared auto-save helper, once.
+describe('placeCallBookingInRoute with GATE_ROUTE_CHECK_AUTO_SAVES', () => {
+  const trx = { isTransaction: true };
+  const created = { id: 'svc-1', technician_id: 'tech-1', window_start: '10:00:00' };
+  const autoOn = () => { process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
+
+  beforeEach(() => placeMovedVisit.mockClear());
+  afterEach(() => {
+    delete process.env.GATE_CALL_BOOKING_STOP_ORDER;
+    delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  });
+
+  test('on, the stop-order gate off: placed once on the booking transaction, marked as a call booking, cache roads only', async () => {
+    autoOn();
+    await expect(placeCallBookingInRoute(trx, created)).resolves.toEqual(['stop-a', 'svc-1', 'stop-b']);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, source: 'call_booking' });
+  });
+
+  test('on WITH the stop-order gate: still one placement, the stop-order gate\'s own (phone_call), never a second', async () => {
+    autoOn();
+    process.env.GATE_CALL_BOOKING_STOP_ORDER = 'true';
+    await placeCallBookingInRoute(trx, created);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', source: 'phone_call' });
+  });
+
+  test('on, a street-level pending row: its address waits on the office, so nothing is placed', async () => {
+    autoOn();
+    await expect(placeCallBookingInRoute(trx, created, { streetLevelPending: true })).resolves.toBeNull();
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+  });
+
+  test('on without the arrival-window route check: nothing is placed', async () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    await expect(placeCallBookingInRoute(trx, created)).resolves.toBeNull();
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+  });
+
+  test('on, a throwing placement: resolves null, the booking is not failed', async () => {
+    autoOn();
+    placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
+    await expect(placeCallBookingInRoute(trx, created)).resolves.toBeNull();
+  });
+});
+
 describe('the fresh call booking calls it, and only there', () => {
   const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
   const CALL = 'await placeCallBookingInRoute(trx, created, { streetLevelPending });';
