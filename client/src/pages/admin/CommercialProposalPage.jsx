@@ -75,6 +75,7 @@ const BUILDING_USE_OPTIONS = [
   { value: 'residential', label: 'Homes or residential community', note: 'Homes, apartments, condos and HOA common areas. Florida does not tax pest work here.' },
   { value: 'nonresidential', label: 'Business building', note: 'Offices, stores, restaurants and warehouses. Pest work is taxable; lawn and tree & shrub are not.' },
 ];
+const BUILDING_USE_REQUIRED = 'Pick the building use before saving: homes or residential community, or business building. It sets which rows carry sales tax.';
 // A row's Taxable rule for a business building, from the served family registry: its service family's rule, or the
 // 'other' rule for a row with no service. Undefined for a service the registry does not list (a generated one-time
 // line), whose switch then stays as it is.
@@ -613,6 +614,8 @@ function CommercialProposalEditor() {
     if ((next !== 'residential' && next !== 'nonresidential') || next === buildingUse) return;
     markEdit();
     setBuildingUse(next);
+    // The save's "pick the building use" message is answered now; any other message stays.
+    setError((prev) => (prev === BUILDING_USE_REQUIRED ? null : prev));
     const apply = next === 'residential'
       ? (row) => ({ ...row, bizTaxable: row.bizTaxable ?? row.taxable, taxable: false })
       : ({ bizTaxable, ...row }) => ({ ...row, taxable: bizTaxable ?? row.taxable });
@@ -1142,7 +1145,7 @@ function CommercialProposalEditor() {
     try {
       // The building use sets which rows carry sales tax, so every save states it.
       if (!formRef.current.buildingUse) {
-        setError('Pick the building use before saving: homes or residential community, or business building. It sets which rows carry sales tax.');
+        setError(BUILDING_USE_REQUIRED);
         return false;
       }
       for (let attempt = 0; attempt < 5; attempt++) {

@@ -165,6 +165,9 @@ it('with no building use picked, a row the operator adds starts not taxable and 
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   expect(await screen.findByText(/Pick the building use before saving/)).toBeInTheDocument();
   expect(puts).toHaveLength(0);
+  // Picking answers the message.
+  fireEvent.change(useSelect(), { target: { value: 'residential' } });
+  expect(screen.queryByText(/Pick the building use before saving/)).not.toBeInTheDocument();
 });
 
 it('Residential turns every row off and Business puts each back; the pick saves with the proposal', async () => {
