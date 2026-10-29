@@ -815,4 +815,82 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect((await call('POST', '/from-email', { email_id: randomUUID() })).status).toBe(404);
     });
   });
+
+  // The bell's No bid / Bid buttons (GATE_BID_ALERT_BUTTONS, services/bid-desk/alert-buttons.js): served for the bid as
+  // it stands, and a tap runs the same save step as the page, under its lock.
+  describe('bell buttons', () => {
+    let buttons;
+    let NotificationService;
+    const TECH = randomUUID();
+    beforeAll(() => {
+      process.env.GATE_BID_ALERT_BUTTONS = 'true';
+      buttons = require('../services/admin-alert-buttons');
+      NotificationService = require('../services/notification-service');
+    });
+    afterAll(() => { delete process.env.GATE_BID_ALERT_BUTTONS; });
+
+    // The new-bid row as raise() stores it (the emitter itself: bid-alert-buttons.test.js).
+    async function bellFor(bidId) {
+      const { bidButtons } = require('../services/bid-desk/alert-buttons');
+      const [row] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'lead', title: 'Estimates — review the bid invite from Fixture Build Co', body: 'Sample Ridge Residences.',
+        link: `/admin/bid-desk?bid=${bidId}`, metadata: JSON.stringify({ dedupeKey: `bid-desk:new:${bidId}`, bidId, buttons: bidButtons() }),
+      }).returning('id');
+      return row.id;
+    }
+    const served = async (id) => {
+      const rows = await mockPg('notifications').where({ id }).select('id', 'done_at', 'metadata');
+      const [row] = await buttons.withAlertButtons(rows, { role: 'admin' });
+      return (row.actions || []).map((action) => action.id);
+    };
+    const versionOf = async (id) => (await mockPg('notifications').where({ id })
+      .first(mockPg.raw(`${NotificationService._private.NOTIFICATION_VERSION_SQL} AS version`))).version;
+    const tap = async (id, actionId) => buttons.runAlertButton({ notificationId: id, actionId, version: await versionOf(id), technicianId: TECH, role: 'admin' });
+    const bell = (id) => mockPg('notifications').where({ id }).first('done_at', 'metadata');
+
+    test('an unconfirmed date serves No bid only; a confirmed one serves Bid too; a decided bid serves none', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const id = await bellFor(bidId);
+      expect(await served(id)).toEqual(['no_bid']);
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(200);
+      expect(await served(id)).toEqual(['no_bid', 'bid']);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ status: 'no_bid' });
+      expect(await served(id)).toEqual([]);
+    });
+
+    test('No bid saves the decision through the page\'s step: the bid and its bells close, and the tap is recorded', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const id = await bellFor(bidId);
+      await expect(tap(id, 'no_bid')).resolves.toEqual({ status: 200, body: { success: true, message: 'Marked No bid.' } });
+      expect((await bidRow(bidId)).status).toBe('no_bid');
+      const after = await bell(id);
+      expect(after.done_at).not.toBeNull();
+      expect(after.metadata.buttonTaps).toEqual([expect.objectContaining({ action: 'no_bid', by: TECH, outcome: 'done' })]);
+      expect(after.metadata).not.toHaveProperty('buttonClaim');
+      // A second tap does nothing.
+      await expect(tap(id, 'no_bid')).resolves.toMatchObject({ status: 409 });
+      expect((await bell(id)).metadata.buttonTaps).toHaveLength(1);
+    });
+
+    test('Bid before the date is confirmed saves nothing and leaves the row open; after it, Bid saves', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const id = await bellFor(bidId);
+      await expect(tap(id, 'bid')).resolves.toEqual({ status: 409, body: { error: 'date_not_confirmed', message: 'Confirm the due date on the Bid desk first.' } });
+      expect((await bidRow(bidId)).status).toBe('new');
+      expect((await bell(id)).done_at).toBeNull();
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(200);
+      await expect(tap(id, 'bid')).resolves.toEqual({ status: 200, body: { success: true, message: 'Marked Bid.' } });
+      expect((await bidRow(bidId)).status).toBe('bid');
+      expect((await bell(id)).metadata.buttonTaps.map((t) => t.outcome)).toEqual(['date_not_confirmed', 'done']);
+    });
+
+    test('a bid decided on the page meanwhile: the tap saves nothing and closes the row with that note', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const id = await bellFor(bidId);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ status: 'bid' });
+      await expect(tap(id, 'no_bid')).resolves.toMatchObject({ status: 409, body: { error: 'decided' } });
+      expect((await bidRow(bidId)).status).toBe('bid');
+      expect((await bell(id)).done_at).not.toBeNull();
+    });
+  });
 });

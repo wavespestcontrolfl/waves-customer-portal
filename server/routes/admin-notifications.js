@@ -89,7 +89,7 @@ router.get('/', async (req, res, next) => {
     const lastServed = persisted.slice(0, limit).at(-1);
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole })],
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...(await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole }))],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
