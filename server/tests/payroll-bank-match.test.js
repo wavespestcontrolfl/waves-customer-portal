@@ -174,6 +174,17 @@ describe('planTaxPayment', () => {
     expect(plan.tax).toBe('federal');
   });
 
+  it('suggests an exact amount while the pay period is open, unless the owner recorded paying it', () => {
+    const early = { ...irs, txn_date: '2026-10-20' };
+    expect(planTaxPayment({ row: early, filings: [filing()] }).action).toBe('suggest');
+    expect(taxWindow(filing()).periodEnd).toBe('2026-10-31');
+    expect(planTaxPayment({ row: early, filings: [filing({ amount_paid: '350.00', status: 'paid' })] }).action).toBe('link');
+    const rt6 = filing({ id: 'fil-3', source_key: 'payroll:rt6:2026-Q3', due_date: '2026-10-30', amount_due: '12.34' });
+    expect(taxWindow(rt6).periodEnd).toBe('2026-09-30');
+    const fl = line({ id: 'fl', description: 'FL DEPT OF REVENUE', amount: '12.34', txn_date: '2026-09-15' });
+    expect(planTaxPayment({ row: fl, filings: [rt6] }).action).toBe('suggest');
+  });
+
   it('matches the amount the owner recorded paying over the amount due', () => {
     const paid = filing({ amount_paid: '351.00', status: 'paid' });
     expect(filingCents(paid)).toBe(35100);
@@ -187,17 +198,20 @@ describe('planTaxPayment', () => {
   });
 
   it('keeps the deposit window from the month start to 14 days after the due date', () => {
-    expect(taxWindow(filing())).toEqual({ tax: 'federal', from: '2026-10-01', to: '2026-11-30' });
+    expect(taxWindow(filing())).toEqual({ tax: 'federal', from: '2026-10-01', to: '2026-11-30', periodEnd: '2026-10-31' });
     const at = (txn_date) => planTaxPayment({ row: { ...irs, txn_date }, filings: [filing()] }).action;
     expect(at('2026-09-30')).toBe('none');
-    expect(at('2026-10-01')).toBe('link');
+    // inside the open pay period an exact amount is only a suggestion
+    expect(at('2026-10-01')).toBe('suggest');
+    expect(at('2026-10-31')).toBe('suggest');
+    expect(at('2026-11-01')).toBe('link');
     expect(at('2026-11-30')).toBe('link');
     expect(at('2026-12-01')).toBe('none');
   });
 
   it('matches an RT-6 row only to a Florida Department of Revenue line', () => {
     const rt6 = filing({ id: 'fil-3', source_key: 'payroll:rt6:2026-Q3', due_date: '2026-10-30', amount_due: '12.34' });
-    expect(taxWindow(rt6)).toEqual({ tax: 'florida', from: '2026-07-01', to: '2026-11-13' });
+    expect(taxWindow(rt6)).toEqual({ tax: 'florida', from: '2026-07-01', to: '2026-11-13', periodEnd: '2026-09-30' });
     const fl = line({ id: 'fl-line', description: 'FL DEPT OF REVENUE', amount: '12.34', txn_date: '2026-10-28' });
     expect(planTaxPayment({ row: fl, filings: [rt6] }).action).toBe('link');
     expect(planTaxPayment({ row: { ...fl, description: 'IRS USATAXPYMT' }, filings: [rt6] }).action).toBe('none');

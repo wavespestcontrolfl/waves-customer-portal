@@ -198,6 +198,120 @@ postgres('payroll bank match in the bank import', () => {
       expect((await row(id)).status).toBe('unmatched');
     });
 
+    describe('an expense the owner already entered', () => {
+      const manual = async (patch = {}) => {
+        const id = randomUUID();
+        await trx('expenses').insert({
+          id, description: 'Sample Alpha paycheck', vendor_name: 'CHECK 1042 sample', amount: '812.63',
+          expense_date: '2026-10-28', tax_year: '2026', ...patch,
+        });
+        return id;
+      };
+      const payrollCategory = async () => (await trx('expense_categories').where({ name: CATEGORY }).first('id')).id;
+
+      it('parks the line beside the payroll candidate and the expense; creates and links nothing', async () => {
+        const expenseId = await manual();
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        const summary = await bankImport.runDeterministicMatching();
+        expect(summary.payrollChecksLinked).toBe(0);
+        const r = await row(id);
+        expect(r.status).toBe('unmatched');
+        expect(r.matched_payroll_check_id).toBeNull();
+        expect(r.matched_expense_id).toBeNull();
+        expect(r.suggestion.payrollCandidates).toEqual([expect.objectContaining({
+          id: checkA, existingExpenses: [expect.objectContaining({ id: expenseId, amount: 812.63 })],
+        })]);
+        // the ordinary matcher lists the expense but, held, does not link it (vendor evidence would have)
+        expect(r.suggestion.candidates.map((c) => c.id)).toEqual([expenseId]);
+        const cat = await payrollCategory();
+        expect(await trx('expenses').where({ category_id: cat }).count('* as n').first()).toMatchObject({ n: '0' });
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
+      it('the owner may link the paycheck to that expense: same id, moved into the payroll category, restored on void', async () => {
+        const expenseId = await manual({ tax_deductible_amount: '812.63' });
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        await bankImport.runDeterministicMatching();
+        const refused = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner' });
+        expect(refused).toMatchObject({ ok: false, reason: 'existing_expense' });
+        const ok = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
+        expect(ok).toMatchObject({ ok: true, reused: true });
+        const e = await trx('expenses').where({ id: expenseId }).first();
+        expect(e).toMatchObject({ category_id: await payrollCategory(), tax_deductible_amount: '0.00' });
+        expect(await row(id)).toMatchObject({ status: 'matched_expense', matched_expense_id: expenseId, matched_payroll_check_id: checkA });
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+
+        await trx('payroll_checks').where({ run_id: runId }).update({ status: 'voided' });
+        await trx('payroll_runs').where({ id: runId }).update({ status: 'voided', voided_at: trx.fn.now(), void_reason: 'redo' });
+        expect(await bankImport.releaseVoidedPayrollLinks()).toBe(1);
+        // the owner's own expense survives, back in its first category
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '812.63' });
+        expect(await row(id)).toMatchObject({ status: 'unmatched', matched_expense_id: null });
+      });
+
+      it('the owner may book as new beside it', async () => {
+        await manual();
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        const ok = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', createNew: true });
+        expect(ok).toMatchObject({ ok: true, reused: false });
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '2' });
+      });
+    });
+
+    describe('a linked tax payment whose calendar row changes', () => {
+      const linkedTax = async () => {
+        const id = await line('IRS USATAXPYMT 270012345', '350.00', '2026-11-13');
+        await bankImport.runDeterministicMatching();
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'created_expense', matched_tax_filing_id: filingId });
+        return { id, expenseId: r.matched_expense_id };
+      };
+
+      it('goes back to review when the row amount changes: expense removed, evidence kept, seen-in-bank gone', async () => {
+        const { id, expenseId } = await linkedTax();
+        expect((await row(id)).suggestion.payrollMatch.amountCents).toBe(35000);
+        await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '700.00' });
+        await bankImport.runDeterministicMatching();
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'unmatched', matched_tax_filing_id: null, matched_expense_id: null, match_method: null });
+        expect(r.suggestion.payrollMatch).toBeUndefined();
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_changed', filingId, bankCents: 35000, calendarCents: 70000, matchedCents: 35000 });
+        expect(r.suggestion.payrollUnlinked.was).toMatchObject({ expenseId, filingId });
+        expect(r.suggestion.rejectedTaxFilingIds).toEqual([filingId]);
+        expect(await trx('expenses').where({ id: expenseId }).first()).toBeUndefined();
+        expect(await trx('bank_transactions').where({ matched_tax_filing_id: filingId }).count('* as n').first()).toMatchObject({ n: '0' });
+        // and it is not re-linked to the row that no longer says its amount
+        await bankImport.runDeterministicMatching();
+        expect((await row(id)).status).toBe('unmatched');
+      });
+
+      it('goes back to review when the row is deleted, with the evidence', async () => {
+        const { id, expenseId } = await linkedTax();
+        await trx('tax_filing_calendar').where({ id: filingId }).del();
+        await bankImport.runDeterministicMatching();
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'unmatched', matched_tax_filing_id: null, matched_expense_id: null });
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_deleted', filingId, bankCents: 35000, calendarCents: null });
+        expect(r.suggestion.rejectedTaxFilingIds).toBeUndefined();
+        expect(await trx('expenses').where({ id: expenseId }).first()).toBeUndefined();
+      });
+
+      it('keeps a link whose row still says the same amount (amount_paid wins over amount_due)', async () => {
+        const { id } = await linkedTax();
+        await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '999.00', amount_paid: '350.00', status: 'paid' });
+        await bankImport.runDeterministicMatching();
+        expect(await row(id)).toMatchObject({ status: 'created_expense', matched_tax_filing_id: filingId });
+      });
+    });
+
+    it('an exact tax amount inside the pay period still open is a suggestion, not a link', async () => {
+      const id = await line('IRS USATAXPYMT 270012345', '350.00', '2026-10-20');
+      await bankImport.runDeterministicMatching();
+      const r = await row(id);
+      expect(r.status).toBe('unmatched');
+      expect(r.suggestion.payrollCandidates).toEqual([expect.objectContaining({ kind: 'tax', id: filingId })]);
+    });
+
     it('is idempotent: a second pass links nothing new', async () => {
       await seedLines();
       await bankImport.runDeterministicMatching();

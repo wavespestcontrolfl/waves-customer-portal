@@ -6267,6 +6267,33 @@ function BankImportTab() {
                           {c.kind === "check"
                             ? `Paycheck for ${c.name}, ${fmtM(c.netCents / 100)}, pay date ${fmtD(c.payDate)}${c.nearMiss ? " (one cent off)" : ""}`
                             : `${c.title}, ${fmtM(c.amountCents / 100)}, due ${fmtD(c.dueDate)}${c.nearMiss ? " (one cent off)" : ""}`}
+                          {c.existingExpenses?.length > 0 ? (
+                            <>
+                              <div className="mt-1">
+                                You may already have entered this payment. Link it to the existing expense, or book it as new.
+                              </div>
+                              {c.existingExpenses.map((e) => (
+                                <Button
+                                  key={e.id}
+                                  type="button"
+                                  variant="secondary"
+                                  className="mr-2 mt-1"
+                                  disabled={!!busy}
+                                  onClick={() =>
+                                    act(
+                                      "link-payroll",
+                                      `/admin/tax/bank-import/${r.id}/link-payroll`,
+                                      c.kind === "check"
+                                        ? { checkId: c.id, expenseId: e.id }
+                                        : { filingId: c.id, expenseId: e.id },
+                                    )
+                                  }
+                                >
+                                  {`Use existing expense ${e.vendor_name || ""} ${fmtM(e.amount)} ${fmtD(e.expense_date)}`}
+                                </Button>
+                              ))}
+                            </>
+                          ) : null}
                           <Button
                             type="button"
                             variant="secondary"
@@ -6276,11 +6303,19 @@ function BankImportTab() {
                               act(
                                 "link-payroll",
                                 `/admin/tax/bank-import/${r.id}/link-payroll`,
-                                c.kind === "check" ? { checkId: c.id } : { filingId: c.id },
+                                {
+                                  ...(c.kind === "check" ? { checkId: c.id } : { filingId: c.id }),
+                                  // "Book as new" is offered only beside the existing expenses the owner just saw
+                                  ...(c.existingExpenses?.length > 0 ? { createNew: true } : {}),
+                                },
                               )
                             }
                           >
-                            {c.kind === "check" ? "Link paycheck" : "Link tax payment"}
+                            {c.existingExpenses?.length > 0
+                              ? "Book as new"
+                              : c.kind === "check"
+                                ? "Link paycheck"
+                                : "Link tax payment"}
                           </Button>
                         </div>
                       ))}

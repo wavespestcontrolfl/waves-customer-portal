@@ -109,8 +109,23 @@ describe('link-payroll', () => {
     bankImport.claimPayrollLink.mockResolvedValue({ ok: true, expense: { id: 'exp-1' } });
     const res = await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true, expenseId: 'exp-1' });
+    expect(await res.json()).toEqual({ success: true, expenseId: 'exp-1', reusedExpense: false });
     expect(bankImport.claimPayrollLink).toHaveBeenCalledWith(expect.objectContaining({ check: { id: UUID_B }, filing: null, by: 'owner' }));
+  });
+
+  test('passes the owner\'s existing-expense pick and book-as-new through, and refuses a duplicate by default', async () => {
+    const UUID_C = '33333333-3333-4333-8333-333333333333';
+    bankImport.claimPayrollLink.mockResolvedValue({ ok: true, expense: { id: UUID_C }, reused: true });
+    const res = await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B, expenseId: UUID_C });
+    expect(await res.json()).toEqual({ success: true, expenseId: UUID_C, reusedExpense: true });
+    expect(bankImport.claimPayrollLink).toHaveBeenLastCalledWith(expect.objectContaining({ expenseId: UUID_C, createNew: false }));
+    await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B, createNew: true });
+    expect(bankImport.claimPayrollLink).toHaveBeenLastCalledWith(expect.objectContaining({ expenseId: null, createNew: true }));
+    expect((await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B, expenseId: 'nope' })).status).toBe(400);
+    bankImport.claimPayrollLink.mockResolvedValue({ ok: false, reason: 'existing_expense', existing: [] });
+    const dup = await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B });
+    expect(dup.status).toBe(409);
+    expect((await dup.json()).error).toMatch(/already be entered/);
   });
 
   test('maps a refusal to a plain answer', async () => {

@@ -2747,9 +2747,10 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
 router.post('/bank-import/:id/link-payroll', async (req, res, next) => {
   try {
     if (!payrollBankMatchOn()) return res.status(404).json({ error: 'payroll bank match is not turned on' });
-    const { checkId, filingId } = req.body || {};
+    const { checkId, filingId, expenseId, createNew } = req.body || {};
     if (!!checkId === !!filingId) return res.status(400).json({ error: 'send exactly one of checkId or filingId' });
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(checkId || filingId))) return res.status(400).json({ error: 'checkId or filingId must be an id' });
+    if (expenseId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(expenseId))) return res.status(400).json({ error: 'expenseId must be an id' });
     const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'suggestion');
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to paychecks' });
@@ -2760,14 +2761,19 @@ router.post('/bank-import/:id/link-payroll', async (req, res, next) => {
       check: checkId ? { id: String(checkId) } : null,
       filing: filingId ? { id: String(filingId) } : null,
       by: 'owner',
+      expenseId: expenseId ? String(expenseId) : null,
+      createNew: createNew === true,
     });
-    if (outcome.ok) return res.json({ success: true, expenseId: outcome.expense.id });
+    if (outcome.ok) return res.json({ success: true, expenseId: outcome.expense.id, reusedExpense: outcome.reused === true });
     const messages = {
       implausible: [400, 'that paycheck or tax row does not plausibly match this bank row (amount or date outside the matching window)'],
       check_not_final: [409, 'that paycheck is not final'],
       filing_gone: [409, 'that payroll tax row is gone'],
       no_category: [409, 'the category "Payroll (counted from pay runs)" is missing'],
       taken: [409, 'that paycheck or tax row is already linked to another bank row'],
+      existing_expense: [409, 'an expense for this payment may already be entered. Link that expense to this paycheck (it moves into the payroll category), or choose Book as new to create another.'],
+      expense_gone: [404, 'that expense is gone'],
+      implausible_expense: [400, 'that expense does not match this bank row (amount or date), or a refund already reduced it'],
     };
     const [status, error] = messages[outcome.reason] || [409, 'row was matched by someone else mid-flight'];
     return res.status(status).json({ error });

@@ -76,15 +76,24 @@ function netPayWindow(check) {
 }
 
 // 'payroll:941_deposit:2026-10' and its ':balance:n' rows -> the month; 'payroll:rt6:2026-Q3' -> the quarter.
+// start / end are the first and last day of the pay period the row's amount is built from.
 function taxFamily(filing) {
   const key = String(filing.source_key || '');
   if (/:review:\d+$/.test(key)) return null;
   const [prefix, kind, period] = key.split(':');
   if (prefix !== 'payroll') return null;
-  if (kind === '941_deposit' && /^\d{4}-\d{2}/.test(period || '')) return { tax: 'federal', start: `${period.slice(0, 7)}-01` };
+  if (kind === '941_deposit' && /^\d{4}-\d{2}/.test(period || '')) {
+    const start = `${period.slice(0, 7)}-01`;
+    const nextMonth = new Date(`${start}T00:00:00Z`);
+    nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+    return { tax: 'federal', start, end: addDays(nextMonth.toISOString().slice(0, 10), -1) };
+  }
   if (kind === 'rt6' && /^\d{4}-Q[1-4]/.test(period || '')) {
     const q = Number(period.slice(6, 7));
-    return { tax: 'florida', start: `${period.slice(0, 4)}-${String((q - 1) * 3 + 1).padStart(2, '0')}-01` };
+    const start = `${period.slice(0, 4)}-${String((q - 1) * 3 + 1).padStart(2, '0')}-01`;
+    const next = new Date(`${start}T00:00:00Z`);
+    next.setUTCMonth(next.getUTCMonth() + 3);
+    return { tax: 'florida', start, end: addDays(next.toISOString().slice(0, 10), -1) };
   }
   return null;
 }
@@ -93,8 +102,13 @@ function taxFamily(filing) {
 function taxWindow(filing) {
   const family = taxFamily(filing);
   if (!family) return null;
-  return { tax: family.tax, from: family.start, to: addDays(filing.due_date, TAX_DAYS_AFTER_DUE) };
+  return { tax: family.tax, from: family.start, to: addDays(filing.due_date, TAX_DAYS_AFTER_DUE), periodEnd: family.end };
 }
+
+// While the pay period is still open another run can raise the row's amount, so an exact amount is not yet
+// proof. Only a row the owner already recorded paying (amount_paid) is settled before the period ends.
+const periodOpen = (filing, window, txnDate) => (filing.amount_paid === null || filing.amount_paid === undefined)
+  && day(txnDate) <= window.periodEnd;
 
 // The amount a calendar row stands for: what the owner recorded paying, else what is due.
 function filingCents(filing) {
@@ -202,6 +216,8 @@ function planTaxPayment({ row, filings, peers = [], rejected = [] }) {
   }
   if (exact.length > 1) return { action: 'suggest', candidates: exact.slice(0, SUGGESTION_CAP).map((o) => filingCandidate(o.filing, row)) };
   const [only] = exact;
+  // Chosen: an exact amount inside a pay period that is still open is a suggestion, not a link.
+  if (periodOpen(only.filing, only.window, row.txn_date)) return { action: 'suggest', candidates: [filingCandidate(only.filing, row)] };
   const rivals = peers.filter((p) => p.id !== row.id && isBankDebit(p) && centsOf(p.amount) === cents
     && taxPaymentKind(p.description) === tax && inWindow(p.txn_date, only.window));
   if (rivals.length > 0) return { action: 'suggest', candidates: [filingCandidate(only.filing, row)] };
