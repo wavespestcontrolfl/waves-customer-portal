@@ -5,8 +5,10 @@
  * lead's booking evidence (after the bell, never a visit that did not run) and
  * the customer-contact classes behind GATE_ALERT_CONTACT_CLOSE (the shared
  * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
- * quote, a person's email reply). The rules themselves are covered by
- * admin-alert-relevance.test.js.
+ * quote, a person's email reply), and the two rules with their own gates
+ * (GATE_VOICEMAIL_VISIT_UNDERWAY: a visit that ran after a voicemail;
+ * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells). The rules
+ * themselves are covered by admin-alert-relevance.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -24,7 +26,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     db = require('../models/db');
     relevance = require('../services/admin-alert-relevance');
   });
-  afterEach(() => { delete process.env.GATE_ALERT_CONTACT_CLOSE; });
+  afterEach(() => {
+    delete process.env.GATE_ALERT_CONTACT_CLOSE;
+    delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
+    delete process.env.GATE_LEAD_CONTACTED_CLOSE;
+  });
   afterAll(async () => {
     if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
     for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'scheduled_services', 'leads', 'estimates', 'customers']) {
@@ -671,6 +677,202 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       }
       for (const open of [earlier, ringOut]) expect((await get(open.note.id)).done_at).toBeNull();
     });
+
+    test('a voicemail callback request closes once the customer\'s own visit completed after the voicemail on the same ET day (GATE_VOICEMAIL_VISIT_UNDERWAY); the next ET day, before the voicemail, a visit that never ran, another customer\'s (even on the same phone) and an earlier-day voicemail do not', async () => {
+      gate('true');
+      const WENT_AHEAD = "The customer's visit went ahead after the call";
+      // 10:20 AM Eastern (EDT) on 2026-10-26; the call row is the voicemail's start.
+      const vmAt = new Date('2026-10-26T14:20:00Z');
+      let phoneN = 8101;
+      const voicemailFor = async (customer, phone, at = vmAt) => {
+        const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: at });
+        return bell({ category: 'voicemail_callback', created_at: mins(at, 1),
+          metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: customer.id, phone, name: 'Caller' } } });
+      };
+      const visitFor = (customer, completedAt, status = 'completed') => insert('scheduled_services', { customer_id: customer.id, scheduled_date: '2026-10-26',
+        service_type: 'General Pest Control', status, completed_at: completedAt, created_at: mins(vmAt, -60 * 24 * 7) });
+      const mk = async (completedAt, { status, at } = {}) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone);
+        const row = await voicemailFor(customer, phone, at);
+        if (completedAt) await visitFor(customer, completedAt, status);
+        return { customer, phone, row };
+      };
+      const sameDay = await mk(mins(vmAt, 30));
+      const nextDay = await mk(new Date('2026-10-27T14:50:00Z'));
+      const beforeCall = await mk(mins(vmAt, -10));
+      const cancelled = await mk(mins(vmAt, 30), { status: 'cancelled' });
+      const noShow = await mk(mins(vmAt, 30), { status: 'no_show' });
+      const noVisit = await mk(null);
+      // 11:50 PM Eastern, the visit completed at 12:10 AM Eastern the next day: not the same ET day.
+      const overMidnight = await mk(new Date('2026-10-27T04:10:00Z'), { at: new Date('2026-10-27T03:50:00Z') });
+      // Another customer's completed visit, and one for a different customer on the very same phone: by customer id only.
+      const other = await mk(null);
+      await visitFor(await customerWith('+15555558190'), mins(vmAt, 30));
+      const sharedPhone = await mk(null);
+      await visitFor(await customerWith(sharedPhone.phone), mins(vmAt, 30));
+      const positives = [sameDay];
+      const stays = [nextDay, beforeCall, cancelled, noShow, noVisit, overMidnight, other, sharedPhone];
+
+      // Off: the reason is not offered, nothing is recorded.
+      await sweep();
+      for (const c of [...positives, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
+      expect(await wouldClose(sameDay.row.id)).toHaveLength(0);
+      // Shadow: only what WOULD close is recorded, and no bell changes (the contact gate being true does not matter).
+      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'shadow';
+      await sweep();
+      for (const c of [...positives, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
+      expect((await wouldClose(sameDay.row.id)).map((r) => r.metadata)).toEqual([expect.objectContaining({ class: 'voicemail_callback', reason: WENT_AHEAD })]);
+      for (const c of stays) expect(await wouldClose(c.row.id)).toHaveLength(0);
+      // True: closes the one, with the wording.
+      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'true';
+      await sweep();
+      expect(await get(sameDay.row.id)).toMatchObject({ done_by: 'relevance', resolution: WENT_AHEAD });
+      for (const c of stays) expect((await get(c.row.id)).done_at).toBeNull();
+      // Rollback: the gate off puts the bell back, unread.
+      delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
+      expect((await sweep()).rearmed).toBeGreaterThanOrEqual(1);
+      const back = await get(sameDay.row.id);
+      expect([back.read_at, back.done_at, back.done_by]).toEqual([null, null, null]);
+      expect(back.metadata.retired).toBeUndefined();
+    }, 30000);
+
+    test('a voicemail callback request: a person\'s contact outranks the visit wording, and an email bell never closes on the visit', async () => {
+      gate('true');
+      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'true';
+      const vmAt = new Date('2026-10-26T14:20:00Z');
+      const customer = await customerWith('+15555558191', { email: `visit-${Date.now()}@example.invalid` });
+      const call = await insert('call_log', { direction: 'inbound', from_phone: customer.phone, to_phone: BIZ, customer_id: customer.id, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: vmAt });
+      const row = await bell({ category: 'voicemail_callback', created_at: mins(vmAt, 1),
+        metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: customer.id, phone: customer.phone } } });
+      const inbound = await insert('emails', { gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: customer.email, to_address: 'office@waves.example.invalid',
+        cc_address: '', bcc_address: '', label_ids: JSON.stringify(['INBOX']), received_at: vmAt, customer_id: customer.id });
+      const mail = await bell({ category: 'inbound_email', created_at: mins(vmAt, 2), link: `/admin/email?id=${inbound.id}`,
+        metadata: { triggerKey: 'customer_email_received', payload: { emailId: inbound.id, customerId: customer.id } } });
+      await insert('scheduled_services', { customer_id: customer.id, scheduled_date: '2026-10-26', service_type: 'General Pest Control', status: 'completed', completed_at: mins(vmAt, 30),
+        created_at: mins(vmAt, -60 * 24 * 7) });
+      await sweep();
+      expect(await get(row.id)).toMatchObject({ done_by: 'relevance', resolution: "The customer's visit went ahead after the call" });
+      expect((await get(mail.id)).done_at).toBeNull();
+      // A person's text to them after the call is named first.
+      await db('notifications').where({ id: row.id }).update({ done_at: null, done_by: null, resolution: null, read_at: null, metadata: JSON.stringify({ triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: customer.id, phone: customer.phone } }) });
+      await staffText(customer, customer.phone, mins(vmAt, 20));
+      await sweep();
+      expect(await get(row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+    }, 30000);
+
+    test('lead_contacted Leads bells (GATE_LEAD_CONTACTED_CLOSE, its own gate): a person\'s text or call back, a live visit booked, or an estimate handed off AFTER the bell closes it; earlier facts, sent_at alone, a visit that did not run and a bid-invite Leads bell do not', async () => {
+      const bellAt = mins(new Date(), -240);
+      const after = mins(bellAt, 60);
+      const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+      let phoneN = 8201;
+      const leadBell = async ({ doneWhen = 'lead_contacted', dedupeKey } = {}) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone);
+        const lead = await insert('leads', { first_name: 'Lead', phone, status: 'new', customer_id: customer.id });
+        const row = await bell({ category: 'lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
+          metadata: { dedupeKey: dedupeKey ? dedupeKey(lead) : `sms-lead:${lead.id}`, doneWhen, leadId: lead.id, customerId: customer.id, source: 'sms_lead_extraction' } });
+        return { customer, phone, lead, row };
+      };
+      const visit = (c, status, createdAt) => insert('scheduled_services', { customer_id: c.customer.id, scheduled_date: etDateString(new Date(Date.now() + 7 * DAY)),
+        service_type: 'General Pest Control', status, created_at: createdAt });
+      const texted = await leadBell();
+      const called = await leadBell({ dedupeKey: (l) => `lead-call-text-followup:${l.id}` });
+      const booked = await leadBell({ dedupeKey: (l) => `lead-unverified-hold:${l.id}` });
+      const quoted = await leadBell({ dedupeKey: (l) => `lead-call-reply-missed:${l.id}` });
+      const earlier = await leadBell();
+      const suppressed = await leadBell();
+      const noShow = await leadBell();
+      const bid = await leadBell({ doneWhen: 'bid_decided', dedupeKey: (l) => `bid-invite:${l.id}` });
+      await staffText(texted.customer, texted.phone, after);
+      await staffCall(called.customer, called.phone, after);
+      await visit(booked, 'confirmed', after);
+      await insert('estimates', { status: 'accepted', customer_id: quoted.customer.id, estimate_data: delivered(after) });
+      // Everything from BEFORE the bell.
+      await staffText(earlier.customer, earlier.phone, mins(bellAt, -60));
+      await visit(earlier, 'confirmed', mins(bellAt, -60));
+      await insert('estimates', { status: 'sent', customer_id: earlier.customer.id, sent_at: mins(bellAt, -60), estimate_data: delivered(mins(bellAt, -60)) });
+      // A suppressed send (sent_at stamped, nothing delivered), and a visit booked after the bell that never ran.
+      await insert('estimates', { status: 'sent', customer_id: suppressed.customer.id, sent_at: after });
+      await visit(noShow, 'no_show', after);
+      // A bid-invite Leads bell for a lead a person texted: not this class.
+      await staffText(bid.customer, bid.phone, after);
+      const closes = [texted, called, booked, quoted];
+      const stays = [earlier, suppressed, noShow, bid];
+
+      // Off (the contact gate is off too): nothing judged, nothing recorded.
+      await sweep();
+      for (const c of [...closes, ...stays]) { expect((await get(c.row.id)).done_at).toBeNull(); expect(await wouldClose(c.row.id)).toHaveLength(0); }
+      // Shadow: the would-close rows only, with each reason; no bell changes.
+      process.env.GATE_LEAD_CONTACTED_CLOSE = 'shadow';
+      await sweep();
+      for (const c of [...closes, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
+      const wouldReason = async (c) => (await wouldClose(c.row.id)).map((r) => [r.metadata.class, r.metadata.reason]);
+      expect(await wouldReason(texted)).toEqual([['lead_contacted', 'Lead was contacted']]);
+      expect(await wouldReason(called)).toEqual([['lead_contacted', 'Lead was contacted']]);
+      expect(await wouldReason(booked)).toEqual([['lead_contacted', 'A visit was booked']]);
+      expect(await wouldReason(quoted)).toEqual([['lead_contacted', 'Estimate was sent']]);
+      for (const c of stays) expect(await wouldClose(c.row.id)).toHaveLength(0);
+      // True: closes the four, with their reasons.
+      process.env.GATE_LEAD_CONTACTED_CLOSE = 'true';
+      await sweep();
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      expect(await state(texted)).toEqual(['relevance', 'Lead was contacted']);
+      expect(await state(called)).toEqual(['relevance', 'Lead was contacted']);
+      expect(await state(booked)).toEqual(['relevance', 'A visit was booked']);
+      expect(await state(quoted)).toEqual(['relevance', 'Estimate was sent']);
+      for (const c of stays) expect(await state(c)).toBeNull();
+      // Rollback: the gate off puts back what it closed.
+      delete process.env.GATE_LEAD_CONTACTED_CLOSE;
+      expect((await sweep()).rearmed).toBeGreaterThanOrEqual(4);
+      for (const c of closes) {
+        const back = await get(c.row.id);
+        expect([back.done_at, back.done_by]).toEqual([null, null]);
+        expect(back.metadata.retired).toBeUndefined();
+      }
+    }, 30000);
+
+    test('lead_contacted: a bell refreshed with new content (rungAt) is judged from that refresh — a reply, a booking or an estimate handoff between the first ring and the refresh never closes it; the same facts after the refresh do', async () => {
+      process.env.GATE_LEAD_CONTACTED_CLOSE = 'true';
+      const now = new Date();
+      const bellAt = mins(now, -300); // first ring (created_at is kept by a refresh without bumpOnRefresh)
+      const early = mins(now, -200); // T1: after the first ring, before the refresh
+      const rungAt = mins(now, -120); // T2: the refresh with new content
+      const late = mins(now, -60); // after T2
+      const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+      let phoneN = 8301;
+      const leadBell = async (withRefresh = true) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone);
+        const lead = await insert('leads', { first_name: 'Lead', phone, status: 'new', customer_id: customer.id });
+        const row = await bell({ category: 'lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
+          metadata: { dedupeKey: `sms-lead:${lead.id}`, doneWhen: 'lead_contacted', leadId: lead.id, customerId: customer.id, ...(withRefresh ? { rungAt: rungAt.toISOString() } : {}) } });
+        return { customer, phone, lead, row };
+      };
+      const visit = (c, createdAt) => insert('scheduled_services', { customer_id: c.customer.id, scheduled_date: etDateString(new Date(Date.now() + 7 * DAY)),
+        service_type: 'General Pest Control', status: 'confirmed', created_at: createdAt });
+      const estimate = (c, at) => insert('estimates', { status: 'accepted', customer_id: c.customer.id, estimate_data: delivered(at) });
+      const facts = { text: (c, at) => staffText(c.customer, c.phone, at), visit, estimate };
+      const reasons = { text: 'Lead was contacted', visit: 'A visit was booked', estimate: 'Estimate was sent' };
+      const cases = {};
+      for (const kind of Object.keys(facts)) {
+        cases[kind] = { earlyOnly: await leadBell(), afterRefresh: await leadBell() };
+        await facts[kind](cases[kind].earlyOnly, early);
+        await facts[kind](cases[kind].afterRefresh, early);
+        await facts[kind](cases[kind].afterRefresh, late);
+      }
+      // Control: the same early reply on a bell that was never refreshed does close it.
+      const never = await leadBell(false);
+      await staffText(never.customer, never.phone, early);
+
+      await sweep();
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      for (const kind of Object.keys(facts)) {
+        expect(await state(cases[kind].earlyOnly)).toBeNull();
+        expect(await state(cases[kind].afterRefresh)).toEqual(['relevance', reasons[kind]]);
+      }
+      expect(await state(never)).toEqual(['relevance', 'Lead was contacted']);
+    }, 30000);
 
     test('rollback: gate off puts back, unread, what the contact classes closed in the window', async () => {
       const t0 = mins(new Date(), -120);

@@ -216,11 +216,35 @@ describe('the preview', () => {
     ['a two-line subject', { subject: 'Hi\nBcc: x@example.invalid' }, 'invalid_subject'],
     ['a too-long subject', { subject: 'x'.repeat(201) }, 'invalid_subject'],
     ['an empty body', { body: ' \n ' }, 'invalid_body'],
-    ['a too-long body', { body: 'x'.repeat(5001) }, 'invalid_body'],
+    ['a too-long body', { body: 'x'.repeat(501) }, 'invalid_body'],
     ['a control character in the body', { body: 'Hi\u0000there' }, 'invalid_body'],
   ])('refused: %s', async (_label, input, code) => {
     expect(await preview(input)).toMatchObject({ code });
     expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a customer on file', {}],
+    ['a typed address', { customer_id: undefined, email_address: 'office@vendor.example' }],
+  ])('the 500-character body cap, %s: 500 gets a card, 501 is refused with no card and a shorten message', async (_label, who) => {
+    const card = await preview({ ...who, body: 'x'.repeat(500) });
+    expect(card).toMatchObject({ preview: true, body_chars: 500 });
+    const refused = await preview({ ...who, body: 'x'.repeat(501) });
+    expect(refused).toMatchObject({ code: 'invalid_body' });
+    expect(refused.preview).toBeUndefined();
+    expect(refused._version).toBeUndefined();
+    expect(refused.error).toMatch(/limit is 500/);
+    expect(refused.error).toMatch(/few short lines/);
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  test('the tool tells the model the short-email rule and the cap', () => {
+    const [tool] = COMPOSE_EMAIL_TOOLS;
+    expect(tool.description).toMatch(/SHORT/);
+    expect(tool.description).toMatch(/greeting, the answer in one or two sentences, any ask as one question/);
+    expect(tool.description).toMatch(/at most 500 characters/);
+    expect(tool.input_schema.properties.body.description).toMatch(/at most 500 characters/);
+    expect(tool.input_schema.properties.body.description).toMatch(/a greeting, the answer in one or two sentences, any ask as one question/);
   });
 
   test('a customer with no email on file is refused with the fix', async () => {
