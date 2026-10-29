@@ -248,6 +248,44 @@ describe('pay run with pay lines', () => {
     expect(stub.getByText('HSA from Waves (not part of gross pay or taxes)')).toBeInTheDocument();
   });
 
+  it('reloads the pay lines when the open run is finalized or voided', async () => {
+    let status = 'draft';
+    let paid = [];
+    const original = adminFetch.getMockImplementation();
+    const runNow = () => ({ ...RUN, status, checks: [check({ status })] });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', payDate: '2026-10-23', status, totals }] });
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: runNow() });
+      if (path === '/admin/payroll/pay-lines?status=paid') return reply({ payLines: paid });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') {
+        status = 'finalized'; paid = open.map(l => ({ ...l, status: 'paid', checkId: 'check-a' })); open = [];
+        return reply({ run: runNow() });
+      }
+      if (path === '/admin/payroll/runs/run-1/void' && method === 'POST') {
+        status = 'voided'; open = paid.map(l => ({ ...l, status: 'open', checkId: null })); paid = [];
+        return reply({ run: runNow() });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    const view = within(await panel());
+    await view.findByRole('table', { name: 'Pay lines waiting' });
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    // The finalized run paid the line: it leaves the waiting list for the paid one.
+    expect(await view.findByText('No pay lines waiting for a pay run.')).toBeInTheDocument();
+    expect(within(view.getByRole('table', { name: 'Pay lines paid' })).getByText('Commission')).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }));
+    fireEvent.change(screen.getByLabelText(/Why are you voiding this pay run/), { target: { value: 'Redo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Void pay run' }));
+    // The void reopened it: it waits again, with its Remove button.
+    expect(await view.findByRole('button', { name: 'Remove Commission for Sample Alpha' })).toBeInTheDocument();
+    expect(view.queryByRole('table', { name: 'Pay lines paid' })).toBeNull();
+  });
+
   it('shows none of it when the checks carry no pay line figures', async () => {
     const original = adminFetch.getMockImplementation();
     const plain = check({ reviewBonusCents: 0, healthAllowanceCents: 0, hsaEmployerCents: 0, lineOvertimePremiumCents: 0 });

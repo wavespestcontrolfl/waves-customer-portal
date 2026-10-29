@@ -58,7 +58,7 @@ function LinesTable({ title, lines, onRemove, busy }) {
   </Table>;
 }
 
-export default function PayLinesPanel({ call, weekStart, onChanged }) {
+export default function PayLinesPanel({ call, weekStart, refreshKey, onChanged }) {
   // null until the first answer; false when the server says the gate is off.
   const [enabled, setEnabled] = useState(null);
   const [technicians, setTechnicians] = useState([]);
@@ -85,7 +85,8 @@ export default function PayLinesPanel({ call, weekStart, onChanged }) {
       setError(failure.message);
     }
   }, [call]);
-  useEffect(() => { load(); }, [load]);
+  // refreshKey changes when the open pay run is finalized or voided, which pays or reopens lines.
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   if (enabled !== true) return null;
 

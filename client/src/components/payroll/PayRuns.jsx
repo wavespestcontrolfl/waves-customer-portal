@@ -408,6 +408,8 @@ export default function PayRuns({ call, onRunsChanged }) {
 
     <PayLinesPanel
       call={call} weekStart={run ? run.weekStart : week}
+      // A finalize pays the open lines and a void reopens them: reload when the run's status changes.
+      refreshKey={run ? `${run.id}:${run.status}` : ''}
       onChanged={() => { if (run) open(run.id); }}
     />
 
