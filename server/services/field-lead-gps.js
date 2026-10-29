@@ -89,7 +89,8 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
     return { ...check, result: 'no_gps_arrival' };
   }
   check.scheduled_service_id = serviceId;
-  const visit = await database('scheduled_services').where({ id: serviceId }).first('id', 'technician_id', 'customer_id', 'visit_id');
+  const visit = await database('scheduled_services').where({ id: serviceId })
+    .first('id', 'technician_id', 'customer_id', 'visit_id', 'service_address_line1', 'service_address_city', 'service_address_zip');
   if (!visit
     || String(visit.technician_id || '') !== String(technicianId || '')
     || String(visit.customer_id || '') !== String(customerId || '')) {
@@ -113,17 +114,23 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
   const logged = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
   return {
     ...check,
-    premise: await visitedPremise(database, visit.customer_id),
+    premise: await visitedPremise(database, visit),
     result: 'verified',
     distance_m: Number.isFinite(logged) ? Math.round(logged) : null,
   };
 }
 
-// The property the truck arrived at: the visit's customer row (one customer row per property) and
-// its service address, kept with the result so the estimate can be checked against the same place.
-async function visitedPremise(database, customerId) {
-  const row = await database('customers').where({ id: customerId }).first('address_line1', 'city', 'zip');
-  return { customer_id: String(customerId), address: row?.address_line1 || null, city: row?.city || null, zip: row?.zip || null };
+// The property the truck arrived at, by the arrival detector's own rule (gps-arrival-detector.js
+// extractDestination): the visit's stamped service address when it has one (a secondary or rental
+// property), else the customer's primary address. Kept with the result, with the visit's customer
+// row, so the estimate is checked against the same place.
+async function visitedPremise(database, visit) {
+  const customerId = String(visit.customer_id);
+  if (visit.service_address_line1) {
+    return { customer_id: customerId, address: visit.service_address_line1, city: visit.service_address_city || null, zip: visit.service_address_zip || null };
+  }
+  const row = await database('customers').where({ id: visit.customer_id }).first('address_line1', 'city', 'zip');
+  return { customer_id: customerId, address: row?.address_line1 || null, city: row?.city || null, zip: row?.zip || null };
 }
 
 // Prospect mode: the typed address against the technician's truck.

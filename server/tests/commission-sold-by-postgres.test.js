@@ -224,6 +224,27 @@ postgres('commission sold by', () => {
       expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified$/);
     });
 
+    it("stores a rental visit's stamped service address, not the customer's primary home", async () => {
+      const { lead } = await run({
+        arrivalHoursAgo: 1,
+        mutate: async ({ v }) => {
+          await trx('scheduled_services').where({ id: v }).update({
+            service_address_line1: '77 Rental Ave', service_address_city: 'Bradenton', service_address_zip: '34205',
+          });
+          return {};
+        },
+      });
+      expect(lead.gps_verified).toBe(true);
+      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '77 Rental Ave', city: 'Bradenton', zip: '34205' });
+      // The rental's estimate fills; the primary home's does not.
+      const rental = await estimate({ customer_id: lead.customer_id, address: '77 Rental Ave, Bradenton, FL 34205' });
+      const home = await estimate({ customer_id: lead.customer_id });
+      await trx('leads').where({ id: lead.id }).update({ estimate_id: home });
+      expect((await autoFillSoldBy(trx, await estimateRow(home))).sold_by_source).toBeFalsy();
+      await trx('leads').where({ id: lead.id }).update({ estimate_id: rental });
+      expect((await autoFillSoldBy(trx, await estimateRow(rental))).sold_by_lead_id).toBe(lead.id);
+    });
+
     it('makes the lead, unverified, when no arrival was logged', async () => {
       const { res, lead } = await run();
       expect(res.status).toBe(200);
