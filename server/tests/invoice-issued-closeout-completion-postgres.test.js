@@ -80,7 +80,7 @@ describe('source contracts', () => {
     expect(source).toMatch(/async function lockedSend\(s, owner\) \{[\s\S]{0,900}await acquireClaim\(s, stillHeld\)[\s\S]{0,500}await verifyApproved\(s, claim\)[\s\S]{0,200}await deliver\(s, claim, stillHeld\)/);
     expect(source).toMatch(/async function deliver\(s, claim, stillHeld\) \{\s*await runCloseout\(s, stillHeld\);[\s\S]{0,300}await runEmailLeg\(s, claim, stillHeld\);[\s\S]{0,200}await runTextLeg\(s, claim, stillHeld\)/);
     // The claim is taken before anything else, and the closeout is the paid trigger.
-    expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at \}\)/);
+    expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at, requirePaid: true \}\)/);
     expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId \}\)/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {

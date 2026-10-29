@@ -1093,7 +1093,7 @@
     },
     {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -1194,7 +1194,7 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "30644e37a7a7565ab5c03c6df495d423"
+      "hash": "b465628b85cafc8316ebf23992b6ee90"
     },
     {
       "endpoint": "/admin/invoices/:id",
