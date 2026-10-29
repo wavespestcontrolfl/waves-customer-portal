@@ -162,6 +162,7 @@ const ROUTE_SELECTOR = {
   smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
   autoDispatchProofreader: 'AUTO_DISPATCH_PROOFREADER',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
+  lawnDiagnosisPerceptionBackup: 'OPENAI_LAWN_ASSESSMENT',
   typedDecision: 'TYPESAFE_JEV',
   typedDecisionClef: 'CLOUDFLARE_CLEF',
 };
@@ -484,7 +485,7 @@ const LANES = [
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
-  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
+  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), R('lawnDiagnosisPerceptionBackup'), { note: 'OpenAI reads the photos when Gemini misses (owner 2026-10-29); if both miss, the Claude VISION score composite' }),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
