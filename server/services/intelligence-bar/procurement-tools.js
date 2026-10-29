@@ -1604,7 +1604,10 @@ async function groundOperatorNamedProduct(rawPrompt, preview, actorId, threadId,
   // combine into a phantom "Demand CS".
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
   const skipped = [];
-  for (const turn of turns) {
+  for (const rawTurn of turns) {
+    // An earlier receipt may end in the same closed read tail as the current prompt ("We received 2 quarts of Taurus SC,
+    // show me what we have now"): it is read the same way, so a correction can still find its product.
+    const turn = withoutReadTail(toolName, rawTurn);
     // A question, modal statement, or infinitive write never authorizes a
     // write, even as the turn a "Yes" answers: the look-back stops at it.
     if (isNotAnInstruction(turn)) return null;

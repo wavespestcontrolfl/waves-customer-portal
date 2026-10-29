@@ -1962,6 +1962,15 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, expect.objectContaining({ maxSeq: 2 }));
       });
 
+      test('reads an earlier receipt that ended in a closed read tail (Codex #6923 r1 P2)', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC, show me what we have now.']);
+        expect(await correct()).toEqual({ productId: TAURUS.id });
+        // Words outside the closed tail still stop the look-back.
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received 2 quarts of Taurus SC, tell me the balance but do not record this again']);
+        expect(await correct()).toMatchObject({ code: 'target_clarification_required' });
+      });
+
       test('needs the earlier turn to be a receipt, an instruction, and the same product', async () => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         for (const turn of ['Order 2 quarts of Taurus SC.', 'Did we receive 2 quarts of Taurus SC?', 'We received 2 quarts of Alpine WSG.']) {
