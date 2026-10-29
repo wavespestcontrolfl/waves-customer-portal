@@ -414,7 +414,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (previousBalance?.total > 0 && linkPaysEverything) {
     previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.`;
   } else if (previousBalance?.total > 0) {
-    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
+    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the text or email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
   }
   const previousBalanceEscaped = previousBalanceNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
