@@ -489,6 +489,78 @@
       "hash": "2a12517c72fac6cffbc7eea6a5693a77"
     },
     {
+      "endpoint": "/admin/dispatch/:serviceId/tech-tips",
+      "reviewed": "Handler (admin-dispatch.js GET /:serviceId/tech-tips, behind the router's adminAuthenticate + requireTechOrAdmin; the owner login reads any visit, a technician only their own through completionOwnershipError) and every function the scan followed: techTipGate and GATE_SERVICE_REPORT_COMPLETION_CHOICES (both off = { available: false }), one scheduled_services row with its property, loadPreviousRecommendations (the customer's completed service_records for the same premises, three visits and twelve items at most, selecting report_view_token only to test Boolean(report_view_token) for 'a report was published': the token is never put in the answer), addonServiceKeys, resolveCompletionProfileForScheduledService, the newest lawn_assessments and lawn_assessment_runs row (ranking only), loadTechTipYard (grass, irrigation and county facts) and tipBlogPosts when GATE_TECH_TIP_SOURCES is on, tipsForVisit (the tip registry, business-authored copy), the last 90 days of service_records.structured_notes->techTips (what was sent, as a tip-id to date map), and property_preferences (irrigation settings, read only to answer one boolean). Every function read end to end, every read is a select (the scan found no write, no outside call, no signed link; the only signals are the credential words it saw: report_view_token read as a boolean, a URL userinfo password check in the citation lint, the token_only delivery label, and the customers read inside the grass lookup). Scope is broad on purpose: the visit id is not a customer id, so a task for one customer cannot use it. KEEP mode, so only what the tip picker is for returns: whether tips are available, the line and season, each group's id, label and primary flag with its tips' id, label, group, pests, season and the customer-facing copy (business reference text, declared content), the other tips' id, label, group, pests and season, whether irrigation is on file, the yard facts the tips were matched to (grass, irrigation system, county), and the dates of the previous recommendations. The recommendation wording itself is staff-typed text about the customer: it returns only while GATE_IB_READ_NOTES is on (keepNotes). Withheld: the sent-tip map (a map of dates), the blog post map (titles and links), the tip keywords, sources, citations and links, the service-record ids, and every key not listed.",
+      "scope": "broad",
+      "params": {
+        "serviceId": "uuid"
+      },
+      "query": [],
+      "keywords": [
+        "tech tips",
+        "tips for this visit",
+        "what tips can we send",
+        "service tips",
+        "customer tips for a visit",
+        "previous recommendations for a visit"
+      ],
+      "keep": [
+        "available",
+        "completionChoicesEnabled",
+        "line",
+        "season",
+        "groups.*.id",
+        "groups.*.label",
+        "groups.*.primary",
+        "groups.*.tips.*.id",
+        "groups.*.tips.*.label",
+        "groups.*.tips.*.group",
+        "groups.*.tips.*.pests",
+        "groups.*.tips.*.season",
+        "groups.*.tips.*.copy",
+        "more.*.id",
+        "more.*.label",
+        "more.*.group",
+        "more.*.pests",
+        "more.*.season",
+        "conditions.irrigation_on_file",
+        "tipSources",
+        "yard.grass",
+        "yard.irrigationSystem",
+        "yard.county",
+        "previousRecommendations.*.serviceDate"
+      ],
+      "keepNotes": [
+        "previousRecommendations.*.text"
+      ],
+      "freeText": {
+        "copy": "content"
+      },
+      "acceptSignals": [
+        "credential_field:password",
+        "credential_field:report_view_token",
+        "credential_field:service_records.report_view_token as rep",
+        "credential_field:token_only",
+        "credential_table:customers"
+      ],
+      "signals": [
+        "credential_field:password",
+        "credential_field:report_view_token",
+        "credential_field:service_records.report_view_token as rep",
+        "credential_field:token_only",
+        "credential_table:customers"
+      ],
+      "unresolved": [
+        "services/service-completion-profiles.js#k",
+        "services/service-report/report-blog-post.js#HUB_SITE_KEYS.includes",
+        "services/service-report/service-line-configs.js#detectExistingServiceCategory",
+        "services/service-report/service-line-configs.js#normalizeServiceType",
+        "utils/savepoint-read.js#query",
+        "utils/savepoint-read.js#transactionQueues.delete"
+      ],
+      "hash": "e5302713f0451cb525ee97d1fe1903bc"
+    },
+    {
       "endpoint": "/admin/dispatch/alerts",
       "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
@@ -921,6 +993,103 @@
       "signals": [],
       "unresolved": [],
       "hash": "6175e7ea103824452658cd90912d42b6"
+    },
+    {
+      "endpoint": "/admin/health/scores/:customerId",
+      "reviewed": "Handler (admin-health.js GET /scores/:customerId, behind the router's adminAuthenticate + requireAdmin): one customer_health_scores row joined to its customer (customers.* plus the score columns), the newest 90 customer_health_history rows and up to 20 new or acknowledged customer_health_alerts, with the stored JSON details parsed; a customer with no score answers 404. Handler read end to end, no write. The router used to run ensureHealthTables (CREATE TABLE and ALTER TABLE, once per process) in front of EVERY route, reads included; it now runs only in front of the four write routes (rescore, rescore-all, alert update, alert action), so this read creates and alters nothing (the migrations own the tables). The select takes customers.*, so the row is in KEEP mode: only the customer's name and WaveGuard tier, the score columns, the system-written detail counters (payment, service, engagement, satisfaction, loyalty, growth), the churn fields (the signal name and severity only: a behavioral signal's message is customer_signals.signal_value and stays out), the history scores and each active alert's type, severity, status, created time and system-composed description (health-alerts.js builds it from scores and counts) return. Withheld: every other customers column (contact, address, gate and lockbox codes, Stripe ids, notes, rates), the alert title (it names the customer and is never kept), trigger_data, recommended_actions, resolution_notes (staff-typed) and every id other than the customer's and the alert's. The customer's own id is the scope parameter, checked against the task customer.",
+      "scope": "customer",
+      "scopeParam": "customerId",
+      "params": {
+        "customerId": "uuid"
+      },
+      "query": [],
+      "keywords": [
+        "customer health score",
+        "health score",
+        "churn risk for a customer",
+        "is this customer at risk",
+        "customer health",
+        "why is their score low"
+      ],
+      "keep": [
+        "score.id",
+        "score.first_name",
+        "score.last_name",
+        "score.waveguard_tier",
+        "score.overall_score",
+        "score.score_grade",
+        "score.payment_score",
+        "score.service_score",
+        "score.engagement_score",
+        "score.satisfaction_score",
+        "score.loyalty_score",
+        "score.growth_score",
+        "score.payment_details.onTimeRate",
+        "score.payment_details.lateCount",
+        "score.payment_details.failedCount",
+        "score.service_details.completedCount",
+        "score.service_details.cancelledCount",
+        "score.service_details.skippedCount",
+        "score.service_details.daysSinceLastService",
+        "score.service_details.adherenceRate",
+        "score.service_details.callbackCount",
+        "score.service_details.callbackRatio",
+        "score.engagement_details.smsInbound",
+        "score.engagement_details.smsOutbound",
+        "score.engagement_details.interactions",
+        "score.engagement_details.daysSinceLastContact",
+        "score.satisfaction_details.avgRating",
+        "score.satisfaction_details.reviewCount",
+        "score.satisfaction_details.complaintCount",
+        "score.satisfaction_details.complimentCount",
+        "score.loyalty_details.tenureMonths",
+        "score.loyalty_details.tier",
+        "score.loyalty_details.referralCount",
+        "score.growth_details.distinctServices",
+        "score.growth_details.monthlyRate",
+        "score.growth_details.rateChange",
+        "score.churn_risk",
+        "score.churn_probability",
+        "score.churn_signals.*.signal",
+        "score.churn_signals.*.severity",
+        "score.days_until_predicted_churn",
+        "score.score_trend",
+        "score.previous_score",
+        "score.score_change_30d",
+        "score.scored_at",
+        "history.*.overall_score",
+        "history.*.payment_score",
+        "history.*.service_score",
+        "history.*.engagement_score",
+        "history.*.satisfaction_score",
+        "history.*.loyalty_score",
+        "history.*.growth_score",
+        "history.*.churn_risk",
+        "history.*.scored_at",
+        "alerts.*.id",
+        "alerts.*.alert_type",
+        "alerts.*.severity",
+        "alerts.*.status",
+        "alerts.*.description",
+        "alerts.*.created_at"
+      ],
+      "freeText": {
+        "description": "content",
+        "payment_details": "content",
+        "service_details": "content",
+        "engagement_details": "content",
+        "satisfaction_details": "content",
+        "loyalty_details": "content",
+        "growth_details": "content"
+      },
+      "acceptSignals": [
+        "credential_table:customers"
+      ],
+      "signals": [
+        "credential_table:customers"
+      ],
+      "unresolved": [],
+      "hash": "ece7928410d7507fcee5927d9770a95b"
     },
     {
       "endpoint": "/admin/invoices",
@@ -1861,6 +2030,43 @@
       "freeText": {
         "answersFirstReason": "content"
       }
+    },
+    {
+      "endpoint": "/admin/sms-templates",
+      "reviewed": "Handler (admin-sms-templates.js GET /, behind adminAuthenticate + requireTechOrAdmin): sms_templates ordered by category and sort order, optionally filtered to one category, each row decorated with can_delete. Handler read end to end, no write. The handler used to call ensureTable first (CREATE TABLE, ALTER TABLE and an INSERT .. ON CONFLICT DO NOTHING of the default templates, once per process); that call and the function are removed, so the list creates, alters and inserts nothing. It changes nothing on the page: the table, its trigger_event_key column and every default template come from the migrations (20260514000002 inserts each default; the default keys are protected from delete), and a real-database test pins that no default template is missing after the migrations. Keep mode: the wording is the point of the read, so each template's name, category, body, description (both business-authored reference text, declared content), the variable names, active and internal flags, sort order, can_delete and updated time return. Withheld: the template key and the trigger event key (identifiers the writers match on), and any column added later. A template body can carry a {token} placeholder, never a customer value.",
+      "scope": "broad",
+      "params": {},
+      "query": [
+        "category"
+      ],
+      "keywords": [
+        "sms templates",
+        "text message templates",
+        "what does our text say",
+        "wording of an automatic text",
+        "is a text template active",
+        "message templates"
+      ],
+      "keep": [
+        "templates.*.id",
+        "templates.*.name",
+        "templates.*.category",
+        "templates.*.body",
+        "templates.*.description",
+        "templates.*.variables",
+        "templates.*.is_active",
+        "templates.*.is_internal",
+        "templates.*.sort_order",
+        "templates.*.can_delete",
+        "templates.*.updated_at"
+      ],
+      "freeText": {
+        "body": "content",
+        "description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "84eee65bb30a376ccfa98228a0b22e2d"
     }
   ]
 }

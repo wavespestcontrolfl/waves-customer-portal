@@ -689,7 +689,10 @@ module.exports = router;
 
 test('the endpoints that run middleware DDL, mint links or return credentials are not in the catalog', () => {
   const endpoints = committed.entries.map(e => e.endpoint);
-  expect(endpoints.filter(e => /^\/admin\/(health|equipment-maintenance)(\/|$)/.test(e))).toEqual([]);
+  expect(endpoints.filter(e => /^\/admin\/equipment-maintenance(\/|$)/.test(e))).toEqual([]);
+  // The health router used to run table DDL in front of every route. It now runs it only in front of its write routes, so the
+  // one customer score read is admitted (keep mode) and every other health route stays out.
+  expect(endpoints.filter(e => /^\/admin\/health(\/|$)/.test(e))).toEqual(['/admin/health/scores/:customerId']);
   // estimates-summary returns the estimate bearer tokens, so it is admitted only with the token omitted from the answer.
   expect(committed.entries.find(entry => entry.endpoint === '/admin/customers/:id/estimates-summary').omit).toContain('estimates.token');
   expect(endpoints).not.toContain('/admin/newsletter/subscribers');
