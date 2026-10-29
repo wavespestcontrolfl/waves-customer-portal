@@ -441,6 +441,8 @@ function visitsPerYearForCadence(cadence) {
     // fall to the null default and the prepay choice stays disabled.
     case 'monthly': return 12;
     case 'every_6_weeks': return 9;
+    // Lawn 9x rounds: prepay coverage follows the round calendar server-side.
+    case 'lawn_rounds_9': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
     case 'triannual': case 'every_4_months': return 3;

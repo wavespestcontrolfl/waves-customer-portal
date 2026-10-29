@@ -13,16 +13,18 @@ const filings = [
   { id: 'f-done', filingType: 'payroll_941', title: 'Form 941 — Q4 2098', periodLabel: 'Q4 2098', dueDate: '2099-01-31', status: 'filed', amountDue: null, amountPaid: null, filedDate: '2099-01-20', paidDate: null, confirmationNumber: 'EFT-998877', notes: 'A pay run changed after this was marked done.' },
 ];
 let puts;
+let seenInBank;
 
 beforeEach(() => {
   puts = [];
+  seenInBank = false;
   localStorage.setItem('waves_admin_token', 'test-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     if (options.method === 'PUT') {
       puts.push({ url: String(url), body: JSON.parse(options.body) });
       return { ok: true, json: async () => ({ success: true }) };
     }
-    return { ok: true, json: async () => ({ filings }) };
+    return { ok: true, json: async () => ({ filings: seenInBank ? filings.map(f => ({ ...f, bankSeenOn: '2099-04-28' })) : filings }) };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -36,6 +38,16 @@ const markFiled = async () => {
 it('shows the confirmation number on a completed row', async () => {
   render(<FilingCalendarTab />);
   await waitFor(() => expect(screen.getByText('Conf. EFT-998877')).toBeInTheDocument());
+});
+
+it('shows the date a payment was seen in the bank on both cards, and nothing without it', async () => {
+  const first = render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Form 941 — Q1 2099')).toBeInTheDocument());
+  expect(screen.queryByText(/Seen in the bank on/)).toBeNull();
+  first.unmount();
+  seenInBank = true;
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getAllByText(/Seen in the bank on/)).toHaveLength(2));
 });
 
 it('shows the notes on both the upcoming and the completed cards', async () => {

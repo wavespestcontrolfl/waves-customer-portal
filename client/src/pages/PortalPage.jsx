@@ -3998,7 +3998,9 @@ function ServicesTab() {
             {loadingMore ? 'Loading...' : 'Load More Visits'}
           </button>
           <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>
-            Showing {services.length} of {totalServices} visits
+            {/* One card per service performed (a pest + lawn stop is two),
+                so this counts services; the tile above counts visit days. */}
+            Showing {services.length} of {totalServices} services
           </div>
         </div>
       )}

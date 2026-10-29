@@ -100,8 +100,11 @@
  *   GATE_TRUCK_VIEWS_PER_VEHICLE=true (tech roadmap build 6, owner "GO" 2026-10-29: "Every truck in the truck views." Today the Intelligence Bar truck answer ("what did the truck drive today?") reads one vehicle and the admin Mileage tab sums every vehicle with no split. On, get_truck_trips answers for every Bouncie vehicle, or the one named by an optional vehicle input (a nickname or a technician name), get_truck_status names each vehicle's technician, and the Mileage dashboard adds a per-vehicle list (today, month to date, live state, technician). Read-only; sends nothing to anyone. Read at call time via truckViewsPerVehicleLive(), strict 'true', dark by default; off = every response and the Mileage tab are byte for byte today's; rollback = unset.)
  *   GATE_PAYROLL_FAMILY_EMPLOYEE=true (basic payroll, owner ruling 2026-10-29, D5 part 2 of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL. Adds a family-employee setting on a W-2 technician: the relationship (parent or spouse of the owner), the employer entity (sole proprietorship or single-member LLC with no S election) and the date it starts. A pay run dated on or after that date skips federal unemployment tax (26 U.S.C. 3306(c)(5)) and Florida reemployment tax (F.S. 443.1216(13)(d)) for that person and nothing else: income tax withholding, Social Security, Medicare, Form 941 and the W-2 stay the same. The exempt wages are reported as exempt on Form 940 line 4 (box 4e) and left out of the RT-6 wages, employee counts and wage list; they never count toward the $7,000 base. Read at call time via payrollFamilyEmployeeLive(), strict 'true', dark by default; off = every output and route is byte for byte today's for checks drafted with it off (the setting route answers 404), and a check drafted with it on keeps reporting what it stored; after it is turned off, exempt pay earlier in the year still never uses up the $7,000 base; rollback = unset. Pays, sends and files nothing; the owner makes every payment and filing himself.)
  *   GATE_PAYROLL_REVIEW_BONUS_IMPORT=true (basic payroll, owner ruling 2026-10-29, D5 part 3a of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL and GATE_PAYROLL_PAY_LINES. Each time a pay run is drafted, recomputed or finalized, every earned Google review bonus (review_incentive_payouts) of a W-2 technician, earned on or before the run's week end, becomes an open review bonus pay line (source_type review_incentive_payout) that the run pays; finalizing the run marks the payout paid and voiding it puts the payout back to earned. While GATE_PAYROLL_PAY_LINES is on, an imported line whose payout was marked paid by hand or moved to another technician is dropped at the next draft, recompute or finalize; finalize and void keep the payouts in step with the lines they paid whatever the gates say. Read at call time via payrollReviewBonusImportLive(), strict 'true', dark by default; off = nothing is imported, every open imported line comes off the next run, and every pay run output is byte for byte today's; rollback = unset. Pays, sends and files nothing; the owner makes every payment himself.)
+ *   GATE_COMMISSION_SOLD_BY=true (basic payroll, owner ruling 2026-10-29, D5 part 3b-1 of the first-technician pay plan: "the technician's flag, checked by the truck GPS, fills in 'Sold by'". Records who sold an estimate; pays, texts and charges nothing, the commission ledger is part 3b-2. On: the field-lead flag also records a GPS check (customer flag: a truck arrival at the visit in the 12 hours before; new 'Neighbor' flag: the truck within field_flag.gps_radius_m, default 300 m, of the typed address, position under 6 hours old; distance only, never the truck's coordinates), a verified flag from an active W-2 technician fills estimates.sold_by_technician_id while the estimate is not accepted and not cleared, and admins can set or clear it (PUT /api/admin/estimates/:id/sold-by, locked once accepted). Read at call time via commissionSoldByLive(), strict 'true', dark by default; off = the flag route, the flag modal and every estimate path are byte for byte today's and nothing is read, written or shown; rollback = unset (stored Sold by values stay but nothing reads or shows them).)
+ *   GATE_PAYROLL_COMMISSION_LEDGER=true (basic payroll, owner ruling 2026-10-29, D5 part 3b-2 of the first-technician pay plan: the technician earns 10% of what Waves collects for the NEW service only, in its first 12 months, on work the tech brings in, paid in the next payroll after each payment, even after the tech leaves. Office-booked calls and web plans do not count; collected = net of sales tax, the card surcharge and refunds. Needs GATE_PAYROLL_PAY_LINES and reads estimates.sold_by_technician_id (GATE_COMMISSION_SOLD_BY fills it). On: each pay run (draft, recompute, finalize) records a commission sale for every accepted estimate sold by a W-2 technician, one ledger entry for each customer payment on the sold lines inside the 12 months, and one open 'commission' pay line per payment, so the commission rides on the pay run; a refund inside the 12 months comes off the technician's next commission, never below $0 and never from wages. Read at call time via payrollCommissionLedgerLive(), strict 'true', dark by default; off = no sales or entries are written, every open commission line comes off the next run, paid lines stay, and with the pay lines gate off every pay run is byte for byte today's; rollback = unset.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
+ *   GATE_PAYROLL_BANK_MATCH=true (basic payroll item 8, owner 2026-10-28, "pay package is still being built, do these": the bank import ties a bank line to the paycheck or payroll tax payment it paid. A debit on a business account equal to a finalized, not-voided paycheck's net pay (pay date minus 3 days to plus 45 days, or plus 7 for a bank transfer) links when exactly one check and one bank line pair up, and a check number printed on the line breaks a tie; an IRS / EFTPS debit equal to a payroll federal deposit calendar row, and a Florida Department of Revenue debit equal to a payroll RT-6 row, link the same way. A linked line is booked as an expense in "Payroll (counted from pay runs)", which the P&L and Schedule C draft leave out. Anything else (two checks with one amount, an amount one cent off, a different check number) stays a suggestion with the paycheck named, and the owner picks. An automatic link is verified right after it commits (a later same-amount line or paycheck puts it back to review, nothing deleted), and a crash leftover is verified at the top of the next pass. It never moves money and never marks a calendar row paid; the Payroll tab shows Bank: matched / not seen yet / needs your pick per check, and the filing calendar shows Seen in the bank on <date>. Voiding a pay run releases the lines matched to its checks. That release, a changed or deleted calendar row and the owner's Unlink never delete or re-price an expense: the expense the match made stays as it is (the next pass finds it as the existing expense), and one it re-categorized gets its category back. Needs GATE_BANK_IMPORT for the bank lines, GATE_PAYROLL for the pay runs and GATE_PNL_PAY_RUN_WAGES (the match does nothing while that gate is off, so no expense is moved into a category the books do not leave out). Read at call time via payrollBankMatchLive(), strict 'true', dark by default; off = the bank import, the books and every response are byte for byte today's; rollback = unset (existing links stay).)
  *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
  *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_TECH_COST_RATES=true (L11a, owner 2026-10-26: "we need real actual calculation, this ($35) was a number I just thought". Job costing charges each visit for its own on-site minutes plus its drive minutes at its technician's worked-hour cost, and for its miles and vehicle time, when a cost card is in effect for that technician on the visit date (technician_cost_cards, vehicle_cost_cards; admin API /api/admin/cost-cards; Cost cards section on Settings > Operating costs). Read at call time via techCostRatesLive(), dark by default; exactly `true`. Off, or no card in effect = job_costs and service_records values are byte for byte today's loaded_labor_rate x on-job hours and drive_cost_per_stop. Customer prices never change. Kill switch: unset.)
@@ -3263,6 +3266,17 @@ const gates = {
   // payrollReviewBonusImportLive(). Kill switch: unset GATE_PAYROLL_REVIEW_BONUS_IMPORT.
   payrollReviewBonusImport: process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT === 'true',
 
+  // Commission "Sold by" (owner 2026-10-29, D5 part 3b-1): the field-lead flag records a
+  // truck GPS check and a verified W-2 flag fills the estimate's Sold by. OFF in every
+  // environment; read at call time via commissionSoldByLive().
+  // Kill switch: unset GATE_COMMISSION_SOLD_BY.
+  commissionSoldBy: process.env.GATE_COMMISSION_SOLD_BY === 'true',
+
+  // Commission ledger (owner 2026-10-29, D5 part 3b-2): customer payments on a technician's sales become
+  // 'commission' pay lines on pay runs. Needs payrollPayLines. OFF in every environment; read at call
+  // time via payrollCommissionLedgerLive(). Kill switch: unset GATE_PAYROLL_COMMISSION_LEDGER.
+  payrollCommissionLedger: process.env.GATE_PAYROLL_COMMISSION_LEDGER === 'true',
+
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
@@ -3919,10 +3933,11 @@ const gates = {
   // gap. Applied where a series' pattern is WRITTEN (office create and
   // make-recurring, estimate accept, online booking wizard, seeder follow-ups)
   // by lawnRoundsSeriesPattern in recurring-appointment-seeder.js; quotes and
-  // cadence vocabulary stay every-6-weeks. Annual prepay is not supported on a
-  // rounds series yet: an estimate accept with annual prepay keeps the
-  // every-6-weeks series, and prepay on book downgrades to a standard accept,
-  // until the prepay coverage change ships. Read at call time via
+  // cadence vocabulary stay every-6-weeks. Annual prepay covers a rounds series:
+  // the term records coverage_cadence 'lawn_rounds_9' (an estimate accept with
+  // annual prepay writes the rounds series and mints that term; prepay on book
+  // of a rounds series mints it too, no downgrade), and its covered visits sit
+  // on the round calendar. Read at call time via
   // lawn9xRoundsLive(); dark by default. Off = every series is written exactly
   // as before.
   lawn9xRounds: gateEnvValue('GATE_LAWN_9X_ROUNDS'),
@@ -4616,6 +4631,10 @@ const gates = {
   // logGateStatus; pnl-report.js and tax-return-engine.js read pnlPayRunWagesLive() at CALL time.
   // Ships DARK: exactly 'true' only.
   pnlPayRunWages: process.env.GATE_PNL_PAY_RUN_WAGES === 'true',
+  // Payroll bank match (owner 2026-10-28, payroll item 8): the bank import ties a bank line to the paycheck or
+  // payroll tax payment it paid. This entry is for logGateStatus; bank-import.js reads payrollBankMatchLive()
+  // at CALL time. Ships DARK: exactly 'true' only.
+  payrollBankMatch: process.env.GATE_PAYROLL_BANK_MATCH === 'true',
   // Tech cost rates (L11a, owner 2026-10-26): job costing charges a visit at its technician's cost card
   // (labor per worked hour, vehicle fixed per worked hour and per mile). This entry is for logGateStatus;
   // job-costing.js and admin-cost-cards.js read techCostRatesLive() at CALL time. Ships DARK: exactly
@@ -6895,6 +6914,20 @@ function customerRouteCheckMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
+// GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
+// builds", Route Check Everywhere build 3c). The portal assistant's
+// check_availability and the text drafter's city-based OPEN TIMES fallback
+// (services/scheduling/assistant-route-times.js) read the customer pages' time
+// list instead of the by-city zone finder. 'off' (unset or any other value) is
+// today's finder byte for byte; 'shadow' computes both, logs the difference
+// and serves the finder's; 'on' (GATE_ASSISTANT_ROUTE_TIMES=true) serves the
+// customer pages' list in the finder's response shape.
+function assistantRouteTimesMode() {
+  const value = String(process.env.GATE_ASSISTANT_ROUTE_TIMES || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
+}
+
 // GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
 // tech-aware confirm-side conflict scope (scheduling/occupancy.js
 // techScopedConfirmActive, which also requires GATE_SCHEDULING_CAPACITY so the
@@ -7783,6 +7816,13 @@ function pnlPayRunWagesLive() {
   return process.env.GATE_PNL_PAY_RUN_WAGES === 'true';
 }
 
+// Payroll bank match (services/bank-import.js, payroll-bank-match.js, payroll-runs.js, routes/admin-tax.js),
+// read at CALL time. Strict `=== 'true'`, dark in every environment; unsetting it is the kill switch. Also needs
+// GATE_PNL_PAY_RUN_WAGES: only then do the P&L and Schedule C leave the pay-run category out and count the pay runs.
+function payrollBankMatchLive() {
+  return process.env.GATE_PAYROLL_BANK_MATCH === 'true' && pnlPayRunWagesLive();
+}
+
 // Tech cost rates (services/job-costing.js, routes/admin-cost-cards.js), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 function techCostRatesLive() {
@@ -8418,6 +8458,23 @@ function payrollReviewBonusImportLive() {
   return process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT === 'true';
 }
 
+// GATE_COMMISSION_SOLD_BY read at CALL time — strict 'true' only, so an unset variable is off.
+// Gates the truck GPS check on field leads (routes/tech-field-lead.js), the estimate Sold by
+// auto-fill and its admin routes (services/estimate-sold-by.js, admin-estimate-persistence.js,
+// routes/admin-estimates.js) and the tech app's Neighbor flag. Off = the flag route, the modal
+// and every estimate path are byte for byte today's and nothing is read, written or shown.
+function commissionSoldByLive() {
+  return process.env.GATE_COMMISSION_SOLD_BY === 'true';
+}
+
+// GATE_PAYROLL_COMMISSION_LEDGER read at CALL time — strict 'true' only, so an unset variable is off.
+// Gates the commission ledger (services/payroll-commission.js, payroll-runs.js): commission sales,
+// entries and the 'commission' pay lines made from customer payments. Needs GATE_PAYROLL_PAY_LINES.
+// Off = no sales or entries are written and every open commission line comes off the next run.
+function payrollCommissionLedgerLive() {
+  return process.env.GATE_PAYROLL_COMMISSION_LEDGER === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -8484,6 +8541,7 @@ function stockCountAwareUsageLive() {
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
+module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).
@@ -8877,6 +8935,10 @@ module.exports.truckViewsPerVehicleLive = truckViewsPerVehicleLive;
 module.exports.payrollFamilyEmployeeLive = payrollFamilyEmployeeLive;
 // GATE_PAYROLL_REVIEW_BONUS_IMPORT reader, on its own line so gate PRs never conflict.
 module.exports.payrollReviewBonusImportLive = payrollReviewBonusImportLive;
+// GATE_COMMISSION_SOLD_BY reader, on its own line so gate PRs never conflict.
+module.exports.commissionSoldByLive = commissionSoldByLive;
+// GATE_PAYROLL_COMMISSION_LEDGER reader, on its own line so gate PRs never conflict.
+module.exports.payrollCommissionLedgerLive = payrollCommissionLedgerLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
@@ -9271,6 +9333,8 @@ module.exports.techStaffGuardsLive = techStaffGuardsLive;
 module.exports.taxPackageW2LaborLive = taxPackageW2LaborLive;
 // GATE_PNL_PAY_RUN_WAGES reader, on its own line so gate PRs never conflict.
 module.exports.pnlPayRunWagesLive = pnlPayRunWagesLive;
+// GATE_PAYROLL_BANK_MATCH reader, on its own line so gate PRs never conflict.
+module.exports.payrollBankMatchLive = payrollBankMatchLive;
 // GATE_MISTING_LAYOUT_DESIGNER reader, on its own line so gate PRs never conflict.
 module.exports.mistingLayoutDesignerLive = mistingLayoutDesignerLive;
 // GATE_REVIEW_BONUS_ASK_FIRST reader, on its own line so gate PRs never conflict.

@@ -534,6 +534,76 @@ class AvailabilityEngine {
     return null;
   }
 
+  // The zone-scoped occupied set confirmBooking's zone check reads: zone services,
+  // unlinked live self-bookings and live estimate holds, as [{ start, end }]
+  // minutes. Shared with the assistant's offer filter
+  // (scheduling/assistant-route-times.js), so an offer and its commit read one set.
+  async loadZoneOccupied(conn, zone, dateStr, options = {}) {
+    // Mirror getAvailableSlots' occupied set: zone services + live
+    // self-bookings. Any overlap means the slot was taken since the
+    // customer loaded the picker.
+    const occupied = [];
+    const scheduledInZone = await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .where('scheduled_services.scheduled_date', dateStr)
+      .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+      .whereNotNull('scheduled_services.window_start')
+      .where((q) => {
+        q.whereNull('scheduled_services.reservation_expires_at')
+          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      })
+      .modify((q) => {
+        // Case-insensitive city match — same reasoning as the slot
+        // builder above; empty list matches nothing like an empty whereIn.
+        const lowered = (zone?.cities || []).map((city) => String(city || '').toLowerCase());
+        if (!lowered.length) return q.whereRaw('1 = 0');
+        return q.whereRaw(
+          `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
+          lowered,
+        );
+      })
+      .modify((q) => {
+        if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
+      })
+      .select('scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes');
+    for (const s of scheduledInZone) {
+      occupied.push({
+        start: this.timeToMin(s.window_start),
+        end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
+      });
+    }
+    const selfBooked = await conn('self_booked_appointments')
+      .where('service_zone_id', zone.id)
+      .where('date', dateStr)
+      .whereNot('status', 'cancelled')
+      .whereNotExists(function linkedVisit() {
+        this.select('id').from('scheduled_services')
+          .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
+      })
+      .modify((q) => {
+        if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
+      });
+    for (const b of selfBooked) {
+      occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
+    }
+    // Live estimate-slot holds (customer_id NULL, tech-keyed, no zone)
+    // occupy real route time even though they don't match the zone
+    // predicates above — count them so a self-booking can't land on a
+    // held slot.
+    const liveHolds = await conn('scheduled_services')
+      .where('scheduled_date', dateStr)
+      .whereNull('customer_id')
+      .whereRaw('reservation_expires_at > NOW()')
+      .select('window_start', 'window_end');
+    for (const h of liveHolds) {
+      occupied.push({
+        start: this.timeToMin(h.window_start || '09:00'),
+        end: this.timeToMin(h.window_end || (h.window_start ? this.addMinutes(h.window_start, 60) : '10:00')),
+      });
+    }
+    return occupied;
+  }
+
   // options.excludeServiceId / options.excludeSelfBookingId: skip a specific
   // existing appointment in the occupancy re-check — used by the onboarding
   // reschedule, which books the replacement BEFORE cancelling the original
@@ -602,7 +672,6 @@ class AvailabilityEngine {
     // literal default regardless of what the estimate actually named
     // (Codex r4 P1: offer/commit identity parity requires the real column).
     const serviceType = estimate?.service_interest || 'General Pest Control';
-    const zoneCities = zone?.cities || [];
 
     // Two customers browsing the same zone see the same slots and can both
     // confirm one — the window is the whole slot-picker session, not
@@ -706,68 +775,7 @@ class AvailabilityEngine {
       }
 
       if (zone) {
-        // Mirror getAvailableSlots' occupied set: zone services + live
-        // self-bookings. Any overlap means the slot was taken since the
-        // customer loaded the picker.
-        const occupied = [];
-        const scheduledInZone = await trx('scheduled_services')
-          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-          .where('scheduled_services.scheduled_date', dateStr)
-          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-          .whereNotNull('scheduled_services.window_start')
-          .where((q) => {
-            q.whereNull('scheduled_services.reservation_expires_at')
-              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-          })
-          .modify((q) => {
-            // Case-insensitive city match — same reasoning as the slot
-            // builder above; empty list matches nothing like an empty whereIn.
-            const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
-            if (!lowered.length) return q.whereRaw('1 = 0');
-            return q.whereRaw(
-              `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
-              lowered,
-            );
-          })
-          .modify((q) => {
-            if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
-          })
-          .select('scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes');
-        for (const s of scheduledInZone) {
-          occupied.push({
-            start: this.timeToMin(s.window_start),
-            end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
-          });
-        }
-        const selfBooked = await trx('self_booked_appointments')
-          .where('service_zone_id', zone.id)
-          .where('date', dateStr)
-          .whereNot('status', 'cancelled')
-          .whereNotExists(function linkedVisit() {
-            this.select('id').from('scheduled_services')
-              .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
-          })
-          .modify((q) => {
-            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
-          });
-        for (const b of selfBooked) {
-          occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
-        }
-        // Live estimate-slot holds (customer_id NULL, tech-keyed, no zone)
-        // occupy real route time even though they don't match the zone
-        // predicates above — count them so a self-booking can't land on a
-        // held slot.
-        const liveHolds = await trx('scheduled_services')
-          .where('scheduled_date', dateStr)
-          .whereNull('customer_id')
-          .whereRaw('reservation_expires_at > NOW()')
-          .select('window_start', 'window_end');
-        for (const h of liveHolds) {
-          occupied.push({
-            start: this.timeToMin(h.window_start || '09:00'),
-            end: this.timeToMin(h.window_end || (h.window_start ? this.addMinutes(h.window_start, 60) : '10:00')),
-          });
-        }
+        const occupied = await this.loadZoneOccupied(trx, zone, dateStr, options);
         if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
           throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
         }
@@ -845,6 +853,11 @@ class AvailabilityEngine {
         self_booking_id: bookingRow.id,
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
+
+      // GATE_ASSISTANT_ROUTE_TIMES (a no-op unless 'true'): number the visit in its
+      // technician's day with the placement helper New Appointment and the phone
+      // agent use, inside this transaction (a visit with no technician stays as is).
+      await require('./scheduling/assistant-route-times').placeAssistantBooking(trx, scheduledRow.id);
 
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —

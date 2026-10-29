@@ -595,7 +595,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern, seriesCadencePosition, seriesRoundAnchor } = require('../services/recurring-appointment-seeder');
 const { lawn9xRoundsLive } = require('../config/feature-gates');
 // GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
@@ -656,17 +656,6 @@ function seriesRecurrenceOptions(parent) {
     intervalDays: parent.recurring_interval_days,
     roundAnchor: seriesRoundAnchor(parent),
   };
-}
-
-// Lawn rounds: the date whose offset in its round and weekday place every
-// visit of the series. A write that re-places the series from a new date
-// (a series move on a later visit, an Edit appointment cadence rewrite, make
-// recurring) stores that date on the parent, recurring_round_anchor_date: the
-// parent's own date is history and usually a completed visit. Unset, it is
-// the parent's cadence position, which a one-off move or a hand-off placement
-// does not change.
-function seriesRoundAnchor(parent) {
-  return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
 }
 
 // Lawn rounds: store `anchorDateStr` as the series round anchor
@@ -873,15 +862,6 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   const latestStr = seriesCadencePosition(latest);
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
-}
-
-// A series row's cadence position (see seriesExtendAnchor): an exception's
-// recorded cadence date, else a hand-off's due date, else its own date.
-function seriesCadencePosition(row) {
-  const position = (row?.date_exception && row?.date_exception_cadence_date)
-    ? row.date_exception_cadence_date
-    : (row?.recurring_dispatch_due_date || row?.scheduled_date);
-  return dateOnly(position) || '';
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -8829,14 +8809,12 @@ async function scheduleCreateHandler(req, res, next) {
       const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
         ? 'every_6_weeks'
         : recurringPattern;
-      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) has no prepay
-      // coverage yet: nine visits a year, but no supported coverage cadence,
-      // so it downgrades like seasonal_feb_oct (see prepayCoverageCadenceForPattern)
-      // with its own message.
+      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) is the nine-round
+      // lawn plan: 9 covered visits, coverage cadence lawn_rounds_9
+      // (prepayCoverageCadenceForPattern), placed on the round calendar.
       const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
-      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern)
-        || (prepayRoundsSeries ? 9 : null);
-      const prepayCoverageCadence = prepayRoundsSeries ? null : prepayCoverageCadenceForPattern(prepayBookedPattern);
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
+      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name + cadence — sourced
@@ -8945,8 +8923,6 @@ async function scheduleCreateHandler(req, res, next) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
-      } else if (prepayRoundsSeries) {
-        downgrade('Appointment booked as standard — annual prepay isn’t available yet for the nine-round lawn program.');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
@@ -8966,7 +8942,9 @@ async function scheduleCreateHandler(req, res, next) {
         // invoice prices the quoted plan, so an unverifiable cadence could
         // stamp the wrong number of covered visits for that price.
         downgrade('Appointment booked as standard — the quoted plan’s cadence could not be determined, so annual prepay can’t verify the booked series matches what was sold. Use the estimate’s Annual Prepay action or set up prepay from Customer 360.');
-      } else if (quoteRecurringCadence !== prepayCoverageCadence) {
+      } else if ((prepayRoundsSeries && quoteRecurringCadence === 'every_6_weeks' ? prepayCoverageCadence : quoteRecurringCadence) !== prepayCoverageCadence) {
+        // (A quoted lawn 9x plan reads every_6_weeks in the quote vocabulary;
+        // the booked rounds series is that same plan, so the two match.)
         // The prepay invoice prices the QUOTED cadence's annual — booking a
         // different cadence would stamp a different number of visits as
         // covered for that price (quoted quarterly → booked monthly = 12
@@ -24743,13 +24721,15 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
     // A NEW series (the draft probe) that GATE_LAWN_9X_ROUNDS will write as
-    // lawn_rounds_9 has no prepay coverage yet: refused like seasonal_feb_oct.
-    // A committed series is read as it is stored.
+    // lawn_rounds_9 is covered on the rounds cadence: the term records the
+    // pattern the series is written with. A committed series is read as it is
+    // stored.
     const draftWrittenAsRounds = input.mode === 'draft' && lawnRoundsSeriesPattern({
       pattern: input.rawCadence, intervalDays: input.intervalDays, service_type: coverageServiceType,
     }).pattern === LAWN_ROUNDS_9;
-    const visitsPerYear = visitsPerYearForCadence(cadence) || (draftWrittenAsRounds ? 9 : null);
-    const coverageCadence = draftWrittenAsRounds ? null : prepayCoverageCadenceForPattern(cadence);
+    const coveredCadence = draftWrittenAsRounds ? LAWN_ROUNDS_9 : cadence;
+    const visitsPerYear = visitsPerYearForCadence(coveredCadence);
+    const coverageCadence = prepayCoverageCadenceForPattern(coveredCadence);
     if (!visitsPerYear || !coverageCadence) {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }

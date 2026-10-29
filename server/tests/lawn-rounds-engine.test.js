@@ -531,6 +531,14 @@ describe('a series move stores its round anchor, and later top-ups hop from it',
     expect(plan(parent)[0]).toBe('2027-10-06');
   });
 
+  test('seriesRoundAnchor and seriesCadencePosition are the seeder\'s (one rule shared with the prepay coverage)', () => {
+    const seeder = require('../services/recurring-appointment-seeder');
+    expect(seriesRoundAnchor).toBe(seeder.seriesRoundAnchor);
+    const row = { scheduled_date: '2026-01-13' };
+    expect(seeder.seriesCadencePosition(row)).toBe('2026-01-13');
+    expect(seriesRecurrenceOptions(row).roundAnchor).toBe(seeder.seriesRoundAnchor(row));
+  });
+
   test('seriesRoundAnchor: the stored anchor, else the parent cadence position', () => {
     expect(seriesRoundAnchor({ ...parent, recurring_round_anchor_date: movedTo })).toBe(movedTo);
     expect(seriesRoundAnchor({ ...parent, recurring_round_anchor_date: new Date('2027-05-05T00:00:00Z') })).toBe(movedTo);

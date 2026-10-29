@@ -6283,6 +6283,49 @@ code, error code, message text, limiter, signature or token changes.
 - Estimate page cache: the five-minute slot cache is keyed by the route check
   mode (and by whether the caller asked for the check), so changing the gate
   never serves the other mode's list.
+
+Assistant route times (`GATE_ASSISTANT_ROUTE_TIMES`, dark, owner 2026-10-29,
+Route Check Everywhere build 3c). Read at call time
+(`assistantRouteTimesMode()`): unset or any other value = `off`, `shadow`,
+`true`. It changes which times the signed-in portal assistant (`POST
+/api/ai/chat`, its `check_availability` tool) and the text drafter's
+city-based OPEN TIMES quote, and nothing else: no route, field, status code,
+error code, limiter or token changes, and no message is sent.
+- `off`: byte-identical to before; the customer pages' list is never built.
+- `shadow`: the old by-city list is served as before. After the answer, a
+  capped (5 seconds) comparison builds the customer pages' list for the same
+  customer and logs one `[assistant-route-times]` line. The reply never waits
+  for it.
+- `true`: a customer with a stored pin of their own (no geocode: without one the old
+  list is served) is offered the SAME list `/book` shows them, with
+  `GATE_CUSTOMER_ROUTE_CHECK` applied as on `/book`, in the old response shape
+  (`days[]` with `date`, `dayOfWeek`, `dayNum`, `month`, `fullDate`, `slots[]`
+  with `start`, `end`, `startTime24`, `endTime24`; one slot per distinct start).
+  No pin, a list that did not build in about 1.5 seconds (3 seconds for a
+  text quote), or any error serves the old list.
+- The assistant's list is also filtered against `confirmBooking`'s own commit
+  constraints (closed day, notice window, last start, its zone occupied set
+  including unlinked legacy self-bookings, and its technician-blind occupancy
+  probe with the travel gap), so a time the assistant offers is a
+  time `book_appointment` accepts. A start that only one technician has free,
+  while another technician's visit overlaps it, is not offered. A filter that
+  fails or takes over 1 second, or that leaves no time at all, serves the old
+  list (never an empty picker when times exist). Text quotes are not
+  filtered (a person books them).
+- Text quotes carry the list that produced them (`open_times_snapshot.lookup.source`
+  is `route_times`); the send-time recheck asks that same list, whatever the
+  gate says by then. A snapshot without that source is the old list's, and is
+  rechecked against it.
+- `book_appointment` (the assistant's commit, `confirmBooking`) keeps its own
+  conflict checks. With the gate `true`, the new visit is also numbered in its
+  technician's day by the staff placement helper, inside the same transaction;
+  a visit with no technician is left as it was.
+- Cost: no Google call (drive times are the default route-optimizer estimate,
+  asked with `providerTravel: false` so capacity mode buys no road times; the
+  pin is read from the customer row, never geocoded).
+- The assistant's offers are append-only (`appendOnly`, find-time `capacityPlacement: false`), even
+  with `GATE_BOOK_CAPACITY_COMMIT` on: its commit stores no route order. `/book`
+  and the other callers are unchanged.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

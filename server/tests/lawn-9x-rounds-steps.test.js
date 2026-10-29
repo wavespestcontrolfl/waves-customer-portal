@@ -413,6 +413,8 @@ function planDb({ date, pattern = 'lawn_rounds_9', city = 'Lakewood Ranch', trac
     scheduled_services: [service],
     customer_turf_profiles: [profile],
     products_catalog: CATALOG,
+    // A pre-emergent is on the ledger this year, so these visits carry no spring catch-up (lawn-9x-rounds-catchup.test.js pins that line).
+    property_application_history: [{ id: 'history-1', customer_id: 'cust-1' }],
     ...protocolTables(track),
   });
 }

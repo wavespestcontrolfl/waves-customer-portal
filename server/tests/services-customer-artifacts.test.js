@@ -42,7 +42,7 @@ describe('customer services visit note', () => {
 
   function chain(rows) {
     const c = {};
-    ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count'].forEach((m) => { c[m] = jest.fn(() => c); });
+    ['where', 'whereRaw', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count'].forEach((m) => { c[m] = jest.fn(() => c); });
     c.first = jest.fn(async () => rows[0] || { count: 0 });
     c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return c;
