@@ -241,6 +241,10 @@ const CADENCE_OPTIONS = [
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
+// Lawn 9x rounds (lawn_rounds_9) is never a choice in the cadence select; a line
+// can still carry it (an existing 9x lawn plan), so it needs a staff label here.
+const LAWN_ROUNDS_LABEL = 'Lawn rounds (9 a year)';
+
 const NTH_OPTIONS = [
   { value: 1, label: '1st' }, { value: 2, label: '2nd' },
   { value: 3, label: '3rd' }, { value: 4, label: '4th' },
@@ -3142,6 +3146,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const wOpt = WEEKDAY_OPTIONS.find((o) => o.value === parseInt(group.weekday));
       return `${nthOpt?.label || group.nth} ${wOpt?.label || ''}`.trim();
     }
+    if (group.cadence === 'lawn_rounds_9') return LAWN_ROUNDS_LABEL;
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
@@ -3157,6 +3162,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (cadence === 'daily') return 1;
     if (cadence === 'weekly') return 7;
     if (cadence === 'biweekly') return 14;
+    if (cadence === 'lawn_rounds_9') return 42; // ranks like the 42-day 9x cadence
     const months = {
       monthly: 30,
       monthly_nth_weekday: 30,

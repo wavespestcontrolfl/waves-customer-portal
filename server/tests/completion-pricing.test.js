@@ -22,6 +22,19 @@ describe('completion estimate evidence', () => {
     expect(matchServiceLine({ ...job, recurring_pattern: 'monthly' }, [line]).status).toBe('unmatched');
     expect(matchServiceLine({ service_type: 'Pest' }, [line]).status).toBe('unmatched');
   });
+  test('a lawn rounds job is the 9x lawn plan, and no other cadence', () => {
+    const lawn = { source: 'recurring', serviceId: 'lawn' };
+    const job = { service_id: 'lawn', is_recurring: true, recurring_pattern: 'lawn_rounds_9' };
+    // Estimate lines carry the 9x plan as custom + 42 days (the scheduler's form).
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'custom', intervalDays: 42 }]).status).toBe('matched');
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'every_6_weeks' }]).status).toBe('matched');
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'quarterly' }]).status).toBe('unmatched');
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'monthly' }]).status).toBe('unmatched');
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'custom', intervalDays: 30 }]).status).toBe('unmatched');
+    expect(matchServiceLine(job, [{ ...lawn, cadence: 'custom', intervalDays: null }]).status).toBe('unmatched');
+    // Other jobs compare exactly as before.
+    expect(matchServiceLine({ ...job, recurring_pattern: 'quarterly' }, [{ ...lawn, cadence: 'custom', intervalDays: 42 }]).status).toBe('unmatched');
+  });
   test('another property never matches the same customer service', () => {
     expect(propertyMatches({ property_id: 'a' }, { property_id: 'b' })).toBe(false);
   });
