@@ -150,7 +150,9 @@ describe('wiring', () => {
     // Rain-out's Quick Move advisory judges the same route commit probes.
     const rain = read('services/rain-out.js');
     expect(rain).toContain('technicianId: service.technician_id');
-    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(3); // getOptions presets, checkTarget, route-scope probe
+    // getOptions presets, checkTarget, route-scope probe, and the route-checked
+    // same-day hours (GATE_TECH_MOVE_ROUTE_TIMES): the visit's own technician.
+    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(4);
   });
 
   // Owner ruling 2026-10-03: with two technicians, staff booking or moving a
