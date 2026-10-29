@@ -348,6 +348,17 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
   }
 }
 
+// The won proposal's building use onto the customer (owner 2026-10-28): what the
+// site is used for decides Florida sales tax on its later visits (TaxCalculator,
+// GATE_BUILDING_USE_TAX; written whatever the gate, read only when it is on).
+// Run on EVERY proposal win, beside the commercial flag. A proposal without a
+// pick leaves the customer as it is; a later win with a pick replaces it.
+async function recordProposalBuildingUse({ trx, customerId, proposal }) {
+  const use = proposal?.buildingUse;
+  if (!customerId || (use !== 'residential' && use !== 'nonresidential')) return;
+  await trx('customers').where({ id: customerId }).update({ building_use: use });
+}
+
 // Net-terms from the structured commercial terms (slice 1A-i). paymentTerms
 // is the CANONICAL payer vocabulary, and the token→days map is payer.js's
 // shared PAYMENT_TERM_NET_DAYS (the same map payer statements use) — a
@@ -438,6 +449,7 @@ module.exports = {
   promoteLinkedCustomerForProposalWin,
   ensureCustomerForProposalWin,
   flagProposalCustomerCommercialIfTaxable,
+  recordProposalBuildingUse,
   proposalNetTermDays,
   createProposalAcceptanceInvoice,
 };
