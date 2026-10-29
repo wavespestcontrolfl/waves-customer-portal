@@ -358,12 +358,49 @@ const ANNUAL_PREPAY_CADENCE_OPTIONS = [
   { value: "annual", label: "Annual", visits: 1 },
 ];
 
+// Lawn 9x rounds (lawn_rounds_9): the staff-only cadence of a lawn series booked
+// on the nine fixed rounds a year. It is offered in the select only to a
+// customer whose plan or term already runs on it, never as a choice for others.
+const LAWN_ROUNDS_PREPAY_CADENCE = "lawn_rounds_9";
+const ANNUAL_PREPAY_LAWN_ROUNDS_OPTION = { value: LAWN_ROUNDS_PREPAY_CADENCE, label: "Lawn rounds (9 a year)", visits: 9 };
+
+function annualPrepayCadenceOptionsFor(...cadences) {
+  if (!cadences.includes(LAWN_ROUNDS_PREPAY_CADENCE)) return ANNUAL_PREPAY_CADENCE_OPTIONS;
+  const at = ANNUAL_PREPAY_CADENCE_OPTIONS.findIndex((option) => option.value === "every_6_weeks") + 1;
+  return [
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(0, at),
+    ANNUAL_PREPAY_LAWN_ROUNDS_OPTION,
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(at),
+  ];
+}
+
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
-  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
+  [...ANNUAL_PREPAY_CADENCE_OPTIONS, ANNUAL_PREPAY_LAWN_ROUNDS_OPTION].map((option) => [option.value, String(option.visits)]),
 );
+
+// Lawn rounds is the lawn plan's own calendar: the server refuses it for any
+// other covered service (annual-prepay-renewals lawnRoundsCoverageError, the
+// seeder's serviceKeyFor 'lawn_care' test, mirrored here).
+function labelIsLawnPlan(label) {
+  const raw = String(label || "").toLowerCase();
+  if (/\+/.test(raw) && /pest|roach|ant|spider|perimeter|general/.test(raw)) return false;
+  return /lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw);
+}
+
+// The cadence a new "Service covered" label infers. A lawn label that says
+// "every 6 weeks" keeps a lawn rounds cadence; any other service leaves it for
+// its own label cadence, or the 9-visit every-6-weeks schedule when the label
+// names none (Codex #7008 r6).
+function annualPrepayLabelCadence(label, currentCadence) {
+  const labelCadence = inferAnnualPrepayCadenceFromLabel(label);
+  if (currentCadence !== LAWN_ROUNDS_PREPAY_CADENCE) return labelCadence;
+  if (!labelIsLawnPlan(label)) return labelCadence || "every_6_weeks";
+  return labelCadence === "every_6_weeks" ? null : labelCadence;
+}
 
 function inferAnnualPrepayCadenceFromLabel(value) {
   const text = String(value || "").toLowerCase();
+  if (text.trim() === LAWN_ROUNDS_PREPAY_CADENCE) return LAWN_ROUNDS_PREPAY_CADENCE;
   if (/\bevery\s*6\s*weeks?\b|\b6\s*weeks\b|\b42\s*days\b/.test(text)) return "every_6_weeks";
   if (/\bbi[-\s]?monthly\b|\bevery\s*2\s*months?\b/.test(text)) return "bimonthly";
   if (/\bquarterly\b|\bevery\s*3\s*months?\b/.test(text)) return "quarterly";
@@ -559,6 +596,7 @@ function inferAnnualPrepayInitialCadence(activeTerm = null, prepaidPlans = []) {
   if (activeCadence) return activeCadence;
 
   const planPattern = String(prepaidPlans[0]?.recurringPattern || "").trim();
+  if (planPattern === LAWN_ROUNDS_PREPAY_CADENCE) return LAWN_ROUNDS_PREPAY_CADENCE;
   if (planPattern && planPattern !== "custom") {
     return inferAnnualPrepayCadenceFromLabel(planPattern) || planPattern;
   }
@@ -3995,7 +4033,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
-    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    const inferredCadence = annualPrepayLabelCadence(value, coverageCadence);
     // A label-inferred cadence only takes effect when the operator hasn't
     // chosen one manually — and the prefill must evaluate against the cadence
     // that will actually be SUBMITTED, never the ignored inference (a
@@ -4184,7 +4222,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               onChange={(e) => handleCadenceChange(e.target.value)}
               className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
-              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+              {annualPrepayCadenceOptionsFor(coverageCadence, labelIsLawnPlan(serviceType) ? defaultCoverageCadence : null).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -4422,7 +4460,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
-    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    // A lawn label keeps a rounds cadence; another service leaves it (annualPrepayLabelCadence).
+    const inferredCadence = annualPrepayLabelCadence(value, coverageCadence);
     if (inferredCadence && !cadenceTouchedRef.current) {
       setCoverageCadence(inferredCadence);
       const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
@@ -4651,7 +4690,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               onChange={(e) => handleCadenceChange(e.target.value)}
               className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
-              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+              {annualPrepayCadenceOptionsFor(coverageCadence, labelIsLawnPlan(serviceType) ? defaultCoverageCadence : null).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

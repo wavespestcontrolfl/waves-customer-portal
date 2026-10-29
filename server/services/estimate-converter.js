@@ -36,7 +36,7 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
-const { visitsPerYearForCadence } = require('./prepay-cadence');
+const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType, GRASS_SOURCE } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
@@ -4686,7 +4686,20 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
 // SEASONAL_FEB_OCT (annual-prepay renewal doesn't support the season walk yet)
 // so seasonal prepay fails closed on every acceptance path, matching the
 // prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
+//
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the term must also record the pattern
+// the series is WRITTEN with. A residential lawn 9x series seeds as
+// lawn_rounds_9, so the cadence derived below comes back as lawn_rounds_9 (via
+// the seeder's lawnRoundsSeriesPattern, the same decision the seeder makes
+// for the series). Gate off, or any other line: the derived cadence is
+// returned unchanged.
 function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFrequency = null) {
+  const derived = derivedAnnualPrepayCoverageCadence(svc, fallbackFrequency, acceptedPlanFrequency);
+  if (derived !== 'every_6_weeks') return derived;
+  return RecurringAppointmentSeeder.lawnRoundsSeriesPattern({ ...svc, pattern: derived, intervalDays: null }).pattern;
+}
+
+function derivedAnnualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFrequency = null) {
   // Coverage and the recurring series must use the same accepted pest cadence.
   if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)
     && !svc.isCommercial && !isCommercialRecurringLine(svc)) {
@@ -4836,10 +4849,9 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
     // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the seeder writes a residential
-    // lawn 9x series as lawn_rounds_9 (parent mark and every child). An accept
-    // with annual prepay keeps the every_6_weeks series the prepay coverage
-    // cadence records, until rounds prepay coverage ships.
-    ...(opts.annualPrepay === true ? { lawnRounds: false } : {}),
+    // lawn 9x series as lawn_rounds_9 (parent mark and every child); an accept
+    // with annual prepay mints a lawn_rounds_9 term for it
+    // (annualPrepayCoverageCadence).
     visitsPerYear,
     skipWeekends: true,
     weekendShift: 'forward',
@@ -8426,6 +8438,15 @@ const EstimateConverter = {
               coverageServiceType = annualPrepayCoverageOverride.serviceType;
               coverageVisitCount = annualPrepayCoverageOverride.visitCount;
               coverageCadence = annualPrepayCoverageOverride.cadence;
+              // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): this accept writes the
+              // series as lawn_rounds_9, so a caller's 9-visit every-6-weeks
+              // (or unspecified, which infers every_6_weeks from 9 visits)
+              // coverage cadence is the same plan under the quote's name. The
+              // term records the pattern the series is written with.
+              if (overrideValidation === 'lawn_rounds_9'
+                && (!coverageCadence || prepayCoverageCadenceForPattern(coverageCadence) === 'every_6_weeks')) {
+                coverageCadence = 'lawn_rounds_9';
+              }
             }
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];

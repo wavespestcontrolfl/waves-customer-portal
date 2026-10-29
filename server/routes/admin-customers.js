@@ -5802,6 +5802,10 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
 
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
+    // Lawn rounds is the lawn plan's own calendar: refuse it for any other
+    // service before anything is written (Codex #7008 r6).
+    const lawnRoundsRefusal = require('../services/prepay-cadence').lawnRoundsCoverageError(coverageCadence, coverageServiceType);
+    if (lawnRoundsRefusal) return res.status(400).json(lawnRoundsRefusal);
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
     // Retired-for-sale plans prepay only for a customer already on that plan
     // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
@@ -6346,6 +6350,10 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
+    // Lawn rounds is the lawn plan's own calendar: refuse it for any other
+    // service before anything is written (Codex #7008 r6).
+    const lawnRoundsRefusal = require('../services/prepay-cadence').lawnRoundsCoverageError(coverageCadence, coverageServiceType);
+    if (lawnRoundsRefusal) return res.status(400).json(lawnRoundsRefusal);
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
     // Retired-for-sale plans prepay only for a customer already on that plan
     // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
