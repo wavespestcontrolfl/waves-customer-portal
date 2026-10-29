@@ -7,7 +7,8 @@
  *
  * Three ways the column gets its value:
  *  - 'flag': a GPS-verified field lead of an active W-2 technician that the office built this
- *    estimate from (leads.estimate_id; one flag credits one estimate). The auto-fill runs from
+ *    estimate from (leads.estimate_id), for the place the GPS proved (the visited customer, or
+ *    the Neighbor's typed address); one flag credits one estimate. The auto-fill runs from
  *    createOrReuseAdminEstimate and reviseAdminEstimate;
  *  - 'office': an admin chose the technician;
  *  - 'cleared': an admin chose no one. Auto-fill never refills a cleared estimate.
@@ -38,16 +39,18 @@ const SOLD_BY_COLUMNS = [
 
 // The newest qualifying field flag for the estimate, or null. A flag counts only for the
 // estimate the office built from it (leads.estimate_id, set when the office makes the estimate
-// from the flagged lead): the office's own act binds the flag to the service being quoted. A
-// flag on the same customer or with the same typed phone never binds by itself (another
-// service the customer asked the office for must not credit the technician; the GPS proves where
-// the truck was, not whose phone it is). One flag credits one estimate: a lead already filling
-// another estimate's Sold by is skipped, and the lead row is locked so two saves cannot both take
-// it. The seller is the technician who flagged (gps_check.technician_id, written once by the
-// flag), never leads.assigned_to, which the office may reassign.
+// from the flagged lead), and only when that estimate is for the place the GPS proved: a visit
+// flag for the visited customer's property (leads.customer_id = the estimate's customer), a
+// Neighbor flag for the typed address the truck was near (the estimate's service address, same
+// street and no conflicting ZIP, city or state: flagCoversAddress). An estimate whose address the
+// office changed, or a typed phone or the same customer alone, never binds. One flag credits one
+// estimate: a lead already filling another estimate's Sold by is skipped, and the candidate lead
+// rows are locked so two saves cannot both take one. The seller is the technician who flagged
+// (gps_check.technician_id, written once by the flag), never leads.assigned_to, which the office
+// may reassign.
 async function findMatchingFlag(trx, estimate, now) {
   const since = new Date(now.getTime() - FLAG_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-  const query = trx('leads')
+  const candidates = await trx('leads')
     .joinRaw("JOIN technicians ON technicians.id::text = leads.gps_check->>'technician_id'")
     .where('leads.gps_verified', true)
     .where('leads.first_contact_channel', 'field_observation')
@@ -65,8 +68,25 @@ async function findMatchingFlag(trx, estimate, now) {
     })
     .orderBy('leads.created_at', 'desc')
     .orderBy('leads.id', 'desc')
-    .forUpdate('leads');
-  return query.first('leads.id as lead_id', 'technicians.id as technician_id');
+    .forUpdate('leads')
+    .select('leads.id as lead_id', 'technicians.id as technician_id', 'leads.customer_id',
+      'leads.address', 'leads.city', 'leads.zip', trx.raw("leads.gps_check->>'mode' as gps_mode"));
+  return candidates.find((flag) => flagProvesPremise(flag, estimate)) || null;
+}
+
+// Was the truck at the place this estimate is for? A visit flag proved the visited customer's
+// property; a Neighbor flag proved the typed address.
+function flagProvesPremise(flag, estimate) {
+  if (flag.gps_mode === 'customer') {
+    return Boolean(flag.customer_id) && String(flag.customer_id) === String(estimate.customer_id || '');
+  }
+  if (flag.gps_mode !== 'prospect' || !flag.address || !estimate.address) return false;
+  const { parseDisplayAddress, flagCoversAddress } = require('./lead-address-unverified');
+  const premise = parseDisplayAddress(estimate.address);
+  return flagCoversAddress(
+    { address_line1: flag.address, city: flag.city, zip: flag.zip },
+    { line1: premise.line1, city: premise.city, state: premise.state, zip: premise.zip },
+  );
 }
 
 /**
