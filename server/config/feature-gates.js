@@ -3870,8 +3870,10 @@ const gates = {
   // gap. Applied where a series' pattern is WRITTEN (office create and
   // make-recurring, estimate accept, online booking wizard, seeder follow-ups)
   // by lawnRoundsSeriesPattern in recurring-appointment-seeder.js; quotes and
-  // cadence vocabulary stay every-6-weeks. Annual prepay on such a series fails
-  // closed until the prepay coverage change ships. Read at call time via
+  // cadence vocabulary stay every-6-weeks. Annual prepay is not supported on a
+  // rounds series yet: an estimate accept with annual prepay keeps the
+  // every-6-weeks series, and prepay on book downgrades to a standard accept,
+  // until the prepay coverage change ships. Read at call time via
   // lawn9xRoundsLive(); dark by default. Off = every series is written exactly
   // as before.
   lawn9xRounds: gateEnvValue('GATE_LAWN_9X_ROUNDS'),

@@ -320,8 +320,11 @@ function lawnRoundsSeriesPattern({ pattern, intervalDays = null, ...identity } =
 
 // The seeder's own follow-up rows: when it is handed a lawn 9x parent with the
 // every-6-weeks vocabulary, the parent mark and every seeded child carry
-// lawn_rounds_9 and no interval. Returns null when nothing translates.
+// lawn_rounds_9 and no interval. Returns null when nothing translates, and
+// always when the caller passes opts.lawnRounds === false (an annual-prepay
+// accept keeps its every_6_weeks series until rounds prepay coverage ships).
 function lawnRoundsSeedInput(parent, opts) {
+  if (opts?.lawnRounds === false) return null;
   const pattern = normalizeRecurringPattern(opts?.pattern || parent?.recurring_pattern);
   if (!pattern || pattern === LAWN_ROUNDS_9 || !parent) return null;
   const translated = lawnRoundsSeriesPattern({

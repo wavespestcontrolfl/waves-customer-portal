@@ -343,8 +343,8 @@ describe('POST / — admin create — prepay on book for a lawn 9x series', () =
     const { status, body } = await post(prepayBody);
     expect(status).toBe(201);
     expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill('lawn_rounds_9'));
-    expect(body.warnings.some((w) => cadenceRefusal.test(w))).toBe(true);
-    expect(body.warnings.some((w) => /booked as standard/.test(w))).toBe(true);
+    expect(body.warnings.some((w) => /booked as standard — annual prepay isn.t available yet for the nine-round lawn program/.test(w))).toBe(true);
+    expect(body.warnings.some((w) => /seasonal|every-6-weeks/i.test(w))).toBe(false);
   });
 
   test('gate off: custom/42 keeps its supported every_6_weeks coverage cadence (no cadence downgrade)', async () => {

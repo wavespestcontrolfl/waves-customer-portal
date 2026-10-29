@@ -8830,8 +8830,8 @@ async function scheduleCreateHandler(req, res, next) {
         : recurringPattern;
       // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) has no prepay
       // coverage yet: nine visits a year, but no supported coverage cadence,
-      // so it downgrades exactly like seasonal_feb_oct (see
-      // prepayCoverageCadenceForPattern).
+      // so it downgrades like seasonal_feb_oct (see prepayCoverageCadenceForPattern)
+      // with its own message.
       const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
       const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern)
         || (prepayRoundsSeries ? 9 : null);
@@ -8944,6 +8944,8 @@ async function scheduleCreateHandler(req, res, next) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
+      } else if (prepayRoundsSeries) {
+        downgrade('Appointment booked as standard — annual prepay isn’t available yet for the nine-round lawn program.');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
