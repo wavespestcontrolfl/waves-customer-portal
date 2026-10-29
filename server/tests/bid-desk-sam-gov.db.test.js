@@ -454,4 +454,30 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
       delete process.env.SAM_GOV_DAILY_CALLS;
     }
   });
+
+  describe('GATE_BID_DESK_AUTO_DATES', () => {
+    beforeEach(() => { process.env.GATE_BID_DESK_AUTO_DATES = 'true'; });
+    afterEach(() => { delete process.env.GATE_BID_DESK_AUTO_DATES; });
+
+    test('gate on: a new notice with a response deadline is filed with the date confirmed; a notice with none is not', async () => {
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-60'), notice('n-61', { responseDeadLine: null })]), apiKey: 'test-key' });
+      const bids = await samBids();
+      expect(bids.find((b) => b.external_id === 'n-60')).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
+      expect(bids.find((b) => b.external_id === 'n-61')).toMatchObject({ due_at: null, due_confirmed: false });
+    });
+
+    test('gate off: the same notice is filed with the date unconfirmed', async () => {
+      delete process.env.GATE_BID_DESK_AUTO_DATES;
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-62')]), apiKey: 'test-key' });
+      expect((await samBids())[0]).toMatchObject({ due_confirmed: false });
+    });
+
+    test('a deadline SAM.gov moves later still flags the confirmed date and never overwrites it', async () => {
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-63')]), apiKey: 'test-key' });
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-63', { responseDeadLine: '2026-11-20T14:00:00-05:00' })]), apiKey: 'test-key' });
+      const [bid] = await samBids();
+      expect(new Date(bid.due_at).toISOString()).toBe('2026-11-05T19:00:00.000Z');
+      expect(bid).toMatchObject({ due_confirmed: true, needs_date_confirmation: true });
+    });
+  });
 });

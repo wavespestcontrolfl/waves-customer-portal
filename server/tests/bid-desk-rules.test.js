@@ -1,6 +1,6 @@
 // Bid Desk rules (GATE_BID_DESK): the addendum / date rule, reminder eligibility and the notification copy.
 // Pure: no database, no clock. Synthetic bids only.
-const { attachPatch, reminderDue, daysLeft } = require('../services/bid-desk/rules');
+const { attachPatch, reminderDue, daysLeft, lapsedBid } = require('../services/bid-desk/rules');
 const { newBidSpec, addendumSpec, reminderSpec } = require('../services/bid-desk/alerts');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -170,5 +170,42 @@ describe('notification copy follows the admin notification rule', () => {
     expect(detail).not.toMatch(/confirm the due date/);
     // A moved deadline on an active notice is still a date question.
     expect(addendumSpec({ ...closed, source_active: true }, null).spec.doneWhen).toBe('due_date_confirmed');
+  });
+});
+
+describe('lapsedBid (GATE_BID_DESK_AUTO_DATES): a bid that closes itself', () => {
+  const dueDaysAgo = (days) => new Date(NOW.getTime() - days * DAY);
+  const lapsed = (over = {}) => bid({ due_at: dueDaysAgo(2), submitted_at: null, decision_note: null, ...over });
+
+  test('a new bid two days past its due date closes', () => {
+    expect(lapsedBid(lapsed(), NOW)).toBe(true);
+  });
+
+  test('a bid marked bid, decided, or submitted never closes', () => {
+    expect(lapsedBid(lapsed({ status: 'bid' }), NOW)).toBe(false);
+    for (const status of ['no_bid', 'submitted', 'won', 'lost']) expect(lapsedBid(lapsed({ status }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ submitted_at: dueDaysAgo(3) }), NOW)).toBe(false);
+  });
+
+  test('a bid with no date never closes', () => {
+    expect(lapsedBid(lapsed({ due_at: null }), NOW)).toBe(false);
+  });
+
+  test('the first day after the due date is a grace day', () => {
+    expect(lapsedBid(lapsed({ due_at: dueDaysAgo(0.5) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ due_at: dueDaysAgo(1) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ due_at: new Date(NOW.getTime() - DAY - 1000) }), NOW)).toBe(true);
+    expect(lapsedBid(lapsed({ due_at: new Date(NOW.getTime() + DAY) }), NOW)).toBe(false);
+  });
+
+  test('a date flagged for an addendum check waits 30 days', () => {
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(5) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(30) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(31) }), NOW)).toBe(true);
+  });
+
+  test('a bid that closed itself once, and was set back to new, never closes again', () => {
+    expect(lapsedBid(lapsed({ decision_note: 'Closed by itself: the due date (Sep 28) passed with no decision.' }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ decision_note: 'Pest scope looks too big' }), NOW)).toBe(true);
   });
 });
