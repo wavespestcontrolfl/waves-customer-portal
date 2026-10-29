@@ -4424,29 +4424,75 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
       const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
       if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return null;
     }
-    // A visit billed to a third-party payer (a visit-specific or account
-    // payer assigned after the accept) is not held: completion bills it to
-    // that payer, so it never releases the year's charge either (GitHub Codex
-    // #5567 r9). The same resolver completion's own payer exclusion reads.
-    const visitPayer = await require('./payer').resolveForInvoice({
-      database: conn, customerId: scheduledService.customer_id, scheduledServiceId: scheduledService.id, throwOnError: true,
-    });
-    if (visitPayer?.payerId) return null;
-    // Only a visit the year actually BOUGHT is held: the same sold selection
-    // first activation will stamp (count cap, window as projected for a
-    // payment today, ownership, callbacks out), minus a visit the stamp-time
-    // price check would refuse — never every same-service visit on the plan.
-    const sold = await coverageRowsForTerm(term, conn, activated ? {} : { projectFirstActivationOn: etDateString() });
-    if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return null;
-    const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
-      includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
-    });
-    return heldIds.has(String(scheduledService.id)) ? null : term;
+    return (await termBoughtVisit(term, scheduledService, conn, {
+      projectFirstActivationOn: activated ? null : etDateString(),
+    })) ? term : null;
   } catch (err) {
     if (throwOnError) throw err;
     logger.warn(`[annual-prepay] deferred-prepay coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
     return null;
   }
+}
+
+// Did this year BUY the visit? Shared by the deferred-prepay hold and
+// prepayYearBillingVisit. Throws on a failed read.
+async function termBoughtVisit(term, scheduledService, conn, { projectFirstActivationOn = null } = {}) {
+  // A visit billed to a third-party payer (a visit-specific or account
+  // payer assigned after the accept) is not held: completion bills it to
+  // that payer, so it never releases the year's charge either (GitHub Codex
+  // #5567 r9). The same resolver completion's own payer exclusion reads.
+  const visitPayer = await require('./payer').resolveForInvoice({
+    database: conn, customerId: scheduledService.customer_id, scheduledServiceId: scheduledService.id, throwOnError: true,
+  });
+  if (visitPayer?.payerId) return false;
+  // Only a visit the year actually BOUGHT is held: the same sold selection
+  // first activation will stamp (count cap, window as projected for a
+  // payment on `projectFirstActivationOn` when not yet activated, ownership,
+  // callbacks out), minus a visit the stamp-time price check would refuse —
+  // never every same-service visit on the plan.
+  const sold = await coverageRowsForTerm(term, conn, projectFirstActivationOn ? { projectFirstActivationOn } : {});
+  if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return false;
+  const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
+    includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
+  });
+  return !heldIds.has(String(scheduledService.id));
+}
+
+// The prepay year whose live bill includes this visit, or null
+// (GATE_SETUP_FEE_APPLICATION_SETTLED, read by setup-fee-alert-reconcile.js):
+// one of the visit customer's years with paid coverage (coveredTermsAsOf,
+// window-free — a past year still bought its visits) or still awaiting payment
+// on a live prepay invoice (payment_pending, not dispute-suspended, invoice not
+// void / cancelled / refunded), whose sold selection holds the visit. Wider
+// than annualPrepayCoversVisit on purpose, and it suppresses no billing: it
+// also reads a COMPLETED visit a year bought but never stamped (the year was
+// paid after the visit; reconcilePendingWindowCompletions delivers that slice
+// with no invoice — prod alert of 2026-09-25) and a year still waiting on its
+// own invoice (a same-day sale whose prepay invoice carries the visit — prod
+// alert of 2026-09-11). The setup-fee alert must never send staff to bill by
+// hand a charge one of these bills. Throws on a failed read.
+async function prepayYearBillingVisit(scheduledService, conn = db) {
+  if (!scheduledService?.id || !scheduledService.customer_id) return null;
+  const paidTerms = await coveredTermsAsOf(conn, null)
+    .where('t.customer_id', scheduledService.customer_id)
+    .select('t.*');
+  for (const term of paidTerms) {
+    if (await termBoughtVisit(term, scheduledService, conn)) return term;
+  }
+  const checked = new Set(paidTerms.map((t) => String(t.id)));
+  const awaitingTerms = await conn('annual_prepay_terms as t')
+    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.customer_id', scheduledService.customer_id)
+    .where('t.status', PAYMENT_PENDING_STATUS)
+    .whereNull('t.dispute_suspended_at')
+    .select('t.*', 'i.status as prepay_invoice_status');
+  const today = etDateString();
+  for (const { prepay_invoice_status: invoiceStatus, ...term } of awaitingTerms) {
+    if (checked.has(String(term.id))) continue;
+    if (PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoiceStatus || '').toLowerCase())) continue;
+    if (await termBoughtVisit(term, scheduledService, conn, { projectFirstActivationOn: today })) return term;
+  }
+  return null;
 }
 
 async function pafDeferredPrepayCoversVisit(scheduledService, conn, opts = {}) {
@@ -11377,6 +11423,7 @@ module.exports = {
   annualPrepayCoversVisit,
   pafDeferredPrepayCoversVisit,
   pafDeferredHoldingTerm,
+  prepayYearBillingVisit,
   pafHeldStampCovers,
   annualCoverageVerdictForPrediction,
   deferredPrepayHoldCustomerIds,

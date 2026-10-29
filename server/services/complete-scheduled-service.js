@@ -11429,6 +11429,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceRecordId: record.id,
         } });
       }
+      // GATE_SETUP_FEE_APPLICATION_SETTLED: the shared reconciler also knows
+      // the prepay-year and visit-add-on coverage this transaction does not,
+      // so it runs now rather than at the next daily sweep. The alert row
+      // stays the durable follow-up: a coverage regression reopens it.
+      if (require('../config/feature-gates').setupFeeApplicationSettledLive()) setupFeeReconcileAfterCommit = true;
       if (setupFeeReconcileAfterCommit) {
         // Multi-visit resolution deferred from the alert transaction
         // (Codex P0): the shared reconciler proves EVERY parked visit

@@ -95,11 +95,22 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
       .where('t.source_estimate_id', sourceEstimateId)
       .first('t.id');
     const feeWaivedByTerm = !!coveredTermStanding;
+    // GATE_SETUP_FEE_APPLICATION_SETTLED: a visit's application is also billed
+    // when ANY live prepay year of this customer bought it — a year from
+    // another estimate, one paid after the visit was completed, or one still
+    // awaiting its own invoice (prepayYearBillingVisit). Off: only this
+    // estimate's covered year is asked, through the canonical gate.
+    const applicationSettledLive = require('../config/feature-gates').setupFeeApplicationSettledLive();
     const annualCoversVisitId = async (visitId) => {
-      if (!feeWaivedByTerm || !visitId) return false;
+      if (!(feeWaivedByTerm || applicationSettledLive) || !visitId) return false;
       try {
         const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
-        return !!(visitRow && await AnnualPrepayCoverage.annualPrepayCoversVisit(visitRow, trx));
+        if (!visitRow) return false;
+        if (await AnnualPrepayCoverage.annualPrepayCoversVisit(visitRow, trx)) return true;
+        if (!applicationSettledLive || String(visitRow.customer_id) !== String(customerId)) return false;
+        // A savepoint: a failed read here must not abort the alert's own
+        // locked transaction — the visit just stays uncovered.
+        return !!(await trx.transaction((sp) => AnnualPrepayCoverage.prepayYearBillingVisit(visitRow, sp)));
       } catch { return false; }
     };
           // RESOLVED rows are reconciled too (Codex P0, pre-push round
@@ -393,11 +404,18 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               && staleMeta?.serviceRecordId
               && String(r.service_record_id || '') === String(staleMeta.serviceRecordId))
           ));
+          // The frozen expectation is the visit's whole charge (mint amount or
+          // estimated_price), add-ons included; with the gate on, the visit's
+          // own add-on lines count beside its base line (sumVisitChargeCents).
+          const { sumVisitChargeCents } = require('./estimate-first-application-invoice');
+          const billedVisitCents = (rows, visitId) => (applicationSettledLive
+            ? sumVisitChargeCents(rows, visitId)
+            : rows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0));
           const visitApplicationBilled = (visitId) => {
             const rows = rowsForVisit(visitId);
             const expect = expectedAppCents(visitId);
             if (expect === null) return rows.some(invoiceBillsBaseApplication);
-            return rows.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0) >= expect;
+            return billedVisitCents(rows, visitId) >= expect;
           };
           // All four coverage states rewrite the alert (Codex P0,
           // pre-push round 17): once staff bills ONE charge, the original
@@ -426,7 +444,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               : stampedAppCents >= expect;
           };
           const annualCoveredIds = new Set();
-          if (feeWaivedByTerm) {
+          if (feeWaivedByTerm || applicationSettledLive) {
             for (const visitId of parkedIds) {
                
               if (await annualCoversVisitId(visitId)) annualCoveredIds.add(String(visitId));
@@ -494,7 +512,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               // FULL cents coverage per visit (Codex PR r19 P1), boolean
               // only when the row carries no price.
               const histAnnualOk = new Set();
-              if (feeWaivedByTerm) {
+              if (feeWaivedByTerm || applicationSettledLive) {
                 for (const visitId of histPlanIds) {
                    
                   if (await annualCoversVisitId(visitId)) histAnnualOk.add(String(visitId));
@@ -508,7 +526,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                   || recordToVisit.get(String(r.service_record_id || '')) === String(visitId)));
                 const expect = histPriceCents.get(String(visitId));
                 if (expect === null || expect === undefined) return !rowsFor.some(invoiceBillsBaseApplication);
-                return rowsFor.reduce((sum, r) => sum + sumBaseApplicationCents(r), 0) < expect;
+                return billedVisitCents(rowsFor, visitId) < expect;
               });
             }
           }
