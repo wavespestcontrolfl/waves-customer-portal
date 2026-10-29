@@ -54,6 +54,8 @@ test('registry: first entry is the office Mac appt-sweep due 07:00', () => {
     jobName: 'appt-sweep',
     dueBy: '07:00',
     label: 'Daily plan gap sweep (office Mac)',
+    action: 'Check why the daily plan sweep did not run',
+    why: 'The office Mac has not finished a full daily plan gap sweep today.',
     where: '~/ops-oneshots/appt-sweep/run.log',
     link: '/admin/schedule',
   });
@@ -92,9 +94,13 @@ test('after 07:00 ET with no row -> one alert keyed "never"', async () => {
   expect(alertEpisodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
   const [category, title, body, opts] = alertEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
   expect(category).toBe('system');
-  expect(title).toBe('FIX: Daily plan gap sweep did not finish today');
-  expect(body).toContain('never');
+  // Composed per docs/admin-notifications.md: no FIX: prefix, no date or path in the headline or why.
+  expect(title).toBe('System — Check why the daily plan sweep did not run');
+  expect(title.length).toBeLessThanOrEqual(60);
+  expect(body).toBe('The office Mac has not finished a full daily plan gap sweep today.');
   expect(body.length).toBeLessThanOrEqual(110);
+  expect(opts.detail).toContain('Last complete run: never');
+  expect(opts.metadata).toMatchObject({ area: 'System', severity: 'needs-you', who: 'claude', subject: { type: 'check', id: 'appt-sweep' } });
   expect(opts.dedupeKey).toBe(`${PREFIX}never`);
   expect(opts.link).toBe('/admin/schedule');
   expect(opts.bell).toBe(true);
@@ -109,9 +115,9 @@ test('yesterday\'s success after 07:00 -> alert keyed to that success', async ()
   jobRow = { last_status: 'success', last_success_at: yesterday, last_error: null };
   const r = await runExternalHeartbeatWatch({ now: AFTER_DUE });
   expect(r.alerted).toBe(1);
-  const [, , body, opts] = alertEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
+  const [, , , opts] = alertEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
   expect(opts.dedupeKey).toBe(`${PREFIX}${yesterday.toISOString()}`);
-  expect(body).toMatch(/October 27, 7:02 AM ET/);
+  expect(opts.detail).toMatch(/October 27, 7:02 AM ET/);
 });
 
 test('last_status failed today -> alert, with a sanitized short error', async () => {
@@ -123,18 +129,19 @@ test('last_status failed today -> alert, with a sanitized short error', async ()
   };
   const r = await runExternalHeartbeatWatch({ now: AFTER_DUE });
   expect(r.alerted).toBe(1);
-  const [, , body, opts] = alertEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
-  expect(body).toContain('failed');
+  const [, , , opts] = alertEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
+  expect(opts.detail).toContain('Last status: failed');
   expect(opts.detail).toContain('partial: upstream jobs not finished');
   expect(opts.detail).not.toMatch(/abcdefghijklmnopqrstuvwxyz/);
   expect(opts.detail).not.toContain('ops@example.com');
   expect(opts.detail).not.toContain('\n');
 });
 
-test('a failed run that follows an earlier success today still counts as not complete', async () => {
+test('a failed rerun after a complete run today still counts as complete (the day was swept)', async () => {
   jobRow = { last_status: 'failed', last_success_at: new Date('2026-10-28T11:02:00.000Z'), last_error: 'boom' };
   const r = await runExternalHeartbeatWatch({ now: AFTER_DUE });
-  expect(r.alerted).toBe(1);
+  expect(r.alerted).toBe(0);
+  expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
 });
 
 test('complete today -> no alert and every open alert of the job is closed', async () => {

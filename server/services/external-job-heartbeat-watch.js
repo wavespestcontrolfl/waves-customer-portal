@@ -25,6 +25,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const alertEpisodes = require('./admin-alert-episodes');
+const { composeAdminAlert } = require('./admin-alert-compose');
 const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, etParts, formatETDate, formatETTime } = require('../utils/datetime-et');
 
@@ -38,6 +39,10 @@ const EXTERNAL_JOBS = [
     jobName: 'appt-sweep',
     dueBy: '07:00',
     label: 'Daily plan gap sweep (office Mac)',
+    // Composed per docs/admin-notifications.md: headline = `System — <action>`; the why is one
+    // sentence with no date, path or env name (those ride in detail).
+    action: 'Check why the daily plan sweep did not run',
+    why: 'The office Mac has not finished a full daily plan gap sweep today.',
     where: '~/ops-oneshots/appt-sweep/run.log',
     link: '/admin/schedule',
   },
@@ -93,7 +98,9 @@ async function checkJob(job, now) {
   const row = await readRow(job.jobName);
   const lastSuccess = toDate(row && row.last_success_at);
   const today = etDateString(now);
-  const complete = !!row && row.last_status === 'success' && !!lastSuccess && etDateString(lastSuccess) === today;
+  // A success stamped today is a complete run, even if a later rerun failed: last_success_at only
+  // moves on a complete run, and the day's sweep has already been done.
+  const complete = !!lastSuccess && etDateString(lastSuccess) === today;
 
   if (complete) {
     const closed = await closeOpenKeys(prefix, null, 'the job finished a complete run', 'The job finished a complete run', now);
@@ -109,8 +116,10 @@ async function checkJob(job, now) {
   const status = (row && row.last_status) || 'no row';
   const error = sanitizeError(row && row.last_error);
   const lastText = describeRun(lastSuccess);
-  // Body stays under the admin brevity cap (110 chars); the rest rides in detail.
-  const body = `Last complete run: ${lastText}. Last status: ${status}.`;
+  const composed = composeAdminAlert({
+    area: 'System', action: job.action, why: job.why, severity: 'needs-you', who: 'claude',
+    subject: { type: 'check', id: job.jobName }, doneWhen: 'external_job_completed_today', link: job.link,
+  });
   const detail = [
     `${job.label} has not finished a complete run today (due by ${job.dueBy} ET).`,
     `Last complete run: ${lastText}. Last status: ${status}.`,
@@ -121,14 +130,15 @@ async function checkJob(job, now) {
 
   const raised = await alertEpisodes.raiseAdminAlertWithReopen(
     'system',
-    `FIX: ${job.label.replace(/\s*\(.*\)$/, '')} did not finish today`,
-    body,
+    composed.headline,
+    composed.why,
     {
-      link: job.link,
+      link: composed.link,
       detail,
       bell: true,
       dedupeKey,
       metadata: {
+        ...composed.metadata,
         dedupeKey,
         job_name: job.jobName,
         last_success_at: lastSuccess ? lastSuccess.toISOString() : null,
