@@ -3623,6 +3623,8 @@ async function handleChargeRefunded(charge) {
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
+  // A full refund that terminalized an invoice paid partly by hand: the office is told after commit (alertMixedRefund).
+  let mixedRefund = null;
   const refundedPayment = await db.transaction(async (trx) => {
     // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate is
     // this transaction's FIRST lock — the refund stamp below (and the credit
@@ -4059,6 +4061,9 @@ async function handleChargeRefunded(charge) {
       if (invId && invoiceOwned) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        // Part of this bill was paid by hand (a part payment): the card refund cannot return it, so the office decides.
+        const handCents = await handPartsPaidCents(trx, invId);
+        if (handCents > 0) mixedRefund = { invoiceId: invId, handCents };
         // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded
         // wrote the payments row (the update above hit 0 rows → pmt is null), but the
         // invoice still resolved + was marked 'refunded'. The later succeeded handler
@@ -4092,6 +4097,7 @@ async function handleChargeRefunded(charge) {
   // was stamped, and no refund email/notification may fire for money
   // Stripe kept (the refund.failed handler already notified the office).
   if (feeRefundFencedInLock) return;
+  if (mixedRefund) await alertMixedRefund(mixedRefund, { chargeId, refundId });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -7059,6 +7065,34 @@ function handPartsPaidSql(trx, invoiceId) {
 async function handPartsPaidCents(trx, invoiceId) {
   const result = await trx.raw(`SELECT COALESCE(SUM(ROUND(amount * 100)), 0) AS cents FROM payments WHERE ${HAND_PARTS_PAID_WHERE}`, [invoiceId]);
   return Number(result?.rows?.[0]?.cents) || 0;
+}
+
+// A full card refund (from the Stripe dashboard; the portal refuses one) on an invoice paid partly by hand: the invoice reads refunded,
+// but the hand part stays recorded as received. The office decides whether to return it too or bill again. Nothing goes to the customer.
+async function alertMixedRefund({ invoiceId, handCents }, { chargeId, refundId }) {
+  try {
+    const inv = await db('invoices').where({ id: invoiceId }).first('invoice_number');
+    const label = inv?.invoice_number ? `Invoice ${inv.invoice_number}` : 'An invoice';
+    const dollars = `$${(handCents / 100).toFixed(2)}`;
+    const { raiseAdminAlert } = require('../services/admin-alert-compose');
+    await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: 'Check a refund on an invoice paid partly by hand',
+      why: `${label} was refunded by card in Stripe, but ${dollars} paid by hand is still on record.`,
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${encodeURIComponent(invoiceId)}`,
+      subject: { type: 'invoice', id: invoiceId },
+      // Nothing closes this automatically: a person returns the money or bills again, then marks it done.
+      doneWhen: 'refund_checked_and_marked_done',
+      who: 'person',
+    }, {
+      bell: true,
+      detail: `The card payment on ${label.toLowerCase().startsWith('an ') ? 'this invoice' : label} was fully refunded in Stripe, so the invoice now reads refunded. ${dollars} was paid by hand on it earlier and is still recorded as received. Return that money too, or bill the customer again, then mark this done. Nothing was sent to the customer. Stripe charge ${chargeId}${refundId ? `, refund ${refundId}` : ''}.`,
+      dedupeKey: `mixed-refund:${invoiceId}:${refundId || chargeId}`,
+    });
+  } catch (err) {
+    logger.error(`[stripe-webhook] mixed refund alert failed for invoice ${invoiceId}: ${err.message}`);
+  }
 }
 
 // The facts the remove compares the locked invoice against, or null when this
