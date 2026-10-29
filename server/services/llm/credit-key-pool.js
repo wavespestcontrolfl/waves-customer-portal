@@ -26,7 +26,9 @@
  *   - the request carries the MAIN key (a call with any other key passes);
  *   - the body can be sent twice (no streams);
  *   - Anthropic bodies that name a file_id or container pass (those
- *     resources live in the main organization).
+ *     resources live in the main organization);
+ *   - OpenAI bodies that ask for or replay encrypted_content pass (encrypted
+ *     reasoning only decrypts in the organization that wrote it).
  *
  * Pauses are in memory, per process, per provider + key. Key numbers in logs
  * and in the status are 1-based env positions. Key values are never logged or
@@ -261,6 +263,12 @@ function createCreditKeyFetch(baseFetch, opts = {}) {
       return baseFetch(input, init);
     }
     if (provider === 'openai' && pathname === '/v1/responses' && !(typeof body === 'string' && /"store"\s*:\s*false/.test(body))) {
+      return baseFetch(input, init);
+    }
+    // Encrypted reasoning only decrypts in the organization that wrote it, so a
+    // conversation that asks for or replays it (Intelligence Bar OpenAI loop,
+    // Sandy's voice relay) stays on the main key for every turn.
+    if (provider === 'openai' && typeof body === 'string' && body.includes('encrypted_content')) {
       return baseFetch(input, init);
     }
     const original = mainKeyMatches(provider, init);

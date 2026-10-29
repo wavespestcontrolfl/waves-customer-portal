@@ -167,6 +167,10 @@ describe('pass-through (original arguments, untouched)', () => {
     await expectUntouched(ANTHROPIC_URL, anthropicInit(MAIN_A, { body: '{"source":{"type":"file","file_id":"file_1"}}' }));
     await expectUntouched(ANTHROPIC_URL, anthropicInit(MAIN_A, { body: '{"container":"c1"}' }));
   });
+  test('openai conversations that ask for or replay encrypted reasoning stay on the main key', async () => {
+    await expectUntouched(OPENAI_RESP, openaiInit(MAIN_O, { body: '{"model":"m","store":false,"include":["reasoning.encrypted_content"]}' }));
+    await expectUntouched(OPENAI_RESP, openaiInit(MAIN_O, { body: '{"model":"m","store":false,"input":[{"type":"reasoning","encrypted_content":"gAAA"}]}' }));
+  });
   test('provider with no credit keys passes through', async () => {
     const base = makeBase();
     const { f } = pool(base, { env: baseEnv({ OPENAI_CREDIT_KEYS: '' }) });
