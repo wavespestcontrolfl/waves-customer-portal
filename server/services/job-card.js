@@ -498,7 +498,7 @@ const ADDON_PROGRAMS = Object.freeze({
       'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
       'rodent_exclusion_only', 'rodent_wire_mesh', 'rodent_bird_box',
       'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation',
-      'rodent_inspection', 'rodent_guarantee',
+      'rodent_inspection', 'rodent_guarantee', 'rodent_dead_animal_removal',
     ],
   },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },

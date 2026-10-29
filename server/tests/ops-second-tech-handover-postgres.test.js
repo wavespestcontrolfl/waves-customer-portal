@@ -72,11 +72,12 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
   });
 
   test('plans a pest series, skips lawn, a catalog tree & shrub row, a bait customer and grouped rows; reads nothing it should not', async () => {
-    // Pest series: Mon-Fri open, a completed one, one before start, one grouped, one in a dissolved group.
+    // Pest series: Mon-Thu open, a Friday after the 13-week weekend-customer window (dates before 2099-10-05 are
+    // inside it), a completed one, one before start, one grouped, one in a dissolved group.
     const pestCustomer = await customer();
     const pest = await series(pestCustomer);
     const open = [];
-    for (const d of ['2099-07-06', '2099-07-07', '2099-07-08', '2099-07-09', '2099-07-10']) open.push(await child(pest, d));
+    for (const d of ['2099-07-06', '2099-07-07', '2099-07-08', '2099-07-09', '2099-10-09']) open.push(await child(pest, d));
     await child(pest, '2099-07-13', { status: 'completed' });
     await child(pest, '2099-07-14', { status: 'cancelled' });
     await child(pest, '2099-07-03');
@@ -110,12 +111,14 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
 
     expect(plan.target).toBe(hireId);
     expect(plan.target_work_days_source).toBe('technician_row');
-    // Mon-Thu 07-06..09 move, plus the dissolved-group Thursday 07-16; Friday 07-10 stays with the owner.
+    // Mon-Thu 07-06..09 move, plus the dissolved-group Thursday 07-16. Friday 10-09 stays with the owner as one visit: it is
+    // after the window, so the customer is not kept whole (owner 2026-10-28, question 1 = C).
     expect(plan.would_change.series).toBe(1);
     expect(plan.would_change.visits).toBe(5);
     expect(plan.ids.series).toEqual([pest.id]);
     expect(new Set(plan.ids.visits)).toEqual(new Set([...open.slice(0, 4).map((r) => r.id), wasDissolved.id]));
     expect(plan.stays_off_day).toEqual({ visits: 1, by_weekday: { Fri: 1 } });
+    expect(plan.skipped.off_day_customer).toBeUndefined();
     expect(plan.skipped.grouped).toEqual({ series: 1, visits: 1 });
     expect(plan.skipped.before_start).toEqual({ series: 1, visits: 1 });
     // other_line: the lawn series, the catalog tree & shrub series, and the bait series itself (termite).

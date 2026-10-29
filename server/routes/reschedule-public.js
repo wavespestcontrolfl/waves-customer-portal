@@ -677,6 +677,13 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     availability.days = (availability.days || []).filter((day) => inSeason(day.date));
     availability.slots = (availability.slots || []).filter((slot) => inSeason(slot.date || slot.day));
   }
+  // A lawn_rounds_9 visit stays inside its round (SmartRebooker refuses a
+  // non-admin move out of it), so the picker only lists the round's days.
+  if (availability && svc.recurring_pattern === 'lawn_rounds_9') {
+    const inRound = (d) => !SmartRebooker.leavesOwnRound('lawn_rounds_9', apptDateStr(svc.scheduled_date), String(d || '').slice(0, 10));
+    availability.days = (availability.days || []).filter((day) => inRound(day.date));
+    availability.slots = (availability.slots || []).filter((slot) => inRound(slot.date || slot.day));
+  }
   return availability;
 }
 

@@ -1,20 +1,24 @@
 #!/usr/bin/env node
-// READ-ONLY
+// MUTATES (dry-run default: only `--execute --plan <id>` or `--rollback <file>` writes, through second-tech-handover-execute.js)
 //
 // second-tech-handover.js — plans the ONE-TIME handover of service lines to the
 // new technician (second-tech plan, build 6; owner 2026-10-25: "move every pest,
 // rodent and mosquito series to the new tech the weekend before the first solo
 // week ... skip lawn, the termite-bait customers and any old grouped visits").
 //
-// THIS SCRIPT ONLY PLANS. It has no write path: every query is a SELECT inside a
-// read-only transaction on a read-only session. A later PR adds `--execute`
-// after the owner has read this output.
+// WITHOUT `--execute` THIS SCRIPT ONLY PLANS. This file has no write path: every
+// query here is a SELECT inside a read-only transaction on a read-only session. The
+// dry run prints a PLAN ID. `--execute --plan <id>` hands the same flags to
+// second-tech-handover-execute.js, which recomputes the plan inside its write
+// transaction and writes only when the PLAN ID is identical (header there).
 //
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
 //     [--lines general,rodent,mosquito] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
+//   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
+//   ... --rollback <file the execute wrote> [--out-dir <dir>]
 //
 //   --from   the owner's technician row (required).
 //   --to     the hire's row. Optional: the row may not exist yet. Without it the
@@ -24,7 +28,13 @@
 //   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
 //            shrub and termite / WDO are never movable here.
 //   --list   adds the series ids and visit ids that would change. Ids only.
-//   --json   machine-readable output.
+//   --json   machine-readable output (includes planId).
+//   --execute  write the plan the dry run printed (needs --to and --plan).
+//   --plan   the PLAN ID line of the dry run: sha256 over the sorted (series id, visit id,
+//            visit date, from technician) rows the run would change plus --from, --to,
+//            --start and --lines. A different id refuses the run, with no writes.
+//   --rollback  restore the rows a prior execute changed (the rollback file it wrote).
+//   --out-dir  where execute writes its rollback file (default ~/handover-runs).
 //
 //   PG_CA_FILE  REQUIRED for the public proxy: a pinned copy of the database's own
 //            root certificate (Railway's Postgres signs its server certificate with a
@@ -78,12 +88,21 @@
 //            monitoring program: its catalog key (services.service_key by
 //            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
 //            matches /bait|monitor/. Every series of that customer is skipped.
-//   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). A visit on a
-//            target day off STAYS with --from (owner decision still open: move the
-//            date, or keep with the owner; default = keep).
+//   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). Owner
+//            2026-10-28 (Tech 2 & 3 Roadmap, question 1 = C): the weekend customers stay
+//            with the owner for 60 days, then a second handover run moves them. A WEEKEND
+//            CUSTOMER = a customer with a visit this run would otherwise move (open, dated
+//            >= --start, held by --from, in --lines, not grouped, not bait) on a target day
+//            off within OFF_DAY_CUSTOMER_DAYS (13 weeks) of --start: the window the roadmap
+//            counted its 80 weekend pest customers over. That customer stays WHOLE with
+//            --from: no series of theirs changes template and none of their visits move
+//            (skipped as off_day_customer). Any later visit on a target day off also stays
+//            with --from (stays_off_day). The second run must move those dates to a
+//            target work day as well, which this planner does not do.
 //
 // Output carries counts, technician ids the operator typed, series ids and visit
 // ids only — no customer names, addresses, phones or emails are selected.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -115,6 +134,11 @@ const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
+// Owner 2026-10-28, question 1 = C (header, OFF DAY): a target-day-off visit within 13 weeks of --start keeps its customer
+// with --from, whole.
+const OFF_DAY_CUSTOMER_DAYS = 91;
+// Series skip reasons that keep a whole customer: the plan also says how many customers.
+const CUSTOMER_SKIPS = new Set(['termite_bait_customer', 'off_day_customer']);
 
 /** First solo day when --start is not given: the next Monday after today, ET. */
 function defaultStart(now = new Date()) {
@@ -122,8 +146,11 @@ function defaultStart(now = new Date()) {
 }
 
 const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito] [--list] [--json]\n'
+  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
+  + '       node ops/agents/second-tech-handover.js --rollback <rollback file> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --list-techs';
-const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json' };
+const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute' };
+const PLAN_ID = /^[0-9a-f]{64}$/;
 const technicianFlag = (name) => (v) => (UUID.test(v)
   ? { [name]: v.toLowerCase() }
   : `--${name} needs a technician uuid, got ${JSON.stringify(v)}`);
@@ -137,10 +164,26 @@ const VALUE_FLAGS = {
     const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
     return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and termite are never handed over), got ${JSON.stringify(v)}`;
   },
+  '--plan': (v) => (PLAN_ID.test(v) ? { plan: v.toLowerCase() } : `--plan needs the 64-character PLAN ID the dry run printed, got ${JSON.stringify(v)}`),
+  '--rollback': (v) => ({ rollback: v }),
+  '--out-dir': (v) => ({ outDir: v }),
 };
 
+// Flag combinations that are refused before any connection: [broken?, message].
+const ARG_RULES = [
+  [(a) => a.rollback && (a.execute || a.plan), '--rollback stands alone: do not combine it with --execute or --plan'],
+  [(a) => !a.listTechs && !a.rollback && !a.from, '--from <technician uuid> is required (use --list-techs to see ids)'],
+  [(a) => a.from && a.to && a.from === a.to, '--from and --to are the same technician'],
+  [(a) => a.execute && !a.to, '--execute needs --to <the hire\'s technician uuid>'],
+  [(a) => a.execute && !a.plan, '--execute needs --plan <PLAN ID>: run the dry run first and pass the id it printed'],
+  [(a) => a.plan && !a.execute, '--plan only goes with --execute'],
+];
+
 function parseArgs(argv) {
-  const args = { from: null, to: null, start: null, lines: [...MOVABLE_LINES], list: false, listTechs: false, json: false };
+  const args = {
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], list: false, listTechs: false, json: false,
+    execute: false, plan: null, rollback: null, outDir: null,
+  };
   const fail = (msg) => { console.error(msg); process.exit(2); };
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
@@ -156,8 +199,8 @@ function parseArgs(argv) {
     if (typeof out === 'string') fail(out);
     Object.assign(args, out);
   }
-  if (!args.listTechs && !args.from) fail('--from <technician uuid> is required (use --list-techs to see ids)');
-  if (args.from && args.to && args.from === args.to) fail('--from and --to are the same technician');
+  const broken = ARG_RULES.find(([bad]) => bad(args));
+  if (broken) fail(broken[1]);
   return args;
 }
 
@@ -209,6 +252,21 @@ function targetWorkDays(to) {
 }
 
 /**
+ * The PLAN ID: sha256 over the sorted rows a run would change, plus the flags that
+ * shaped it. One row per series whose template moves (series id, no visit) and one per
+ * visit that moves (series id, visit id, visit date, from technician). Same plan, same
+ * id; a different visit, date, target, start or line set gives a different one.
+ */
+function planIdOf({ from, to, start, lines, retemplate, moves }) {
+  const rows = [
+    ...retemplate.map((seriesId) => [seriesId, '', '', from]),
+    ...moves.map((m) => [m.series_id, m.visit_id, m.date, from]),
+  ].map((r) => JSON.stringify(r)).sort();
+  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows });
+  return crypto.createHash('sha256').update(body).digest('hex');
+}
+
+/**
  * Build the plan. Pure: no database, no clock beyond `today`.
  *   from      technician id the lines move away from
  *   to        { id, work_days } | null   (null = target not set)
@@ -246,15 +304,16 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     lines: [...lines],
     target_work_days: workDays.map((d) => WEEKDAYS[d]),
     target_work_days_source: workDaysSource,
-    off_day_policy: 'keep_with_owner',
+    off_day_policy: 'weekend_customer_stays_whole',
+    off_day_customer_until: etDateString(addETDays(parseETDateTime(`${start}T12:00:00`), OFF_DAY_CUSTOMER_DAYS)),
     series: { active: active.length, on_from: 0, in_lines: 0, retemplate: 0, with_visits_to_move: 0 },
     would_change: { series: 0, visits: 0, by_line: {}, by_weekday: {} },
     stays_off_day: { visits: 0, by_weekday: {} },
     skipped: {},
     notices_to_suppress: 0,
-    ids: { retemplate: [], series: [], visits: [] },
+    ids: { retemplate: [], series: [], visits: [], moves: [] },
   };
-  const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set() });
+  const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set(), _customers: new Set() });
   // One visit stays: its series counts once per reason.
   const skip = (reason, seriesId) => {
     const s = bucket(reason);
@@ -262,10 +321,17 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     s.visits += 1;
   };
   // A whole series stays, with the visits it would have moved.
-  const seriesSkip = (reason, seriesId, candidates) => {
+  const seriesSkip = (reason, p, candidates) => {
     const s = bucket(reason);
-    s.series += 1; s._ids.add(seriesId); s.visits += candidates;
+    s.series += 1; s._ids.add(p.id); s._customers.add(p.customer_id); s.visits += candidates;
   };
+  // Why a series on --from stays whole: the first rule it meets. None = in scope. A customer-level reason also reports
+  // how many customers it kept (CUSTOMER_SKIPS).
+  const seriesStays = [
+    ['no_line', (p) => !p.line],
+    ['other_line', (p) => !lines.includes(p.line)],
+    ['termite_bait_customer', (p) => baitCustomers.has(p.customer_id)],
+  ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
   // (or stays with --from on a target day off).
   const visitStays = [
@@ -276,42 +342,55 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     ['other_technician', (v) => v.technician_id !== from],
     ['bad_date', (v) => dayOfWeekOfDate(v.scheduled_date) === null],
   ];
-  const baitHit = new Set();
+  // What happens to one visit of an in-scope series: the first rule it stays for, 'off_day' (it stays with --from on a
+  // target day off) or 'move'. The weekend-customer test and the moves read the same answer.
+  const visitOutcome = (v) => {
+    const stay = visitStays.find(([, test]) => test(v));
+    if (stay) return stay[0];
+    return workDays.includes(dayOfWeekOfDate(v.scheduled_date)) ? 'move' : 'off_day';
+  };
+  const inScope = [];
 
-  for (const p of active) {
-    if (seriesTechnicianId(p) !== from) continue;
+  // Pass 1: each series on --from gets its skip reason, or joins the in-scope list with its visits' outcomes.
+  for (const p of active.filter((series) => seriesTechnicianId(series) === from)) {
     plan.series.on_from += 1;
     const members = bySeries.get(p.id) || [];
     // What this series would have moved if it were in scope: open, on/after start, held by --from.
     const candidates = members.filter((v) => isOpenVisit(v) && v.scheduled_date >= start && v.technician_id === from).length;
+    const stay = seriesStays.find(([, test]) => test(p));
+    if (stay) { seriesSkip(stay[0], p, candidates); continue; }
+    inScope.push({ p, candidates, outcomes: members.map((v) => ({ v, outcome: visitOutcome(v) })) });
+  }
+  const lineSkipped = ['no_line', 'other_line'].reduce((n, reason) => n + (plan.skipped[reason] ? plan.skipped[reason].series : 0), 0);
+  plan.series.in_lines = plan.series.on_from - lineSkipped;
+  // Weekend customers (owner 2026-10-28, question 1 = C): an off-day visit inside the window, in any in-scope series.
+  const weekendCustomers = new Set(inScope
+    .filter(({ outcomes }) => outcomes.some(({ v, outcome }) => outcome === 'off_day' && v.scheduled_date < plan.off_day_customer_until))
+    .map(({ p }) => p.customer_id));
 
-    if (!p.line) { seriesSkip('no_line', p.id, candidates); continue; }
-    if (!lines.includes(p.line)) { seriesSkip('other_line', p.id, candidates); continue; }
-    plan.series.in_lines += 1;
-    if (baitCustomers.has(p.customer_id)) {
-      seriesSkip('termite_bait_customer', p.id, candidates);
-      baitHit.add(p.customer_id);
-      continue;
-    }
+  // Pass 2: every series of a weekend customer stays; any other series changes template and moves its work-day visits.
+  for (const { p, candidates, outcomes } of inScope) {
+    if (weekendCustomers.has(p.customer_id)) { seriesSkip('off_day_customer', p, candidates); continue; }
     plan.series.retemplate += 1;
     plan.ids.retemplate.push(p.id);
 
     let moved = 0;
-    for (const v of members) {
-      const stay = visitStays.find(([, test]) => test(v));
-      if (stay) { skip(stay[0], p.id); continue; }
+    for (const { v, outcome } of outcomes) {
       const dow = dayOfWeekOfDate(v.scheduled_date);
-      if (!workDays.includes(dow)) {
+      if (outcome === 'off_day') {
         plan.stays_off_day.visits += 1;
         bump(plan.stays_off_day.by_weekday, WEEKDAYS[dow]);
-        continue;
+      } else if (outcome !== 'move') {
+        skip(outcome, p.id);
+      } else {
+        moved += 1;
+        plan.would_change.visits += 1;
+        bump(plan.would_change.by_weekday, WEEKDAYS[dow]);
+        const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
+        byLine.visits += 1;
+        plan.ids.visits.push(v.id);
+        plan.ids.moves.push({ series_id: p.id, visit_id: v.id, date: v.scheduled_date });
       }
-      moved += 1;
-      plan.would_change.visits += 1;
-      bump(plan.would_change.by_weekday, WEEKDAYS[dow]);
-      const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
-      byLine.visits += 1;
-      plan.ids.visits.push(v.id);
     }
     if (moved) {
       plan.series.with_visits_to_move += 1;
@@ -320,10 +399,14 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
       plan.ids.series.push(p.id);
     }
   }
-  if (plan.skipped.termite_bait_customer) plan.skipped.termite_bait_customer.customers = baitHit.size;
-  for (const s of Object.values(plan.skipped)) delete s._ids;
+  for (const [reason, s] of Object.entries(plan.skipped)) {
+    if (CUSTOMER_SKIPS.has(reason)) s.customers = s._customers.size;
+    delete s._ids;
+    delete s._customers;
+  }
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
+  plan.planId = planIdOf({ from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves });
   plan.series_note = 'retemplate = series whose technician template moves (future visits seed to the target); with_visits_to_move = series with at least one visit that changes now';
   return plan;
 }
@@ -441,11 +524,12 @@ function weekdayLine(map) {
 
 function printPlan(plan, { list }) {
   const out = [];
-  out.push('Second-technician handover plan (READ-ONLY: nothing was changed)');
+  out.push('Second-technician handover plan (DRY RUN: nothing was changed)');
   out.push(`  from:    ${plan.from}`);
   out.push(`  target:  ${plan.target}`);
   out.push(`  first solo day: ${plan.start}   (plan read on ${plan.today})`);
   out.push(`  lines:   ${plan.lines.join(', ')}`);
+  out.push(`  PLAN ID: ${plan.planId}`);
   const src = {
     assumed_mon_thu: 'ASSUMED Mon-Thu, because --to is not set',
     technician_row: 'from the target technician row',
@@ -464,12 +548,15 @@ function printPlan(plan, { list }) {
   for (const [line, c] of Object.entries(plan.would_change.by_line)) out.push(`  ${line}: ${c.series} series, ${c.visits} visits`);
   out.push(`  by weekday: ${weekdayLine(plan.would_change.by_weekday)}`);
   out.push('');
-  out.push(`Visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
+  const weekend = plan.skipped.off_day_customer;
+  out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
+    + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
+  out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
-  out.push('  (owner decision open: keep with the owner, or move the date. This plan keeps them.)');
+  out.push('  (a second handover run moves these customers and their dates; it is not built here.)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'termite_bait_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'termite_bait_customer', 'off_day_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];
@@ -480,6 +567,7 @@ function printPlan(plan, { list }) {
   if (!any) out.push('  none');
   out.push('');
   out.push(`Per-visit technician notices the execute step must suppress: ${plan.notices_to_suppress}`);
+  out.push('  (--execute sends none of them: it writes through no notifying path, then sends the hire ONE summary card)');
   if (list) {
     out.push('');
     out.push(`Series whose technician template changes (${plan.ids.retemplate.length}):`);
@@ -567,6 +655,8 @@ function readOnlyConn(connectionString) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // The only write path lives in its own file, so this one stays a reader.
+  if (args.execute || args.rollback) return require('./second-tech-handover-execute').main(args);
   const conn = process.env.DATABASE_PUBLIC_URL;
   if (!conn) {
     console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/second-tech-handover.js --from <uuid>');
@@ -601,9 +691,9 @@ async function main() {
 }
 
 module.exports = {
-  MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
+  MOVABLE_LINES, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
-  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
+  buildPlan, planIdOf, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };
 
 if (require.main === module) {

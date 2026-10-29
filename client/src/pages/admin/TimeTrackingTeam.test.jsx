@@ -143,3 +143,14 @@ describe('TimeTrackingPage payroll deep-link resolution', () => {
     expect(resolveStaffTab('pay-growth', true, 'admin', false)).toBe('pay-growth');
   });
 });
+
+describe('TimeTrackingPage pay stubs deep-link resolution (GATE_TECH_PAY_STUBS)', () => {
+  it('opens for any role once its request says ready, waits while pending, and falls back to Timesheet when off', () => {
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'ready')).toBe('pay-stubs');
+    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'ready')).toBe('pay-stubs');
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'loading')).toBeNull();
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'off')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'error')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', false, 'technician')).toBe('timesheet');
+  });
+});
