@@ -259,6 +259,11 @@ postgres('payroll bank match in the bank import', () => {
         const ok = await bankImport.claimPayrollLink({ row: r, check: { id: checkA }, by: 'owner', expenseId });
         expect(ok).toMatchObject({ ok: true, reused: true });
         expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+        // a Bank Import refresh (the edit heal) and a later matching pass keep the late-clearing link
+        expect(await bankImport.healEditedExpenseLinks()).toBe(0);
+        await bankImport.runDeterministicMatching();
+        expect(await row(id)).toMatchObject({ status: 'matched_expense', matched_expense_id: expenseId, matched_payroll_check_id: checkA });
+        expect((await trx('expenses').where({ id: expenseId }).first()).category_id).toBe(await payrollCategory());
       });
 
       it('the owner\'s Unlink gives the reused expense its category and deduction back and keeps the evidence', async () => {

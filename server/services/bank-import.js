@@ -1012,6 +1012,8 @@ async function healEditedExpenseLinks() {
   // same as the parking rule.
   const links = await db('bank_transactions as bt')
     .join('expenses as e', 'e.id', 'bt.matched_expense_id')
+    // a paycheck link clears weeks after payday: its window reaches back to the check's pay date
+    .leftJoin('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
     .joinRaw(`left join lateral (
         select coalesce(sum(case when rbt.status = 'refund_applied' then (rbt.suggestion->>'refundAmount')::numeric else rbt.amount end), 0) as rsum
         from bank_transactions rbt
@@ -1019,14 +1021,15 @@ async function healEditedExpenseLinks() {
            or (rbt.status = 'ignored' and rbt.suggestion->>'releasedRefundOf' = e.id::text)
       ) rs on true`)
     .where('bt.status', 'matched_expense')
-    .select('bt.id as id', 'bt.amount as bt_amount', 'bt.txn_date as txn_date', 'bt.description as description',
+    .select(db.raw("to_char(pc.pay_date, 'YYYY-MM-DD') as pay_date"), 'bt.id as id', 'bt.amount as bt_amount', 'bt.txn_date as txn_date', 'bt.description as description',
       'bt.account_type as account_type', 'bt.match_method as match_method', 'bt.matched_expense_id as expense_id',
       'e.amount as e_amount', 'e.expense_date as e_date', 'e.vendor_name as vendor_name', 'e.payment_method as payment_method',
       db.raw('rs.rsum as rsum'));
   const linkOk = (link, exp, rsum) => {
     const txn = toDateStr(link.txn_date);
     const expDate = toDateStr(exp.expense_date);
-    const windowOk = expDate >= addDays(txn, -EXPENSE_DATE_WINDOW_DAYS) && expDate <= addDays(txn, EXPENSE_DATE_WINDOW_DAYS);
+    const win = link.pay_date ? payrollExpenseWindow(txn, [link.pay_date]) : { from: addDays(txn, -EXPENSE_DATE_WINDOW_DAYS), to: addDays(txn, EXPENSE_DATE_WINDOW_DAYS) };
+    const windowOk = expDate >= win.from && expDate <= win.to;
     const auto = link.match_method === 'expense_amount_date_vendor';
     // AUTO links must hold the matcher's exact-cent policy (a one-cent
     // edit voids the automatic justification); MANUAL links keep the
