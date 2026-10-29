@@ -160,12 +160,18 @@ postgres('Partial payments against migrated PostgreSQL', () => {
 
     const err = await refusalOf(record(invoice.id, { amountCents: 2000 }));
     expect(err).toMatchObject({ statusCode: 409 });
-    expect(err.message).toMatch(/open card dispute/);
+    expect(err.message).toMatch(/card dispute that is not settled yet/);
     expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+
+    // Won, but this invoice is not restored yet (the combined closure marks the payment won first; a crash can stop there): still refused.
+    await database('payments').where({ id: disputed.id || disputed }).update({
+      status: 'paid', metadata: JSON.stringify({ dispute_id: 'dp_synthetic', invoice_id: invoice.id, dispute_final: 'won' }),
+    });
+    expect((await refusalOf(record(invoice.id, { amountCents: 2000 }))).message).toMatch(/card dispute that is not settled yet/);
 
     // Lost: the card money is gone for good, so the office can take parts again.
     await database('payments').where({ id: disputed.id || disputed }).update({
-      metadata: JSON.stringify({ dispute_id: 'dp_synthetic', dispute_invoice_id: invoice.id, dispute_final: 'lost' }),
+      status: 'disputed', metadata: JSON.stringify({ dispute_id: 'dp_synthetic', dispute_invoice_id: invoice.id, dispute_final: 'lost' }),
     });
     await record(invoice.id, { amountCents: 2000 });
     expect(Number((await row(invoice.id)).amount_paid)).toBe(20);

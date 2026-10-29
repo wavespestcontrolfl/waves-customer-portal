@@ -351,7 +351,7 @@ describe('an open card dispute (pre-push P0)', () => {
     harness({ dispute: { id: 'pay-disputed' } });
     const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 2000 }));
     expect(err.statusCode).toBe(409);
-    expect(err.message).toMatch(/open card dispute/);
+    expect(err.message).toMatch(/card dispute that is not settled yet/);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
