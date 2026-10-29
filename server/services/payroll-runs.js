@@ -466,7 +466,8 @@ async function evaluate(conn, run, { lock = false } = {}) {
 // bank line, needs the owner's pick when a suggestion names the check, else not seen yet.
 async function bankStatusByCheck(conn, rows) {
   const ids = rows.map((row) => row.id);
-  const matched = new Map((await conn('bank_transactions').whereIn('matched_payroll_check_id', ids)
+  // a link whose expense is gone is not a match (the next pass sends the line back to review)
+  const matched = new Map((await conn('bank_transactions').whereIn('matched_payroll_check_id', ids).whereNotNull('matched_expense_id')
     .select('matched_payroll_check_id', conn.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date")))
     .map((line) => [line.matched_payroll_check_id, line.txn_date]));
   const parked = await conn('bank_transactions').where({ status: 'unmatched' })

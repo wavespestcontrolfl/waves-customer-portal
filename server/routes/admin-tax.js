@@ -760,8 +760,15 @@ router.get('/filings', async (req, res, next) => {
     // the owner's own Mark filed / paid stays the only thing that changes its status.
     let seenInBank = null;
     if (payrollBankMatchOn() && filings.length) {
-      seenInBank = new Map((await db('bank_transactions').whereIn('matched_tax_filing_id', filings.map(f => f.id))
-        .select('matched_tax_filing_id', db.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date")))
+      // Only a link that still holds: the expense it made or reused exists, and the row still says the amount it
+      // had when linked (or the line's amount). Anything else waits for the next pass to send it back to review.
+      seenInBank = new Map((await db('bank_transactions as bt')
+        .join('tax_filing_calendar as f', 'f.id', 'bt.matched_tax_filing_id')
+        .join('expenses as e', 'e.id', 'bt.matched_expense_id')
+        .whereIn('bt.matched_tax_filing_id', filings.map(f => f.id))
+        .whereRaw(`(round(coalesce(f.amount_paid, f.amount_due, -1) * 100) = round(bt.amount * 100)
+          or round(coalesce(f.amount_paid, f.amount_due, -1) * 100) = (bt.suggestion->'payrollMatch'->>'amountCents')::numeric)`)
+        .select('bt.matched_tax_filing_id', db.raw("to_char(bt.txn_date, 'YYYY-MM-DD') as txn_date")))
         .map(line => [line.matched_tax_filing_id, line.txn_date]));
     }
     res.json({

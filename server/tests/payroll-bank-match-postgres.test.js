@@ -318,6 +318,24 @@ postgres('payroll bank match in the bank import', () => {
         expect(ok).toMatchObject({ ok: true, reused: true });
       });
 
+      it('restores the deduction in proportion to the expense\'s amount now, and keeps a deduction the owner typed since', async () => {
+        const expenseId = await manual({ amount: '812.63', tax_deductible_amount: '406.32' });
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        await bankImport.runDeterministicMatching();
+        await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
+        // a refund later cut the expense to half
+        await trx('expenses').where({ id: expenseId }).update({ amount: '406.32' });
+        expect(await bankImport.unlinkPayrollMatched(await row(id))).toBe(true);
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '203.16' });
+
+        const typed = await manual({ amount: '812.63', tax_deductible_amount: '100.00', vendor_name: 'Typed sample' });
+        const second = await line('CHECK 1042 B', '812.63', '2026-10-29');
+        await bankImport.claimPayrollLink({ row: await row(second), check: { id: checkA }, by: 'owner', expenseId: typed, createNew: false });
+        await trx('expenses').where({ id: typed }).update({ tax_deductible_amount: '50.00' });
+        await bankImport.unlinkPayrollMatched(await row(second));
+        expect(await trx('expenses').where({ id: typed }).first()).toMatchObject({ tax_deductible_amount: '50.00' });
+      });
+
       it('the owner may book as new beside it', async () => {
         await manual();
         const id = await line('CHECK 1042', '812.63', '2026-10-28');

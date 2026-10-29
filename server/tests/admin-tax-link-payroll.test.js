@@ -10,12 +10,13 @@ const builder = (table) => {
   const b = {
     where: jest.fn(() => b),
     orderBy: jest.fn(() => b),
+    join: jest.fn(() => b),
     limit: jest.fn(() => b),
     offset: jest.fn(() => b),
     count: jest.fn(() => b),
     whereIn: jest.fn(() => b),
     whereRaw: jest.fn(() => b),
-    select: jest.fn(() => (table === 'bank_transactions' ? Promise.resolve(state.seen) : b)),
+    select: jest.fn(() => (String(table).startsWith('bank_transactions') ? Promise.resolve(state.seen) : b)),
     first: jest.fn(() => Promise.resolve(state.bankRow)),
   };
   b.then = (resolve, reject) => Promise.resolve(table === 'tax_filing_calendar' ? state.filings : []).then(resolve, reject);
@@ -211,6 +212,6 @@ describe('filing calendar', () => {
     state.filings = [filing];
     const body = await (await fetch(`${baseUrl}/admin/tax/filings`)).json();
     expect(body.filings[0]).not.toHaveProperty('bankSeenOn');
-    expect(mockDb).not.toHaveBeenCalledWith('bank_transactions');
+    expect(mockDb.mock.calls.some(([t]) => String(t).startsWith('bank_transactions'))).toBe(false);
   });
 });

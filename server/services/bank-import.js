@@ -1570,7 +1570,7 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
               by,
               ...(check ? { checkId: target.id } : { filingId: target.id, tax: taxKind, amountCents: payrollMatch.filingCents(target) }),
               expenseId: expense.id,
-              ...(reused ? { reusedExpense: true, prevCategoryId: reused.category_id || null, prevDeductible: reused.tax_deductible_amount == null ? null : reused.tax_deductible_amount } : {}),
+              ...(reused ? { reusedExpense: true, prevAmount: reused.amount, prevCategoryId: reused.category_id || null, prevDeductible: reused.tax_deductible_amount == null ? null : reused.tax_deductible_amount } : {}),
             },
           }, [...PAYROLL_CANDIDATE_KEYS, 'noMatch']),
         });
@@ -1647,8 +1647,24 @@ async function releasePayrollExpense(trx, live) {
     const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
     const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME }).first('id');
     if (category) {
-      await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id })
-        .update({ category_id: pm.prevCategoryId || null, tax_deductible_amount: pm.prevDeductible });
+      const current = await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).forUpdate()
+        .first('amount', 'tax_deductible_amount');
+      if (current) {
+        const patch = { category_id: pm.prevCategoryId || null };
+        // The match set the deduction to 0. A value the owner has typed since stays. Otherwise the old deduction
+        // comes back in proportion to the amount now (a refund or an edit may have changed it), never above it.
+        if (Number(current.tax_deductible_amount || 0) === 0) {
+          if (pm.prevDeductible == null) patch.tax_deductible_amount = null;
+          else {
+            const prevAmount = Number(pm.prevAmount);
+            const scaled = prevAmount > 0 && Number(current.amount) !== prevAmount
+              ? Math.round(Number(pm.prevDeductible) * (Number(current.amount) / prevAmount) * 100) / 100
+              : Number(pm.prevDeductible);
+            patch.tax_deductible_amount = Math.min(scaled, Number(current.amount));
+          }
+        }
+        await trx('expenses').where({ id: live.matched_expense_id }).update(patch);
+      }
     }
     return;
   }
