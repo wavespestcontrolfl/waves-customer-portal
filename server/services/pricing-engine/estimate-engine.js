@@ -107,7 +107,7 @@ const {
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
   normalizeRoachType, assertFinitePriceFields,
-  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, isDeadAnimalRidingHostLine, buildPricingError,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, buildPricingError,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
@@ -2271,10 +2271,9 @@ function generateEstimate(input) {
   }
 
   // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, NEW QUOTES
-  // ONLY). Priced LAST among the rodent one-time lines on purpose: "riding" (no
-  // drive, no admin) means this same estimate already carries another PRICED
-  // rodent one-time line, and the engine decides that from its own line list.
-  // A `riding` (or any other) key on the request is never read. The gate is
+  // ONLY). One price per access tier (owner 2026-10-29): other rodent work on
+  // this estimate does not change it, and only `tier` is read from the request;
+  // staff discount on the estimate itself (manualDiscount). The gate is
   // enforced BEFORE the commercial hand-off so a commercial property cannot
   // swallow the input silently; a malformed envelope throws, never skips.
   // Commercial property: always a manual quote (no scopedOneTime opt-in, and the
@@ -2288,7 +2287,6 @@ function generateEstimate(input) {
     if (!useCommercialManualQuote(deadAnimalInput, 'pest_control')) {
       const result = priceDeadAnimalRemoval({
         tier: deadAnimalInput === true ? undefined : deadAnimalInput.tier,
-        riding: lineItems.some(isDeadAnimalRidingHostLine),
       });
       (result.manualReviewReasons || []).forEach(addManualReviewReason);
       lineItems.push(result);

@@ -6220,15 +6220,15 @@ function priceSanitation(options = {}) {
 // (the owner's add-on cost formula is documented there and in the pricing
 // engine README; it is NOT evaluated here).
 //
-// Input: { tier: 'reachable' | 'attic' | 'in_wall', riding: boolean }
+// Input: { tier: 'reachable' | 'attic' | 'in_wall' }
 //   reachable  easy reach (garage, crawl-space opening, under a cabinet, attic floor near the hatch)
 //   attic      attic search (found by smell, insulation moved as needed)
 //   in_wall    inside a wall or ceiling (needs an opening): a CUSTOM QUOTE, never priced here
 //   no tier    not chosen: a CUSTOM QUOTE (there is no default tier)
-// `riding` = the same estimate already has another PRICED rodent one-time line
-// (isDeadAnimalRidingHostLine), so there is no drive and no admin on this line.
-// Only the estimate engine decides it, from its own line list; the engine never
-// reads a client value for it.
+// One price per access tier (owner 2026-10-29: "think we just have the 3 options,
+// and can discount if they have other work"): other rodent work on the same
+// estimate does not lower it. Staff give a discount on the estimate itself
+// (input.manualDiscount, percent or dollars), which reaches this line.
 //
 // Gate (NEW QUOTES ONLY): enforced here, the deepest chokepoint, like
 // assertAreaAddOnsEnabled. Off = a 400 failClosed error, never a silent drop.
@@ -6244,32 +6244,6 @@ function assertDeadAnimalRemovalEnabled() {
   err.isOperational = true;
   err.failClosed = true;
   throw err;
-}
-
-// Rodent one-time line keys that count as "the crew is already on site": trapping, exclusion
-// (V1, V2 sections, the alternate sqft-tiered exclusion, and the rodent guarantee combo, whose
-// price carries the exclusion work: calculateRodentGuaranteeCombo), wire mesh, bird box,
-// sanitation and the paid rodent inspection. A line counts only when it is PRICED (not a custom
-// or manual quote, price above zero). Nothing recurring (bait), no fee, bond, payment-only rider
-// (rodent_guarantee) or discount row.
-const DEAD_ANIMAL_RIDING_HOST_SERVICES = new Set([
-  'rodent_trapping',
-  'exclusion',
-  'rodent_exclusion',
-  'exclusion_v2',
-  'rodent_guarantee_combo',
-  'rodent_wire_mesh',
-  'rodent_bird_box',
-  'rodent_sanitation',
-  'rodent_inspection',
-]);
-
-function isDeadAnimalRidingHostLine(line) {
-  if (!line || typeof line !== 'object') return false;
-  if (!DEAD_ANIMAL_RIDING_HOST_SERVICES.has(line.service)) return false;
-  if (line.quoteRequired === true || line.requiresCustomQuote === true) return false;
-  const amount = Number(line.price ?? line.total ?? line.subtotal);
-  return Number.isFinite(amount) && amount > 0;
 }
 
 // The tier a request names, or null when none was chosen. An unknown non-empty
@@ -6295,7 +6269,6 @@ function priceDeadAnimalRemoval(options = {}) {
   const customQuote = (reason) => ({
     ...base,
     price: null,
-    riding: false,
     quoteRequired: true,
     requiresCustomQuote: true,
     customQuoteReason: reason,
@@ -6310,20 +6283,19 @@ function priceDeadAnimalRemoval(options = {}) {
   if (tier === 'in_wall') return customQuote('dead_animal_in_wall_custom_quote');
 
   const tierCfg = cfg[tier];
-  const riding = options.riding === true;
-  const price = riding ? tierCfg.riding : tierCfg.alone;
+  // `alone` is the tier's one price (the key predates the one-price rule; the stored
+  // pricing_config row keeps it).
+  const price = tierCfg.alone;
   // The cost this price stands for, stated for the pricing audit (it reads costs.total when
-  // no inventory mapping exists). Never used to compute the price. A riding line carries no
-  // drive and no admin.
-  const driveMin = riding ? 0 : GLOBAL.DRIVE_TIME;
-  const adminCost = riding ? 0 : AREA_ADDONS.adminPerJob;
+  // no inventory mapping exists). Never used to compute the price.
+  const driveMin = GLOBAL.DRIVE_TIME;
+  const adminCost = AREA_ADDONS.adminPerJob;
   const laborCost = (tierCfg.durationMin + driveMin) * GLOBAL.LABOR_RATE / 60;
   const totalCost = tierCfg.material + laborCost + adminCost;
   return {
     ...base,
     price,
-    riding,
-    pricingBasis: riding ? 'riding' : 'alone',
+    pricingBasis: 'fixed_tier',
     durationMin: tierCfg.durationMin,
     costs: {
       material: roundMoney(tierCfg.material),
@@ -6336,8 +6308,7 @@ function priceDeadAnimalRemoval(options = {}) {
     margin: Math.round((price - totalCost) / price * 1000) / 1000,
     manualReviewReasons: [],
     warnings: [],
-    detail: `${tierCfg.label} - ${tierCfg.durationMin} min on site | `
-      + (riding ? 'Same visit as the other rodent work on this estimate' : 'Own visit'),
+    detail: `${tierCfg.label} - ${tierCfg.durationMin} min on site`,
   };
 }
 
@@ -10300,7 +10271,7 @@ module.exports = {
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
-  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, isDeadAnimalRidingHostLine, DEAD_ANIMAL_RIDING_HOST_SERVICES,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
