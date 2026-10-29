@@ -450,9 +450,10 @@ describe('write calls', () => {
     // the probes below leave out required inputs on purpose; required is checked on its own at the end
     const check = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys).filter((p) => !/omits the required input/.test(p));
     const checkAll = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys);
-    // a template message type and a booking property pin: not on main
+    // a template message type: not on main
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } })).toHaveLength(1);
-    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } })).toHaveLength(1);
+    // the booking property pin landed (BUILT_GAPS): property_id is on main
+    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } })).toEqual([]);
     expect(check({ tool: 'save_customer_estimate', input: { customer_id: 'c', property_id: 'p', measurement_key: 'back_lot' } })).toHaveLength(1);
     expect(check({ tool: 'reschedule_appointment_series', input: { appointment_id: 'a' } })).toHaveLength(1);
     expect(check({ tool: 'update_customer', input: { customer_id: 'c', updates: { favorite_color: 'x' } } })).toHaveLength(1);
@@ -461,7 +462,6 @@ describe('write calls', () => {
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } }, ['reschedule_notice_send'])).toEqual([]);
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'billing_notice' } }, ['reschedule_notice_send'])).toHaveLength(1);
     expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } }, ['create_appointment_property_pin'])).toEqual([]);
-    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } }, ['reschedule_notice_send'])).toHaveLength(1);
     // and plain main calls are clean
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message: 'hi', message_type: 'manual' } })).toEqual([]);
     // a required input that is left out is caught, and a gap that renders the text relaxes it

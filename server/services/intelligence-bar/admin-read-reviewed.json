@@ -705,6 +705,81 @@
       "hash": "fff055e70de321e980fb41bf0337fbfc"
     },
     {
+      "endpoint": "/admin/email-templates",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "query": [
+        "mode",
+        "purpose",
+        "q",
+        "status"
+      ],
+      "keywords": [
+        "email templates",
+        "email template list",
+        "is an email template active",
+        "which email templates exist",
+        "customer email templates"
+      ],
+      "keep": [
+        "templates.*.id",
+        "templates.*.name",
+        "templates.*.description",
+        "templates.*.mode",
+        "templates.*.purpose",
+        "templates.*.audience",
+        "templates.*.status",
+        "templates.*.from_name",
+        "templates.*.default_cta_label",
+        "templates.*.last_published_at",
+        "templates.*.version_count",
+        "templates.*.draft_count",
+        "templates.*.automation_count"
+      ],
+      "freeText": {
+        "description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "7eca8f5c382949092cebdbb948877d81"
+    },
+    {
+      "endpoint": "/admin/email-templates/automations",
+      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "scope": "broad",
+      "keywords": [
+        "email automations",
+        "automatic emails",
+        "what emails go out automatically",
+        "email triggers",
+        "email automation status",
+        "which emails are active"
+      ],
+      "keep": [
+        "automations.*.name",
+        "automations.*.description",
+        "automations.*.trigger_description",
+        "automations.*.template_name",
+        "automations.*.template_status",
+        "automations.*.delay_minutes",
+        "automations.*.audience",
+        "automations.*.status",
+        "automations.*.frequency_cap",
+        "automations.*.timezone",
+        "automations.*.send_count_30d",
+        "automations.*.would_send_30d",
+        "automations.*.would_block_30d",
+        "automations.*.last_published_at"
+      ],
+      "freeText": {
+        "description": "content",
+        "trigger_description": "content"
+      },
+      "signals": [],
+      "unresolved": [],
+      "hash": "19248f920bdbcbfd4dcb1e5d3019ad67"
+    },
+    {
       "endpoint": "/admin/estimates",
       "reviewed": "Handler (admin-estimates.js GET /): estimates joined to the creator, every row mapped to an explicit field list (status, contact, totals, dates, views, clicks, source, service lines, notes, decline reason, review material from estimate_data); limit default 50, max 500. pricingRisk is not offered (it runs the pricing-risk batch). The estimate token is omitted by the row. credential_field:token and credential_link:hasToken are the bearer token field and a presence check. Free text: notes, declineReason, dispositionNote, reviewNotes and description are withheld by the key-name default; leadSourceDetail and the agent draft reasoning, assumptions and uncertainty are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read for PR #6432: the row mapping adds perApplication (service label, price, visits from the frozen proposal lines) and hasAcceptanceRecord (a boolean); both are outside the keep list, so neither reaches the model. New reads are batched and read-only: annual_prepay_terms ids, customers (id, pipeline_stage, monthly_rate, billing_mode only) and estimate_acceptances ids; the signals and unresolved callees are unchanged. Re-read for PR #6432 rounds 4-5: rows add staffPreviewable (a boolean, outside the keep list, so it never reaches the model) from staffPreviewableIdSet: the /data gate's pure row predicates (adminDraftPreviewEligible, isEstimateCustomerViewable) and callSideBlocksForEstimates, which reads call_log (id, metadata, processing_token, processing_status, extraction_attempts, created_at, twilio_call_sid) and leads (id, twilio_call_sid) once per page only to decide that boolean. The per-application lane also reads estimates (id, estimate_group_id, customer_id) and customers (id, live only) for a grouped row's sibling owner (resolveGroupedEstimateOwnerIds), and the batched phone match reads customers (id, phone, email, address fields, pipeline_stage, monthly_rate, billing_mode, updated_at) only to choose the lane; none of those values is returned. estimate_data is parsed once (parseEstimateData). New credential-named signals, accepted by name: credential_field:processing_token is the call row's processing claim, read only to judge whether the call is in flight and never returned; credential_link:canonicalizeRouteTokens is an address-word helper (road-word rewrite) reached through the address comparator, with no credential or link. All new reads are read-only; no write, outside call or file. Re-read for PR #6432 round 6: the per-application lane splits by isEstimateAcceptActive (pure). An offer that can still be accepted reads today's lane through the batched reads above (rowsBilledPerApplicationToday); every other row reads the lane it was sent in from its own frozen send bundle (sentBundleBillsPerApplication, a pure walk for billedPerApplication flags). No new table, column or response key. Re-read for round 7: one call-side read now serves both staffPreviewable and the per-application lane (a call-blocked offer is closed and shows its send-time lane), and an open offer shows its price only while sentSnapshotServesAsIs (the customer page's own pure fast-path predicate, extracted unchanged from buildPricingBundleInner) holds. No new table, column or response key. effect_call:upsertSupplement is the in-memory array helper inside recurringServicesWithSupplements, reached through that predicate; it writes nothing. Re-reviewed for #6503 (mosquito misting pricer, dark): the chain now reaches two pure string predicates, isMistingSystemIdentity (estimate-converter.js recurringServiceKey, via utils/mosquito-misting-system.js) and mistingProposalIdentity (estimate-proposal.js normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem). Both read a row's key or label and return a string or null: no table, no query, no write, no new response key. normalizeLineItem / normalizeProgram / normalizeCorrectiveWorkItem additionally keep a line's own id, service, originalRequestedService and identity fields when the line is the misting system (fields the row already carried in the estimate_data it reads). Nothing else in the read path changed. Re-signed for #6503 round 7: normalizeCorrectiveWorkItem (estimate-proposal.js) now also infers the misting identity from the row's text through the same pure predicate (mistingProposalIdentity, already in this row's unresolved list) and keeps the row's own id; no table, query, write or response key changed. Re-signed for #6503 round 8: mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also recognizes the canonical misting work labels; nothing in the read path's tables, queries, writes or response keys changed. Re-signed for #6503 round 8 (second): normalizeCorrectiveWorkItem persists an originalRequestedService marker for a misting row; same pure predicate, no table, query, write or response key changed. Re-signed for misting PR 2a: the converter now reads the stored misting install row and the protocol-matcher rules gained the misting program; the signals, tables, queries, writes and response keys did not change. Re-signed for misting PR 2a audit fixes: the converter and the misting identity helper gained the install line marker (kind misting_installation); the signals, tables, queries, writes and response keys did not change. Re-signed for the misting PR 2a multi-install fix: frozenMistingInstall now returns one entry per sold install and the invoice lines come from a shared helper; the signals, tables, queries, writes and response keys did not change. Re-signed for the v13 lawn outline (GATE_LAWN_OUTLINE_V13): the outline stale check reads contentLibraryVersion() instead of the CONTENT_LIBRARY_VERSION constant; the signals, tables, queries, writes and response keys did not change. Re-signed for the Pynamite retail misting change (2026-10-24): mistingProposalIdentity (utils/mosquito-misting-system.js, pure text predicate) now also accepts the two frozen MistAway-era tier labels (MISTING_LEGACY_TIER_LABELS, a code-owned constant) beside the live tier-table labels, so a stored label-only misting line keeps its identity; the signals, tables, queries, writes and response keys did not change. Re-signed for #6684 (commercial Auto Pay, GATE_COMMERCIAL_AUTOPAY, 2026-10-25): normalizePaymentTerms (estimate-proposal.js, pure string normalizer reached through normalizeCommercialTerms) now also returns the proposal-only token autopay, compared against AUTOPAY_PAYMENT_TERMS (a string constant imported from shared/commercial-agreement-terms.cjs); those are the only two changes in the chain. The signals, tables, queries, writes and response keys did not change. Re-read for PR #6695: estimate-pricing-audit SERVICE_MAP adds the registry labels Bora-Care Treatment, German Roach Cleanout and Cockroach Treatment to three keys. That changes only which inventory rows the pricing-risk batch costs, which this row does not offer; the response keys, signals and unresolved callees are unchanged. Re-read for the pre-slab audit product change: estimate-pricing-audit.js now costs a pre-slab line from the quoted product (pure in-memory arithmetic on persisted line fields) and estimate-result-container.js carries one more field when it merges duplicate lines; the handler, its reads, signals and unresolved callees are unchanged, and pricingRisk is still not offered. Re-reviewed 2026-10-26 (lawn outline detail PR): contentLibraryVersion() now also reads GATE_LAWN_OUTLINE_DETAIL to pick the stamp it compares; no new read, write or field. Re-reviewed 2026-10-26 (Tree & Shrub outline PR, GATE_TS_OUTLINE): the outline summary read adds service_outline_packets.service_line and keeps lawn and Tree & Shrub packets apart; while the gate is on, rows add treeShrubOutlineAvailable (a boolean from the row's own service lines) and treeShrubServiceOutline (the lawn summary's shape); both are outside the keep list, so neither reaches the model. tree-shrub-service-outline.js is reached only for constants, the gate reader and the protocol version (protocols.json, loaded at start). No new table, write or call. Re-signed for #6869 (commercial first visit, GATE_COMMERCIAL_FIRST_VISIT, 2026-10-26): normalizeProgram (estimate-proposal.js) keeps a program's optional visitMinutes (a bounded whole number the proposal save validates); merged with main's re-sign. The signals, unresolved callees, tables, queries, writes and response keys did not change. Re-reviewed 2026-10-26 (Pest Control outline PR, GATE_PEST_OUTLINE): the outline programs now come from service-outline-programs.js (Tree & Shrub and Pest Control: gate readers, stamp constants, the protocol version, and a pure test of each service line plus the row's monthly total); while the Pest Control gate is on, rows add pestOutlineAvailable (a boolean) and pestServiceOutline (the lawn summary's shape), both outside the keep list, so neither reaches the model. No new table, query, write or call. Re-reviewed 2026-10-26 (Mosquito outline PR, GATE_MOSQUITO_OUTLINE): service-outline-programs.js gains a mosquito entry whose offer check reads the stored estimate data already loaded for the row (a pure read of the recurring mosquito row through estimate-result-container.js, with the row's own pricing_authority picking the stored container); while the Mosquito gate is on, rows add mosquitoOutlineAvailable (a boolean) and mosquitoServiceOutline (the lawn summary's shape), both outside the keep list, so neither reaches the model. No new table, query, write or call; the unresolved callees did not change.",
       "scope": "broad",
@@ -1189,6 +1264,23 @@
       "hash": "221af5cdec979b70c219d9f873ac8b98"
     },
     {
+      "endpoint": "/admin/kpi-targets",
+      "reviewed": "Handler (admin-kpi-targets.js GET /, behind the router's adminAuthenticate + requireAdmin and cacheRoute(60), a response cache): kpi_targets select of metric, target, amber band, lower-is-better, updated_by, updated_at, mapped to numbers. No customer data, no write; read end to end.",
+      "scope": "broad",
+      "keywords": [
+        "kpi targets",
+        "revenue target",
+        "dashboard targets",
+        "goal for a metric",
+        "what is our target"
+      ],
+      "signals": [],
+      "unresolved": [
+        "routes/admin-kpi-targets.js#middleware cacheRoute()"
+      ],
+      "hash": "2d7b6590446c2e3e496ac8263fafe670"
+    },
+    {
       "endpoint": "/admin/leads",
       "reviewed": "Handler (admin-leads.js GET /): leads joined to lead_sources, technicians and estimates, leads.* plus source name and type, channel, estimate status and assigned name; filters status (open expands to the working statuses), source_name, channel, search, start_date, end_date, sort, order, page and limit (default 50, max 200); deleted leads are excluded. The estimates join selects only estimates.status (credential_table:estimates is the join, not a token read). The id, source, estimate_attachable and builder_warranty filters are not offered. The row omits the raw Twilio recording URL, the anonymous visitor id and the Google click id. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary and the other note-like keys are withheld by the key-name default; service_interest and extracted_data (typed or spoken lead text) are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
@@ -1630,6 +1722,35 @@
       "hash": "ba82ea574fd8734f90e320a09edb33f4"
     },
     {
+      "endpoint": "/admin/schedule/blackout-dates",
+      "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note.",
+      "scope": "broad",
+      "keywords": [
+        "blackout dates",
+        "days we are closed",
+        "closed days",
+        "holidays we are closed",
+        "weekly days off",
+        "are we open on a date",
+        "schedule closures"
+      ],
+      "freeText": {
+        "reason": "note"
+      },
+      "acceptSignals": [
+        "write:transaction"
+      ],
+      "signals": [
+        "write:transaction"
+      ],
+      "unresolved": [
+        "services/scheduling/blackout-dates.js#conn.transaction",
+        "services/scheduling/blackout-dates.js#fn",
+        "services/scheduling/holidays.js#holiday.dateIn"
+      ],
+      "hash": "9e35587b23a1c44cfd4e183dba6a15b0"
+    },
+    {
       "endpoint": "/admin/schedule/list",
       "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only. Re-reviewed for #6503 (mosquito misting pricer, dark): utils/service-normalizer.js, followed by this handler for service_type labels, now classifies a label through isMistingSystemIdentity (utils/mosquito-misting-system.js, a pure string predicate: exact mosquito_misting* key or the phrase 'misting system' / 'misting service plan') before the mosquito patterns, and its bare /misting/ entry is narrowed to the plan phrase; a design-visit label keeps its catalog name. No table, column, query or response key changed; the mapped columns are the same. Re-signed for #6503 round 7: utils/service-normalizer.js gained three label entries ahead of the design-visit one (Mosquito Misting System Installation / Refill / Maintenance keep their own labels); pure label mapping, no table, column, query or response key changed.",
       "scope": "broad",
@@ -1715,6 +1836,27 @@
       "signals": [],
       "unresolved": [],
       "hash": "bd907b8a4a1a71aa228546b03fdd60a9"
+    },
+    {
+      "endpoint": "/admin/settings/call-routing/status",
+      "reviewed": "Handler (admin-settings.js GET /call-routing/status, adminAuthenticate + requireAdmin): one system_settings read, mergeCallRoutingConfig (call-routing-config.js: pure normalization), isEnabled('voiceAiAgent') and decideVoiceRoute (voice-route-decision.js: pure decision on the config and the clock); returns booleans, the mode, the decision reason and two numbers. The agent endpoint URL is never returned (only whether one is set). No customer data, no write; read end to end. answersFirstReason is decideVoiceRoute's fixed reason code (system text), declared content.",
+      "scope": "broad",
+      "keywords": [
+        "call routing",
+        "where do calls ring",
+        "does the ai answer calls",
+        "voice agent status",
+        "call routing status",
+        "after hours calls"
+      ],
+      "signals": [
+        "effect_call:mergeCallRoutingConfig"
+      ],
+      "unresolved": [],
+      "hash": "6f5e691d782bb355a42980c2369ec13c",
+      "freeText": {
+        "answersFirstReason": "content"
+      }
     }
   ]
 }
