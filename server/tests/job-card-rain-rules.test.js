@@ -151,6 +151,19 @@ describe('buildSprayCheck with rain rules', () => {
     expect(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW }).verdicts[0].verdict).toBe('hold');
   });
 
+  test('a mid-hour start reads the hour it starts in and the next one, never a third (pre-push audit P1)', () => {
+    const windy = { ...celsius, max_wind_mph: 15 };
+    const at201 = new Date(NOW.getTime() + 60000); // 2:01 pm ET
+    const rows = (winds) => winds.map((windMph, i) => ({ startTime: new Date(NOW.getTime() + i * 3600000).toISOString(), temperatureF: 85, windMph, rainChance: 0 }));
+    const judgeAt = (hourly) => buildSprayCheck({ products: [windy], hourly, now: at201, rainRules: rulesOn([windy], PEST) }).verdicts[0];
+    // Wind at 4 pm only: outside the 2 pm and 3 pm periods.
+    expect(judgeAt(rows([5, 5, 20, 5])).verdict).toBe('ok');
+    expect(judgeAt(rows([5, 20, 5, 5]))).toMatchObject({ verdict: 'caution', reason: 'wind 20 mph at 3 pm — over the 15 mph limit' });
+    // The 2 pm and 3 pm periods are enough; no 4 pm row is needed (Celsius's 3 h rain window is, so it reads 3 rows).
+    expect(buildSprayCheck({ products: [{ id: 'w', name: 'Wind Only Spray', category: 'herbicide', max_wind_mph: 15, label_verified_at: '2026-05-28' }],
+      hourly: rows([5, 5]), now: at201, rainRules: rulesOn([], 'Interior Pest Treatment') }).verdicts[0].verdict).toBe('ok');
+  });
+
   test('Celsius heat: the label line (no surfactant above 90°F) is a caution with its action, and replaces the catalog 95°F', () => {
     const hotCelsius = { ...celsius, max_temp_f: 95, min_temp_f: 50 };
     const at = (temps) => buildSprayCheck({ products: [hotCelsius], hourly: hours([0, 0, 0, 0]).map((h, i) => ({ ...h, temperatureF: temps[i] ?? 85 })), now: NOW, rainRules: rulesOn([hotCelsius], PEST) }).verdicts[0];

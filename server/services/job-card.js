@@ -863,16 +863,6 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
     reason: () => c.reason(limits[c.limit]),
   }));
-  const siteRows = hoursAhead(SITE_HOURS);
-  const siteComplete = covers(siteRows, SITE_HOURS);
-  const siteLimitChecks = (limits) => LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
-    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: 'product limit',
-    tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
-    reason: (known, rows) => {
-      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, limits[c.limit]), c.limit === 'minTempF');
-      return worst ? SITE_TEXT[c.limit](worst.value, worst.at, limits[c.limit]) : c.reason(limits[c.limit]);
-    },
-  }));
   // Rain tiers the highest chance it reads: above holdAbove holds, above cautionAbove is a caution.
   const rainCheck = ({ hours, rows = hoursAhead(hours), complete = covers(rows, hours), label = `rain ${hours} h`, holdAbove = RAIN_HOLD_ABOVE_PCT, cautionAbove = RAIN_CAUTION_ABOVE_PCT, text, ...rest }) => ({
     ...rest, rows, complete, label, key: 'rainChance', kind: 'rain',
@@ -897,6 +887,23 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     return Number.isFinite(t) && t <= start && start < t + 3600000;
   });
   const startAt = startRow ? formatETTime(new Date(startRow.startTime)).replace(':00', '').toLowerCase() : null;
+  // Wind and temperature (step 2): the forecast period the work starts in and the next one, from that period's
+  // start, not a span from the minute (a 2:01 pm start reads 2 pm and 3 pm, never 4 pm). Both periods are needed.
+  const siteFrom = startRow ? Date.parse(startRow.startTime) : null;
+  const siteRows = siteFrom == null ? [] : (Array.isArray(hourly) ? hourly : []).filter((h) => {
+    const t = Date.parse(h.startTime);
+    return Number.isFinite(t) && t >= siteFrom && t < siteFrom + SITE_HOURS * 3600000;
+  });
+  const siteComplete = siteFrom != null && Array.from({ length: SITE_HOURS }, (_, i) => siteFrom + i * 3600000)
+    .every((t) => siteRows.some((h) => Date.parse(h.startTime) === t));
+  const siteLimitChecks = (limits) => LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
+    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: 'product limit',
+    tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
+    reason: (known, rows) => {
+      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, limits[c.limit]), c.limit === 'minTempF');
+      return worst ? SITE_TEXT[c.limit](worst.value, worst.at, limits[c.limit]) : c.reason(limits[c.limit]);
+    },
+  }));
   const rainRuleChecks = (product, limits) => {
     const rule = labelRainRuleFor(product);
     const dry = rule?.dryBeforeRain?.hours;
