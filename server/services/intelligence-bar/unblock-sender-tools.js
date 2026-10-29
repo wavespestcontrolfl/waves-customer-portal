@@ -159,8 +159,14 @@ async function verifiedPlan(input, pinned) {
   return { plan };
 }
 
-async function stillBlocked(id) {
-  return db('blocked_email_senders').where({ id }).first('id').catch(() => null);
+// Whether the blocklist row is still there after a failed unblock: 'present', 'gone' (a read that SUCCEEDED and found
+// no row), or 'unknown' (the read itself failed, which says nothing about the row and is never read as "gone").
+async function blockState(id) {
+  try {
+    return (await db('blocked_email_senders').where({ id }).first('id')) ? 'present' : 'gone';
+  } catch {
+    return 'unknown';
+  }
 }
 
 async function commitUnblock(input) {
@@ -176,7 +182,7 @@ async function commitUnblock(input) {
     });
   } catch (err) {
     logger.error(`[intelligence-bar:unblock-sender] unblock failed (${err?.code || err?.name || 'error'})`);
-    if (!(await stillBlocked(plan.blocked_id))) {
+    if ((await blockState(plan.blocked_id)) === 'gone') {
       return { ...base, success: true, warning: true, sent_to_customer: false,
         note: `${plan.blocked_target} is off the blocklist, but a later step reported a problem. Check the Email page.` };
     }

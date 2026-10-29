@@ -43,6 +43,7 @@ function freshState() {
 function makeTable() {
   const q = { filters: [], rawEq: [], nullCols: [], single: false, del: false };
   const run = () => {
+    if (S.failReads) throw new Error('read failed');
     const rows = S.rows.filter((r) => q.filters.every(([k, v]) => r[k] === v)
       && q.rawEq.every(([k, v]) => String(r[k] || '').toLowerCase() === v)
       && q.nullCols.every((k) => r[k] == null));
@@ -302,6 +303,20 @@ describe('the confirmed run', () => {
     expect(await confirm(card)).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
     spy.mockImplementationOnce(async () => { S.rows = []; throw new Error('late failure'); });
     expect(await confirm(card)).toMatchObject({ success: true, warning: true });
+    spy.mockRestore();
+  });
+
+  test('the unblock fails AND the read-back fails: outcome_unknown, never "off the blocklist"', async () => {
+    const card = await preview();
+    const spy = jest.spyOn(spamBlocker, 'unblockSender').mockImplementationOnce(async () => { S.failReads = true; throw new Error('connection lost'); });
+    const out = await confirm(card);
+    expect(out).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
+    expect(out.success).toBeUndefined();
+    expect(out.note).toBeUndefined();
+    S.failReads = false;
+    // A read that works and finds the row still there is outcome_unknown too (the unblock did not happen, or may not have).
+    spy.mockRejectedValueOnce(new Error('boom'));
+    expect(await confirm(card)).toMatchObject({ outcome_unknown: true });
     spy.mockRestore();
   });
 });

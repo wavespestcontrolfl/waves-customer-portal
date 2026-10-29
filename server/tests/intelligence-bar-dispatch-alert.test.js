@@ -60,6 +60,7 @@ function makeTable(name) {
   const matched = () => (S.tables[base] || []).filter((r) => q.filters.every(([k, v]) => r[k] === v)
     && q.isNull.every((k) => r[k] == null) && q.notNull.every((k) => r[k] != null));
   const run = () => {
+    if (S.failReads) throw new Error('read failed');
     if (q.patch) {
       if (q.raw) return [];
       const rows = matched();
@@ -349,6 +350,17 @@ describe('the confirmed run', () => {
     S.afterRollback = () => { alert().resolved_at = 'NOW'; };
     spy.mockRejectedValueOnce(new Error('late failure'));
     expect(await confirm(card)).toMatchObject({ success: true, warning: true });
+    spy.mockRestore();
+  });
+
+  test('the resolve fails AND the read-back fails: outcome_unknown, never "resolved"', async () => {
+    const card = await preview();
+    const spy = jest.spyOn(dispatchAlerts, 'resolveAlertAsDispatcher').mockImplementationOnce(async () => { S.failReads = true; throw new Error('connection lost'); });
+    const out = await confirm(card);
+    expect(out).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
+    expect(out.success).toBeUndefined();
+    expect(out.note).toBeUndefined();
+    S.failReads = false;
     spy.mockRestore();
   });
 });

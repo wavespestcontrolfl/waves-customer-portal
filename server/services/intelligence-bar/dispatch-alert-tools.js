@@ -240,8 +240,15 @@ async function verifiedPlan(input, pinned) {
 
 const changedError = () => Object.assign(new Error('The alert changed after the card was shown.'), { code: 'preview_changed' });
 
-async function readBack(alertId) {
-  return db('dispatch_alerts').where({ id: alertId }).first('resolved_at', 'resolved_by').catch(() => null);
+// Whether the alert reads back resolved after a failed resolve: true only when a read SUCCEEDED and shows it resolved.
+// A failed read says nothing about the alert, so it is never read as "done" (the caller then reports outcome_unknown).
+async function readsResolved(alertId) {
+  try {
+    const now = await db('dispatch_alerts').where({ id: alertId }).first('resolved_at');
+    return Boolean(now?.resolved_at);
+  } catch {
+    return false;
+  }
 }
 
 async function commitResolve(input, actionContext) {
@@ -263,8 +270,7 @@ async function commitResolve(input, actionContext) {
       return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: 'The alert changed or was already resolved after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.' };
     }
     logger.error(`[intelligence-bar:dispatch-alert] resolve failed (${err?.code || err?.name || 'error'})`);
-    const now = await readBack(plan.alert_id);
-    if (now?.resolved_at) {
+    if (await readsResolved(plan.alert_id)) {
       return { ...base, success: true, warning: true, sent_to_customer: false,
         note: `The ${plan.alert_label} alert is resolved, but a later step reported a problem. Check the Dispatch board.` };
     }
