@@ -1629,6 +1629,8 @@ function toCsv(rows = []) {
 module.exports = {
   POLICY_KEY,
   DEFAULT_POLICY,
+  // The payout sources the Reviews page shows and pays; payroll imports the same (payroll-review-bonuses.js).
+  PAYOUT_ELIGIBLE_SOURCES,
   getPolicy,
   savePolicy,
   createPayoutForReviewRequest,
