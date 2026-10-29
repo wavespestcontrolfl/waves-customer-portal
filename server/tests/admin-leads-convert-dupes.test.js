@@ -1399,3 +1399,81 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
     });
   });
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// booked visit also gets the arrival-window route check (a SECOND, advisory
+// probe after the insert), its warning joins the response's warnings, and its
+// technician's day is numbered inside the booking transaction. Warn only.
+describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_SAVES', () => {
+  const routeCheck = require('../services/scheduling/staff-save-route-check');
+  const arrivalRoute = require('../services/scheduling/arrival-route');
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2027-01-15. Review the route before driving it.';
+  let warningsSpy;
+  let placeSpy;
+  let realPlaceSpy;
+  beforeEach(() => {
+    db.mockReset();
+    warningsSpy = jest.spyOn(routeCheck, 'staffSaveRouteWarnings').mockResolvedValue([ROUTE_WARNING]);
+    placeSpy = jest.spyOn(routeCheck, 'placeStaffSavedVisit').mockResolvedValue(null);
+    realPlaceSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    realPlaceSpy.mockRestore();
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  });
+
+  it('the booked visit is route-checked inside the transaction, the warning is returned, and the booking commits', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      // The route-check helper is spied (it skips an unassigned visit on its own, pinned in
+      // staff-save-route-check.test.js); only the wiring is under test here.
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.warnings).toEqual([ROUTE_WARNING]);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+      expect(warningsSpy).toHaveBeenCalledTimes(1);
+      const [conn, args] = warningsSpy.mock.calls[0];
+      expect(conn.isTransaction).toBe(true);
+      expect(args).toMatchObject({ serviceId: 'appt-1', date: '2027-01-15', windowStart: '10:00', technicianId: null });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', source: 'lead_appointment' });
+    });
+  });
+
+  it('gate off (the real helper): no route probe and no route number, the response is as before', async () => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toBeUndefined();
+      expect(realPlaceSpy).not.toHaveBeenCalled();
+      // Only the one overlap probe ran on scheduled_services.
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toHaveLength(1);
+    });
+  });
+
+  it('gate on (the real helper): an unassigned booking is not route-checked or numbered', async () => {
+    warningsSpy.mockRestore();
+    placeSpy.mockRestore();
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toBeUndefined();
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c))).toHaveLength(1);
+    });
+  });
+});

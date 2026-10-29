@@ -2176,6 +2176,22 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         .soleActivePropertyId(customerId, trx);
       const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
 
+      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+      // when off): the booked visit gets the arrival-window check Edit's save
+      // runs, on the road times the pickers already bought, and then its
+      // technician's day is numbered in the order that check certified
+      // (placeMovedVisit, inside this transaction; it needs
+      // GATE_STAFF_ROUTE_INSERTION too). WARN ONLY: a route result never
+      // blocks the booking. The overlap probe above is unchanged.
+      {
+        const routeCheck = require('../services/scheduling/staff-save-route-check');
+        bookingWarnings.push(...await routeCheck.staffSaveRouteWarnings(trx, {
+          serviceId: appt.id, date: occupancyDate, windowStart: appt.window_start, windowEnd: appt.window_end,
+          technicianId: appt.technician_id,
+        }));
+        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appt.id, source: 'lead_appointment' });
+      }
+
       // Two-treatment package (cockroach / flea): visit 2 books with visit 1
       // — gate-dark, savepoint-isolated, no-op for every other service
       // (package-followup-booking.js).

@@ -3915,6 +3915,7 @@ async function createAppointment(input, actionContext = {}) {
   // still never blocks the booking.
   let appointment;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   try {
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
@@ -4049,6 +4050,22 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+    // when off): the booked visit gets the arrival-window check Edit's save
+    // runs, on the road times the pickers already bought, and its technician's
+    // day is numbered in the order that check certified (inside this
+    // transaction; needs GATE_STAFF_ROUTE_INSERTION too). ADVISORY ONLY: its
+    // result is a warning in the tool result and is kept out of the pinned
+    // "no overlap" comparison above, so it can never refuse or roll back the
+    // booking; only a real overlap refuses, as before.
+    {
+      const routeCheck = require('../scheduling/staff-save-route-check');
+      routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+        serviceId: created.id, date: dateStr, windowStart: created.window_start, windowEnd: created.window_end,
+        technicianId: created.technician_id,
+      });
+      await routeCheck.placeStaffSavedVisit(trx, { serviceId: created.id, source: 'intelligence_bar' });
+    }
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -4268,7 +4285,7 @@ async function createAppointment(input, actionContext = {}) {
 
   // One `warning` key — both the reminder failure and the occupancy advisory
   // must survive when they coincide (the card renders result.warning).
-  const warnings = [reminderWarning, overlapAdvisory].filter(Boolean);
+  const warnings = [reminderWarning, overlapAdvisory, ...routeAdvisories].filter(Boolean);
   return {
     success: true,
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),
@@ -4447,6 +4464,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  let routeAdvisories = [];
   // A package visit 1 with a live visit 2: the card shows one visit, so the
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
@@ -4562,6 +4580,21 @@ async function rescheduleAppointment(input, actionContext = {}) {
         });
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
+      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+      // when off): the moved visit gets the arrival-window check Edit's save
+      // runs, on the road times the pickers already bought, and its
+      // technician's day is numbered in the order that check certified (inside
+      // this transaction; needs GATE_STAFF_ROUTE_INSERTION too). ADVISORY
+      // ONLY: a route result is a warning in the tool result and never
+      // refuses the move.
+      if (updatedRows && probeWindowStart && probeWindowEnd) {
+        const routeCheck = require('../scheduling/staff-save-route-check');
+        routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
+          serviceId: appointment_id, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
+          technicianId: committedTechId,
+        });
+        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appointment_id, source: 'intelligence_bar' });
+      }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
     thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
@@ -4663,8 +4696,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
     // ONE warning key (card renders result.warning only): advisory overlap
     // note + lifecycle-cleanup + group-repair + audit-append failures
     // COMBINE, never overwrite.
-    ...(overlapAdvisory || lifecycleWarning || groupWarning || auditWarning
-      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
+    ...(overlapAdvisory || routeAdvisories.length || lifecycleWarning || groupWarning || auditWarning
+      ? { warning: [overlapAdvisory, ...routeAdvisories, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
       : {}),
   };
 }
