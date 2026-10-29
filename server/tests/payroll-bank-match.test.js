@@ -121,6 +121,15 @@ describe('tax-looking lines are never net pay', () => {
     expect(planNetPay({ row: line({ description: 'EFTPS PAYMENT', amount: '812.64' }), checks: [check()] })).toEqual({ action: 'none' });
   });
 
+  it('never treats a Florida sales tax payment as net pay or as a rival line', () => {
+    const sales = line({ id: 'sales', description: 'FL DEPT OF REVENUE SALES TAX', amount: '812.63' });
+    expect(planNetPay({ row: sales, checks: [check()] })).toEqual({ action: 'none' });
+    expect(planNetPay({ row: line({ description: 'DR-15 PAYMENT' }), checks: [check()] })).toEqual({ action: 'none' });
+    expect(planNetPay({ row: line(), checks: [check()], peers: [line(), { ...sales, txn_date: '2026-11-02' }] }).action).toBe('link');
+    // and it is not a payroll tax payment either
+    expect(planTaxPayment({ row: sales, filings: [filing({ source_key: 'payroll:rt6:2026-Q3', amount_due: '812.63', due_date: '2026-10-30' })] }).action).toBe('none');
+  });
+
   it('does not let a tax line count as a rival bank line for a paycheck', () => {
     const rival = line({ id: 'tax-line', description: 'IRS USATAXPYMT', txn_date: '2026-11-02' });
     expect(planNetPay({ row: line(), checks: [check()], peers: [line(), rival] }).action).toBe('link');

@@ -43,6 +43,12 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Any tax-agency debit, payroll tax or not (IRS, Florida DOR including its sales tax payment, DR-15): never net pay.
+function isTaxAgencyLine(description) {
+  const text = String(description || '');
+  return FEDERAL_TAX_RE.test(text) || FLORIDA_DOR_RE.test(text) || /\bsales\s*(and\s+use\s*)?tax\b|\bdr-?15\b|\buse\s+tax\b/i.test(text);
+}
+
 function taxPaymentKind(description) {
   const text = String(description || '');
   if (FEDERAL_TAX_RE.test(text)) return 'federal';
@@ -155,7 +161,7 @@ function filingCandidate(filing, row) {
 function planNetPay({ row, checks, peers = [], rejected = [] }) {
   if (!isBankDebit(row) || !(Number(row.amount) > 0)) return { action: 'none' };
   // A line that names the IRS or the Florida DOR is a tax payment, whatever its amount: it never becomes net pay.
-  if (taxPaymentKind(row.description)) return { action: 'none' };
+  if (isTaxAgencyLine(row.description)) return { action: 'none' };
   const cents = centsOf(row.amount);
   const open = checks.filter((c) => !rejected.includes(c.id) && Number(c.net_cents) > 0 && inWindow(row.txn_date, netPayWindow(c)));
   const exact = open.filter((c) => Number(c.net_cents) === cents);
@@ -186,7 +192,7 @@ function planNetPay({ row, checks, peers = [], rejected = [] }) {
   // One check, one amount: the line must also be the only open line that could be this check.
   const check = exact[0];
   const window = netPayWindow(check);
-  const rivals = peers.filter((p) => p.id !== row.id && isBankDebit(p) && !taxPaymentKind(p.description) && centsOf(p.amount) === cents && inWindow(p.txn_date, window));
+  const rivals = peers.filter((p) => p.id !== row.id && isBankDebit(p) && !isTaxAgencyLine(p.description) && centsOf(p.amount) === cents && inWindow(p.txn_date, window));
   if (rivals.length > 0) return { action: 'suggest', candidates: [checkCandidate(check, row)] };
   return { action: 'link', check };
 }
@@ -243,6 +249,7 @@ module.exports = {
   NET_PAY_DAYS_AFTER_TRANSFER,
   TAX_DAYS_AFTER_DUE,
   taxPaymentKind,
+  isTaxAgencyLine,
   checkNumbersIn,
   carriesCheckNumber,
   netPayWindow,
