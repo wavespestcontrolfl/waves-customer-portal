@@ -6241,7 +6241,11 @@ code, error code, message text, limiter, signature or token changes.
   at its own minute and technician. Order, slot shapes and signed offers
   (`slot_sig`) of the kept starts are unchanged.
 - Floor: if the removals would leave no offered start dated today through
-  today+6 (Eastern), the whole list is served unchanged.
+  today+6 (Eastern), the whole list is served unchanged. The estimate page
+  checks its route list and its ASAP windows together in one request, so the
+  floor, the time budget and the route reads are shared: near-term ASAP
+  windows that pass keep the floor satisfied, and route-list starts that fail
+  are still removed.
 - Fail-open: any error, a missing pin, `GATE_ADMIN_ARRIVAL_WINDOWS` (and
   capacity mode) both off, or a check that passes its time budget (about
   1.5 seconds a request) serves the unfiltered list. The check never throws

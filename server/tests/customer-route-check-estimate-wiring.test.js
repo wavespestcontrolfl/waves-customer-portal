@@ -141,7 +141,7 @@ describe('getAvailableSlots — route check wiring (GATE_CUSTOMER_ROUTE_CHECK)',
     expect(routeCheck.filterOfferedSlots).not.toHaveBeenCalled();
   });
 
-  test('on: both lists go through the helper with the estimate pin, hold and duration; its answer is served', async () => {
+  test('on: both lists go through the helper once with the estimate pin, hold and duration; its answer is served', async () => {
     const baseline = keys(await getAvailableSlots('est-rain-1', OFFER));
     expect(baseline.length).toBeGreaterThan(1);
     estimateSlotAvailability._internals.clearCaches();
@@ -152,9 +152,9 @@ describe('getAvailableSlots — route check wiring (GATE_CUSTOMER_ROUTE_CHECK)',
     }));
     const served = keys(await getAvailableSlots('est-rain-1', OFFER));
     expect(served).not.toContain(dropped);
-    const surfaces = routeCheck.filterOfferedSlots.mock.calls.map(([a]) => a.surface);
-    expect(surfaces).toContain('estimate');
-    expect(surfaces).toContain('estimate_asap');
+    // ONE call per request, over the route list and the ASAP windows together.
+    expect(routeCheck.filterOfferedSlots).toHaveBeenCalledTimes(1);
+    expect(routeCheck.filterOfferedSlots.mock.calls[0][0].surface).toBe('estimate');
     for (const [arg] of routeCheck.filterOfferedSlots.mock.calls) {
       expect(arg.mode).toBe('on');
       expect(arg.target.prospective).toMatchObject({ lat: 27.3364, lng: -82.5307 });

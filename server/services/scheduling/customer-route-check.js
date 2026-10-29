@@ -219,7 +219,7 @@ function floorBlocks({ slots, remove, pick, today }) {
 /**
  * @param {object} args
  * @param {string} args.surface   'book' | 'reschedule' | 'reservice' | 'inspection' |
- *                                'commercial_first_visit' | 'voice' | 'estimate' | 'estimate_asap'
+ *                                'commercial_first_visit' | 'voice' | 'estimate' (route list + ASAP windows together)
  * @param {Array}  args.slots     the picker's offered slots (any shape pick() can read)
  * @param {object} args.target    { prospective: { lat, lng, estimated_duration_minutes },
  *                                  excludeServiceIds?, excludeEstimateId? } for a new
