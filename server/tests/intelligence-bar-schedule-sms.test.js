@@ -17,9 +17,13 @@ jest.mock('../services/scheduled-sms-queue', () => ({
 }));
 const mockProposalRefusal = jest.fn();
 const mockResolveCustomer = jest.fn();
+// The shared standalone rule list_queued_messages and cancel_queued_message use (comms-tools smsIneligibilityReason); the real
+// one runs in the Postgres suite. Here a row tied to an Agent Review decision stands for "another workflow owns it".
+const mockIneligible = (row) => (JSON.parse(row.metadata || '{}').agent_decision_id ? 'This text is tied to an Agent Review suggestion and can\'t be cancelled here.' : null);
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   sendSmsProposalRefusal: (...a) => mockProposalRefusal(...a),
   resolveCustomer: (...a) => mockResolveCustomer(...a),
+  smsIneligibilityReason: (...a) => mockIneligible(...a),
 }));
 
 const db = require('../models/db');
@@ -112,7 +116,8 @@ describe('registration', () => {
 
   test('the description states the B1 rule, the AM/PM question and that send-now is another tool', () => {
     const text = SCHEDULE_SMS_TOOLS[0].description;
-    expect(text).toMatch(/8:00 AM to 7:59 PM Eastern/);
+    expect(text).toMatch(/8:00 AM through 7:45 PM Eastern/);
+    expect(text).toMatch(/every five minutes/);
     expect(text).toMatch(/ASK which one/);
     expect(text).toMatch(/send_sms/);
   });
@@ -179,29 +184,52 @@ describe('the card', () => {
   });
 });
 
-describe('B1: 8:00 AM to 8:00 PM Eastern only', () => {
+describe('B1: 8:00 AM through 7:45 PM Eastern only (the sender runs every five minutes)', () => {
   test.each([
-    ['2099-01-05', '08:00', true], ['2099-01-05', '08:01', true], ['2099-01-05', '12:00', true], ['2099-01-05', '19:59', true],
-    ['2099-01-05', '20:00', false], ['2099-01-05', '20:01', false], ['2099-01-05', '21:00', false], ['2099-01-05', '23:59', false],
+    // Winter (EST): the first accepted minute and the latest accepted minute, and one minute either side.
+    ['2099-01-05', '08:00', true], ['2099-01-05', '08:01', true], ['2099-01-05', '12:00', true], ['2099-01-05', '19:44', true], ['2099-01-05', '19:45', true],
+    ['2099-01-05', '19:46', false], ['2099-01-05', '19:50', false], ['2099-01-05', '19:59', false], ['2099-01-05', '20:00', false], ['2099-01-05', '21:00', false], ['2099-01-05', '23:59', false],
     ['2099-01-05', '00:00', false], ['2099-01-05', '03:30', false], ['2099-01-05', '07:59', false],
-    // Summer time: the same wall-clock boundary in EDT, not UTC.
-    ['2099-07-15', '08:00', true], ['2099-07-15', '19:59', true], ['2099-07-15', '20:00', false], ['2099-07-15', '07:59', false],
+    // Summer time (EDT): the same Eastern wall-clock boundary, not UTC.
+    ['2099-07-15', '08:00', true], ['2099-07-15', '19:45', true], ['2099-07-15', '19:46', false], ['2099-07-15', '19:59', false], ['2099-07-15', '20:00', false], ['2099-07-15', '07:59', false],
+    // The days the clock changes (second Sunday of March, first Sunday of November in 2099).
+    ['2099-03-08', '08:00', true], ['2099-03-08', '19:45', true], ['2099-03-08', '19:46', false], ['2099-11-01', '08:00', true], ['2099-11-01', '19:45', true], ['2099-11-01', '19:46', false],
   ])('%s %s Eastern is %s', async (send_date, send_time, ok) => {
     const result = await preview({ send_date, send_time });
     if (ok) expect(result).toMatchObject({ preview: true });
-    else expect(result).toMatchObject({ code: 'night_time_refused', error: expect.stringMatching(/8 AM to 8 PM/) });
+    else expect(result).toMatchObject({ code: 'night_time_refused', error: expect.stringMatching(/8:00 AM through 7:45 PM/) });
   });
 
-  test('the refusal tells the bar to ask for a daytime time and to ask AM or PM, and offers no card', async () => {
+  test('the latest accepted time still leaves before 8:00 PM when two five-minute runs are missed', () => {
+    // Runs are at minutes ending in 0 and 5; a text goes at the first run on or after its time.
+    const firstRun = (minuteOfDay) => Math.ceil(minuteOfDay / 5) * 5;
+    const latest = 19 * 60 + 45;
+    expect(firstRun(latest) + 10).toBeLessThan(20 * 60); // two missed runs: 7:45 -> 7:55
+    expect(firstRun(19 * 60 + 46) + 5).toBeLessThan(20 * 60); // 7:46 would still make it with one missed run...
+    expect(firstRun(19 * 60 + 51) + 5).toBeGreaterThanOrEqual(20 * 60); // ...but 7:51 would not, so the rule stops well short of it
+  });
+
+  test('the refusal states the exact rule, tells the bar to ask for a daytime time and AM or PM, and offers no card', async () => {
     const result = await preview({ send_time: '21:00' });
-    expect(result.error).toMatch(/Ask the operator for a time from 8 AM to 8 PM/);
+    expect(result.error).toMatch(/five minutes/);
+    expect(result.error).toMatch(/7:45 PM is the latest/);
+    expect(result.error).toMatch(/Ask the operator for a time from 8 AM to 7:45 PM/);
     expect(result.error).toMatch(/ask AM or PM/);
     expect(result.preview).toBeUndefined();
   });
 
+  test('the card says the text goes out on the first five-minute check on or after the time, not at that exact minute', async () => {
+    const card = await preview();
+    const lines = cardLines('schedule_sms', card).map((l) => l.text).join('\n');
+    expect(lines).toMatch(/first five-minute check on or after that time/);
+    expect(lines).toMatch(/within about 5 minutes after it \(never before\)/);
+    expect(lines).not.toMatch(/exact minute/);
+    expect(card.send_time_et).toBe('Monday, January 5 at 10:00 AM');
+  });
+
   test('a night time never reaches the writer, on confirm either', async () => {
     const card = await preview();
-    expect(await confirm(card, { send_time: '20:00' })).toMatchObject({ code: 'night_time_refused', preview_changed: true });
+    expect(await confirm(card, { send_time: '19:46' })).toMatchObject({ code: 'night_time_refused', preview_changed: true });
     expect(mockQueue).not.toHaveBeenCalled();
   });
 });
@@ -254,7 +282,7 @@ describe('a suggested reply waiting on the thread (Agent Review)', () => {
     const card = await preview();
     await confirm(card);
     const { underLock } = mockQueue.mock.calls[0][2];
-    const trx = (table) => { const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, first: async () => (table === 'customers' ? { phone: PHONE } : null) }; return b; };
+    const trx = (table) => { const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, orderBy: () => b, first: async () => (table === 'customers' ? { phone: PHONE } : null), select: async () => [] }; return b; };
     mockPending.mockResolvedValueOnce(true);
     expect(await underLock(trx)).toMatchObject({ refuse: { status: 409, code: 'suggestion_pending' } });
     expect(mockPending).toHaveBeenLastCalledWith('9415550142', trx);
@@ -331,13 +359,31 @@ describe('Confirm', () => {
     await confirm(card);
     const { underLock } = mockQueue.mock.calls[0][2];
     const trx = (rows) => (table) => {
-      const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, first: async () => (table === 'customers' ? rows.customer : rows.existing) };
+      const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, orderBy: () => b, first: async () => (table === 'customers' ? rows.customer : null), select: async () => (rows.existing ? [rows.existing] : []) };
       return b;
     };
     expect(await underLock(trx({ customer: { phone: PHONE }, existing: null }))).toBeNull();
     expect(await underLock(trx({ customer: { phone: '+19415550199' }, existing: null }))).toMatchObject({ refuse: { status: 409, code: 'preview_changed' } });
     expect(await underLock(trx({ customer: null, existing: null }))).toMatchObject({ refuse: { code: 'preview_changed' } });
-    expect(await underLock(trx({ customer: { phone: PHONE }, existing: { id: 'sms-9', scheduled_for: new Date('2099-01-05T15:00:00Z') } }))).toEqual({ existing: { id: 'sms-9', scheduledFor: new Date('2099-01-05T15:00:00Z') } });
+    expect(await underLock(trx({ customer: { phone: PHONE }, existing: { id: 'sms-9', scheduled_for: new Date('2099-01-05T15:00:00Z'), metadata: '{"human_authored":true}', admin_user_id: 'a1', message_type: 'manual' } }))).toEqual({ existing: { id: 'sms-9', scheduledFor: new Date('2099-01-05T15:00:00Z') } });
+  });
+
+  test('an identical text already queued counts only when the bar could cancel it; a workflow-owned match is refused, nothing written', async () => {
+    const card = await preview();
+    await confirm(card);
+    const { underLock } = mockQueue.mock.calls[0][2];
+    const trx = (existing) => (table) => {
+      const b = { where: () => b, whereNull: () => b, forShare: () => b, whereRaw: () => b, orderBy: () => b, first: async () => (table === 'customers' ? { phone: PHONE } : null), select: async () => existing };
+      return b;
+    };
+    const owned = { id: 'sms-owned', scheduled_for: new Date('2099-01-05T15:00:00Z'), metadata: JSON.stringify({ agent_decision_id: 'd1', human_authored: true }), admin_user_id: 'a1', message_type: 'manual' };
+    const plain = { id: 'sms-plain', scheduled_for: new Date('2099-01-05T15:00:00Z'), metadata: JSON.stringify({ human_authored: true }), admin_user_id: 'a1', message_type: 'manual' };
+    const refused = await underLock(trx([owned]));
+    expect(refused).toMatchObject({ refuse: { status: 409, code: 'queued_text_not_cancelable', error: expect.stringMatching(/belongs to another workflow.*Agent Review.*Nothing was written/) } });
+    expect(refused.existing).toBeUndefined();
+    // Another identical text the bar can cancel still answers the repeated Confirm, whatever order they come in.
+    expect(await underLock(trx([owned, plain]))).toEqual({ existing: { id: 'sms-plain', scheduledFor: plain.scheduled_for } });
+    expect(await underLock(trx([]))).toBeNull();
   });
 
   test.each([

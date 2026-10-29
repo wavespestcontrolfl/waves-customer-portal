@@ -12,12 +12,18 @@
  *   schedule_sms — one plain customer text to the customer's own number at one day and time.
  *
  * OWNER RULING B1 (2026-10-28), binding: a time from the bar between 8:00 PM and 8:00 AM Eastern is REFUSED and the
- * bar asks for a time from 8 AM to 8 PM. The bar is mostly voice and "at 9" can mean 9 AM or 9 PM. THE BOUNDARY:
- * 8:00:00 AM ET is allowed, 7:59 PM ET is allowed (any minute before 8:00 PM), 8:00 PM ET and later is refused,
- * and every time from midnight to 7:59 AM ET is refused. It is the existing send-window boundary
- * (services/messaging/send-window.js isWithinSendWindowET, hour >= 8 and hour < 20, read through etParts in
- * utils/datetime-et.js), so the bar and the automated send window can never disagree. The Communications page keeps
- * its exact-minute behavior (the route's rules are unchanged); "send now" at night is not part of this tool.
+ * bar asks for a time from 8 AM to 8 PM. The bar is mostly voice and "at 9" can mean 9 AM or 9 PM.
+ *
+ * THE BOUNDARY (the dispatcher decides it, not the clock): the scheduled-text sender (scheduler.js, node-cron
+ * '*\/5 * * * *') runs every five minutes, at minutes ending in 0 or 5, and sends a queued operator text at the first
+ * run on or after its time, with no quiet-hours check (operator rows bypass it). So a text for 10:01 goes at 10:05,
+ * and a text for 7:59 PM would go at 8:00 PM, at night. node-cron here also drops a tick under load. The bar therefore
+ * accepts 8:00 AM ET through 7:45 PM ET inclusive and refuses 7:46 PM and later (and midnight to 7:59 AM):
+ * 7:45 PM goes at the 7:45 run, and still leaves before 8:00 PM if the 7:45 and 7:50 runs are both missed (7:55 is the
+ * third). 7:50 PM would survive only one missed run with no room for send time. 8:00 AM is the first accepted minute
+ * because a run never sends before the time. The dispatcher and the Communications page keep their behavior (the page
+ * may schedule any minute); "send now" at night is not part of this tool. The card says "goes out on the first
+ * five-minute check on or after" the time, never "at that exact minute".
  *
  * Always a confirm card, on every login (it texts a customer): never owner-direct, admin only, dark behind
  * GATE_IB_SCHEDULE_SMS (which needs GATE_IB_PLATFORM).
@@ -39,8 +45,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
-const { parseETDateTime, validCalendarDate, formatETDay, formatETDate, formatETTime } = require('../../utils/datetime-et');
-const { isWithinSendWindowET } = require('../messaging/send-window');
+const { parseETDateTime, validCalendarDate, formatETDay, formatETDate, formatETTime, etParts } = require('../../utils/datetime-et');
 
 function scheduleSmsLive() {
   return require('../../config/feature-gates').ibScheduleSmsLive() === true;
@@ -51,8 +56,8 @@ const MESSAGE_MAX_CHARS = 1600;
 const SCHEDULE_SMS_TOOLS = [
   {
     name: 'schedule_sms',
-    description: `Schedule ONE text message to a customer for a later day and time (the Communications page "Schedule send"). The first call returns a PREVIEW and writes nothing: the exact text, the customer, the number it goes to (last 4 digits), the From number, and the send day and time in words in Eastern Time. The operator approves on the confirmation card; nothing is sent now. The text goes out at that minute unless it is cancelled first (list_queued_messages, then cancel_queued_message) or the customer has opted out by then.
-TIME RULE (owner ruling): only a time from 8:00 AM to 7:59 PM Eastern can be scheduled. A time from 8:00 PM to 7:59 AM is refused. The operator is often speaking, and "at 9" can mean 9 AM or 9 PM, so if the operator did not say AM or PM (or morning, evening, noon), ASK which one before you call. Never guess AM or PM. When the answer is a night time, ask for a time from 8 AM to 8 PM instead. Pass send_date as YYYY-MM-DD and send_time as 24-hour HH:MM, both Eastern Time; work the weekday from today's date, never from memory.
+    description: `Schedule ONE text message to a customer for a later day and time (the Communications page "Schedule send"). The first call returns a PREVIEW and writes nothing: the exact text, the customer, the number it goes to (last 4 digits), the From number, and the send day and time in words in Eastern Time. The operator approves on the confirmation card; nothing is sent now. The text goes out on the first five-minute check on or after that time (within about 5 minutes) unless it is cancelled first (list_queued_messages, then cancel_queued_message) or the customer has opted out by then.
+TIME RULE (owner ruling): only a time from 8:00 AM through 7:45 PM Eastern can be scheduled. Any later time, and any time before 8:00 AM, is refused. Texts go out on a check that runs every five minutes, so a text goes out within about 5 minutes after its time (never before it). The operator is often speaking, and "at 9" can mean 9 AM or 9 PM, so if the operator did not say AM or PM (or morning, evening, noon), ASK which one before you call. Never guess AM or PM. When the answer is a night time or after 7:45 PM, ask for a time from 8 AM to 7:45 PM instead. Pass send_date as YYYY-MM-DD and send_time as 24-hour HH:MM, both Eastern Time; work the weekday from today's date, never from memory.
 Refused with the reason: a time that is not in the future, a customer with no phone or an opted-out or blocked number, a link that only works on an immediate send (Auto Pay, contract signing, card request, statement, review request), a marketing or promotional text, an applicant's number. A reply taken from the Agent Review or translation cards is sent now, not scheduled. Admin only. This tool does NOT send now: "text them now" is send_sms.
 Use for: "text Henderson tomorrow at 10 AM that we're on our way", "schedule a reminder text for Smith Thursday at 9:30 AM", "send the Millers a text Monday morning at 8".`,
     input_schema: {
@@ -80,7 +85,17 @@ const nameOf = (c) => [c?.first_name, c?.last_name].filter(Boolean).join(' ').tr
 
 const SUGGESTION_PENDING_REFUSAL = 'This customer has a suggested reply waiting on their thread (Agent Review). Scheduling a text now would tie it to that suggestion, and the bar could not cancel it. Handle the suggested reply on the Communications page first, then ask again. Nothing was scheduled.';
 
-const NIGHT_TIME_REFUSAL = 'A text from the bar can only be scheduled for a time from 8:00 AM to 8:00 PM Eastern. That time is outside it (8:00 PM to 8:00 AM is refused, because "at 9" could mean morning or evening). Ask the operator for a time from 8 AM to 8 PM, and ask AM or PM if they did not say. Nothing was scheduled.';
+// The accepted clock, in Eastern minutes of the day: 8:00 AM through 7:45 PM (see THE BOUNDARY above).
+const EARLIEST_ET_MINUTE = 8 * 60;
+const LATEST_ET_MINUTE = 19 * 60 + 45;
+
+function inBarWindowET(at) {
+  const { hour, minute } = etParts(at);
+  const minuteOfDay = hour * 60 + minute;
+  return minuteOfDay >= EARLIEST_ET_MINUTE && minuteOfDay <= LATEST_ET_MINUTE;
+}
+
+const NIGHT_TIME_REFUSAL = 'A text from the bar can only be scheduled for a time from 8:00 AM through 7:45 PM Eastern. That time is outside it: texts go out on a check that runs every five minutes, so 7:45 PM is the latest time that always leaves before 8 PM, and the bar does not schedule from 8 PM to 8 AM at all ("at 9" could mean morning or evening). Ask the operator for a time from 8 AM to 7:45 PM, and ask AM or PM if they did not say. Nothing was scheduled.';
 
 // "Thursday, October 30 at 10:00 AM", in Eastern Time.
 function sendTimeInWords(at) {
@@ -88,7 +103,7 @@ function sendTimeInWords(at) {
 }
 
 // The send time the call names, as an instant: a strict ET day and 24-hour clock (an ISO string with an offset is
-// never taken), inside the bar's 8 AM to 8 PM window and in the future.
+// never taken), inside the bar's 8:00 AM to 7:45 PM window and in the future.
 function resolveSendTime(input) {
   const date = String(input?.send_date || '').trim();
   const time = String(input?.send_time || '').trim();
@@ -96,7 +111,7 @@ function resolveSendTime(input) {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return refusal('send_time must be a 24-hour HH:MM clock time (Eastern Time). Ask the operator for the time, with AM or PM.', 'invalid_send_time');
   const at = parseETDateTime(`${date}T${time}`);
   if (Number.isNaN(at.getTime())) return refusal('That day and time could not be read. Ask the operator again.', 'invalid_send_time');
-  if (!isWithinSendWindowET(at)) return refusal(NIGHT_TIME_REFUSAL, 'night_time_refused');
+  if (!inBarWindowET(at)) return refusal(NIGHT_TIME_REFUSAL, 'night_time_refused');
   if (at <= new Date()) return refusal('That time has already passed. Ask the operator for a day and time in the future. Nothing was scheduled.', 'send_time_in_the_past');
   return { at };
 }
@@ -168,7 +183,7 @@ async function buildPlan(input) {
     sends_now: false,
     effects: [
       { kind: 'comms', text: `Text ${name || 'the customer'} (…${last4(customer.phone)}) from ${from}: “${message}”` },
-      { kind: 'operational', text: `Queued to send ${when} Eastern, at that exact minute. Nothing is sent now.` },
+      { kind: 'operational', text: `Queued for ${when} Eastern. It goes out on the first five-minute check on or after that time, so within about 5 minutes after it (never before). Nothing is sent now.` },
       { kind: 'operational', text: 'It stays in the customer\'s scheduled texts until then: list_queued_messages shows it and cancel_queued_message cancels it before it goes. It will not send if the customer opts out first.' },
     ],
     _version: versionOf({ customer, from, message, at: time.at }),
@@ -190,12 +205,21 @@ async function verifiedPlan(input, pinned) {
   return { plan };
 }
 
-// The identical text already queued for this customer at this minute (a repeated Confirm), read inside the lock.
+// The identical text already queued for this customer at this minute (a repeated Confirm), read inside the lock. It
+// counts as THIS card's text only when the bar could list and cancel it: the shared standalone rule
+// (comms-tools smsIneligibilityReason, the one list_queued_messages and cancel_queued_message use). A match tied to
+// another workflow (an Agent Review decision, a recruiting reply, an invoice send, a send already attempted) is returned
+// as `blocked` with that rule's reason, and the caller refuses instead of reporting it as cancelable.
 async function alreadyQueued(trx, { customerId, to, from, message, sendAt }) {
-  return trx('sms_log')
+  const rows = await trx('sms_log')
     .where({ customer_id: customerId, direction: 'outbound', status: 'scheduled', message_type: 'manual', from_phone: from, to_phone: to, scheduled_for: sendAt })
     .whereRaw('md5(message_body) = md5(?)', [message])
-    .first('id', 'scheduled_for');
+    .orderBy('created_at', 'asc')
+    .select('id', 'scheduled_for', 'metadata', 'message_type', 'admin_user_id');
+  const { smsIneligibilityReason } = require('./comms-tools');
+  const usable = rows.find((row) => !smsIneligibilityReason(row));
+  if (usable) return { row: usable };
+  return rows.length ? { blocked: smsIneligibilityReason(rows[0]) } : {};
 }
 
 // Inside the writer's transaction, after its thread lock: the customer must still be live with the approved number
@@ -207,8 +231,9 @@ function underLockFor(plan, pinned) {
     if (!live || digest(digits(live.phone)) !== pinned.to) {
       return { refuse: { status: 409, code: 'preview_changed', error: 'The customer or their phone number changed after the card was shown. Nothing was scheduled.' } };
     }
-    const existing = await alreadyQueued(trx, { customerId, to, from, message, sendAt });
+    const { row: existing, blocked } = await alreadyQueued(trx, { customerId, to, from, message, sendAt });
     if (existing) return { existing: { id: existing.id, scheduledFor: existing.scheduled_for } };
+    if (blocked) return { refuse: { status: 409, code: 'queued_text_not_cancelable', error: `An identical text is already queued for this customer at this time, but it belongs to another workflow, so it is not the text this card would schedule and the bar could not cancel it. ${blocked} Nothing was written. Cancel or let that text send from the Communications page first.` } };
     // A suggestion that arrived after the card: the writer parks every pending one on this thread (its publish takes
     // the same thread lock, so none can land between this read and that park). Refuse instead, nothing written.
     if (await threadHasPendingSuggestion(last10(to), trx)) return { refuse: { status: 409, code: 'suggestion_pending', error: SUGGESTION_PENDING_REFUSAL } };
@@ -230,8 +255,7 @@ async function commitSchedule(input, actionContext) {
     );
   } catch (err) {
     // The writer threw after the card was approved. Read the queue back: never invite a retry on an unknown outcome.
-    const row = await db('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'scheduled', message_type: 'manual', from_phone: from, to_phone: to, scheduled_for: sendAt })
-      .whereRaw('md5(message_body) = md5(?)', [message]).first('id').catch(() => null);
+    const { row } = await alreadyQueued(db, { customerId, to, from, message, sendAt }).catch(() => ({}));
     if (row) return { ...base, success: true, state: 'scheduled', message_id: row.id, warning: true, note: 'The text is queued, but a follow-up step reported a problem. Check the customer\'s scheduled texts before trying again.' };
     logger.error(`[intelligence-bar:schedule-sms] writer failed (${err.code || err.name || 'error'})`);
     return { ...base, outcome_unknown: true, code: 'execution_interrupted', error: 'Scheduling was interrupted — the text may or may not be queued. Check the customer\'s scheduled texts before trying again.' };

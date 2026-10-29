@@ -245,13 +245,8 @@ const ALLOWLIST = [
   },
   {
     file: 'services/intelligence-bar/schedule-sms-tools.js',
-    snippet: "return trx('sms_log')",
-    reason: "alreadyQueued (schedule_sms repeated Confirm): status filtered to 'scheduled', which excludes 'sending' — an unresolved reservation cannot match; it looks for the one identical queued text, not message history.",
-  },
-  {
-    file: 'services/intelligence-bar/schedule-sms-tools.js',
-    snippet: "const row = await db('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'scheduled', message_type: 'manual', from_phone: from, to_phone: to, scheduled_for: sendAt })",
-    reason: "schedule_sms read-back after an interrupted writer: status filtered to 'scheduled', which excludes 'sending' — an unresolved reservation cannot match; it looks for the one identical queued text, not message history.",
+    snippet: "const rows = await trx('sms_log')",
+    reason: "alreadyQueued (schedule_sms repeated Confirm, also its read-back): status filtered to 'scheduled', which excludes 'sending' — an unresolved reservation cannot match; it looks for the identical queued text, not message history.",
   },
   {
     file: 'routes/admin-communications.js',

@@ -211,6 +211,44 @@ jest.setTimeout(60000);
     expect(card.preview).toBe(true);
   });
 
+  test('an identical text the Communications page queued for an Agent Review reply is not "already queued": refused, nothing written, the row untouched', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const inputs = input(c.id);
+    const card = await executeScheduleSmsTool('schedule_sms', inputs, ctx);
+    // The page's row for an Agent Review draft: its decision is already parked as scheduled, so the pending-suggestion guard passes.
+    const decision = await pendingSuggestion(c);
+    await db('agent_decisions').where({ id: decision }).update({ status: 'scheduled' });
+    const [page] = await db('sms_log').insert({
+      customer_id: c.id, direction: 'outbound', from_phone: TWILIO_NUMBERS.getOutboundNumber(), to_phone: c.phone, message_body: inputs.message, status: 'scheduled',
+      message_type: 'manual', admin_user_id: ctx.technicianId, scheduled_for: new Date(card.send_at), metadata: JSON.stringify({ agent_decision_id: decision, human_authored: true }),
+    }).returning('id');
+    const result = await confirm(ctx, inputs, card);
+    expect(result).toMatchObject({ failed: true, code: 'queued_text_not_cancelable', error: expect.stringMatching(/belongs to another workflow.*Nothing was written/) });
+    expect(result.success).toBeUndefined();
+    const rows = await rowsFor(c.id);
+    expect(rows.map((r) => r.id)).toEqual([page.id || page]);
+    expect(rows[0].status).toBe('scheduled');
+    // The bar's own tools indeed exclude that row, which is why it must not be reported as this card's text.
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: c.id, channel: 'sms' }, ctx);
+    expect(listed.messages).toEqual([]);
+    expect(listed.excluded_count).toBe(1);
+  });
+
+  test('an identical plain text queued from the Communications page (no workflow) is the same text: a repeated Confirm queues no second row', async () => {
+    const ctx = await admin();
+    const c = await customer();
+    const inputs = input(c.id);
+    const card = await executeScheduleSmsTool('schedule_sms', inputs, ctx);
+    const [page] = await db('sms_log').insert({
+      customer_id: c.id, direction: 'outbound', from_phone: TWILIO_NUMBERS.getOutboundNumber(), to_phone: c.phone, message_body: inputs.message, status: 'scheduled',
+      message_type: 'manual', admin_user_id: ctx.technicianId, scheduled_for: new Date(card.send_at), metadata: JSON.stringify({ human_authored: true }),
+    }).returning('id');
+    const result = await confirm(ctx, inputs, card);
+    expect(result).toMatchObject({ success: true, already_queued: true, message_id: page.id || page });
+    expect(await rowsFor(c.id)).toHaveLength(1);
+  });
+
   test('list_queued_messages lists the row and cancel_queued_message cancels it', async () => {
     const ctx = await admin();
     const c = await customer();
