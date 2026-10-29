@@ -115,6 +115,8 @@ const RERING = [
     decision: 'skip while a promise it covers is still open; expire once none is' },
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',
     decision: 'expire: only a new truck check that still finds tools missing raises it again' },
+  { emitter: 'autopay-hold-charge', files: ['services/invoice-followups.js'], prefixes: ['autopay_hold_charge:'], kind: 'event',
+    decision: 'expire: only a new Auto Pay hold charge attempt raises it again; an attempt keeps its invoice out of the charge sweep' },
 ];
 
 const parseMeta = (metadata) => {
