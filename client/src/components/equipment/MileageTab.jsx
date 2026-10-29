@@ -143,6 +143,8 @@ export default function MileageTab() {
     const t = dash.today || {};
     const m = dash.mtd || {};
     const v = dash.live_vehicle;
+    // GATE_TRUCK_VIEWS_PER_VEHICLE: the server sends these two lists only when it is on.
+    const perVehicle = dash.vehicles || dash.live_vehicles;
     const bizPct = t.total_miles > 0 ? ((t.business_miles / t.total_miles) * 100) : 100;
 
     return (
@@ -164,9 +166,12 @@ export default function MileageTab() {
           ) : <div style={{ color: D.muted, fontSize: 13 }}>No live vehicle data available</div>}
         </div>
 
+        {/* Per-vehicle rows (only when the server sends them) */}
+        {perVehicle && <VehicleTable vehicles={dash.vehicles || []} live={dash.live_vehicles || []} />}
+
         {/* Today's Summary */}
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Today — {t.date || 'N/A'}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>{perVehicle ? 'All vehicles · ' : ''}Today — {t.date || 'N/A'}</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
             <StatBox label="Miles" value={fmtMi(t.total_miles)} color={D.teal} />
             <StatBox label="Trips" value={t.trip_count || 0} color={D.purple} />
@@ -189,6 +194,7 @@ export default function MileageTab() {
         </div>
 
         {/* MTD Stats */}
+        {perVehicle && <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 8 }}>All vehicles — month to date</div>}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12 }}>
           <div style={sCard}><StatBox label="MTD Miles" value={fmtMi(m.total_miles)} color={D.teal} /></div>
           <div style={sCard}><StatBox label="MTD IRS Deduction" value={fmt(m.irs_deduction)} color={D.amber} /></div>
@@ -440,6 +446,50 @@ function StatBox({ label, value, color }) {
     <div>
       <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
       <div style={{ fontSize: 20, fontWeight: 700, color: color || '#0F172A', marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
+// One row per vehicle: the mileage rows grouped by device, joined to the live Bouncie list by IMEI.
+function VehicleTable({ vehicles, live }) {
+  const liveById = new Map(live.map(l => [String(l.imei ?? l.id), l]));
+  const rows = vehicles.map(v => ({ ...v, live: liveById.get(String(v.vehicle_id)) }));
+  for (const l of live) {
+    // A tracker with no trips logged yet still gets a row.
+    if (!vehicles.some(v => String(v.vehicle_id) === String(l.imei ?? l.id))) {
+      rows.push({ vehicle_id: String(l.imei ?? l.id), vehicle_name: l.nickname || `${l.make} ${l.model}`, technician: l.technician, live: l });
+    }
+  }
+  return (
+    <div style={{ ...sCard, overflowX: 'auto' }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Vehicles</div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <thead>
+          <tr style={{ borderBottom: `1px solid ${D.border}` }}>
+            <th style={th}>Vehicle</th>
+            <th style={th}>Technician</th>
+            <th style={th}>Today Mi</th>
+            <th style={th}>MTD Mi</th>
+            <th style={th}>MTD Business Mi</th>
+            <th style={th}>MTD IRS Ded.</th>
+            <th style={th}>Live</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r => (
+            <tr key={r.vehicle_id} style={{ borderBottom: `1px solid ${D.border}22` }}>
+              <td style={td}>{r.vehicle_name}</td>
+              <td style={td}>{r.technician || '--'}</td>
+              <td style={td}>{fmtMi(r.today?.total_miles)}</td>
+              <td style={td}>{fmtMi(r.mtd?.total_miles)}</td>
+              <td style={td}>{fmtMi(r.mtd?.business_miles)}</td>
+              <td style={{ ...td, color: D.amber }}>{fmt(r.mtd?.irs_deduction ?? 0)}</td>
+              <td style={td}>{r.live ? <span style={sBadge(r.live.isRunning ? D.green : D.muted, D.white)}>{r.live.isRunning ? 'RUNNING' : 'STOPPED'}</span> : '--'}</td>
+            </tr>
+          ))}
+          {rows.length === 0 && <tr><td colSpan={7} style={{ padding: 20, textAlign: 'center', color: D.muted }}>No vehicles</td></tr>}
+        </tbody>
+      </table>
     </div>
   );
 }

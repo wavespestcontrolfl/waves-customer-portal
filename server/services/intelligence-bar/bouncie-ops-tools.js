@@ -13,10 +13,18 @@
  */
 
 const bouncie = require('../bouncie');
+const { technicianNamesByImei } = require('../bouncie-mileage');
+const { truckViewsPerVehicleLive } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 const logger = require('../logger');
 
 const MAX_TRIPS_SHOWN = 30;
+
+const TRIPS_DESCRIPTION = `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron.
+Use for: "what did the truck drive today?", "how many miles yesterday?", "when did the day's route start?"`;
+
+const TRIPS_DESCRIPTION_PER_VEHICLE = `Trips for one day (default today, Eastern) for EVERY vehicle on the Bouncie account, each with its assigned technician: start/end times, distance, per-vehicle miles and total miles. Pass vehicle (a vehicle nickname or a technician's name) to see just that one. This is the live view of the same data the tax mileage ledger syncs on its cron.
+Use for: "what did the truck drive today?", "how many miles did each truck drive?", "what did <technician> drive yesterday?", "when did the day's route start?"`;
 
 const BOUNCIE_OPS_TOOLS = [
   {
@@ -30,13 +38,21 @@ Use for: "where's the truck?", "is the truck moving?", "is the Bouncie tracker r
   },
   {
     name: 'get_truck_trips',
-    description: `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron.
-Use for: "what did the truck drive today?", "how many miles yesterday?", "when did the day's route start?"`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' },
-      },
+    // GATE_TRUCK_VIEWS_PER_VEHICLE: read when the model's tool list is serialized,
+    // so off = the description and schema below, byte for byte.
+    get description() {
+      return truckViewsPerVehicleLive() ? TRIPS_DESCRIPTION_PER_VEHICLE : TRIPS_DESCRIPTION;
+    },
+    get input_schema() {
+      return {
+        type: 'object',
+        properties: {
+          date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' },
+          ...(truckViewsPerVehicleLive() && {
+            vehicle: { type: 'string', description: 'One vehicle, by its nickname or by the name of the technician it is assigned to (not case-sensitive). Leave out for every vehicle.' },
+          }),
+        },
+      };
     },
   },
 ];
@@ -49,9 +65,11 @@ function isConfigured() {
 
 async function getTruckStatus() {
   const vehicles = await bouncie.getVehicles();
+  const technicians = truckViewsPerVehicleLive() ? await technicianNamesByImei() : null;
   return {
     vehicles: vehicles.map(v => ({
       nickname: v.nickname,
+      ...(technicians && { technician: technicians.get(String(v.imei)) || null }),
       make: v.make,
       model: v.model,
       year: v.year,
@@ -69,34 +87,72 @@ async function getTruckStatus() {
   };
 }
 
+// Normalized trips carry distance in METERS on `distance`; miles live on
+// `distanceMiles` — use the latter.
+function summarizeTrips(trips) {
+  const all = trips || [];
+  const totalMiles = all.reduce((sum, trip) => sum + (Number(trip.distanceMiles) || 0), 0);
+  return {
+    trips: all.slice(0, MAX_TRIPS_SHOWN).map(trip => ({
+      started_at: trip.startTime || null,
+      ended_at: trip.endTime || null,
+      distance_miles: trip.distanceMiles != null ? Number(trip.distanceMiles) : null,
+      duration_minutes: trip.durationMinutes ?? null,
+      max_speed: trip.maxSpeed ?? null,
+    })),
+    total: all.length,
+    total_miles: Number(totalMiles.toFixed(1)),
+    truncated: all.length > MAX_TRIPS_SHOWN,
+  };
+}
+
+const TRIPS_NOTE = 'Live Bouncie trips for the day (Eastern). The tax mileage ledger syncs this same data on its cron — discrepancies there are a sync question, not a tracker question.';
+
 async function getTruckTrips(input) {
   const date = typeof input.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.date.trim())
     ? input.date.trim()
     : etDateString(new Date());
   const vehicles = await bouncie.getVehicles();
+  if (truckViewsPerVehicleLive()) return getTripsPerVehicle(date, vehicles, input.vehicle);
   if (!vehicles.length) {
     return { date, trips: [], total: 0, total_miles: 0, note: 'No vehicles registered on the Bouncie account.' };
   }
   const vehicle = vehicles.find(v => String(v.imei) === String(process.env.BOUNCIE_VEHICLE_IMEI)) || vehicles[0];
   const trips = await bouncie.getTrips(vehicle.id, date, date);
-  // Normalized trips carry distance in METERS on `distance`; miles live on
-  // `distanceMiles` — use the latter.
-  const shown = (trips || []).slice(0, MAX_TRIPS_SHOWN).map(trip => ({
-    started_at: trip.startTime || null,
-    ended_at: trip.endTime || null,
-    distance_miles: trip.distanceMiles != null ? Number(trip.distanceMiles) : null,
-    duration_minutes: trip.durationMinutes ?? null,
-    max_speed: trip.maxSpeed ?? null,
-  }));
-  const totalMiles = (trips || []).reduce((sum, trip) => sum + (Number(trip.distanceMiles) || 0), 0);
   return {
     date,
     vehicle: vehicle.nickname,
-    trips: shown,
-    total: (trips || []).length,
-    total_miles: Number(totalMiles.toFixed(1)),
-    truncated: (trips || []).length > MAX_TRIPS_SHOWN,
-    note: 'Live Bouncie trips for the day (Eastern). The tax mileage ledger syncs this same data on its cron — discrepancies there are a sync question, not a tracker question.',
+    ...summarizeTrips(trips),
+    note: TRIPS_NOTE,
+  };
+}
+
+// GATE_TRUCK_VIEWS_PER_VEHICLE on: every vehicle with its technician, or the one named.
+async function getTripsPerVehicle(date, vehicles, wanted) {
+  if (!vehicles.length) {
+    return { date, vehicles: [], total_miles: 0, note: 'No vehicles registered on the Bouncie account.' };
+  }
+  const technicians = await technicianNamesByImei();
+  const rows = vehicles.map(v => ({ v, technician: technicians.get(String(v.imei)) || null }));
+  const name = typeof wanted === 'string' ? wanted.trim().toLowerCase() : '';
+  const chosen = name
+    ? rows.filter(r => String(r.v.nickname || '').toLowerCase() === name || String(r.technician || '').toLowerCase() === name)
+    : rows;
+  if (!chosen.length) {
+    // A plain answer, not { error }: errors count against the shared circuit breaker.
+    const known = rows.map(r => (r.technician ? `${r.v.nickname} (${r.technician})` : r.v.nickname)).join(', ');
+    return { date, vehicles: [], total_miles: 0, note: `No vehicle matches "${wanted.trim()}". Known vehicles: ${known}.` };
+  }
+  const perVehicle = await Promise.all(chosen.map(async ({ v, technician }) => ({
+    vehicle: v.nickname,
+    technician,
+    ...summarizeTrips(await bouncie.getTrips(v.id, date, date)),
+  })));
+  return {
+    date,
+    vehicles: perVehicle,
+    total_miles: Number(perVehicle.reduce((sum, r) => sum + r.total_miles, 0).toFixed(1)),
+    note: TRIPS_NOTE,
   };
 }
 
