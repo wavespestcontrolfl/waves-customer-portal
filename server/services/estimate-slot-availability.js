@@ -43,7 +43,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
 const {
-  CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
+  CUSTOMER_DAY_END_MINUTES, customerOfferGrid,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
   customerLastStart16Enabled,
 } = require('./scheduling/customer-windows');
@@ -1203,7 +1203,7 @@ function slotWindowFitsDay(windowStart, windowEnd) {
   // customerWindowAdmits, Codex r4 on #4663) — grid floor (09:00-17:00,
   // never find-time's own 08:00 shift-start, in EITHER capacity mode),
   // resolved close (currentDayEndMinutes(), honoring a preserved
-  // booking_config.day_end override) and the lunch gate, all in one call.
+  // booking_config.day_end override), all in one call.
   // This is the one choke point every customer-facing slot (ASAP and
   // route) runs through, in both capacity modes.
   return customerWindowAdmits({ startMin, endMin });
@@ -1367,13 +1367,9 @@ function buildAsapCapacitySlotsForTechs({
     if (excludeDates && excludeDates.has(date)) continue;
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
     // Read at call time (customerOfferGrid(), not a module-level constant) so
-    // a mid-process GATE_BOOKING_LUNCH_BLOCK flip takes effect immediately.
-    // Pass the REAL duration (Codex push-audit P1 on #4663) — a fixed 60
-    // here wrongly excluded a documented grid hour for a SHORTER service
-    // (e.g. an 11:00 start + 30 min ends at 11:30, before an 11:30 lunch
-    // start, but comparing 11:00-12:00 against it excluded 11:00 anyway).
-    // slotWindowFitsDay below still re-verifies the real window either way.
-    for (const windowStart of customerOfferGrid(durationMinutes)) {
+    // a mid-process GATE_CUSTOMER_LAST_START_16 flip takes effect immediately.
+    // slotWindowFitsDay below re-verifies the real window.
+    for (const windowStart of customerOfferGrid()) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
       const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
@@ -1985,10 +1981,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     estimateId,
     `route-days:${routeDayPolicyKey}`,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
-    // Lunch gate state in the key (GATE_BOOKING_LUNCH_BLOCK, owner ruling
-    // 2026-09-23): a result computed while noon was offerable must never be
-    // served after the gate flips on (or vice versa) for the TTL's length.
-    lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
     // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
     customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
     // A flip of GATE_ESTIMATE_SLOT_ONE_PER_HOUR must not serve the other list shape.
@@ -2521,11 +2513,10 @@ async function getSlotDebug(estimateId, userOpts = {}) {
   // getSlotDebug classifies find-time's raw output directly — it never runs
   // through filterCollidingSlots (the live path's slot-zone/occupancy pass,
   // which needs a real DB customer/estimate context this debug surface
-  // doesn't build), so slotWindowFitsDay's lunch-gate check (customerFacing
+  // doesn't build), so slotWindowFitsDay's admission check (customerFacing
   // above only restricts capacity mode's own generator, not a legacy-mode
   // raw candidate) never ran either. This debug view exists to mirror
-  // exactly what the customer is offered, so a noon slot the gate would
-  // hide from the live path must not show up here (Codex r4 P2 on #4663).
+  // exactly what the customer is offered (Codex r4 P2 on #4663).
   const classified = (raw?.slots || [])
     .map((s) => ({
       ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),

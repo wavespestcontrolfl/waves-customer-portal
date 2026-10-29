@@ -230,7 +230,6 @@
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
- *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
@@ -3455,16 +3454,6 @@ const gates = {
   // unset GATE_SLOT_SLIDE_OFFER.
   slotSlideOffer: gateEnvValue('GATE_SLOT_SLIDE_OFFER'),
 
-  // Booking lunch block (owner ruling 2026-09-23) — restores the
-  // 12:00-13:00 reserved window on every customer-facing offer + commit
-  // surface (routes/booking.js, routes/reschedule-public.js and
-  // routes/reservice-public.js via its shared builder, services/availability.js's
-  // legacy zone engine). Off (default): noon is a normal offerable and
-  // reservable hour everywhere. This entry is for logGateStatus only —
-  // every consumer reads gateEnvValue at CALL time through the single
-  // lunchBlockEnabled() helper in services/scheduling/customer-windows.js.
-  bookingLunchBlock: gateEnvValue('GATE_BOOKING_LUNCH_BLOCK'),
-
   // JOB CARD tab in the Service Protocol drawer (Tech Resource Drawer PR 2):
   // one GET assembles the customer strip, a 1–3 sentence paragraph written
   // from portal fields (FAST tier, deterministic template fallback, cached
@@ -4741,10 +4730,6 @@ const gates = {
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
   standardWordingPreview: process.env.GATE_STANDARD_WORDING_PREVIEW === 'true',
-  // GATE_TRACE_REUSE — "Same as last visit" on the Fast Complete report flow
-  // copies the customer's last saved spray trace whose outline holds this
-  // visit's location onto the open visit; read at call time via traceReuseLive().
-  traceReuse: process.env.GATE_TRACE_REUSE === 'true',
   // GATE_BLOG_SEARCH_SUGGEST — a search no post covers suggested as a new
   // post for the autonomous blog queue; read at call time via
   // blogSearchSuggestLive().
@@ -6407,14 +6392,6 @@ function lawnReportClarityLive() {
 // in every environment. Off, the preview route answers { available: false }.
 function standardWordingPreviewLive() {
   return process.env.GATE_STANDARD_WORDING_PREVIEW === 'true';
-}
-
-// GATE_TRACE_REUSE read at CALL time — strict `=== 'true'`, dark in every
-// environment. Off, GET .../treatment-zone/last answers { available: false },
-// POST .../treatment-zone/reuse answers 404, and the Fast Complete sheet
-// shows no "Same as last visit" button.
-function traceReuseLive() {
-  return process.env.GATE_TRACE_REUSE === 'true';
 }
 
 // GATE_BLOG_SEARCH_SUGGEST read at CALL time — strict `=== 'true'`, dark in
@@ -8470,8 +8447,6 @@ module.exports.autoLunchLive = autoLunchLive;
 module.exports.truckKitLive = truckKitLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
-// GATE_TRACE_REUSE reader, on its own line so gate PRs never conflict.
-module.exports.traceReuseLive = traceReuseLive;
 // GATE_FAST_COMPLETE_INVOICED_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.fastCompleteInvoicedVisitsLive = fastCompleteInvoicedVisitsLive;
 

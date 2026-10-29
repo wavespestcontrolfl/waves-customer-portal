@@ -65,7 +65,6 @@ async function request(path, options = {}) {
   if (bare.endsWith('/promises')) return { available: false, promises: [] };
   if (bare.includes('/blog-posts')) return { available: true, posts: [{ id: 'b1', title: 'Why ghost ants come inside after rain', url: 'https://www.wavespestcontrol.com/blog/ghost-ants-after-rain/' }] };
   if (bare.endsWith('/photos')) return { photos: [] };
-  if (bare.endsWith('/treatment-zone/last')) return { available: false };
   if (bare.endsWith('/treatment-zone')) return { enabled: true, treatmentZone: null };
   if (bare === '/admin/schedule/generate-report') { await wait(600); return { report: REPORT }; }
   if (bare.endsWith('/voice-facts')) return { available: true, status: 'read', areas: ['Inside', 'Outside'], pests: ['ghost ants'] };
