@@ -311,8 +311,13 @@ async function closeBell(customerId, outcome) {
  * The office confirms `referrerCustomerId` as the person who referred
  * `customerId`. Makes the referral row, converts it, and posts both credits
  * now (quietly) when a performed recurring visit is on record.
+ * `deferredOnly` (the new-referral bell's Confirm, referral-inbound-bell.js):
+ * the confirm may neither send nor pay anything now. It refuses a customer
+ * with a performed plan visit, converts inside its own transaction (the
+ * conversion refuses an at-once reward or a milestone under the promoter
+ * lock), and never credits, so any refusal saves nothing.
  */
-async function confirmInboundReferral({ customerId, referrerCustomerId, reviewedBy = null }) {
+async function confirmInboundReferral({ customerId, referrerCustomerId, reviewedBy = null, deferredOnly = false }) {
   // Unlocked first pass: refuse early, before the referrer is enrolled.
   const { referee } = await eligibleReferee(db, customerId);
   const referrer = await checkedReferrer(db, referrerCustomerId, referee);
@@ -351,6 +356,10 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     if (await trx('referrals').whereRaw(sql, bindings).first('id')) {
       throw inboundError(409, 'ALREADY_REFERRED', 'A referral already names this customer');
     }
+    // deferredOnly: a plan visit already on record would post both credits at once, so the Queue answers it.
+    if (deferredOnly && await performedRecurringVisits(trx).where('ss.customer_id', customerId).first('ss.id')) {
+      throw inboundError(409, 'FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue.");
+    }
     const [row] = await trx('referrals').insert({
       referrer_customer_id: promoter.customer_id,
       referee_name: (fullName(locked.referee) || 'Friend').slice(0, 100),
@@ -372,9 +381,22 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
       referral_id: row.id,
       reviewed_by: reviewedBy,
     });
+    // deferredOnly converts on this transaction: a refusal there (rewards paid at once, a milestone due) undoes
+    // the referral and the answer, so nothing is saved.
+    if (deferredOnly) {
+      await engine.convertReferral(row.id, {
+        customerId, tier: locked.referee.waveguard_tier, monthlyValue: Number(locked.referee.monthly_rate) || null, trx, deferredOnly: true,
+      });
+    }
     return { referral: row, current: locked };
   });
   await closeBell(customerId, 'confirmed');
+  if (deferredOnly) {
+    // Converted above, and no credit runs now: the first performed plan visit pays both $25 credits. A visit that
+    // completed while this ran is paid at the next one.
+    logger.info(`[referral-inbound] referral ${referral.id} confirmed (${current.evidence.source}, deferred); converted=true`);
+    return { referralId: referral.id, converted: true, creditsNow: false, credited: null, error: null };
+  }
 
   // Post-commit, the existing steps. Each is idempotent and re-checks its own
   // guards under a row lock, so a failure here leaves a pending referral the

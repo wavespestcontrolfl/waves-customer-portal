@@ -482,6 +482,64 @@ jest.mock('../services/customer-credit', () => ({
     expect(await inbound.listInboundReferrals()).toHaveLength(2);
   });
 
+  describe('a deferred-only confirm (the bell\'s Confirm) refuses, under its locks, anything that would send or pay now', () => {
+    const promoterFor = (referrer, converted) => db('referral_promoters').insert({
+      customer_phone: referrer.phone, first_name: 'Jane', last_name: 'Smith', customer_id: referrer.id,
+      referral_code: 'WAVES-JANE', status: 'active', total_referrals_converted: converted,
+    });
+    const saved = async () => ({
+      referrals: (await db('referrals').count('* as n').first()).n,
+      answers: (await db('referral_inbound_reviews').count('* as n').first()).n,
+    });
+
+    test('a milestone conversion is refused and saves nothing', async () => {
+      const referrer = await customer({ referral_code: 'WAVES-JANE' });
+      await promoterFor(referrer, 2);
+      const friend = await linkCustomer('WAVES-JANE');
+      await expect(inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id, deferredOnly: true }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'MILESTONE_DUE' });
+      expect(await saved()).toEqual({ referrals: '0', answers: '0' });
+      expect(await db('referral_promoters').where({ customer_id: referrer.id }).first()).toMatchObject({ total_referrals_converted: 2, milestone_level: 'none' });
+      expect((await inbound.listInboundReferrals()).map((c) => c.customerId)).toEqual([friend.id]);
+    });
+
+    test('rewards paid at once are refused and save nothing', async () => {
+      const referrer = await customer({ referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await db('referral_program_settings').update({ require_service_completion: false });
+      try {
+        await expect(inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id, deferredOnly: true }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'REWARD_NOT_DEFERRED' });
+      } finally {
+        await db('referral_program_settings').update({ require_service_completion: true });
+      }
+      expect(await saved()).toEqual({ referrals: '0', answers: '0' });
+    });
+
+    test('a plan visit already on record is refused and saves nothing', async () => {
+      const referrer = await customer({ referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await recurringVisit(friend.id);
+      await expect(inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id, deferredOnly: true }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'FIRST_VISIT_DONE' });
+      expect(await saved()).toEqual({ referrals: '0', answers: '0' });
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    test('two confirms for one referrer at the same moment: the one that would be the 3rd conversion is refused', async () => {
+      const referrer = await customer({ referral_code: 'WAVES-JANE' });
+      await promoterFor(referrer, 1);
+      const [one, two] = [await linkCustomer('WAVES-JANE'), await linkCustomer('WAVES-JANE')];
+      const results = await Promise.allSettled([one, two].map((friend) => inbound.confirmInboundReferral({
+        customerId: friend.id, referrerCustomerId: referrer.id, deferredOnly: true,
+      })));
+      expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+      expect(results.find((r) => r.status === 'rejected').reason).toMatchObject({ code: 'MILESTONE_DUE' });
+      expect(await db('referral_promoters').where({ customer_id: referrer.id }).first()).toMatchObject({ total_referrals_converted: 2, milestone_level: 'none' });
+      expect(await saved()).toEqual({ referrals: '1', answers: '1' });
+    });
+  });
+
   describe('the new-referral bell (GATE_REFERRAL_INBOUND_BELL)', () => {
     let bell;
     let buttons;

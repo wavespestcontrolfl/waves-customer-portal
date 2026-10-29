@@ -327,3 +327,43 @@ test('a conversion past a level already held awards nothing', async () => {
   });
   expect(state.updates.filter((u) => u.table === 'referral_promoters' && u.vals.milestone_level)).toHaveLength(0);
 });
+
+describe('convertReferral deferredOnly (the new-referral bell: nothing sent or paid now)', () => {
+  const engine = () => require('../services/referral-engine');
+  const written = (state) => state.updates.length + state.increments.length;
+
+  test('refused, with nothing written, while the program pays rewards at once', async () => {
+    const state = freshState();
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'REWARD_NOT_DEFERRED' });
+    expect(written(state)).toBe(0);
+  });
+
+  test('refused, with nothing written, when this conversion earns a milestone', async () => {
+    const state = freshState();
+    state.settings.require_service_completion = true;
+    state.promoter = { id: 'promo-1', total_referrals_converted: 2, milestone_level: 'none' };
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'MILESTONE_DUE' });
+    expect(written(state)).toBe(0);
+  });
+
+  test('a deferred conversion runs on the caller\'s transaction and stages the reward as pending', async () => {
+    const state = freshState();
+    state.settings.require_service_completion = true;
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx, deferredOnly: true })).resolves.toMatchObject({ referralId: 'ref-1', requiresServiceCompletion: true });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(state.referral).toMatchObject({ status: 'signed_up', referrer_reward_status: 'pending_service' });
+    expect(state.increments.find((i) => i.table === 'referral_promoters').vals).toMatchObject({ pending_earnings_cents: 2500 });
+  });
+
+  test('a caller transaction without deferredOnly is refused before anything runs', async () => {
+    const state = freshState();
+    const trx = primeDb(state);
+    await expect(engine().convertReferral('ref-1', { trx })).rejects.toThrow(/only when deferredOnly/);
+    expect(written(state)).toBe(0);
+  });
+});

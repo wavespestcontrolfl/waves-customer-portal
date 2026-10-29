@@ -12,6 +12,7 @@ jest.mock('../services/referral-inbound', () => ({
   dismissInboundReferral: jest.fn(),
 }));
 jest.mock('../services/referral-engine', () => ({
+  getSettings: jest.fn(async () => ({ require_service_completion: true })),
   findHouseholdPromoter: jest.fn(async () => null),
   // The engine's own rule (referral-status-transitions.test.js pins it); the engine module is not loaded here.
   milestoneLevelEarned: jest.fn((converted, level) => {
@@ -138,6 +139,13 @@ describe('the row for one card', () => {
     expect(() => composeAdminAlert(composed.spec)).not.toThrow();
   });
 
+  test('no Confirm while the program pays rewards at once (a confirm would pay and text)', () => {
+    const composed = composeCard(card(), { deferred: false });
+    expect(composed.spec.why).toBe("Came in Oct 27 through Lea Quill's referral link; rewards pay at once now, so confirm in the Queue.");
+    expect(ids(composed)).toEqual(['dismiss']);
+    expect(composed.detail).toMatch(/pays rewards at once now/);
+  });
+
   test('no Confirm when the confirm would be the referrer\'s milestone referral (a bonus and a text at once)', () => {
     const composed = composeCard(card(), { milestone: true });
     expect(composed.spec.why).toBe("Came in Oct 27 through Lea Quill's referral link; it earns a milestone bonus, so confirm in the Queue.");
@@ -224,6 +232,13 @@ describe('syncReferralInboundBells: the fifteen-minute sweep', () => {
     expect(items.map((b) => b.id)).toEqual(['dismiss']);
   });
 
+  test('while the program pays rewards at once, the row carries no Confirm', async () => {
+    inbound.listInboundReferrals.mockResolvedValue([card()]);
+    require('../services/referral-engine').getSettings.mockResolvedValueOnce({ require_service_completion: false });
+    await bell.syncReferralInboundBells();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].metadata.buttons.items.map((b) => b.id)).toEqual(['dismiss']);
+  });
+
   test('a household promoter counts when the referrer has none of their own', async () => {
     inbound.listInboundReferrals.mockResolvedValue([card()]);
     require('../services/referral-engine').findHouseholdPromoter.mockResolvedValueOnce({ total_referrals_converted: 4, milestone_level: 'none' });
@@ -276,17 +291,12 @@ describe('a tap', () => {
     expect(inbound.dismissInboundReferral).toHaveBeenCalledWith({ customerId: AMES, reviewedBy: TECH });
   });
 
-  test('Confirm runs the Queue\'s own confirm with the card\'s sure referrer', async () => {
+  test('Confirm runs the Queue\'s own confirm, deferred-only, with the card\'s sure referrer', async () => {
     inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: true, creditsNow: false, credited: null, error: null });
     await expect(run(CONFIRM)).resolves.toEqual({
       ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. $25 each after the first plan visit.", resolution: 'Referrer confirmed',
     });
-    expect(inbound.confirmInboundReferral).toHaveBeenCalledWith({ customerId: AMES, referrerCustomerId: LEA, reviewedBy: TECH });
-  });
-
-  test('a conversion that failed after the save says so', async () => {
-    inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: false, creditsNow: false, credited: null, error: 'convert_failed' });
-    await expect(run(CONFIRM)).resolves.toMatchObject({ ok: true, message: expect.stringMatching(/conversion failed\. Use Convert/) });
+    expect(inbound.confirmInboundReferral).toHaveBeenCalledWith({ customerId: AMES, referrerCustomerId: LEA, reviewedBy: TECH, deferredOnly: true });
   });
 
   test.each([
@@ -300,16 +310,23 @@ describe('a tap', () => {
   });
 
   test.each([
-    ['the sure referrer changed', () => inbound.listInboundReferrals.mockResolvedValue([card({ suggestions: [{ ...LEA_SUGGESTION, customerId: OTHER }] })]), 'referrer_changed'],
-    ['no single sure referrer is left', () => inbound.listInboundReferrals.mockResolvedValue([card({ suggestions: [] })]), 'referrer_changed'],
-    ['the first plan visit happened since the row rang', () => inbound.listInboundReferrals.mockResolvedValue([card({ creditsNow: true })]), 'first_visit_done'],
-    ['the referrer would reach a milestone', () => { mockPromoters[LEA] = { total_referrals_converted: 4, milestone_level: 'advocate' }; }, 'milestone'],
-  ])('Confirm is refused when %s, and the row stays open', async (_name, arrange, code) => {
-    arrange();
+    ['the sure referrer changed', [card({ suggestions: [{ ...LEA_SUGGESTION, customerId: OTHER }] })]],
+    ['no single sure referrer is left', [card({ suggestions: [] })]],
+  ])('Confirm is refused when %s, and the row stays open', async (_name, cards) => {
+    inbound.listInboundReferrals.mockResolvedValue(cards);
     const result = await run(CONFIRM);
-    expect(result).toMatchObject({ ok: false, code });
+    expect(result).toMatchObject({ ok: false, code: 'referrer_changed' });
     expect(result).not.toHaveProperty('close');
     expect(inbound.confirmInboundReferral).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue."],
+    ['MILESTONE_DUE', 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.'],
+    ['REWARD_NOT_DEFERRED', 'Referral rewards are paid at once now. Confirm it in Referrals → Queue.'],
+  ])('the step\'s locked hold %s comes back in its words, and the row stays open', async (code, message) => {
+    inbound.confirmInboundReferral.mockRejectedValueOnce(Object.assign(new Error(message), { statusCode: 409, code }));
+    await expect(run(CONFIRM)).resolves.toEqual({ ok: false, code: code.toLowerCase(), message });
   });
 
   test('the step\'s own refusal comes back in its words; an answered card closes the row', async () => {

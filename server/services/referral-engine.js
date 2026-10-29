@@ -664,7 +664,13 @@ function referralRewardAlreadyStaged(referral) {
     || STAGED_REWARD_STATUSES.includes(referral.referrer_reward_status);
 }
 
-async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
+// deferredOnly (the new-referral bell's Confirm, referral-inbound-bell.js): this conversion may neither send
+// nor pay anything now. It is refused inside the money-critical section below, under the promoter row lock,
+// when the program pays rewards at once or the conversion earns a milestone (a bonus and a text). `trx`: run
+// that section on the caller's transaction (only with deferredOnly, so no post-commit leg can run before the
+// caller commits), so a refusal also undoes what the caller wrote.
+async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
+  if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
   const settings = await getSettings();
 
   // Calculate reward (base + tier bonus)
@@ -678,7 +684,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // Money-critical section. Lock the referral row and only credit when it is still in a
   // pre-conversion state, so a double-click / retry that hits convert twice can no longer
   // credit the promoter balance twice. The referral flip + balance increment commit together.
-  const outcome = await db.transaction(async (trx) => {
+  const convert = async (trx) => {
     const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
     if (!referral) throw new Error('Referral not found');
 
@@ -694,6 +700,18 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     // Idempotency guard: anything already converted/rejected/lost is a no-op (no re-credit).
     if (!CONVERTIBLE_STATUSES.includes(referral.status)) {
       return { referral, alreadyConverted: true };
+    }
+
+    if (deferredOnly) {
+      if (!settings.require_service_completion) {
+        throw referralError(409, 'REWARD_NOT_DEFERRED', 'Referral rewards are paid at once now. Confirm it in Referrals → Queue.');
+      }
+      const promoter = referral.promoter_id
+        ? await trx('referral_promoters').where({ id: referral.promoter_id }).forUpdate().first('total_referrals_converted', 'milestone_level')
+        : null;
+      if (promoter && milestoneLevelEarned(Number(promoter.total_referrals_converted || 0) + 1, promoter.milestone_level)) {
+        throw referralError(409, 'MILESTONE_DUE', 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.');
+      }
     }
 
     const updates = {
@@ -726,7 +744,8 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     }
 
     return { referral, alreadyConverted: false, milestoneAward };
-  });
+  };
+  const outcome = callerTrx ? await convert(callerTrx) : await db.transaction(convert);
 
   if (outcome.alreadyConverted) {
     logger.info(`[ReferralEngine] Referral ${referralId} already converted (status=${outcome.referral.status}); skipping re-credit.`);

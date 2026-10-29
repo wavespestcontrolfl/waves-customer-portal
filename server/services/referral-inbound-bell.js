@@ -8,11 +8,12 @@ const crypto = require('crypto');
 // listInboundReferrals) gets one admin row, "Customers — confirm <name>'s referrer", that opens the Queue and
 // carries two buttons (docs/admin-notifications.md section 2, part 9). Each runs the Queue's own step after the
 // card is read again:
-//  - Confirm <referrer> (confirmInboundReferral): only for one sure referrer (the owner of the link code, or the
-//    one customer whose first and last name both match the name the caller gave), only before the friend's first
-//    plan visit, and only when it is not the referrer's 3rd, 5th or 10th referral. So nothing reaches a customer
-//    and no money moves at the tap: both $25 credits and the referrer's one 9:00 AM email follow the first plan
-//    visit, as for any referral, and no milestone bonus or text is earned by the tap;
+//  - Confirm <referrer> (confirmInboundReferral with deferredOnly): only for one sure referrer (the owner of the
+//    link code, or the one customer whose first and last name both match the name the caller gave), only while
+//    the program defers rewards to the first visit, only before the friend's first plan visit, and only when it
+//    is not the referrer's 3rd, 5th or 10th referral. So nothing reaches a customer and no money moves at the tap:
+//    both $25 credits and the referrer's one 9:00 AM email follow the first plan visit, as for any referral. The
+//    row only hides the button; the step itself refuses each case under its locks and then saves nothing;
 //  - Not a referral (dismissInboundReferral).
 // The Queue can pick any other referrer. The row closes when the card is answered in the bell, the Queue or a
 // script (referral-inbound.js calls closeReferralInboundBell), and the sweep closes a row whose card left the
@@ -64,10 +65,11 @@ async function confirmEarnsMilestone(conn, referrerCustomerId) {
   return Boolean(engine.milestoneLevelEarned(Number(promoter.total_referrals_converted || 0) + 1, promoter.milestone_level));
 }
 
-// Why Confirm is not on the row, or null when it is.
-function confirmBlock(card, sure, { milestone }) {
+// Why Confirm is not on the row, or null when it is. `deferred`: the program pays rewards at the first visit.
+function confirmBlock(card, sure, { milestone, deferred }) {
   if (card.selfReferral) return 'self';
   if (!sure) return 'no_sure_referrer';
+  if (!deferred) return 'reward_not_deferred';
   if (card.creditsNow) return 'first_visit_done';
   if (milestone) return 'milestone';
   return null;
@@ -90,6 +92,7 @@ function whyOf(card, sure, block) {
   const next = {
     self: 'mark it not a referral',
     no_sure_referrer: 'pick the referrer in the Queue',
+    reward_not_deferred: 'rewards pay at once now, so confirm in the Queue',
     first_visit_done: 'a visit is done, so confirm in the Queue for $25 each now',
     milestone: 'it earns a milestone bonus, so confirm in the Queue',
   }[block] || '$25 each after the first plan visit';
@@ -142,6 +145,8 @@ function detailOf(card, name, sure, block) {
   else lines.push('No single customer matches, so pick the referrer in Referrals → Queue.');
   if (!block) {
     lines.push(`Confirm makes ${tidyName(sure.name)} the referrer. Both accounts get the $25 credit at ${first}'s first completed plan visit, and the referrer then gets one thank-you email at the next 9:00 AM ET. Nothing is sent and no money moves at the tap.`);
+  } else if (block === 'reward_not_deferred') {
+    lines.push('The referral program pays rewards at once now, so a confirm pays and sends the reward text and email. Confirm in Referrals → Queue.');
   } else if (block === 'first_visit_done') {
     lines.push(`${first} already had a plan visit, so a confirm posts both $25 credits at once. Confirm in Referrals → Queue.`);
   } else if (block === 'milestone') {
@@ -151,11 +156,12 @@ function detailOf(card, name, sure, block) {
   return lines.join(' ');
 }
 
-// The row for one card. Pure: `milestone` is confirmEarnsMilestone for the sure referrer.
-function composeCard(card, { milestone = false } = {}) {
+// The row for one card. Pure: `milestone` is confirmEarnsMilestone for the sure referrer, `deferred` the
+// program's require_service_completion setting.
+function composeCard(card, { milestone = false, deferred = true } = {}) {
   const name = tidyName(card.name) || 'a new customer';
   const sure = sureReferrer(card);
-  const block = confirmBlock(card, sure, { milestone });
+  const block = confirmBlock(card, sure, { milestone, deferred });
   return {
     spec: {
       area: AREA,
@@ -175,10 +181,10 @@ function composeCard(card, { milestone = false } = {}) {
 // Ring a card's row, or quietly rewrite a standing one whose card changed (its first plan visit happened, a
 // name was fixed). A row a person marked done stays done; a row closed because its card left the list rings
 // again when the card comes back (raiseAdminAlertWithReopen). `trx` holds the row's advisory lock.
-async function raiseCard(trx, card) {
+async function raiseCard(trx, card, { deferred }) {
   const sure = sureReferrer(card);
   const milestone = sure && !card.creditsNow ? await confirmEarnsMilestone(trx, sure.customerId) : false;
-  const composed = composeCard(card, { milestone });
+  const composed = composeCard(card, { milestone, deferred });
   const opts = {
     bell: true,
     dedupeKey: keyFor(card.customerId),
@@ -211,13 +217,13 @@ async function answerOf(conn, customerId) {
 // One card's row, under the row's own advisory lock (the one notifyAdmin takes) with the card read again inside
 // it. closeReferralInboundBell takes the same lock, so an answer that commits while the sweep runs closes the row
 // after the sweep, and an answered card is never rung again.
-async function syncCard(customerId, { now = new Date() } = {}) {
+async function syncCard(customerId, { now = new Date(), deferred = true } = {}) {
   const dedupeKey = keyFor(customerId);
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
     const [card] = await inbound.listInboundReferrals(trx, { customerId });
     if (card) {
-      const result = await raiseCard(trx, card);
+      const result = await raiseCard(trx, card, { deferred });
       if (!result) throw new Error('referral bell row was not written');
       return result.rang ? 'raised' : 'unchanged';
     }
@@ -245,9 +251,10 @@ async function syncReferralInboundBells({ now = new Date() } = {}) {
   // Every listed card, plus every open row: a row whose card is gone (or past the list's first 50) is read alone.
   const ids = new Set(open.map((key) => key.slice(KEY_PREFIX.length)).filter((id) => UUID_RE.test(id)));
   for (const card of await inbound.listInboundReferrals(db)) ids.add(String(card.customerId));
+  const deferred = (await engine.getSettings()).require_service_completion === true;
   for (const customerId of ids) {
     try {
-      tally[await syncCard(customerId, { now })] += 1;
+      tally[await syncCard(customerId, { now, deferred })] += 1;
     } catch (err) {
       tally.failed += 1;
       logger.warn(`[referral-inbound-bell] card ${customerId} not synced: ${err.code || err.message}`);
@@ -268,28 +275,14 @@ async function closeReferralInboundBell(customerId, outcome, { now = new Date() 
   });
 }
 
-function confirmedMessage(result, referrer, name) {
-  if (result.error === 'convert_failed') return 'The referral was saved, but its conversion failed. Use Convert on it in Referrals → Queue.';
-  if (result.error === 'credit_failed') return `${referrer} is confirmed, but the $25 credits did not post. They post at the next plan visit.`;
-  if (result.credited) return `${referrer} is confirmed as ${name}'s referrer. Both $25 credits posted.`;
-  return `${referrer} is confirmed as ${name}'s referrer. $25 each after the first plan visit.`;
-}
-
 function parseMetadata(value) {
   if (value && typeof value === 'object') return value;
   try { return JSON.parse(value || '{}') || {}; } catch { return {}; }
 }
 
-// What a tap on a row says when Confirm is held back (confirmBlock).
-const BLOCK_MESSAGES = {
-  self: () => "The link belongs to this customer's own household. Answer it in Referrals → Queue.",
-  no_sure_referrer: () => 'Pick the referrer in Referrals → Queue.',
-  first_visit_done: (name) => `${firstName(name)}'s first plan visit is done. Confirm the referrer in Referrals → Queue.`,
-  milestone: () => 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.',
-};
-
-// Each button's step, on the card just read again. Confirm acts only for the referrer the button names, and
-// only while that is still the card's one sure referrer and nothing holds Confirm back.
+// Each button's step, on the card just read again. Confirm acts only for the referrer the button names, while
+// that is still the card's one sure referrer; the step refuses, under its own locks, every case that would send
+// or pay now (rewards paid at once, a plan visit on record, a milestone due) and then saves nothing.
 const STEPS = {
   async dismiss({ customerId, name, reviewedBy }) {
     await inbound.dismissInboundReferral({ customerId, reviewedBy });
@@ -300,11 +293,12 @@ const STEPS = {
     if (!sure || String(sure.customerId) !== String(item.args?.referrerCustomerId || '')) {
       return { ok: false, code: 'referrer_changed', message: 'The likely referrer changed. Pick the referrer in Referrals → Queue.' };
     }
-    const milestone = !card.creditsNow && await confirmEarnsMilestone(db, sure.customerId);
-    const block = confirmBlock(card, sure, { milestone });
-    if (block) return { ok: false, code: block, message: BLOCK_MESSAGES[block](name) };
-    const result = await inbound.confirmInboundReferral({ customerId, referrerCustomerId: String(sure.customerId), reviewedBy });
-    return { ok: true, message: confirmedMessage(result, tidyName(sure.name), name), resolution: CLOSE_RESOLUTIONS.confirmed };
+    await inbound.confirmInboundReferral({ customerId, referrerCustomerId: String(sure.customerId), reviewedBy, deferredOnly: true });
+    return {
+      ok: true,
+      message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. $25 each after the first plan visit.`,
+      resolution: CLOSE_RESOLUTIONS.confirmed,
+    };
   },
 };
 
@@ -334,7 +328,8 @@ async function runButton({ row, item, technicianId }) {
     });
   } catch (err) {
     if (!err.statusCode) throw err;
-    // The step's own refusal, in its own words. A card answered or referred meanwhile closes the row.
+    // The step's own refusal, in its own words: a hold (the row stays open) or a card answered or referred
+    // meanwhile (the row closes).
     const settled = err.code === 'ALREADY_REVIEWED' || err.code === 'ALREADY_REFERRED';
     return {
       ok: false,

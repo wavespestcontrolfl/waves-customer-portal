@@ -88,10 +88,11 @@ Kinds today:
   row for a card in Referrals → Queue, with **Confirm <referrer>** and **Not a referral**, the
   Queue's own `confirmInboundReferral` and `dismissInboundReferral`. Confirm is offered only for one
   sure referrer (the link code's owner, or the one customer whose first and last name match the name
-  the caller gave), only before the friend's first plan visit, and only when it is not the
-  referrer's 3rd, 5th or 10th referral. Then the tap sends nothing and moves no money: the $25
-  credits and the referrer's 9:00 AM email follow the first plan visit. Any other case is answered
-  in the Queue.
+  the caller gave), only while the program pays rewards at the first visit, only before the
+  friend's first plan visit, and only when it is not the referrer's 3rd, 5th or 10th referral. Then
+  the tap sends nothing and moves no money: the $25 credits and the referrer's 9:00 AM email follow
+  the first plan visit. The confirm step itself (`deferredOnly`) checks each of these again under its
+  locks and saves nothing when one fails. Any other case is answered in the Queue.
 
 ## 3. Never in a headline or a why
 
