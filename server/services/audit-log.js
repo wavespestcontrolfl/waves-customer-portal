@@ -552,7 +552,9 @@ async function auditAlertWouldClose({ items, et_day, trx = null }) {
  * The 08-28 bell policy silences an admin row before any row exists, so this is the only
  * trace. One row per Eastern day per distinct alert (category + trigger key + title stem),
  * deduped in memory: a restart may write a second row for the same alert that day. The
- * title stem has every digit run as '#', whitespace collapsed, cut at 80 characters.
+ * title stem has every digit run as '#', whitespace collapsed, cut at 80 characters. A
+ * composer alert also leaves its declared area, severity and who, and any alert with a
+ * dedupe key its kind (the key's class prefix), so a muted alert can be judged by its rule.
  * Always the module's own db, never a caller's transaction (it may roll back). Reads
  * GATE_ALERT_CATALOG itself: anything but `watch` reads and writes nothing. Both silence points
  * call it: NotificationService.create, and triggerNotification, which checks the policy itself
@@ -561,7 +563,7 @@ async function auditAlertWouldClose({ items, et_day, trx = null }) {
  */
 const BELL_POLICY_MUTED_ACTION = 'notification.bell_policy.muted';
 const mutedSeen = new Map();
-async function auditBellPolicyMuted({ category, triggerKey = null, title = '' }) {
+async function auditBellPolicyMuted({ category, triggerKey = null, title = '', metadata = null }) {
   if (require('../config/feature-gates').alertCatalogMode?.() !== 'watch') return 0;
   const etDay = etDateString();
   const titleStem = String(title || '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -570,12 +572,19 @@ async function auditBellPolicyMuted({ category, triggerKey = null, title = '' })
   const key = JSON.stringify([category, triggerKey, titleStem]);
   if (seen.has(key)) return 0;
   seen.add(key);
+  // A composer alert's declared area, severity and who, and the alert's kind: its dedupe key's prefix (before the
+  // first ':') with ids and digit runs as '#', which names the class and never a record. Absent fields stay out.
+  const declared = Object.fromEntries(['area', 'severity', 'who']
+    .filter((field) => typeof metadata?.[field] === 'string').map((field) => [field, metadata[field]]));
+  const kind = typeof metadata?.dedupeKey === 'string'
+    ? metadata.dedupeKey.split(':')[0].replace(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi, '#').replace(/\d+/g, '#').slice(0, 60)
+    : '';
   try {
     await db('audit_log').insert({
       actor_type: 'system',
       action: BELL_POLICY_MUTED_ACTION,
       resource_type: 'notification',
-      metadata: JSON.stringify({ category, triggerKey, titleStem, etDay }),
+      metadata: JSON.stringify({ category, triggerKey, titleStem, etDay, ...declared, ...(kind ? { kind } : {}) }),
     });
   } catch (err) {
     seen.delete(key);
