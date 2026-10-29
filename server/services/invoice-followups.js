@@ -3103,11 +3103,18 @@ async function chargeStaleAutopayHold(row, cutoff) {
     try {
       // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
       chargeCalled = true;
+      // The open-visit rule was judged on unlocked reads. The charge path re-checks the visit under its locks,
+      // before credit is applied or Stripe is called: a bound invoice needs its visit still completed and the
+      // invoice still bound to exactly that visit; an unbound invoice must still be unbound.
+      const visitGuards = invoice.scheduled_service_id
+        ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id, requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
+        : { requireUnboundInvoice: true };
       result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
         expectedTotal: quote.total,
         maxAuthorizedTotalCents: Math.round(quote.total * 100),
         requireAutopayForCustomerId: row.customer_id,
         refuseWhenDunningStopped: true,
+        ...visitGuards,
       });
     } catch (chargeErr) {
       let kind = classifyAutopayHoldChargeError(chargeErr);

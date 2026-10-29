@@ -99,7 +99,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       anchor_at: new Date(Date.now() - 20 * DAY),
       updated_at: heldAt,
     });
-    return { invoiceId, customerId, sequenceId, heldAt };
+    return { invoiceId, customerId, sequenceId, heldAt, visitId };
   }
   const seqOf = (invoiceId) => mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   const shadowRows = () => mockPg('audit_log').where({ action: 'invoice_followup.autopay_hold_timeout_shadow' });
@@ -462,13 +462,46 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything(), { rethrow: true });
       expect(quote).toHaveBeenCalledWith(h.invoiceId, 'pm-1');
       expect(chargeCall).toHaveBeenCalledTimes(1);
-      // toEqual on the whole options object: no operatorOverride, no other guard slips in.
+      // toEqual on the whole options object: no operatorOverride, no other guard slips in. An unbound
+      // invoice must still be unbound under the charge transaction's lock.
       expect(chargeCall.mock.calls[0]).toEqual([h.invoiceId, 'pm-1', {
         expectedTotal: 103.09,
         maxAuthorizedTotalCents: 10309,
         requireAutopayForCustomerId: h.customerId,
         refuseWhenDunningStopped: true,
+        requireUnboundInvoice: true,
       }]);
+    });
+
+    test('an invoice bound to a closed visit is charged with the visit guards: visit completed, invoice still bound to it', async () => {
+      const h = await held({ visitStatus: 'completed' });
+      expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+      expect(chargeCall.mock.calls[0]).toEqual([h.invoiceId, 'pm-1', {
+        expectedTotal: 103.09,
+        maxAuthorizedTotalCents: 10309,
+        requireAutopayForCustomerId: h.customerId,
+        refuseWhenDunningStopped: true,
+        requireSelfPayScheduledServiceId: h.visitId,
+        requireCompletedVisit: true,
+        requireInvoiceScheduledServiceBinding: true,
+      }]);
+    });
+
+    test('a linked visit reopened during the quote: the charge path refuses, the hold is kept, one alert, no release', async () => {
+      const h = await held({ visitStatus: 'completed' });
+      quote.mockImplementation(async () => {
+        await mockPg('scheduled_services').where({ id: h.visitId }).update({ status: 'confirmed' });
+        return { base: 100, surcharge: 3.09, total: 103.09 };
+      });
+      chargeCall.mockImplementation(async () => {
+        throw Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+      });
+      expect(await sweep()).toMatchObject({ candidates: 1, release_failed: 1, declined_released: 0, ambiguous: 0, charged: 0 });
+      await untouched(h);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:declined:${h.invoiceId}`);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_not_released', reason: 'refused', error_code: 'VISIT_NOT_COMPLETED', released: false });
     });
 
     test('a bank charge that is processing keeps the hold open for the webhook and writes one audit row', async () => {

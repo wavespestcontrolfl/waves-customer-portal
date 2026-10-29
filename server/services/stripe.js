@@ -2184,7 +2184,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, requireUnboundInvoice = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2292,6 +2292,12 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
+        // Opt-in (the Auto Pay hold charge mode, GATE_AUTOPAY_HOLD_TIMEOUT=charge): that caller found the invoice
+        // unbound in its unlocked read. A visit bound to it since then (read here under the invoice lock, before
+        // any credit apply or Stripe call) would aim this charge at an upcoming visit's bill, so it refuses.
+        if (requireUnboundInvoice && lockedInvoice.scheduled_service_id) {
+          throw new Error('The invoice is now bound to a visit. Review before charging.');
+        }
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
         // (r8 P1: the fully-covered-by-credit early return would otherwise
