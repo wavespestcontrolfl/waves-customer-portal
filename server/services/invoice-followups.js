@@ -3055,13 +3055,99 @@ async function recordAutopayHoldChargeAudit({ row, invoice, outcome, reason = nu
 }
 
 /**
+ * GATE_AUTOPAY_HOLD_TIMEOUT=charge, step one for ONE stale hold: pick the method Auto Pay itself would charge,
+ * quote it, charge it, and report what happened as ONE decision object:
+ *   { kind: 'skipped' }                                   a method lookup that threw: nothing was tried
+ *   { kind: 'charged', status, result, ... }              paid, processing (bank) or covered by account credit
+ *   { kind: 'ambiguous', reason: 'ambiguous', err, ... }  money may have moved or a charge is still settling
+ *   { kind: 'declined', reason: 'declined' | 'refused' | 'no_method', err, ... }   clean, nothing was charged
+ * `chargeCalled` says whether chargeInvoiceWithSavedCard was reached (it decides the release guards).
+ */
+async function attemptAutopayHoldCharge(row, invoice) {
+  let method;
+  try {
+    // rethrow: a failed lookup must not read as "no method" (that releases the hold). Only a lookup that
+    // succeeds and finds nothing is no_method.
+    method = await require('./autopay-eligibility').getChargeableAutopayMethod({ id: row.customer_id }, db, { rethrow: true });
+  } catch (lookupErr) {
+    logger.error(`[invoice-followups] autopay hold charge: Auto Pay method lookup failed for invoice ${row.invoice_id}; hold kept, next run retries: ${lookupErr.message}`);
+    return { kind: 'skipped' };
+  }
+  const decision = (fields) => ({ kind: 'declined', reason: null, chargeCalled: false, err: null, result: null, status: null, quote: null, method, ...fields });
+  if (!method) return decision({ reason: 'no_method' });
+
+  let quote;
+  try {
+    quote = await StripeService.quoteInvoiceSavedCardCharge(invoice.id, method.id);
+  } catch (quoteErr) {
+    // A quote moves no money.
+    return decision({ reason: 'refused', err: quoteErr });
+  }
+
+  // The open-visit rule was judged on unlocked reads. The charge path re-checks the visit under its locks,
+  // before credit is applied or Stripe is called: a bound invoice needs its visit still completed and the
+  // invoice still bound to exactly that visit; an unbound invoice must still be unbound.
+  const visitGuards = invoice.scheduled_service_id
+    ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id, requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
+    : { requireUnboundInvoice: true };
+  try {
+    // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
+    const result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
+      expectedTotal: quote.total,
+      maxAuthorizedTotalCents: Math.round(quote.total * 100),
+      requireAutopayForCustomerId: row.customer_id,
+      refuseWhenDunningStopped: true,
+      ...visitGuards,
+    });
+    const status = result && result.covered_by_credit === true ? 'covered_by_credit' : String(result?.status || 'paid');
+    return decision({ kind: 'charged', chargeCalled: true, quote, result, status });
+  } catch (chargeErr) {
+    let reason = classifyAutopayHoldChargeError(chargeErr);
+    // A clean decline or refusal leaves no open attempt. Anything else may have reached Stripe.
+    if (reason !== 'ambiguous' && await invoiceHasOpenChargeAttempt(invoice.id)) reason = 'ambiguous';
+    return decision({ kind: reason === 'ambiguous' ? 'ambiguous' : 'declined', reason, chargeCalled: true, quote, err: chargeErr });
+  }
+}
+
+// Step two: what each decision does. One table instead of parallel branches.
+// - releases: the hold is released (the guards: afterOwnCharge only when a charge was called);
+// - stops: closes the follow-up sequence (the charge path already did; the same idempotent call again);
+// - alert: the one office alert kind; log: [level, text]; result: the sweep outcome.
+const AUTOPAY_HOLD_CHARGE_PLANS = {
+  charged: {
+    releases: false,
+    stops: (d) => d.status === 'paid' || d.status === 'covered_by_credit',
+    audit: (d) => d.status,
+    alert: null,
+    log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} ${d.status}`],
+    result: () => 'charged',
+  },
+  ambiguous: {
+    releases: false,
+    stops: () => false,
+    audit: () => 'ambiguous',
+    alert: 'ambiguous',
+    log: (d, released, invoice) => ['error', `[invoice-followups] autopay hold charge: invoice ${invoice.id} outcome unclear (${d.err?.code || 'open charge attempt'}); hold kept, nothing retried`],
+    result: () => 'ambiguous',
+  },
+  declined: {
+    releases: true,
+    stops: () => false,
+    audit: (d, released) => (released ? 'declined_released' : 'declined_not_released'),
+    alert: 'declined',
+    log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} ${d.reason}; hold ${released ? 'released' : 'not released'}`],
+    result: (d, released) => (released ? 'declined_released' : 'release_failed'),
+  },
+};
+
+/**
  * GATE_AUTOPAY_HOLD_TIMEOUT=charge: the action for ONE stale hold the sweep selected. Charges the method Auto
- * Pay itself would charge, then:
+ * Pay itself would charge (attemptAutopayHoldCharge), then applies the decision's plan:
  * - paid / processing (bank) / covered by account credit: the hold stays; a paid or credit-covered invoice
  *   closes its follow-up sequence through stopOnPayment (the charge path calls it; this is the same call
  *   again, a no-op once completed), a bank charge closes it when the webhook settles it;
- * - declined, refused or no chargeable method: the hold is released as 'true' releases it, and one office
- *   alert says why;
+ * - declined, refused or no chargeable method: the hold is released as 'true' releases it (original guards
+ *   when no charge was called; only our own failed rows exempted when one was), and one office alert says why;
  * - ambiguous: the hold stays, nothing retries, and one office alert says to check Stripe.
  * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'skipped' }.
  */
@@ -3076,88 +3162,77 @@ async function chargeStaleAutopayHold(row, cutoff) {
   const invoice = await db('invoices').where({ id: row.invoice_id }).first();
   if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return { outcome: 'skipped' };
 
-  let method = null;
-  let quote = null;
-  let chargeCalled = false;
-  let failure = null; // { kind: 'declined' | 'refused' | 'ambiguous' | 'no_method', err }
-  try {
-    // rethrow: a failed lookup must not read as "no method" (that releases the hold). Only a lookup that
-    // succeeds and finds nothing is no_method.
-    method = await require('./autopay-eligibility').getChargeableAutopayMethod({ id: row.customer_id }, db, { rethrow: true });
-  } catch (lookupErr) {
-    logger.error(`[invoice-followups] autopay hold charge: Auto Pay method lookup failed for invoice ${row.invoice_id}; hold kept, next run retries: ${lookupErr.message}`);
-    return { outcome: 'skipped' };
-  }
-  if (!method) failure = { kind: 'no_method', err: null };
-  if (!failure) {
-    try {
-      quote = await StripeService.quoteInvoiceSavedCardCharge(invoice.id, method.id);
-    } catch (quoteErr) {
-      // A quote moves no money.
-      failure = { kind: 'refused', err: quoteErr };
-    }
-  }
+  const d = await attemptAutopayHoldCharge(row, invoice);
+  if (d.kind === 'skipped') return { outcome: 'skipped' };
 
-  let result = null;
-  if (!failure) {
-    try {
-      // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
-      chargeCalled = true;
-      // The open-visit rule was judged on unlocked reads. The charge path re-checks the visit under its locks,
-      // before credit is applied or Stripe is called: a bound invoice needs its visit still completed and the
-      // invoice still bound to exactly that visit; an unbound invoice must still be unbound.
-      const visitGuards = invoice.scheduled_service_id
-        ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id, requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
-        : { requireUnboundInvoice: true };
-      result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
-        expectedTotal: quote.total,
-        maxAuthorizedTotalCents: Math.round(quote.total * 100),
-        requireAutopayForCustomerId: row.customer_id,
-        refuseWhenDunningStopped: true,
-        ...visitGuards,
-      });
-    } catch (chargeErr) {
-      let kind = classifyAutopayHoldChargeError(chargeErr);
-      // A clean decline or refusal leaves no open attempt. Anything else may have reached Stripe.
-      if (kind !== 'ambiguous' && await invoiceHasOpenChargeAttempt(invoice.id)) kind = 'ambiguous';
-      failure = { kind, err: chargeErr };
-    }
+  const plan = AUTOPAY_HOLD_CHARGE_PLANS[d.kind];
+  const covered = d.status === 'covered_by_credit';
+  const amountCents = covered ? 0 : (d.quote ? Math.round(d.quote.total * 100) : cents(invoiceAmountDue(invoice)));
+  // No charge called (no method, quote refused): the original guards, hold stamp included. A charge that
+  // failed cleanly exempts only the failed attempt and failed payment it wrote itself.
+  const released = plan.releases && await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: d.chargeCalled });
+  if (plan.stops(d)) {
+    await stopOnPayment(invoice.id).catch((stopErr) => logger.error(`[invoice-followups] autopay hold charge: stopOnPayment failed for invoice ${invoice.id}: ${stopErr.message}`));
   }
-
-  const amountCents = quote ? Math.round(quote.total * 100) : cents(invoiceAmountDue(invoice));
-  const methodType = method ? (method.method_type || null) : null;
-
-  if (!failure) {
-    const covered = result && result.covered_by_credit === true;
-    const status = covered ? 'covered_by_credit' : String(result?.status || 'paid');
-    if (covered || status === 'paid') {
-      // The charge path already closed the sequence; this is the same idempotent call, in case that step failed.
-      await stopOnPayment(invoice.id).catch((stopErr) => logger.error(`[invoice-followups] autopay hold charge: stopOnPayment failed for invoice ${invoice.id}: ${stopErr.message}`));
-    }
-    await recordAutopayHoldChargeAudit({ row, invoice, outcome: status, amountCents: covered ? 0 : amountCents, methodType, released: false });
-    logger.info(`[invoice-followups] autopay hold charge: invoice ${invoice.id} ${status}`);
-    return { outcome: 'charged' };
-  }
-
-  const errorCode = failure.err?.code || null;
-  if (failure.kind === 'ambiguous') {
-    logger.error(`[invoice-followups] autopay hold charge: invoice ${invoice.id} outcome unclear (${errorCode || 'open charge attempt'}); hold kept, nothing retried`);
-    await recordAutopayHoldChargeAudit({ row, invoice, outcome: 'ambiguous', reason: 'ambiguous', errorCode, amountCents, methodType, released: false });
-    await raiseAutopayHoldChargeAlert({ kind: 'ambiguous', invoice, row, amountCents, reason: 'ambiguous', errorCode, errorMessage: null, released: false });
-    return { outcome: 'ambiguous' };
-  }
-
-  // No charge was called (no method, quote refused): release under the original guards, hold stamp included.
-  // A called charge that failed cleanly exempts only the failed attempt and failed payment it wrote itself.
-  const released = await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: chargeCalled });
   await recordAutopayHoldChargeAudit({
-    row, invoice, outcome: released ? 'declined_released' : 'declined_not_released', reason: failure.kind, errorCode, amountCents, methodType, released,
+    row, invoice, outcome: plan.audit(d, released), reason: d.reason, errorCode: d.err?.code || null, amountCents, methodType: d.method?.method_type || null, released,
   });
-  await raiseAutopayHoldChargeAlert({
-    kind: 'declined', invoice, row, amountCents, reason: failure.kind, errorCode, errorMessage: failure.err?.message || null, released,
-  });
-  logger.info(`[invoice-followups] autopay hold charge: invoice ${invoice.id} ${failure.kind}; hold ${released ? 'released' : 'not released'}`);
-  return { outcome: released ? 'declined_released' : 'release_failed' };
+  if (plan.alert) {
+    await raiseAutopayHoldChargeAlert({
+      kind: plan.alert, invoice, row, amountCents, reason: d.reason, errorCode: d.err?.code || null, errorMessage: d.err?.message || null, released,
+    });
+  }
+  const [level, text] = plan.log(d, released, invoice);
+  logger[level](text);
+  return { outcome: plan.result(d, released) };
+}
+
+/**
+ * The charge-mode sweep over the selected holds, one saved-method charge at a time. An unexpected throw on one
+ * hold is counted and the sweep goes on: before the charge call it moved no money, after it the charge path's
+ * own attempt row fences the invoice.
+ */
+async function chargeStaleAutopayHolds(due, cutoff) {
+  const counts = { charged: 0, declined_released: 0, release_failed: 0, ambiguous: 0, skipped: 0, errors: 0 };
+  for (const row of due) {
+    try {
+      const { outcome } = await chargeStaleAutopayHold(row, cutoff);
+      counts[outcome] += 1;
+    } catch (err) {
+      counts.errors += 1;
+      logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
+    }
+  }
+  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.ambiguous} ambiguous, ${counts.skipped} skipped, ${counts.release_failed} not released, ${counts.errors} error(s)`);
+  return { mode: 'charge', candidates: due.length, released: counts.declined_released, recorded: 0, ...counts };
+}
+
+// 'shadow': one audit_log row per would-release invoice per ET day, nothing else. Returns how many were newly recorded.
+async function recordShadowAutopayHolds(due, now) {
+  let recorded = 0;
+  const { recordAuditEvent } = require('./audit-log');
+  const etDay = etDateString(now);
+  for (const row of due) {
+    const already = await db('audit_log')
+      .where({ action: AUTOPAY_HOLD_SHADOW_ACTION, resource_type: 'invoice', resource_id: row.invoice_id })
+      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?::date", [etDay])
+      .first('id');
+    if (already) continue;
+    const heldSince = new Date(row.updated_at);
+    await recordAuditEvent({
+      actor_type: 'system',
+      action: AUTOPAY_HOLD_SHADOW_ACTION,
+      resource_type: 'invoice',
+      resource_id: row.invoice_id,
+      metadata: {
+        sequence_id: row.id,
+        held_since: heldSince.toISOString(),
+        days_held: Math.floor((now.getTime() - heldSince.getTime()) / 86400000),
+      },
+    });
+    recorded += 1;
+  }
+  return recorded;
 }
 
 /**
@@ -3173,7 +3248,7 @@ async function chargeStaleAutopayHold(row, cutoff) {
  */
 async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
   const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
-  if (mode !== 'shadow' && mode !== 'true' && mode !== 'charge') return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
+  if (!['shadow', 'true', 'charge'].includes(mode)) return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
 
   const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
   const engineGates = customerDunningGates();
@@ -3202,51 +3277,14 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
 
   let released = 0;
   let recorded = 0;
-  if (mode === 'charge') {
-    // Sequential on purpose: one saved-method charge at a time.
-    const counts = { charged: 0, declined_released: 0, release_failed: 0, ambiguous: 0, skipped: 0, errors: 0 };
-    for (const row of due) {
-      try {
-        const { outcome } = await chargeStaleAutopayHold(row, cutoff);
-        counts[outcome] += 1;
-      } catch (err) {
-        // Before the charge call this moved no money; after it, the charge path's own attempt row fences the
-        // invoice. Either way the sweep goes on with the next hold.
-        counts.errors += 1;
-        logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
-      }
-    }
-    logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.ambiguous} ambiguous, ${counts.skipped} skipped, ${counts.release_failed} not released, ${counts.errors} error(s)`);
-    return { mode, candidates: due.length, released: counts.declined_released, recorded: 0, ...counts };
-  }
+  if (mode === 'charge') return chargeStaleAutopayHolds(due, cutoff);
   if (mode === 'true') {
     for (const row of due) {
       if (await releaseStaleAutopayHold(row, cutoff)) released += 1;
     }
     logger.info(`[invoice-followups] autopay hold timeout: released ${released} of ${due.length} stale hold(s)`);
   } else {
-    const { recordAuditEvent } = require('./audit-log');
-    const etDay = etDateString(now);
-    for (const row of due) {
-      const already = await db('audit_log')
-        .where({ action: AUTOPAY_HOLD_SHADOW_ACTION, resource_type: 'invoice', resource_id: row.invoice_id })
-        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?::date", [etDay])
-        .first('id');
-      if (already) continue;
-      const heldSince = new Date(row.updated_at);
-      await recordAuditEvent({
-        actor_type: 'system',
-        action: AUTOPAY_HOLD_SHADOW_ACTION,
-        resource_type: 'invoice',
-        resource_id: row.invoice_id,
-        metadata: {
-          sequence_id: row.id,
-          held_since: heldSince.toISOString(),
-          days_held: Math.floor((now.getTime() - heldSince.getTime()) / 86400000),
-        },
-      });
-      recorded += 1;
-    }
+    recorded = await recordShadowAutopayHolds(due, now);
     logger.info(`[invoice-followups] autopay hold timeout (shadow): ${due.length} would release, ${recorded} newly recorded`);
   }
   return { mode, candidates: due.length, released, recorded };
