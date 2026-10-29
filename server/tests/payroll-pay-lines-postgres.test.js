@@ -34,6 +34,9 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
+const timeTracking = require('../services/time-tracking');
+const approval = require('../services/timesheet-approval');
+const { paidLineCoveringWeeks } = require('../services/payroll-paid-line-weeks');
 
 jest.setTimeout(60000);
 
@@ -461,6 +464,68 @@ postgres('payroll pay lines', () => {
       const run = (await draft(W3)).body.run;
       await trx('payroll_pay_lines').where({ id: line.id }).update({ covers_from: W3, covers_to: '2026-10-04' });
       expect((await api('GET', `/runs/${run.id}`)).body.run.stale).toBe(true);
+    });
+  });
+
+  describe('a paid line keeps the weeks it priced closed to timesheet changes', () => {
+    const LINE_PAID = 'A paid pay line took its overtime from this week. Void the pay run that paid it before changing its entries.';
+    const unlock = async (technicianId, weekStart) => {
+      const weekly = await trx('time_weekly_summary').where({ technician_id: technicianId, week_start: weekStart }).first();
+      const reviewToken = approval._test.reviewSnapshotToken({ weekly, dailies: [], entries: [] });
+      return approval.unlockWeek({ technicianId, weekStart, adminId: ADMIN_ID, reason: 'Fix a punch', reviewToken });
+    };
+    const weekStatus = async (technicianId, weekStart) => (
+      await trx('time_weekly_summary').where({ technician_id: technicianId, week_start: weekStart }).first('status')).status;
+
+    it('refuses to unlock a covered week that has no check of its own, or to move a shift into it, until the paying run is voided', async () => {
+      const id = await readyTech('Sample Alpha');
+      // W1 is approved but never paid on a run of its own; the W2 run pays a commission covering W1 and W2.
+      await approvedWeek(id, W1, '2400.00', '240.00');
+      await approvedWeek(id, W2, '2400.00', '0.00');
+      await addLine(id, { kind: 'commission', amountCents: 40000, coversFrom: W1, coversTo: addDays(W2, 6), earnedWeekStart: W2 });
+      const run = await draftAndFinalize(W2);
+      expect(byName(run, 'Sample Alpha').lineOvertimePremiumCents).toBe(909);
+      expect(await trx('payroll_checks').where({ technician_id: id, week_start: W1 }).first('id')).toBeUndefined();
+
+      await expect(unlock(id, W1)).rejects.toMatchObject({
+        statusCode: 409, message: 'A paid pay line took its overtime from this week. Void the pay run that paid it first.',
+      });
+      expect(await weekStatus(id, W1)).toBe('approved');
+      const movingId = randomUUID();
+      await trx('time_entries').insert({
+        id: movingId, technician_id: id, entry_type: 'shift', status: 'completed', approval_status: 'pending',
+        clock_in: `${addDays(W3, 1)}T14:00:00Z`, clock_out: `${addDays(W3, 1)}T22:00:00Z`, duration_minutes: 480,
+      });
+      const move = () => timeTracking.adminEditEntry(movingId, {
+        clock_in: `${addDays(W1, 2)}T14:00:00Z`, clock_out: `${addDays(W1, 2)}T22:00:00Z`, edit_reason: 'wrong day', edited_by: ADMIN_ID,
+      });
+      await expect(move()).rejects.toMatchObject({ statusCode: 409, message: LINE_PAID });
+
+      expect((await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } })).status).toBe(200);
+      await unlock(id, W1);
+      expect(await weekStatus(id, W1)).toBe('pending');
+      await expect(move()).resolves.toMatchObject({ status: 'edited' });
+    });
+
+    it('covers a line\'s own week or every week its span touches, only while the line is paid', async () => {
+      const id = await readyTech('Sample Alpha');
+      const other = await readyTech('Sample Beta');
+      await approvedWeek(id, W2);
+      // A bonus earned in W1, and a commission whose span runs from W1's Sunday to W2's Monday.
+      await addLine(id, { earnedWeekStart: W1 });
+      await addLine(id, { kind: 'commission', amountCents: 5000, coversFrom: addDays(W1, 6), coversTo: W2, earnedWeekStart: W2 });
+      const covered = async (technicianId, weeks) => Boolean(await paidLineCoveringWeeks(trx, technicianId, weeks));
+      expect(await covered(id, [W1])).toBe(false);
+      const run = await draftAndFinalize(W2);
+      expect(await covered(id, [W1])).toBe(true);
+      expect(await covered(id, [W2])).toBe(true);
+      expect(await covered(id, [W3])).toBe(false);
+      expect(await covered(id, [W4, W3])).toBe(false);
+      expect(await covered(id, [W3, W2])).toBe(true);
+      expect(await covered(other, [W1, W2])).toBe(false);
+      expect(await covered(id, [])).toBe(false);
+      await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } });
+      expect(await covered(id, [W1, W2])).toBe(false);
     });
   });
 
