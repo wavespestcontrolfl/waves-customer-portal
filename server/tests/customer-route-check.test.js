@@ -126,6 +126,24 @@ describe('filterOfferedSlots — only confirmed lateness for another stop remove
     expect(empty.report).toMatchObject({ removed: 0, keptOther: 2 });
   });
 
+  test('baseline-late AND newly late is removed, not counted baseline_late (mixed diagnosis)', async () => {
+    const { report } = await run1(fail('arrival_window', { ...LATE, baselineLateStopIds: ['b'] }));
+    expect(report).toMatchObject({ removed: 2, baselineLate: 0, dayEnd: 0, targetLate: 0, keptOther: 0 });
+    expect(report.removedSlots[0].mixed).toBe('baseline_late');
+  });
+
+  test('day end AND newly late is removed, not counted day_end (mixed diagnosis)', async () => {
+    const { report } = await run1(fail('arrival_window', { ...LATE, dayEndExceeded: true }));
+    expect(report).toMatchObject({ removed: 2, dayEnd: 0, baselineLate: 0 });
+    expect(report.removedSlots[0].mixed).toBe('day_end');
+  });
+
+  test('the removed-slot line notes a mixed day', async () => {
+    arrivalRoute.evaluateArrivalPlacement.mockReturnValue(fail('arrival_window', { ...LATE, baselineLateStopIds: ['b'], dayEndExceeded: true }));
+    await run([slot(SOON, '09:00'), slot(FAR, '09:00')], { mode: 'shadow' });
+    expect(logger.info.mock.calls.map(([l]) => l)).toContain(`[customer-route-check] removed surface=book date=${SOON} start=09:00 tech=tech-1 late=late-1 mixed=baseline_late,day_end`);
+  });
+
   test('a removed slot logs the stops it would make late', async () => {
     const { report } = await run1(fail('arrival_window', { ...LATE, newlyLateStopIds: ['s1', 's2'] }));
     expect(report.removedSlots[0].lateVisitId).toBe('s1,s2');

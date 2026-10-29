@@ -84,6 +84,24 @@ describe('explain: true on the real evaluator', () => {
     expect(fit.lateness.targetLate).toBe(false);
   });
 
+  // Mixed diagnoses. Stops already late before the new visit never count for the new visit, and a
+  // late day end alone never removes an hour; but a customer who is on time without the visit and
+  // late with it is a new broken promise whatever else is wrong with the day.
+  const MIXED_BASELINE = [stop('Z1', '08:00', 180), stop('Z2', '08:30', 60), stop('C', '13:00', 60)];
+  const MIXED_DAY_END = [stop('Z1', '08:00', 180), stop('C', '12:30', 120)];
+
+  test('(5) baseline-late AND newly late: Z2 is already late (baseline), Z1 and C are newly late at every viable placement', () => {
+    const fit = evaluate(MIXED_BASELINE, '12:00', 150, { explain: true });
+    expect(fit.lateness.baselineLateStopIds).toEqual(['Z2']);
+    expect(fit.lateness.newlyLateStopIds).toEqual(['Z1', 'C']);
+    expect(fit.lateness.newlyLateStopIds).not.toContain('Z2');
+  });
+
+  test('(6) day end exceeded AND newly late: removed on the newly late stops, nobody blamed for the day end', () => {
+    const fit = evaluate(MIXED_DAY_END, '12:00', 150, { explain: true });
+    expect(fit.lateness).toMatchObject({ newlyLateStopIds: ['Z1', 'C'], baselineLateStopIds: [], dayEndExceeded: true });
+  });
+
   test('the route runs past the day end: nobody is late, day end is flagged', () => {
     const fit = evaluate([stop('A', '09:00', 60)], '19:00', 120, { explain: true });
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
@@ -156,6 +174,9 @@ describe('customer route check with the real evaluator', () => {
   beforeEach(() => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; });
   afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
 
+  const MIXED_BASELINE_ROWS = [stop('Z1', '08:00', 180), stop('Z2', '08:30', 60), stop('C', '13:00', 60)];
+  const MIXED_DAY_END_ROWS = [stop('Z1', '08:00', 180), stop('C', '12:30', 120)];
+
   // The slot is also the only one dated in the next 7 days, so the floor would hold it
   // whenever it is the only offer: add a second, safe slot on the same day to take the floor out.
   async function check(rows, startMin, durationMinutes) {
@@ -176,6 +197,21 @@ describe('customer route check with the real evaluator', () => {
     expect(slots.map((x) => x.start_time)).toEqual(['16:00']);
     expect(report.removed).toBe(1);
     expect(report.removedSlots[0].lateVisitId).toBe('A,B');
+  });
+
+  test('baseline-late AND newly late is removed and counted as removed, not baseline_late', async () => {
+    const { slots, report } = await check(MIXED_BASELINE_ROWS, 12 * 60, 150);
+    expect(slots.map((x) => x.start_time)).toEqual(['16:00']);
+    // The 16:00 companion slot is kept and is the only one counted baseline_late; the removed slot is not.
+    expect(report).toMatchObject({ removed: 1, baselineLate: 1, dayEnd: 0, targetLate: 0 });
+    expect(report.removedSlots[0]).toMatchObject({ lateVisitId: 'Z1,C', mixed: 'baseline_late,day_end' });
+  });
+
+  test('day end AND newly late is removed and counted as removed, not day_end', async () => {
+    const { slots, report } = await check(MIXED_DAY_END_ROWS, 12 * 60, 150);
+    expect(slots.map((x) => x.start_time)).toEqual(['16:00']);
+    expect(report).toMatchObject({ removed: 1, dayEnd: 0, baselineLate: 0 });
+    expect(report.removedSlots[0]).toMatchObject({ lateVisitId: 'Z1,C', mixed: 'day_end' });
   });
 
   test('a slot that some placement can keep is kept', async () => {

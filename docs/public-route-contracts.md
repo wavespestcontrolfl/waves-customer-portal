@@ -6234,15 +6234,18 @@ code, error code, message text, limiter, signature or token changes.
 - `off`: byte-identical to before; the check code is never loaded.
 - `shadow`: the check runs and logs one `[customer-route-check]` line; the
   list is today's list.
-- `true`: a start is removed only if every placement that keeps the new
-  customer's own 2-hour window makes ANOTHER customer arrive after their
-  2-hour window while they are on time without the visit (the evaluator's
-  `explain` diagnosis tries the visit at every position of the day;
-  `newlyLateStopIds`). A placement that "saves" the others only by missing the
-  new customer's own window does not count. If one placement keeps every
-  promise, or the new customer cannot be reached in their own window anywhere
-  (`target_late`), the start stays. Also kept: a route past the day end
-  (`day_end`), a day already late without the visit (`baseline_late`),
+- `true`: an hour is removed only if, at every placement that keeps the new
+  customer's own 2-hour window, a customer who is on time without the new
+  visit would arrive late (the evaluator's `explain` diagnosis tries the visit
+  at every position of the day; `newlyLateStopIds`). Stops already late
+  before the new visit never count. A late day end alone never removes an
+  hour. A placement that "saves" the others only by missing the new
+  customer's own window does not count. A customer who is newly late is a new
+  broken promise even on a day that is already late elsewhere or runs past
+  the day end, so such a day still loses the hour. If one placement keeps
+  every promise, or the new customer cannot be reached in their own window
+  anywhere (`target_late`), the start stays. A day that is only already late
+  (`baseline_late`) or only past the day end (`day_end`) keeps it. Also kept:
   unverified routes, return-time, margin or overcommitted results, errors, a
   missing diagnosis, and starts not checked in time all stay. Each start is checked
   at its own minute and technician. Order, slot shapes and signed offers

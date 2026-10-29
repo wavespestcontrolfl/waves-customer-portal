@@ -8,11 +8,13 @@
  * re-service, the inspection link, the commercial first visit, the estimate
  * page) were built on the older gap engine, which does not run that check.
  * This module runs it over a list the picker ALREADY built, as a DROP-ONLY
- * filter: a slot is removed only when the evaluator confirms (explain: true)
- * that every placement keeping the NEW customer's own window makes ANOTHER
- * customer arrive after theirs. A new customer who cannot be reached in their
- * own window anywhere, a route past the day end, a day already late without
- * the visit, and every other outcome keep the slot.
+ * filter: an hour is removed only if, at every placement that keeps the new
+ * customer's own 2-hour window, a customer who is on time without the new
+ * visit would arrive late (evaluator explain: true). Stops already late before
+ * the new visit never count, and a late day end alone never removes an hour.
+ * A new customer who cannot be reached in their own window anywhere, a day
+ * that is only already late, a day end that is only late, and every other
+ * outcome keep the slot.
  *
  * Modes (customerRouteCheckMode, read at CALL time):
  *   off     unset or any other value. Callers never reach this module.
@@ -110,15 +112,19 @@ function logReport(report, startedAt) {
     + (report.error ? ` error=${String(report.error).slice(0, 120)}` : ''));
   for (const row of report.removedSlots.slice(0, MAX_REMOVED_LINES)) {
     logger.info(`[customer-route-check] removed surface=${report.surface} date=${row.date} start=${row.start}`
-      + ` tech=${row.technicianId || '-'} late=${row.lateVisitId || '-'}`);
+      + ` tech=${row.technicianId || '-'} late=${row.lateVisitId || '-'}${row.mixed ? ` mixed=${row.mixed}` : ''}`);
   }
 }
 
 // An `arrival_window` failure alone does not say another customer would be late: the new
 // visit may miss its own window, the route may run past the day end, or the day may already
-// be late without it. The evaluator's `lateness` (explain: true) tells them apart; only
-// newlyLateStopIds (another stop late WITH the visit and on time without it, wherever the
-// visit goes) removes a slot. Anything else, or no diagnosis, keeps the slot.
+// be late without it. The evaluator's `lateness` (explain: true) tells them apart. A slot is
+// removed only when, at every placement that keeps the new customer's own window, a customer
+// who is on time WITHOUT the visit would arrive late (newlyLateStopIds). Stops already late
+// before the visit never count, and a late day end alone never removes an hour. A customer
+// who is newly late is a new broken promise even on a day that is already late elsewhere or
+// runs past the day end, so a mixed diagnosis still removes (the baseline_late / day_end
+// counts are for KEPT slots only). No diagnosis, or none of the above, keeps the slot.
 function keptReasonOf(result) {
   const lateness = result?.lateness;
   if (!lateness) return 'arrival_window_unexplained';
@@ -138,8 +144,10 @@ function tally(report, result, slotInfo) {
   report.byReason[reason] = (report.byReason[reason] || 0) + 1;
   if (removes) {
     report.removed += 1;
+    // A removal on a mixed day is a removal (the stop is newly late); the other findings ride along as a note only.
+    const mixed = [result.lateness.baselineLateStopIds?.length ? 'baseline_late' : null, result.lateness.dayEndExceeded ? 'day_end' : null].filter(Boolean);
     report.removedSlots.push({ date: slotInfo.date, start: hhmm(slotInfo.startMin), technicianId: slotInfo.technicianId,
-      lateVisitId: result.lateness.newlyLateStopIds.join(',') });
+      lateVisitId: result.lateness.newlyLateStopIds.join(','), mixed: mixed.join(',') });
     return true;
   }
   if (reason === 'route_unverified') report.keptUnverified += 1;
