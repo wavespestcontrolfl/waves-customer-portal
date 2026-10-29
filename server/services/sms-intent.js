@@ -220,6 +220,27 @@ const COURTESY_TAIL_BLOCK_RE = new RegExp(
   'i'
 );
 
+const COURTESY_TEAMS = ['browns', 'bucs', 'buccaneers', 'bolts', 'lightning', 'rays', 'gators', 'noles', 'seminoles', 'canes', 'hurricanes', 'dolphins', 'fins', 'jaguars', 'jags', 'magic', 'heat', 'panthers', 'knights', 'bills', 'chiefs', 'eagles', 'packers', 'bears', 'lions', 'steelers', 'ravens', 'bengals', 'cowboys', 'giants', 'jets', 'patriots', 'pats', 'yankees', 'mets', 'cubs', 'braves', 'dawgs', 'vols', 'buckeyes', 'team'];
+const COURTESY_SIGNOFF_AGAIN_RE = /^(?:thanks|thank\s+you)\s+again$/i;
+// One TAIL part must match one of these in full (case-insensitive).
+const COURTESY_SIGNOFF_RE = new RegExp(
+  '^(?:'
+  + [
+    `go\\s+(?:${COURTESY_TEAMS.join('|')})`,
+    'roll\\s+tide', 'war\\s+eagle', 'fins\\s+up',
+    'have\\s+a\\s+(?:good|great|nice|wonderful|blessed|safe)\\s+(?:one|day|night|evening|weekend|week|morning|afternoon|trip|holiday)',
+    'enjoy\\s+(?:the|your)\\s+(?:day|evening|weekend|week|game|holiday|trip)',
+    '(?:much\\s+)?appreciated',
+    'appreciate\\s+(?:it|you|ya|that|you\\s+guys)',
+    'take\\s+care', 'talk\\s+soon', 'see\\s+ya', 'see\\s+you\\s+(?:soon|later)', 'you\\s+too', 'same\\s+to\\s+you', 'likewise', 'god\\s+bless', 'cheers',
+    'stay\\s+(?:safe|dry|cool)', 'be\\s+safe', 'have\\s+fun', 'good\\s+luck', 'good\\s+night',
+    'happy\\s+(?:thanksgiving|halloween|holidays|friday|weekend)', 'merry\\s+christmas', 'happy\\s+new\\s+year',
+    'thanks\\s+again', 'thank\\s+you\\s+again', 'thanks\\s+so\\s+much',
+  ].join('|')
+  + ')$',
+  'i'
+);
+
 function courtesyTailMode() {
   try {
     const reader = require('../config/feature-gates').courtesyTailMode;
@@ -260,7 +281,16 @@ function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
   if (!headIsCourtesyGrammar(head)) return false;
   const words = tail.split(/[^a-z']+/i).filter((w) => /[a-z]/i.test(w));
   if (words.length < 1 || words.length > COURTESY_TAIL_MAX_WORDS) return false;
-  if (COURTESY_TAIL_BLOCK_RE.test(tail)) return false;
+  // Allowlist (structural): every part of the TAIL must be a recognized sign-off.
+  // Unknown prose ("You missed the backyard") stays actionable. The denylist is
+  // an extra guard on top.
+  const parts = tail.split(/[,.!]+/).map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 1 || parts.length > 2) return false;
+  for (const part of parts) {
+    if (!COURTESY_SIGNOFF_RE.test(part)) return false;
+    // "thanks again" is a sign-off even though "again" is a contrast word elsewhere.
+    if (!COURTESY_SIGNOFF_AGAIN_RE.test(part) && COURTESY_TAIL_BLOCK_RE.test(part)) return false;
+  }
   return true;
 }
 

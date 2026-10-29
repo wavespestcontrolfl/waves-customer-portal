@@ -222,9 +222,9 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
   const setGate = (v) => { if (v === undefined) delete process.env[GATE]; else process.env[GATE] = v; };
 
   // Texts only the NEW rule closes.
-  const NEWLY_CLOSED = ['Perfect. Go browns', 'Thanks! Enjoy the weekend', 'Great, have a good one, Go Browns', 'Awesome! Talk soon buddy'];
+  const NEWLY_CLOSED = ['Perfect. Go browns', 'Thanks! Enjoy the weekend', 'Great, have a good one, Go Browns', 'Thanks. Go browns', 'Great, enjoy the weekend', 'Perfect. Go browns, have a great day', 'Thanks. Go browns, thanks again', 'Great! Roll tide', 'Awesome, take care'];
   // Already closed by the strict rule (true in every gate state).
-  const ALREADY_CLOSED = ['Great, have a good one', 'Awesome, appreciate you'];
+  const ALREADY_CLOSED = ['Great, have a good one', 'Perfect. Have a good one', 'Thanks! Appreciate you', 'Awesome, appreciate you'];
   const STAYS_OPEN = [
     'Perfect, can you also do the back yard',
     'Great, but the gate is locked',
@@ -241,6 +241,16 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     'Perfect. Ants are back',
     'Thanks. We are out of town',
     'Perfect. Go browns \u{1F43C}',
+    // Codex P1 (pre-push audit): unknown prose in the tail is actionable
+    'Thanks. You missed the backyard',
+    'Thanks. Cockroaches everywhere',
+    'Thanks. My card was charged twice',
+    'Thanks. Go check the yard',
+    'Thanks. Go figure',
+    'Perfect. See you Tuesday',
+    'Awesome! Talk soon buddy',
+    'Perfect. Go browns, have a great day, take care',
+    'Perfect. Go browns, please call',
   ];
 
   it('mode reader: only shadow and true (trimmed, any case) are on', () => {
@@ -297,14 +307,13 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     expect(isCourtesyOnly('Perfect. Go Browns!', { awaitingAnswer: false })).toBe(true);
   });
 
-  it('every request/contrast/problem/service/access word in the tail blocks it', () => {
-    const words = ['please', 'need', 'call', 'text me', 'let me know', 'but', 'also', 'not', "don't", "can't", 'problem', 'roaches', 'mosquitoes', 'spray', 'invoice', 'refund', 'estimate', 'gate', 'code', 'dog', 'locked', 'key'];
-    for (const w of words) {
-      const t = `Thanks. Go ${w} now`;
+  it('the TAIL must be a recognized sign-off; a denylist word inside one still blocks it', () => {
+    for (const t of ['Thanks. Go Cowboys', 'Thanks. Happy Thanksgiving', 'Thanks. Stay safe, god bless', 'Thanks. Good luck', 'Thanks. Good luck, take care']) {
+      expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    }
+    for (const t of ['Thanks. Go dogs', 'Thanks. Go rangers', 'Thanks. Have a good gate', 'Thanks. Go']) {
       expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
     }
-    // word boundary: "ant" must not block "pleasant", "key" must not block "turkey"
-    expect(courtesyTailWould('Thanks. Pleasant turkey day', { awaitingAnswer: false })).toBe(true);
   });
 
   it('shadow metadata: stamped only in shadow and only when the rule says true', () => {
