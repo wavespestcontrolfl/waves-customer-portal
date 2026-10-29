@@ -59,6 +59,7 @@ Use for: "any replies waiting?", "what suggested replies are pending?", "what is
       type: 'object',
       properties: {
         limit: { type: 'number', description: `How many to return (default ${LIST_DEFAULT}, max ${LIST_MAX})` },
+        customer_id: { type: 'string', format: 'uuid', description: 'Only the replies filed under this customer. Inside a request about one customer this is that customer (filled in for you); leave it out to see the whole queue.' },
       },
     },
   },
@@ -121,9 +122,12 @@ function plainReplyScope(q) {
 }
 
 async function listSuggestedReplies(input = {}) {
+  const only = String(input.customer_id || '').trim().toLowerCase();
+  if (only && !UUID_RE.test(only)) return refusal('customer_id must be a valid customer id', 'invalid_target');
   const asked = Math.floor(Number(input.limit));
   const limit = Math.min(Math.max(Number.isFinite(asked) && asked > 0 ? asked : LIST_DEFAULT, 1), LIST_MAX);
-  const base = () => db('message_drafts as d').where('d.status', 'pending');
+  // A customer filter is on the filing customer (message_drafts.customer_id), for the rows and every count alike.
+  const base = () => (only ? db('message_drafts as d').where('d.status', 'pending').where('d.customer_id', only) : db('message_drafts as d').where('d.status', 'pending'));
   const rows = await plainReplyScope(base())
     .leftJoin('customers as c', 'd.customer_id', 'c.id')
     .select('d.id', 'd.customer_id', 'd.sms_log_id', 'd.inbound_message', 'd.draft_response', 'd.flags', 'd.created_at',

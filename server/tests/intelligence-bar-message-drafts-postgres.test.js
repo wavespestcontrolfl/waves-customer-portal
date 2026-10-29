@@ -318,6 +318,19 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(await row(id)).toMatchObject({ status: 'pending', approved_by: null });
   });
 
+  test('the list filtered by customer_id returns only that customer\'s replies and counts only them', async () => {
+    const mine = await customer();
+    const theirs = await customer();
+    const mineId = await draft(mine, await inbound(mine));
+    const theirId = await draft(theirs, await inbound(theirs));
+    const only = await executeMessageDraftTool('list_suggested_replies', { customer_id: mine, limit: 25 }, ADMIN);
+    expect(only.suggested_replies.map((r) => r.draft_id)).toEqual([mineId]);
+    expect(only.pending_replies).toBe(1);
+    expect(only.other_pending_on_communications_page).toBe(0);
+    const all = (await executeMessageDraftTool('list_suggested_replies', { limit: 25 }, ADMIN)).suggested_replies.map((r) => r.draft_id);
+    expect(all).toEqual(expect.arrayContaining([mineId, theirId]));
+  });
+
   test('the list shows the waiting reply with a masked number', async () => {
     const c = await customer();
     const id = await draft(c, await inbound(c));

@@ -49,7 +49,7 @@ let state;
 const freshState = () => ({
   draft: { id: ID, sms_log_id: LOG, customer_id: CUST, inbound_message: 'Can you come Thursday?', draft_response: TEXT, status: 'pending', intent: 'scheduling', campaign_type: null, flags: {}, created_at: '2026-10-28T12:00:00Z' },
   customer: { first_name: 'Robin', last_name: 'Sample', phone: PHONE },
-  listRows: [], counts: [],
+  listRows: [], counts: [], wheres: [],
   readBack: { status: 'approved', sent_at: null },
 });
 
@@ -69,6 +69,7 @@ function makeDb() {
         if (prop === 'catch') return () => b;
         if (prop === 'first') return (...cols) => { q.first = true; q.cols = cols.length > 0; return b; };
         if (prop === 'count') return () => { q.counted = true; return b; };
+        if (prop === 'where') return (...a) => { if (table === 'message_drafts as d') state.wheres.push(a); return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
       },
@@ -112,7 +113,7 @@ describe('registration', () => {
       expect(registry.actions.get(name)).toMatchObject({ domain: 'comms', role: 'admin', approval: 'ui_confirm', scope: 'record', module: 'message-draft-tools.js' });
       expect(MESSAGE_DRAFT_TOOLS.find((t) => t.name === name)._sideEffects).toBe(true);
     }
-    expect(registry.actions.get('list_suggested_replies')).toMatchObject({ domain: 'comms', role: 'admin', approval: null, kind: 'read', scope: 'broad' });
+    expect(registry.actions.get('list_suggested_replies')).toMatchObject({ domain: 'comms', role: 'admin', approval: null, kind: 'read', scope: 'record' });
     expect(registry.policyErrors).not.toEqual(expect.arrayContaining(['list_suggested_replies', 'approve_suggested_reply', 'revise_suggested_reply', 'ignore_suggested_reply']));
   });
 
@@ -187,6 +188,58 @@ describe('list_suggested_replies', () => {
     expect(out.suggested_replies[0]).toMatchObject({ draft_id: ID, customer: 'Robin Sample', sends_to: '…0142', inbound_message: 'Can you come Thursday?', suggested_reply: TEXT });
     expect(out.suggested_replies[0].waiting_minutes).toBeGreaterThanOrEqual(89);
     expect(JSON.stringify(out)).not.toContain('9415550142');
+  });
+});
+
+describe('list_suggested_replies customer filter and task scope', () => {
+  const Context = require('../services/intelligence-bar/task-context');
+  const OTHER = '00000000-0000-4000-8000-00000000d799';
+  const listSchema = MESSAGE_DRAFT_TOOLS.find((t) => t.name === 'list_suggested_replies').input_schema;
+  const prepare = (input, context) => Context.prepareReadInput(input, context, { toolName: 'list_suggested_replies', schema: listSchema });
+  const taskFor = (id) => ({
+    targets: [{ customer_id: id, provenance: 'current_request_lookup' }], target: { customer_id: id }, ambiguous: false,
+    candidates: [], page: { ids: {}, records: {} }, requestedRecords: {},
+  });
+  const customerWheres = () => state.wheres.filter(([col]) => col === 'd.customer_id');
+
+  test('customer_id narrows the rows and every count; no customer_id leaves the queue whole', async () => {
+    await run('list_suggested_replies', { customer_id: CUST.toUpperCase() });
+    expect(customerWheres()).toEqual([['d.customer_id', CUST], ['d.customer_id', CUST], ['d.customer_id', CUST]]);
+    state.wheres = [];
+    await run('list_suggested_replies', {});
+    expect(customerWheres()).toEqual([]);
+  });
+
+  test('a customer_id that is not an id is refused before any read', async () => {
+    expect(await run('list_suggested_replies', { customer_id: 'Robin' })).toMatchObject({ code: 'invalid_target' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  describe('inside a customer task', () => {
+    beforeEach(() => {
+      // The task-context record check reads the customer rows (id only, alive).
+      const rows = { customers: [{ id: CUST }, { id: OTHER }] };
+      db.mockImplementation((table) => {
+        let ids = [];
+        const q = { whereIn: (_k, v) => { ids = v; return q; }, whereNull: () => q, select: () => q,
+          then: (res, rej) => Promise.resolve((rows[table] || []).filter((r) => ids.includes(r.id))).then(res, rej) };
+        return q;
+      });
+      db.raw = (text) => ({ text });
+    });
+
+    test('the read is that customer\'s own; another customer is refused', async () => {
+      expect(await prepare({}, taskFor(CUST))).toEqual({ input: { customer_id: CUST } });
+      expect(await prepare({ limit: 5, customer_id: CUST }, taskFor(CUST))).toEqual({ input: { limit: 5, customer_id: CUST } });
+      expect(await prepare({ customer_id: OTHER }, taskFor(CUST))).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a named customer that did not resolve fails closed; with no customer task the whole queue is read', async () => {
+      const unresolved = { targets: [], namesRequested: true, ambiguous: false, candidates: [], page: { ids: {}, records: {} }, requestedRecords: {} };
+      expect(await prepare({}, unresolved)).toMatchObject({ code: 'customer_scope_required' });
+      const noTask = { targets: [], ambiguous: false, candidates: [], page: { ids: {}, records: {} }, requestedRecords: {} };
+      expect(await prepare({ limit: 5 }, noTask)).toEqual({ input: { limit: 5 } });
+    });
   });
 });
 
