@@ -235,7 +235,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -253,7 +253,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}) });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -1866,6 +1866,22 @@ class AutonomousRunner {
     }
   }
 
+  // The rows whose terminal draft is pushed and usable, best score first
+  // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
+  // past its age limit is not listed, it is briefed again). Gate off, kill
+  // switch off or any read failure: none (the batch claims by score as before).
+  async _writtenTerminalDraftIds() {
+    const terminalWriter = require('./terminal-writer');
+    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
+    try {
+      const { written } = await terminalWriter.awaitingTerminalDrafts();
+      return written.map((row) => row.opportunity_id);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
+      return [];
+    }
+  }
+
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -1923,8 +1939,19 @@ class AutonomousRunner {
     // read-only peek so an empty lane reserves nothing; the rest of the batch
     // claims by score as before. Kill: AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS=0.
     let reservedLeft = actionType ? 0 : await this._claimableBackfillSlots(batchLimit);
+    // Written terminal drafts first (owner ruling 2026-10-26). The claim
+    // orders by score, so a row whose draft was pushed waited behind
+    // higher-scored rows that still had none, each looked at and deferred
+    // again, and the batch limit ran out first. The unscoped batch spends
+    // its first slots on the rows whose draft is written: each claim is
+    // scoped to the ones not yet taken (best score first, every claim rule
+    // still applies), inside the same batch limit; then the reserved
+    // backfill slots, then score order. No written draft = the batch as
+    // before. Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
+    let draftIds = actionType ? [] : await this._writtenTerminalDraftIds();
     for (let i = 0; i < slotBudget; i += 1) {
-      const reserve = reservedLeft > 0 && !scopedActionType;
+      const drafts = draftIds.length > 0 && !scopedActionType;
+      const reserve = !drafts && reservedLeft > 0 && !scopedActionType;
       if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
@@ -1932,8 +1959,19 @@ class AutonomousRunner {
       const run = await this.runNext({
         excludeIds: [...failedOppIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
+        ...(drafts ? { onlyIds: [...draftIds] } : {}),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
       });
+      if (drafts) {
+        // None of them is claimable now (deferred, held by a claim rule):
+        // the slot returns to the general pool, as an empty reserved slot does.
+        if (run.outcome === 'skipped_no_opportunity') {
+          draftIds = [];
+          i -= 1;
+          continue;
+        }
+        draftIds = draftIds.filter((id) => id !== run.opportunity_id);
+      }
       if (reserve && run.outcome === 'skipped_no_opportunity') {
         // Claimed away since the peek: the slot returns to the general pool.
         reservedLeft = 0;

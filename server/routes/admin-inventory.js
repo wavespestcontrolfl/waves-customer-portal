@@ -739,6 +739,8 @@ function mapProduct(product, vendorPricing = []) {
     irrigationNotes: product.irrigation_notes || null,
     postApplicationWatering: product.post_application_watering || null,
     mowHoldDays: product.mow_hold_days ?? null,
+    // Shown on the Bid kit product list under "Products proposed for bid work" (owner 2026-10-28).
+    bidList: product.bid_list === true,
     localRuleSensitivity: product.local_rule_sensitivity === true,
   };
 }
@@ -3539,6 +3541,16 @@ function postApplicationWateringPatch(body, actor) {
   return { value: JSON.stringify(checked.rule) };
 }
 
+// products_catalog.bid_list — an admin ticks a product to print it on the Bid kit product list under "Products proposed for bid
+// work" (owner 2026-10-28). A real true or false only: anything else is a 400 before any write. Returns { skip } when the body
+// does not mention the field, { error } for a 400, else { value }.
+function bidListFlag(body) {
+  const raw = body?.bidList;
+  if (raw === undefined) return { skip: true };
+  if (typeof raw !== 'boolean') return { error: 'Invalid bidList: must be true or false' };
+  return { value: raw };
+}
+
 // products_catalog.mow_hold_days — the days the product LABEL says to hold off
 // mowing after an application. Validated on every admin save: an integer 1..14
 // (a whole-number string is accepted), or null / '' to clear. Anything else is a
@@ -3742,6 +3754,9 @@ router.put('/:id', async (req, res, next) => {
     const mowHoldPatch = mowHoldDaysPatch(req.body);
     if (mowHoldPatch.error) return res.status(400).json({ error: mowHoldPatch.error });
     if (!mowHoldPatch.skip) upd.mow_hold_days = mowHoldPatch.value;
+    const bidListPatch = bidListFlag(req.body);
+    if (bidListPatch.error) return res.status(400).json({ error: bidListPatch.error });
+    if (!bidListPatch.skip) upd.bid_list = bidListPatch.value;
     // The inline editor sends containerSize alone, and scoreVendorRows treats
     // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
     // container edit without an explicit unitSizeOz re-derives it from the

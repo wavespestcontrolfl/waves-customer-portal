@@ -144,13 +144,12 @@ function signableProposal(estimate) {
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
 const {
-  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS,
+  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText,
 } = require('../../shared/commercial-agreement-terms.cjs');
 
 const commercialAutopayLive = () => require('../config/feature-gates').commercialAutopayLive();
 
-// Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
-const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+// Case, whitespace and apostrophe style do not matter (normalizeTermText, shared with the builder's Standard choice).
 const matchesDefaultText = (key) => (value) => normalizeTermText(value) === normalizeTermText(AGREEMENT_TERMS[key]);
 
 // field -> { detail: what the builder line asks for, allowed(value): the value the agreement can sit beside }.

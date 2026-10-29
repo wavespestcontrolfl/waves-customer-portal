@@ -99,6 +99,26 @@ function SubjectText({ subject }) {
       </div>
     );
   }
+  if (subject.type === "agent_messages") {
+    // An Ask Waves website chat turn (ask_waves_safety): the visitor's message
+    // and the reply the chat served, which is the text Jev judged.
+    return (
+      <div className="min-w-0 space-y-2">
+        {subject.visitorMessage && (
+          <div>
+            <div className="text-12 font-medium uppercase text-ink-secondary">Visitor asked</div>
+            <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-400">{subject.visitorMessage}</div>
+          </div>
+        )}
+        <div>
+          <div className="text-12 font-medium uppercase text-ink-secondary">
+            Website chat replied{subject.at ? ` · ${timeLabel(subject.at)}` : ""}
+          </div>
+          <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{subject.text}</div>
+        </div>
+      </div>
+    );
+  }
   if (subject.type === "scheduled_services") {
     // A visit's facts as the models read them (visit_access): saved
     // preferences, notes, customer texts and the last technician note, with

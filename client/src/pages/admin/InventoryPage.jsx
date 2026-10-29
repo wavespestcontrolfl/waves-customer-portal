@@ -3763,6 +3763,48 @@ function ServiceLinesEditor({ product, showToast, onInventoryChanged }) {
     </div>
   );
 }
+// Whether the Bid kit product list prints this product under "Products proposed for bid work" (products_catalog.bid_list), for a
+// product the company proposes in bids but has not applied on a customer visit in the last 12 months. Saved on its own PUT,
+// like Service lines. The daily rebuild leaves the new list unsigned, so the owner signs it off again after a change.
+function BidListEditor({ product, showToast, onInventoryChanged }) {
+  const [onList, setOnList] = useState(product.bidList === true);
+  const [saving, setSaving] = useState(false);
+  const saveBidList = async () => {
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/inventory/${product.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ bidList: onList }),
+      });
+      showToast?.("Bid kit product list setting saved");
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="mb-[12px]">
+      <div className="text-ui-body text-ink-secondary mb-[6px]">
+        Bid kit product list
+      </div>
+      <div className="flex gap-[10px] items-center flex-wrap text-ui-body">
+        <Checkbox
+          label="Show on the Bid kit product list (bid work)"
+          checked={onList}
+          onChange={(e) => setOnList(e.target.checked)}
+        />
+        <Button type="button" onClick={saveBidList} disabled={saving} variant="primary">
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <div className="text-ui-body text-ink-secondary mt-[4px]">
+        Adds this product under &apos;Products proposed for bid work&apos;. You sign off the list again after a change.
+      </div>
+    </div>
+  );
+}
 function ExpandedProduct({
   labelPipelineEnabled = false,
   labelRatesEnabled = false,
@@ -3905,6 +3947,14 @@ function ExpandedProduct({
            technician would only ever see a 403 here. */}
       {canAuthor && (
         <ServiceLinesEditor
+          product={product}
+          showToast={showToast}
+          onInventoryChanged={onInventoryChanged}
+        />
+      )}
+      {canAuthor && (
+        <BidListEditor
+          key={`bid-${product.id}-${product.bidList === true}`}
           product={product}
           showToast={showToast}
           onInventoryChanged={onInventoryChanged}

@@ -371,6 +371,18 @@ export default function TechHomePage({ section = 'today' }) {
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
+  // The banner-clear timers (en route, on site, rain-out). Cleared on unmount,
+  // so a late tick never sets state after the page is gone, a test's teardown
+  // included (CI 2026-10-28: "window is not defined" from the on-site timer).
+  const bannerTimers = useRef(new Set());
+  const clearBannerLater = useCallback((clear, ms) => {
+    const id = setTimeout(() => { bannerTimers.current.delete(id); clear(); }, ms);
+    bannerTimers.current.add(id);
+  }, []);
+  useEffect(() => {
+    const timers = bannerTimers.current;
+    return () => { timers.forEach(clearTimeout); timers.clear(); };
+  }, []);
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
   const [rainChance, setRainChance] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rainChance : null));
   // Per-stop session cache of the open visit's two detail fetches
@@ -524,11 +536,11 @@ export default function TechHomePage({ section = 'today' }) {
       // so the stale card would persist until a manual reload. An
       // explicit fetch closes that drift window.
       fetchSchedule();
-      setTimeout(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
+      clearBannerLater(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
       setEnRouteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark en route', isError: true });
     }
-  }, [enRouteState.pendingId, fetchSchedule]);
+  }, [enRouteState.pendingId, fetchSchedule, clearBannerLater]);
 
   const handleOnSite = useCallback(async (serviceId) => {
     if (!serviceId || onSiteState.pendingId) return;
@@ -544,11 +556,11 @@ export default function TechHomePage({ section = 'today' }) {
       const msg = data.alreadyOnSite ? 'Already marked on site' : 'Marked on site';
       setOnSiteState({ pendingId: null, serviceId, message: msg, isError: false });
       fetchSchedule();
-      setTimeout(() => setOnSiteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
+      clearBannerLater(() => setOnSiteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
       setOnSiteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark on site', isError: true });
     }
-  }, [fetchSchedule, onSiteState.pendingId]);
+  }, [fetchSchedule, onSiteState.pendingId, clearBannerLater]);
 
   // Live updates via Socket.io. Tech JWTs auth into the same
   // dispatch:admins room as admins (server/sockets/index.js), so the
@@ -1264,7 +1276,7 @@ export default function TechHomePage({ section = 'today' }) {
             setRainOutService(null);
             setRainOutResult(summary);
             fetchSchedule();
-            setTimeout(() => setRainOutResult(''), 6000);
+            clearBannerLater(() => setRainOutResult(''), 6000);
           }}
         />
       )}

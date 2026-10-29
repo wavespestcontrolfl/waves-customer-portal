@@ -15,7 +15,7 @@ const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/oc
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
-const { lunchBlockEnabled, pastCustomerLastStart } = require('./scheduling/customer-windows');
+const { pastCustomerLastStart } = require('./scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
 function bookingError(message, code, statusCode = 409) {
@@ -60,7 +60,6 @@ class AvailabilityEngine {
 
     const slotDuration = config.slot_duration_minutes || 60;
     const buffer = config.buffer_minutes || 15;
-    const lunchStart = this.timeToMin(config.lunch_start || '12:00');
     const lunchEnd = this.timeToMin(config.lunch_end || '13:00');
     const dayStart = this.timeToMin(config.day_start || '08:00');
     const dayEnd = this.timeToMin(config.day_end || '18:00');
@@ -281,19 +280,10 @@ class AvailabilityEngine {
       }
 
       // Packed-ends (owner bug report 2026-09-23): a day with at least one
-      // REAL committed stop (not counting the lunch block added next)
-      // restricts each gap to its packed end(s) against that stop, instead
-      // of offering every hourly window in between — see findGaps. An
-      // empty day (lunch only, or no lunch block at all under the gate)
-      // keeps today's earliest-per-gap behavior.
+      // REAL committed stop restricts each gap to its packed end(s) against
+      // that stop, instead of offering every hourly window in between — see
+      // findGaps. An empty day keeps today's earliest-per-gap behavior.
       const hasRealStops = occupied.length > 0;
-
-      // Add lunch block — ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner
-      // ruling 2026-09-23, unset by default; #4663). Off, noon is a normal
-      // offerable/bookable hour like any other on this legacy zone engine.
-      // Flagged `lunch: true` (Codex r1 P2) so findGaps' packed-ends mode
-      // never treats it as a route stop to pack against.
-      if (lunchBlockEnabled()) occupied.push({ start: lunchStart, end: lunchEnd, lunch: true });
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
@@ -317,15 +307,12 @@ class AvailabilityEngine {
       // check_availability tool; the internal pickFirstServiceDate caller
       // (estimate-converter.js) only reads the day, not a specific time, so
       // the per-slot filter is harmless there too.
-      // Morning/afternoon coverage while the lunch block is OFF: the block
-      // used to split every day into two gaps, so an empty day offered
-      // [09:00, 14:00]; without it the day is ONE gap and findGaps' first-
-      // accepted-start-per-gap rule would offer 09:00 alone. Pass the
-      // configured afternoon boundary so each gap spanning it also offers
-      // its first accepted afternoon start (13:00 on an empty day — noon
-      // stays offerable where a gap opens onto it). Null while the block is
-      // on: the block itself already splits the day, legacy output exactly.
-      const afternoonStartMin = lunchBlockEnabled() ? null : lunchEnd;
+      // Morning/afternoon coverage: noon is a normal hour, so the day is ONE
+      // gap and findGaps' first-accepted-start-per-gap rule would offer
+      // 09:00 alone. Pass the configured afternoon boundary so each gap
+      // spanning it also offers its first accepted afternoon start (13:00 on
+      // an empty day — noon stays offerable where a gap opens onto it).
+      const afternoonStartMin = lunchEnd;
       const accept = (g) => {
         if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
         // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16). No-op while unset.
@@ -351,8 +338,7 @@ class AvailabilityEngine {
       // block.start - buffer shape. afternoonStartMin (owner ruling
       // 2026-09-23, #4663) is an independent axis: it only widens the
       // no-real-stops (packEnds false) walk, so an empty day's choices
-      // don't collapse to a single morning slot once the lunch block stops
-      // splitting the day in two.
+      // don't collapse to a single morning slot.
       const credit = travelMirror ? { expectedMinutes: travelMirror.expectedMinutes } : null;
       const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept, { packEnds: hasRealStops, credit, afternoonStartMin });
 
@@ -405,11 +391,10 @@ class AvailabilityEngine {
   // legacy `block.start - buffer` shape — packedBounds' own no-credit
   // fallback is arithmetically identical, so every existing caller of this
   // method (including every direct unit test) is byte-for-byte unaffected.
-  // opts.afternoonStartMin (GATE_BOOKING_LUNCH_BLOCK unset, owner ruling
-  // 2026-09-23, #4663): applies only on the packEnds-false (no real stops)
-  // walk — a gap that spans this boundary ALSO offers its first accepted
-  // start at/after it, so removing the lunch block (which used to split
-  // every day into a morning and an afternoon gap) doesn't collapse an
+  // opts.afternoonStartMin (owner ruling 2026-09-23, #4663): applies only
+  // on the packEnds-false (no real stops) walk — a gap that spans this
+  // boundary ALSO offers its first accepted start at/after it, so an empty
+  // day (no lunch block splitting it into a morning and an afternoon gap) doesn't collapse an
   // empty day's choices from [09:00, 14:00] to [09:00]. Null = legacy
   // first-start-per-gap only. Independent of packEnds/credit: a real-stop
   // day is governed entirely by the packed-ends geometry above, never by
@@ -597,17 +582,6 @@ class AvailabilityEngine {
     // getAvailableSlots' accept() runs, so offer and commit stay in lockstep.
     if (violatesSelfServeNotice({ date: dateStr, startTime })) {
       throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
-    }
-    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) —
-    // commit-side mirror of getAvailableSlots' occupied-lunch push, using the
-    // same configured interval: an option the assistant quoted before the
-    // gate flipped on must not commit onto the block. No-op while unset.
-    if (lunchBlockEnabled()) {
-      const lunchStart = this.timeToMin(config?.lunch_start || '12:00');
-      const lunchEnd = this.timeToMin(config?.lunch_end || '13:00');
-      if (startMin < lunchEnd && endMin > lunchStart) {
-        throw bookingError('That time falls in the lunch block — please pick another slot', 'SLOT_TAKEN');
-      }
     }
     // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
     // 2026-10-09) — commit-side mirror of getAvailableSlots' accept(): an
