@@ -308,6 +308,21 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     for (const v of [w.tue, w.wed]) expect((await get(v.id)).technician_id).toBe(w.hireId);
   });
 
+  test('rollback leaves a visit that joined a group since the run with the hire, listed', async () => {
+    const w = await world();
+    const result = await go(w, { refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+    const groupId = randomUUID();
+    await knex('service_visits').insert({ id: groupId, customer_id: w.thu.customer_id, scheduled_date: '2099-07-09', stop_base_key: `syn-${run}:${groupId.slice(0, 4)}`, created_by: 'test', status: 'open' });
+    created.groups.push(groupId);
+    await knex('scheduled_services').where({ id: w.thu.id }).update({ visit_id: groupId });
+
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+
+    expect(undo.skipped.visits).toEqual([w.thu.id]);
+    expect((await get(w.thu.id)).technician_id).toBe(w.hireId);
+    for (const v of [w.mon, w.tue, w.wed]) expect((await get(v.id)).technician_id).toBe(w.ownerId);
+  });
+
   test('rollback keeps a series with the hire when its inherited template follows a parent row the undo could not restore', async () => {
     const w = await world();
     // A series whose parent row is itself an open visit ahead; its template inherits (no recurring technician, no override).

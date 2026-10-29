@@ -41,7 +41,9 @@
 //
 // ROLLBACK restores a series only while its template still reads (--to, override) and a visit only
 // while it is still open, still held by --to, still on the day the run moved it, and the original
-// technician can still take that day (assertAssignableTechnician). Everything else is listed. A
+// technician can still take that day (assertAssignableTechnician), and only while it is in no visit
+// group (a group's technician moves with its stops, through a path this run never calls). Everything
+// else is listed. A
 // restored visit gets back the route number the file kept (the run cleared it): an undo returns the
 // old route, and the route repair that would renumber it is dark. Series go back after the visits,
 // and only when the restored template gives new visits to --from again: a template that inherits from
@@ -356,11 +358,17 @@ async function rollbackHandover(db, opts) {
       }
       for (const v of record.visits) {
         if (!fromCanTake.get(v.date)) { skipped.visits.push(v.id); continue; }
-        // Only a visit still on the day the run moved it (the day this rollback locked) goes back.
+        // Only a visit still on the day the run moved it (the day this rollback locked), and still in no group (the
+        // planner's GROUPED rule: a service_visits row that is not dissolved), goes back.
         const n = await trx('scheduled_services')
           .where({ id: v.id, technician_id: to })
           .whereIn('status', OPEN_STATUSES)
           .where(function notStopped() { this.whereNull('track_state').orWhereNotIn('track_state', STOPPED_TRACK_STATES); })
+          .where(function notGrouped() {
+            this.whereNull('visit_id').orWhereExists(function dissolved() {
+              this.select(1).from('service_visits as sv').whereRaw('sv.id = scheduled_services.visit_id').where('sv.status', 'dissolved');
+            });
+          })
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [v.date])
           .update({ technician_id: v.technician_id, route_order: v.route_order ?? null, updated_at: trx.fn.now() });
         if (n === 1) visitsRestored += 1; else skipped.visits.push(v.id);
