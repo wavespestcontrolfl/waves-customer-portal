@@ -56,8 +56,8 @@ function freshState() {
 
 function makeTable(name) {
   const base = name.split(' as ')[0];
-  const q = { filters: [], isNull: [], notNull: [], single: false, patch: null, raw: false };
-  const matched = () => (S.tables[base] || []).filter((r) => q.filters.every(([k, v]) => r[k] === v)
+  const q = { filters: [], ins: [], isNull: [], notNull: [], single: false, patch: null, raw: false };
+  const matched = () => (S.tables[base] || []).filter((r) => q.filters.every(([k, v]) => r[k] === v) && q.ins.every(([k, vs]) => vs.includes(r[k]))
     && q.isNull.every((k) => r[k] == null) && q.notNull.every((k) => r[k] != null));
   const run = () => {
     if (S.failReads) throw new Error('read failed');
@@ -77,6 +77,7 @@ function makeTable(name) {
       if (prop === 'then') return (res, rej) => Promise.resolve().then(run).then(res, rej);
       if (prop === 'first') return () => { q.single = true; return b; };
       if (prop === 'where') return (k, v) => { if (k && typeof k === 'object') Object.entries(k).forEach((e) => q.filters.push(e)); else q.filters.push([k, v]); return b; };
+      if (prop === 'whereIn') return (k, vs) => { q.ins.push([k, vs]); return b; };
       if (prop === 'whereNull') return (k) => { q.isNull.push(k); return b; };
       if (prop === 'whereNotNull') return (k) => { q.notNull.push(k); return b; };
       if (prop === 'whereRaw') return () => { q.raw = true; return b; };
@@ -132,6 +133,7 @@ beforeEach(() => {
   S = freshState();
   db.mockImplementation(makeDb());
   db.transaction = makeDb().transaction;
+  db.raw = () => 'RAW';
   envGate(true);
 });
 afterEach(() => envGate(false));
@@ -140,7 +142,7 @@ describe('registration', () => {
   test('a two-step write, admin only, on the schedule/dispatch pages, never owner-direct', () => {
     expect(gates.WRITE_TWO_STEP_TOOL_NAMES.has('resolve_dispatch_alert')).toBe(true);
     expect(gates.UI_GATED_WRITE_TOOL_NAMES.has('resolve_dispatch_alert')).toBe(true);
-    expect(registry.actions.get('resolve_dispatch_alert')).toMatchObject({ domain: 'schedule', role: 'admin', approval: 'ui_confirm', scope: 'route_wide', module: 'dispatch-alert-tools.js' });
+    expect(registry.actions.get('resolve_dispatch_alert')).toMatchObject({ domain: 'schedule', role: 'admin', approval: 'ui_confirm', scope: 'record', module: 'dispatch-alert-tools.js' });
     expect(registry.policyErrors).not.toContain('resolve_dispatch_alert');
     expect(DISPATCH_ALERT_TOOLS[0]._sideEffects).toBe(true);
   });
@@ -362,6 +364,52 @@ describe('the confirmed run', () => {
     expect(out.note).toBeUndefined();
     S.failReads = false;
     spy.mockRestore();
+  });
+});
+
+describe('a request about one customer binds the alert to that customer (validateRecordTarget)', () => {
+  const TaskContext = jest.requireActual('../services/intelligence-bar/task-context');
+  const OTHER_CUST = '00000000-0000-4000-8000-0000000000d2';
+  const OTHER_VISIT = '00000000-0000-4000-8000-0000000000b2';
+  const check = (params, context, opts = {}) => TaskContext.validateRecordTarget(params, context, { toolName: 'resolve_dispatch_alert', ...opts });
+  const forCustomer = { targets: [{ customer_id: CUST }] };
+
+  beforeEach(() => {
+    S.tables.customers.push({ id: OTHER_CUST, first_name: 'Sam', last_name: 'Other', company_name: null });
+    S.tables.scheduled_services.push({ id: OTHER_VISIT, customer_id: OTHER_CUST, service_type: 'Lawn', scheduled_date: '2026-10-28', window_start: '09:00:00', window_end: '11:00:00', status: 'scheduled' });
+    S.tables.dispatch_alerts.push({ id: OTHER_ALERT, type: 'missed_photo', severity: 'warn', tech_id: null, job_id: OTHER_VISIT, payload: null, created_at: new Date(), resolved_at: null, resolved_by: null });
+  });
+
+  test('"resolve the late alert for the Smith visit": an alert on the task customer\'s own visit is admitted, by alert_id or job_id', async () => {
+    expect(await check({ alert_id: ALERT }, forCustomer)).toBeNull();
+    expect(await check({ job_id: VISIT }, forCustomer)).toBeNull();
+    const approval = await check({ alert_id: ALERT }, forCustomer, { forApproval: true });
+    expect(approval.references).toEqual([{ kind: 'appointment_id', id: VISIT }]);
+  });
+
+  test('an alert on ANOTHER customer\'s visit is refused inside the task, by alert_id or job_id', async () => {
+    expect(await check({ alert_id: OTHER_ALERT }, forCustomer)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await check({ job_id: OTHER_VISIT }, forCustomer)).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  test('an alert with no visit (no customer) is refused inside a customer task; a call with no selector is too (it would list every card)', async () => {
+    alert().job_id = null;
+    expect(await check({ alert_id: ALERT }, forCustomer)).toMatchObject({ code: 'customer_scope_required' });
+    expect(await check({}, forCustomer)).toMatchObject({ code: 'customer_scope_required' });
+    expect(await check({ alert_id: '00000000-0000-4000-8000-0000000000ff' }, forCustomer)).toMatchObject({ code: 'record_unavailable' });
+    expect(await check({ alert_id: 'nope' }, forCustomer)).toMatchObject({ code: 'invalid_target' });
+  });
+
+  test('a named customer who did not resolve keeps the request customer-scoped: nothing is admitted', async () => {
+    expect(await check({ alert_id: ALERT }, { namesRequested: true, targets: [] })).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  test('outside a customer-specific request any card passes, including one with no visit; the owner-direct login too', async () => {
+    expect(await check({ alert_id: OTHER_ALERT }, {})).toBeNull();
+    expect(await check({}, {})).toBeNull();
+    alert().job_id = null;
+    expect(await check({ alert_id: ALERT }, {})).toBeNull();
+    expect(await check({ alert_id: OTHER_ALERT }, { ...forCustomer, ownerDirect: true })).toBeNull();
   });
 });
 

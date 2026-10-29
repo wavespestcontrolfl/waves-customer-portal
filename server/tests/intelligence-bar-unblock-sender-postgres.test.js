@@ -124,6 +124,47 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
     expect(mockFilterDelete).not.toHaveBeenCalled();
   });
 
+  test('an address whose domain is blocked too: the card says it stays blocked; Confirm removes only the address; the domain row survives', async () => {
+    const domain = `fixture-${randomUUID().slice(0, 8)}.example.invalid`;
+    const domainRow = await block({ email_address: null, domain, gmail_filter_id: 'fixture-domain-filter' });
+    const row = await block({ email_address: `promo@${domain}` });
+    const preview = await card(row.id);
+    expect(preview).toMatchObject({ still_blocked_by: `@${domain}`, _version: { overlap: { kind: 'domain_block', domain, id: domainRow.id } } });
+    expect(await confirm(row.id, preview)).toMatchObject({ success: true, still_blocked_by: `@${domain}` });
+    expect(mockFilterDelete).toHaveBeenCalledTimes(1);
+    expect(mockFilterDelete).toHaveBeenCalledWith({ userId: 'me', id: 'fixture-filter' });
+    expect(await exists(row.id)).toBe(false);
+    expect(await exists(domainRow.id)).toBe(true);
+  });
+
+  test('a domain block removed by another admin while the confirm waits (FOR SHARE vs their lock): refused, Gmail untouched', async () => {
+    const domain = `fixture-${randomUUID().slice(0, 8)}.example.invalid`;
+    const domainRow = await block({ email_address: null, domain, gmail_filter_id: null });
+    const row = await block({ email_address: `promo@${domain}` });
+    const preview = await card(row.id);
+    let confirming;
+    await db.transaction(async (trx) => {
+      await trx('blocked_email_senders').where({ id: domainRow.id }).forUpdate().first();
+      confirming = confirm(row.id, preview);
+      await settle(400);
+      await trx('blocked_email_senders').where({ id: domainRow.id }).del();
+    });
+    expect(await confirming).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
+    expect(mockFilterDelete).not.toHaveBeenCalled();
+    expect(await exists(row.id)).toBe(true);
+  });
+
+  test('unblocking a domain keeps individual address blocks at it, and says so', async () => {
+    const domain = `fixture-${randomUUID().slice(0, 8)}.example.invalid`;
+    const domainRow = await block({ email_address: null, domain, gmail_filter_id: null });
+    const addressRow = await block({ email_address: `promo@${domain}`, gmail_filter_id: null });
+    const preview = await card(domainRow.id);
+    expect(preview).toMatchObject({ other_blocks_stay: 1, _version: { overlap: { kind: 'address_blocks', domain, count: 1 } } });
+    expect(await confirm(domainRow.id, preview)).toMatchObject({ success: true });
+    expect(await exists(domainRow.id)).toBe(false);
+    expect(await exists(addressRow.id)).toBe(true);
+  });
+
   test('Gmail cannot remove the filter: the row stays and the card says the sender is still blocked', async () => {
     const row = await block();
     const preview = await card(row.id);

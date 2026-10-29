@@ -1006,7 +1006,7 @@ const PINNED_DISPLAY_BUILDERS = {
     : null),
   // unblock_sender: the card names the blocked address or domain, why and how often it was blocked; the lines ride the contract.
   unblock_sender: (params, preview) => (preview?.preview === true && preview.tool === 'unblock_sender'
-    ? { unblock: preview.blocked_target, scope: preview.scope, blocked_before: preview.reason, messages_caught: preview.blocked_count, sends_to_customer: 'nothing' }
+    ? { unblock: preview.blocked_target, scope: preview.scope, blocked_before: preview.reason, messages_caught: preview.blocked_count, after: preview.still_blocked_by ? `still blocked by the domain block ${preview.still_blocked_by}` : 'new mail is no longer auto-trashed', sends_to_customer: 'nothing' }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the

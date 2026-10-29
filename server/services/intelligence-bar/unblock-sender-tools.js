@@ -73,7 +73,7 @@ function blockedAtEt(value) {
 
 // The facts the card shows and Confirm re-checks, from one blocklist row (a pure function, so the locked re-read in
 // the unblock's own transaction builds the identical pin).
-function versionOf(row) {
+function versionOf(row, overlap = null) {
   return {
     blocked_id: row.id,
     email_address: row.email_address || null,
@@ -82,7 +82,32 @@ function versionOf(row) {
     blocked_count: Number(row.blocked_count) || 0,
     blocked_ms: row.created_at ? new Date(row.created_at).getTime() : null,
     gmail_filter_id: row.gmail_filter_id || null,
+    // The other blocks this unblock leaves in place (null when there are none), pinned like the row itself.
+    overlap,
   };
+}
+
+const OVERLAP_CAP = 50;
+const domainOfAddress = (address) => String(address || '').split('@').pop().trim().toLowerCase();
+
+// The OTHER blocklist entries that keep acting on what this unblock is about (the bar never removes them):
+//  - an address row: a pure domain block on the address's own domain. Its Gmail filter and the blocklist's own domain check
+//    (spam-blocker.js isBlocked) still send the address's mail to Trash after the address entry is gone.
+//  - a domain row: individual address blocks at that domain, each still in force.
+// `lock` holds those rows FOR SHARE inside the unblock's transaction, so one cannot appear or go between the check and the write.
+async function overlapOf(row, conn = db, { lock = false } = {}) {
+  if (row.email_address) {
+    const domain = domainOfAddress(row.email_address);
+    if (!domain) return null;
+    const q = conn('blocked_email_senders').whereRaw('LOWER(domain) = ?', [domain]).whereNull('email_address').whereNot({ id: row.id }).orderBy('id');
+    const other = await (lock ? q.forShare() : q).first('id');
+    return other ? { kind: 'domain_block', domain, id: other.id } : null;
+  }
+  const domain = String(row.domain || '').trim().toLowerCase();
+  if (!domain) return null;
+  const q = conn('blocked_email_senders').whereRaw('LOWER(email_address) LIKE ?', [`%@${domain}`]).whereNot({ id: row.id }).orderBy('id').limit(OVERLAP_CAP);
+  const others = await (lock ? q.forShare() : q).select('id');
+  return others.length ? { kind: 'address_blocks', domain, count: others.length } : null;
 }
 
 // The one blocklist row the call names: exactly one of blocked_id / email_address / domain.
@@ -105,25 +130,33 @@ async function resolveRow(input) {
   return { row: rows[0] };
 }
 
-function planEffects({ row, who, scopeText }) {
+function planEffects({ row, who, scopeText, overlap }) {
+  const domainBlock = overlap?.kind === 'domain_block' ? overlap.domain : null;
+  const addressBlocks = overlap?.kind === 'address_blocks' ? overlap : null;
   return [
     row.gmail_filter_id
       ? { kind: 'operational', text: `The Gmail filter that sends ${scopeText} to Trash is removed.` }
       : { kind: 'operational', text: 'No Gmail filter is on file for this block, so only the blocklist entry is deleted.' },
     { kind: 'operational', text: `The blocklist entry for ${who} is deleted.` },
-    { kind: 'operational', text: `New mail from ${scopeText} is no longer auto-trashed. It is checked like any other mail and reaches the inbox unless the spam check flags it.` },
+    domainBlock
+      ? { kind: 'operational', text: `Mail from ${who} STAYS BLOCKED: the domain @${domainBlock} is blocked too, so its Gmail filter and the blocklist keep sending this address's mail to Trash. This card removes only the address entry and never the domain block. To let mail through, unblock @${domainBlock} separately.` }
+      : { kind: 'operational', text: `New mail from ${scopeText}${addressBlocks ? ' (except the addresses listed below)' : ''} is no longer auto-trashed. It is checked like any other mail and reaches the inbox unless the spam check flags it.` },
+    addressBlocks
+      ? { kind: 'operational', text: `${addressBlocks.count >= OVERLAP_CAP ? `${OVERLAP_CAP} or more` : addressBlocks.count} address ${addressBlocks.count === 1 ? 'block' : 'blocks'} at @${addressBlocks.domain} stay in place, so ${addressBlocks.count === 1 ? 'that address stays' : 'those addresses stay'} blocked. Unblock each separately.` }
+      : null,
     { kind: 'operational', text: 'Mail already in Trash stays there. Unblocking does not move it back.' },
     { kind: 'operational', text: 'If Gmail cannot be reached or the filter cannot be removed, nothing changes and the sender stays blocked.' },
     row.email_address
       ? { kind: 'operational', text: 'The automatic spam check can block this address again if it flags new mail from it. To undo, block it again from the bar or the Email page.' }
       : { kind: 'operational', text: 'To undo, block the domain again from the bar or the Email page.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to anyone.' },
-  ];
+  ].filter(Boolean);
 }
 
-function planOf(row) {
+function planOf(row, overlap) {
   const who = row.email_address ? row.email_address : `@${row.domain}`;
   const scopeText = row.email_address ? row.email_address : `any sender at @${row.domain}`;
+  const stillBlockedBy = overlap?.kind === 'domain_block' ? `@${overlap.domain}` : null;
   return {
     preview: true,
     tool: 'unblock_sender',
@@ -134,9 +167,12 @@ function planOf(row) {
     reason: reasonText(row.reason),
     blocked_count: Number(row.blocked_count) || 0,
     gmail_filter: row.gmail_filter_id ? 'on file' : 'none on file',
-    effects: planEffects({ row, who, scopeText }),
+    // Non-null when mail from this address keeps being blocked after the unblock (the domain block stays).
+    still_blocked_by: stillBlockedBy,
+    other_blocks_stay: overlap?.kind === 'address_blocks' ? overlap.count : 0,
+    effects: planEffects({ row, who, scopeText, overlap }),
     sends_to_customer: false,
-    _version: versionOf(row),
+    _version: versionOf(row, overlap),
     note: 'PREVIEW ONLY — nothing was changed. Confirm unblocks exactly this entry; if it changed it refuses.',
   };
 }
@@ -146,7 +182,7 @@ async function buildPlan(input) {
   if (found.error) return found;
   const { row } = found;
   if (!row.email_address && !row.domain) return refusal('That blocklist entry names no address or domain, so the bar will not unblock it. Use the Email page.', 'unsupported_entry');
-  return planOf(row);
+  return planOf(row, await overlapOf(row));
 }
 
 async function verifiedPlan(input, pinned) {
@@ -178,7 +214,8 @@ async function commitUnblock(input) {
     // The row is re-read FOR UPDATE inside unblockSender's transaction and compared to the card before the Gmail
     // filter is touched; a difference returns { changed } with nothing removed.
     result = await require('../email/spam-blocker').unblockSender(plan.blocked_id, {
-      verifyLocked: async (row) => Boolean(row) && JSON.stringify(versionOf(row)) === JSON.stringify(plan._version),
+      verifyLocked: async (row, trx) => Boolean(row)
+        && JSON.stringify(versionOf(row, await overlapOf(row, trx, { lock: true }))) === JSON.stringify(plan._version),
     });
   } catch (err) {
     logger.error(`[intelligence-bar:unblock-sender] unblock failed (${err?.code || err?.name || 'error'})`);
@@ -199,8 +236,12 @@ async function commitUnblock(input) {
       error: `The sender was not unblocked: ${result?.error || 'the Email page refused it'}. It is still blocked.` };
   }
   logger.info(`[intelligence-bar:unblock-sender] blocklist entry ${plan.blocked_id} removed`);
-  return { ...base, success: true, sent_to_customer: false,
-    note: `${plan.blocked_target} is unblocked. ${plan.gmail_filter === 'on file' ? 'Its Gmail trash filter is removed. ' : ''}New mail from it is no longer auto-trashed; mail already in Trash stays there. Nothing was sent to anyone.` };
+  const filterNote = plan.gmail_filter === 'on file' ? ' Its Gmail trash filter is removed.' : '';
+  const after = plan.still_blocked_by
+    ? ` Mail from it is STILL blocked by the domain block ${plan.still_blocked_by}; that block was not touched.`
+    : ` New mail from it is no longer auto-trashed${plan.other_blocks_stay ? ', except the addresses blocked on their own' : ''}.`;
+  return { ...base, success: true, sent_to_customer: false, still_blocked_by: plan.still_blocked_by,
+    note: `${plan.blocked_target} is unblocked.${filterNote}${after} Mail already in Trash stays there. Nothing was sent to anyone.` };
 }
 
 // ── card lines (authorization-contract.js) ──────────────────────
@@ -209,6 +250,7 @@ function cardLines(toolName, preview) {
   if (toolName !== 'unblock_sender' || !preview || preview.preview !== true) return [];
   return [
     { kind: 'operational', text: `Unblock ${preview.blocked_target} (${preview.scope})` },
+    ...(preview.still_blocked_by ? [{ kind: 'operational', text: `STILL BLOCKED after this: the domain block ${preview.still_blocked_by} stays, so mail from ${preview.blocked_target} keeps going to Trash` }] : []),
     { kind: 'operational', text: `Blocked ${preview.blocked_on_et || 'on an unrecorded date'}, by ${preview.reason}` },
     { kind: 'operational', text: `The block has caught ${preview.blocked_count} ${preview.blocked_count === 1 ? 'message' : 'messages'}. Gmail filter: ${preview.gmail_filter}.` },
     ...(preview.effects || []).map(({ kind, text }) => ({ kind, text })),

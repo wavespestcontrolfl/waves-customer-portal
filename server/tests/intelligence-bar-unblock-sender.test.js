@@ -41,10 +41,12 @@ function freshState() {
 }
 
 function makeTable() {
-  const q = { filters: [], rawEq: [], nullCols: [], single: false, del: false };
+  const q = { filters: [], notIds: [], likes: [], rawEq: [], nullCols: [], single: false, del: false };
   const run = () => {
     if (S.failReads) throw new Error('read failed');
     const rows = S.rows.filter((r) => q.filters.every(([k, v]) => r[k] === v)
+      && q.notIds.every((id) => r.id !== id)
+      && q.likes.every(([k, suffix]) => String(r[k] || '').toLowerCase().endsWith(suffix))
       && q.rawEq.every(([k, v]) => String(r[k] || '').toLowerCase() === v)
       && q.nullCols.every((k) => r[k] == null));
     if (q.del) {
@@ -59,9 +61,11 @@ function makeTable() {
       if (prop === 'then') return (res, rej) => Promise.resolve().then(run).then(res, rej);
       if (prop === 'first') return () => { q.single = true; return b; };
       if (prop === 'where') return (k) => { Object.entries(k).forEach((e) => q.filters.push(e)); return b; };
-      if (prop === 'whereRaw') return (sql, [v]) => { q.rawEq.push([/domain/.test(sql) ? 'domain' : 'email_address', v]); return b; };
+      if (prop === 'whereNot') return (k) => { q.notIds.push(k.id); return b; };
+      if (prop === 'whereRaw') return (sql, [v]) => { if (/LIKE/.test(sql)) q.likes.push(['email_address', String(v).replace(/^%/, '')]); else q.rawEq.push([/domain/.test(sql) ? 'domain' : 'email_address', v]); return b; };
       if (prop === 'whereNull') return (k) => { q.nullCols.push(k); return b; };
       if (prop === 'forUpdate') return () => { S.locks.push('blocked_email_senders'); return b; };
+      if (prop === 'forShare') return () => { S.shares = (S.shares || 0) + 1; return b; };
       if (prop === 'del') return () => { q.del = true; return b; };
       if (['insert', 'update', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)}`);
       return () => b;
@@ -200,7 +204,7 @@ describe('the preview', () => {
   test('the route builds the confirmation card from this preview', async () => {
     const { confirmationDisplayParams } = jest.requireActual('../routes/admin-intelligence-bar');
     expect(confirmationDisplayParams('unblock_sender', { blocked_id: ROW }, await preview())).toEqual({
-      unblock: 'promo@spam.example.invalid', scope: 'one sender address', blocked_before: 'the automatic spam check', messages_caught: 4, sends_to_customer: 'nothing',
+      unblock: 'promo@spam.example.invalid', scope: 'one sender address', blocked_before: 'the automatic spam check', messages_caught: 4, after: 'new mail is no longer auto-trashed', sends_to_customer: 'nothing',
     });
   });
 
@@ -318,6 +322,81 @@ describe('the confirmed run', () => {
     spy.mockRejectedValueOnce(new Error('boom'));
     expect(await confirm(card)).toMatchObject({ outcome_unknown: true });
     spy.mockRestore();
+  });
+});
+
+describe('overlapping blocks (the domain block stays; the card never promises inbox delivery it cannot give)', () => {
+  const DOMAIN_ROW = '00000000-0000-4000-8000-0000000000e3';
+  const domainBlock = (over = {}) => ({ id: DOMAIN_ROW, email_address: null, domain: 'spam.example.invalid', reason: 'Manual block (Intelligence Bar)', blocked_count: 2, created_at: new Date('2026-09-01T12:00:00Z'), gmail_filter_id: 'filter-domain', ...over });
+
+  test('an address whose DOMAIN is blocked too: the card says it stays blocked, names the domain, never promises delivery, pins the overlap', async () => {
+    S.rows.push(domainBlock());
+    const card = await preview();
+    expect(card).toMatchObject({ preview: true, still_blocked_by: '@spam.example.invalid', _version: { overlap: { kind: 'domain_block', domain: 'spam.example.invalid', id: DOMAIN_ROW } } });
+    const text = card.effects.map((e) => e.text).join('\n');
+    expect(text).toMatch(/promo@spam\.example\.invalid STAYS BLOCKED: the domain @spam\.example\.invalid is blocked too/);
+    expect(text).toMatch(/never the domain block\. To let mail through, unblock @spam\.example\.invalid separately/);
+    expect(text).not.toMatch(/no longer auto-trashed/);
+    expect(text).not.toMatch(/reaches the inbox/);
+    expect(cardLines('unblock_sender', card).map((l) => l.text)).toContain('STILL BLOCKED after this: the domain block @spam.example.invalid stays, so mail from promo@spam.example.invalid keeps going to Trash');
+    const { confirmationDisplayParams } = jest.requireActual('../routes/admin-intelligence-bar');
+    expect(confirmationDisplayParams('unblock_sender', {}, card).after).toBe('still blocked by the domain block @spam.example.invalid');
+  });
+
+  test('Confirm removes only the address entry and its own filter, never the domain block; the result says it is still blocked', async () => {
+    S.rows.push(domainBlock());
+    const card = await preview();
+    const done = await confirm(card);
+    expect(done).toMatchObject({ success: true, still_blocked_by: '@spam.example.invalid' });
+    expect(done.note).toMatch(/is unblocked\. Its Gmail trash filter is removed\. Mail from it is STILL blocked by the domain block @spam\.example\.invalid; that block was not touched\./);
+    expect(done.note).not.toMatch(/no longer auto-trashed/);
+    expect(S.deleted).toEqual([ROW]);
+    expect(mockFilterDelete).toHaveBeenCalledTimes(1);
+    expect(mockFilterDelete).toHaveBeenCalledWith({ userId: 'me', id: 'filter-1' });
+    expect(S.rows.map((r) => r.id)).toEqual([DOMAIN_ROW]);
+  });
+
+  test('a domain block that APPEARS or GOES after the card is a changed card: refused, Gmail untouched', async () => {
+    const plain = await preview();
+    S.rows.push(domainBlock());
+    expect(await confirm(plain)).toMatchObject({ preview_changed: true, code: 'preview_changed' });
+    const withOverlap = await preview();
+    S.rows = S.rows.filter((r) => r.id !== DOMAIN_ROW);
+    expect(await confirm(withOverlap)).toMatchObject({ preview_changed: true, code: 'preview_changed' });
+    expect(mockFilterDelete).not.toHaveBeenCalled();
+    expect(S.deleted).toEqual([]);
+  });
+
+  test('an overlap that lands between the pre-check and the row lock is refused inside the transaction (held FOR SHARE)', async () => {
+    const card = await preview();
+    S.beforeTx = () => { S.rows.push(domainBlock()); };
+    expect(await confirm(card)).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
+    expect(S.shares).toBeGreaterThan(0);
+    expect(mockFilterDelete).not.toHaveBeenCalled();
+    expect(S.deleted).toEqual([]);
+  });
+
+  test('a block on a DIFFERENT domain, or another address at the same domain, is not an overlap', async () => {
+    S.rows.push(domainBlock({ domain: 'other.example.invalid' }), { ...domainBlock({ id: '00000000-0000-4000-8000-0000000000e4' }), email_address: 'someone@spam.example.invalid', domain: null });
+    const card = await preview();
+    expect(card).toMatchObject({ still_blocked_by: null, _version: { overlap: null } });
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/no longer auto-trashed/);
+  });
+
+  test('unblocking a DOMAIN while addresses at it are blocked on their own: those stay blocked, disclosed and pinned', async () => {
+    S.rows = [domainBlock(), { ...domainBlock({ id: ROW }), email_address: 'promo@spam.example.invalid', domain: null, reason: 'spam_auto', gmail_filter_id: 'filter-1' }];
+    const card = await preview({ blocked_id: DOMAIN_ROW });
+    expect(card).toMatchObject({ scope: 'a whole domain', still_blocked_by: null, other_blocks_stay: 1, _version: { overlap: { kind: 'address_blocks', domain: 'spam.example.invalid', count: 1 } } });
+    const text = card.effects.map((e) => e.text).join('\n');
+    expect(text).toMatch(/1 address block at @spam\.example\.invalid stay in place, so that address stays blocked\. Unblock each separately\./);
+    expect(text).toMatch(/\(except the addresses listed below\)/);
+    S.rows.push({ ...domainBlock({ id: '00000000-0000-4000-8000-0000000000e5' }), email_address: 'second@spam.example.invalid', domain: null });
+    expect(await confirm(card, { blocked_id: DOMAIN_ROW })).toMatchObject({ preview_changed: true });
+    expect(mockFilterDelete).not.toHaveBeenCalled();
+    const fresh = await preview({ blocked_id: DOMAIN_ROW });
+    const done = await confirm(fresh, { blocked_id: DOMAIN_ROW });
+    expect(done.note).toMatch(/except the addresses blocked on their own/);
+    expect(S.deleted).toEqual([DOMAIN_ROW]);
   });
 });
 

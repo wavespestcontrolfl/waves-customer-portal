@@ -2205,7 +2205,7 @@
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
-    "scope": "route_wide"
+    "scope": "record"
   },
   "unblock_sender": {
     "module": "unblock-sender-tools.js",

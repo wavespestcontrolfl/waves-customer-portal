@@ -1286,6 +1286,24 @@ async function bindSavedAddress(supplied, targets) {
   return match ? { address: match.address, lat: match.lat, lng: match.lng } : null;
 }
 
+// The visit a dispatch alert belongs to: the call's own job_id, or the alert's job_id. Refuses a call that names no
+// alert or visit, an alert that does not exist, and an alert tied to no visit (no customer to check).
+async function alertVisitBinding(params) {
+  const alertId = String(params.alert_id || '').trim().toLowerCase();
+  const jobId = String(params.job_id || '').trim().toLowerCase();
+  if (!alertId && !jobId) {
+    return { error: 'This request names a customer, so name the alert (alert_id) or the visit (job_id) to resolve. Listing every open alert is not available here.', code: 'customer_scope_required' };
+  }
+  if (jobId) return UUID_RE.test(jobId) ? { visitId: jobId } : { error: 'A valid record identifier is required', code: 'invalid_target' };
+  if (!UUID_RE.test(alertId)) return { error: 'A valid record identifier is required', code: 'invalid_target' };
+  const alert = await db('dispatch_alerts').where({ id: alertId }).first('id', 'job_id');
+  if (!alert) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
+  if (!alert.job_id) {
+    return { error: 'This alert is not tied to a visit or a customer, so it cannot be resolved from a request about a specific customer. Run it from a request that does not name a customer.', code: 'customer_scope_required' };
+  }
+  return { visitId: alert.job_id };
+}
+
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // Owner-direct (owner ruling 2026-10-01, owner-direct.js): for the owner
   // login the record the bar picks IS the target, so the request-text
@@ -1334,6 +1352,15 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
     const invoice = await db('invoices').where({ invoice_number: String(params.invoice_number).trim().toUpperCase() }).first('id');
     if (!invoice) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
     references.invoice_id = invoice.id;
+  }
+  // resolve_dispatch_alert: inside a customer-specific request the alert is bound to its own visit, so the ordinary
+  // appointment check below proves that visit belongs to the task customer (outside such a request the alert is
+  // admitted on its own, as any dispatcher may resolve any card). An alert with no visit has no customer to prove, and
+  // a call with no selector lists every open card: neither fits a request about one customer.
+  if (toolName === 'resolve_dispatch_alert' && customerSpecific(context) && !direct) {
+    const bound = await alertVisitBinding(params);
+    if (bound.error) return bound;
+    references.appointment_id = bound.visitId;
   }
   const pair = customerPairIds(params, toolName);
   if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];

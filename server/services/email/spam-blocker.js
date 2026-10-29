@@ -507,7 +507,8 @@ async function removeBlockRecord(conn, blocked, id) {
 }
 
 // verifyLocked (the IB card only): called with the blocklist row read FOR
-// UPDATE inside the unblock's own transaction (null when the row is gone),
+// UPDATE inside the unblock's own transaction (null when the row is gone) and
+// that transaction (so it can read overlapping blocks under the same lock),
 // before anything is removed. A false answer returns { changed: true } and
 // nothing is touched, so a block that changed after the card was shown is
 // never unblocked. The page route and the recovery sweeps pass nothing and
@@ -520,7 +521,7 @@ async function unblockSender(id, { verifyLocked } = {}) {
   }
   return db.transaction(async (trx) => {
     const blocked = await trx('blocked_email_senders').where({ id }).forUpdate().first();
-    if (!(await verifyLocked(blocked || null)) || !blocked) return { error: 'Not found', changed: true };
+    if (!(await verifyLocked(blocked || null, trx)) || !blocked) return { error: 'Not found', changed: true };
     return removeBlockRecord(trx, blocked, id);
   });
 }

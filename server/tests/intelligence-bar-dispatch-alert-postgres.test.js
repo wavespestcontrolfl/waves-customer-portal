@@ -126,6 +126,27 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
+  test('a request about one customer: only an alert on that customer\'s own visit passes validateRecordTarget (real rows)', async () => {
+    const TaskContext = require('../services/intelligence-bar/task-context');
+    const otherCustomerId = randomUUID();
+    await db('customers').insert({ id: otherCustomerId, first_name: 'Fixture', last_name: 'OtherCust', phone: '+12025550178', email: `${otherCustomerId}@example.invalid`, property_type: 'residential' });
+    created.customers.push(otherCustomerId);
+    const otherVisit = randomUUID();
+    await db('scheduled_services').insert({ id: otherVisit, customer_id: otherCustomerId, technician_id: techId, service_type: 'Fixture Lawn', scheduled_date: '2099-01-15', window_start: '09:00:00', window_end: '11:00:00', status: 'confirmed' });
+    created.visits.push(otherVisit);
+    const mine = await alertRow();
+    const theirs = await alertRow({ job_id: otherVisit });
+    const none = await alertRow({ job_id: null });
+    const forCustomer = { targets: [{ customer_id: customerId }] };
+    const check = (params, context) => TaskContext.validateRecordTarget(params, context, { toolName: 'resolve_dispatch_alert' });
+    expect(await check({ alert_id: mine.id }, forCustomer)).toBeNull();
+    expect(await check({ job_id: mine.job_id }, forCustomer)).toBeNull();
+    expect(await check({ alert_id: theirs.id }, forCustomer)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await check({ alert_id: none.id }, forCustomer)).toMatchObject({ code: 'customer_scope_required' });
+    expect(await check({ alert_id: theirs.id }, {})).toBeNull();
+    expect(await check({ alert_id: none.id }, {})).toBeNull();
+  });
+
   test('resolveAlertAsDispatcher: resolved, then already_resolved without a second write or broadcast, then not_found', async () => {
     const alert = await alertRow();
     expect(await dispatchAlerts.resolveAlertAsDispatcher({ id: alert.id, resolvedBy: techId })).toMatchObject({ outcome: 'resolved' });
