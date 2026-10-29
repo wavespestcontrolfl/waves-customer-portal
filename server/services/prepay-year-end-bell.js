@@ -22,12 +22,15 @@
  *   c. the customer's billing mode is no longer annual_prepay;
  *   d. the customer is deleted.
  * A "renew" decision alone does not settle it (the new term must be paid), and time
- * passing never closes a bell.
+ * passing never closes a bell. Every bell still open is judged on every run, at any
+ * age, so a year settled long after it ended still closes; a bell whose year changed
+ * (the term is gone or its end date moved) closes, and a moved year gets its own bell.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { raiseAdminAlert } = require('./admin-alert-compose');
-const { closeAdminAlertKeys } = require('./admin-alert-episodes');
+// Through the module object, so a unit test can stand its SQL in.
+const AlertEpisodes = require('./admin-alert-episodes');
 const { fitAction, fullName, shortDateET, tidyName } = require('./admin-alert-names');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -36,8 +39,8 @@ const LOG = '[prepay-year-end-bell]';
 const TERM_END_LEAD_DAYS = 30;
 // ... until this many days after (a late raise still helps: the year just ended).
 const LATE_RAISE_DAYS = 60;
-// A bell raised earlier still closes this many days after the year ended.
-const CLOSE_BACK_DAYS = 120;
+const KEY_PREFIX = 'prepay-year-end:';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RAISE_STATUSES = Object.freeze(['active', 'renewal_pending', 'renewed']);
 const DECLINED_STATUSES = Object.freeze(['cancelled', 'canceled', 'switch_plan']);
 const DECLINED_DECISIONS = Object.freeze(['cancel', 'switch_plan']);
@@ -49,7 +52,13 @@ const STOPS = 'the plan stops booking';
 const CHECK_PRICE = "check the plan's visit price";
 
 function alertKey(termId, termEnd) {
-  return `prepay-year-end:${termId}:${termEnd}`;
+  return `${KEY_PREFIX}${termId}:${termEnd}`;
+}
+
+// The term id inside an open bell's key, or null when the key is not one of ours.
+function termIdOfKey(key) {
+  const id = String(key || '').slice(KEY_PREFIX.length).split(':')[0];
+  return String(key || '').startsWith(KEY_PREFIX) && UUID_RE.test(id) ? id : null;
 }
 
 const usd = (value) => Number(value).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -140,11 +149,15 @@ function inRaiseWindow(row, today) {
   return toEnd <= TERM_END_LEAD_DAYS && toEnd >= -LATE_RAISE_DAYS;
 }
 
-async function candidateTerms(conn, today) {
+// The years inside the raise window, plus every year that still has an open bell.
+async function candidateTerms(conn, today, openTermIds = []) {
   return conn('annual_prepay_terms as t')
     .join('customers as c', 'c.id', 't.customer_id')
     .whereNull('t.annual_plan_version')
-    .whereRaw('t.term_end between ?::date - ?::int and ?::date + ?::int', [today, CLOSE_BACK_DAYS, today, TERM_END_LEAD_DAYS])
+    .where((scope) => {
+      scope.whereRaw('t.term_end between ?::date - ?::int and ?::date + ?::int', [today, LATE_RAISE_DAYS, today, TERM_END_LEAD_DAYS]);
+      if (openTermIds.length) scope.orWhereIn('t.id', openTermIds);
+    })
     .select(
       't.id', 't.customer_id', 't.status', 't.renewal_decision', 't.prepay_amount',
       conn.raw("to_char(t.term_start, 'YYYY-MM-DD') as term_start"),
@@ -189,22 +202,33 @@ async function raiseOne(conn, row) {
 
 async function runPrepayYearEndBell({ conn = db, today = etDateString() } = {}) {
   if (!require('../config/feature-gates').prepayYearEndBellLive()) return { raised: 0, closed: 0 };
-  const rows = await candidateTerms(conn, today);
-  if (!rows.length) return { raised: 0, closed: 0 };
+  const openKeys = await AlertEpisodes.openAdminAlertKeys(conn, KEY_PREFIX);
+  const rows = await candidateTerms(conn, today, [...new Set(openKeys.map(termIdOfKey).filter(Boolean))]);
+  if (!rows.length && !openKeys.length) return { raised: 0, closed: 0 };
   const byCustomer = await paidTermsByCustomer(conn, [...new Set(rows.map((row) => row.customer_id))]);
 
+  const currentKeys = new Set();
   const settledKeys = [];
   const open = [];
   for (const row of rows) {
-    if (settledReason(row, hasLaterPaidTerm(row, byCustomer))) settledKeys.push(alertKey(row.id, row.term_end));
+    const key = alertKey(row.id, row.term_end);
+    currentKeys.add(key);
+    if (settledReason(row, hasLaterPaidTerm(row, byCustomer))) settledKeys.push(key);
     else if (RAISE_STATUSES.includes(row.status) && inRaiseWindow(row, today)) open.push(row);
   }
+  // An open bell whose year is no longer keyed that way: the term is gone, became a termite plan, or its
+  // end date moved (the moved year is raised under its new key above).
+  const staleKeys = openKeys.filter((key) => !currentKeys.has(key));
 
-  const closed = settledKeys.length
-    ? await closeAdminAlertKeys(conn, settledKeys, DONE_WHEN, {
+  const closed = (settledKeys.length
+    ? await AlertEpisodes.closeAdminAlertKeys(conn, settledKeys, DONE_WHEN, {
       resolution: "The prepaid year is settled: next year's prepay is paid, or the customer chose another plan.",
     })
-    : 0;
+    : 0) + (staleKeys.length
+    ? await AlertEpisodes.closeAdminAlertKeys(conn, staleKeys, 'prepay_year_changed', {
+      resolution: 'This prepaid year changed or no longer exists; a moved year end gets its own bell.',
+    })
+    : 0);
 
   let raised = 0;
   for (const row of open) {
@@ -220,7 +244,7 @@ async function runPrepayYearEndBell({ conn = db, today = etDateString() } = {}) 
 module.exports = {
   runPrepayYearEndBell,
   _private: {
-    alertKey, alertSpec, alertDetail, consequenceFor, ongoingRoots, settledReason, inRaiseWindow, hasLaterPaidTerm,
-    STOPS, CHECK_PRICE, TERM_END_LEAD_DAYS, LATE_RAISE_DAYS, CLOSE_BACK_DAYS,
+    alertKey, termIdOfKey, alertSpec, alertDetail, consequenceFor, ongoingRoots, settledReason, inRaiseWindow, hasLaterPaidTerm,
+    STOPS, CHECK_PRICE, TERM_END_LEAD_DAYS, LATE_RAISE_DAYS,
   },
 };

@@ -187,12 +187,30 @@ postgres('prepay year end bell (PostgreSQL)', () => {
     expect(await openBells(other)).toHaveLength(0);
   });
 
-  test('a settled term closes a bell raised earlier, up to 120 days after the term ended', async () => {
+  test('a settled term closes a bell raised earlier at any age, even 300 days after the year ended', async () => {
     const owner = await customer();
     const id = await term(owner);
     await run();
     await trx('annual_prepay_terms').where({ id }).update({ status: 'cancelled', renewal_decision: 'cancel' });
-    expect((await run('2027-03-22')).closed).toBe(1); // 118 days after 2026-11-24
+    expect((await run('2027-09-20')).closed).toBe(1); // 300 days after 2026-11-24
+    expect(await openBells(id)).toHaveLength(0);
+  });
+
+  test('a bell whose year end moved closes, and the moved year end gets its own bell', async () => {
+    const id = await term(await customer());
+    await run();
+    expect(await openBells(id)).toHaveLength(1);
+    await trx('annual_prepay_terms').where({ id }).update({ term_end: '2026-12-05' });
+    expect(await run()).toEqual({ raised: 1, closed: 1 });
+    expect(await openBells(id)).toHaveLength(0);
+    expect(await openBells(id, '2026-12-05')).toHaveLength(1);
+  });
+
+  test('a bell whose term became a termite plan closes', async () => {
+    const id = await term(await customer());
+    await run();
+    await trx('annual_prepay_terms').where({ id }).update({ annual_plan_version: 'v3' });
+    expect((await run()).closed).toBe(1);
     expect(await openBells(id)).toHaveLength(0);
   });
 

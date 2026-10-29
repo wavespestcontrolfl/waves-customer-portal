@@ -148,16 +148,32 @@ describe('prepay year end bell gate', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('gate on with no candidate terms: one query, nothing raised', async () => {
+  test('gate on with no candidate terms and no open bell: one term query, nothing raised or closed', async () => {
     process.env.GATE_PREPAY_YEAR_END_BELL = 'true';
+    const episodes = require('../services/admin-alert-episodes');
+    const openKeys = jest.spyOn(episodes, 'openAdminAlertKeys').mockResolvedValue([]);
+    const close = jest.spyOn(episodes, 'closeAdminAlertKeys').mockResolvedValue(0);
     const conn = fakeConn([]);
     conn.mockImplementation(() => {
       const builder = {};
-      for (const method of ['join', 'whereNull', 'whereRaw', 'select']) builder[method] = jest.fn(() => builder);
+      for (const method of ['join', 'whereNull', 'where', 'whereRaw', 'select']) builder[method] = jest.fn(() => builder);
       builder.then = (resolve) => Promise.resolve([]).then(resolve);
       return builder;
     });
     await expect(runPrepayYearEndBell({ conn, today: '2026-11-01' })).resolves.toEqual({ raised: 0, closed: 0 });
+    expect(openKeys).toHaveBeenCalledWith(conn, 'prepay-year-end:');
     expect(conn).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    openKeys.mockRestore();
+    close.mockRestore();
+  });
+
+  test('only our own keys with a real term id are read back from open bells', () => {
+    const { termIdOfKey } = _private;
+    const id = '0b7c4a8e-1f2d-4c3b-9a5e-6d7f8a9b0c1d';
+    expect(termIdOfKey(`prepay-year-end:${id}:2026-11-24`)).toBe(id);
+    expect(termIdOfKey(`prepay-year-end:not-a-uuid:2026-11-24`)).toBeNull();
+    expect(termIdOfKey(`agreement-renewal:${id}:2026-11-24`)).toBeNull();
+    expect(termIdOfKey(null)).toBeNull();
   });
 });
