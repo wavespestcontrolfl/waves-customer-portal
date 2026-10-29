@@ -155,7 +155,9 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     const invoice = await makeInvoice();
     const [disputed] = await database('payments').insert({
       customer_id: invoice.customer_id, amount: 100, status: 'disputed', payment_date: new Date(), description: `Invoice ${invoice.invoice_number} — card`,
-      metadata: JSON.stringify({ dispute_id: 'dp_synthetic', dispute_invoice_id: invoice.id }),
+      // The shape markPaymentDisputed persists on a card-on-file row: status 'disputed' + dispute_invoice_id, no dispute_id (the
+      // dispute-created suite asserts it from the real handler).
+      metadata: JSON.stringify({ dispute_invoice_id: invoice.id }),
     }).returning('id');
 
     const err = await refusalOf(record(invoice.id, { amountCents: 2000 }));
@@ -165,7 +167,7 @@ postgres('Partial payments against migrated PostgreSQL', () => {
 
     // Won, but this invoice is not restored yet (the combined closure marks the payment won first; a crash can stop there): still refused.
     await database('payments').where({ id: disputed.id || disputed }).update({
-      status: 'paid', metadata: JSON.stringify({ dispute_id: 'dp_synthetic', invoice_id: invoice.id, dispute_final: 'won' }),
+      status: 'paid', metadata: JSON.stringify({ dispute_invoice_id: invoice.id, dispute_id: 'dp_synthetic', dispute_final: 'won' }),
     });
     expect((await refusalOf(record(invoice.id, { amountCents: 2000 }))).message).toMatch(/card dispute that is not settled yet/);
 

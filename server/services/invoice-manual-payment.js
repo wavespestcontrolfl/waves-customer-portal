@@ -154,10 +154,10 @@ async function partPaymentRefusal(conn, invoice) {
   // A card dispute not settled for this invoice yet: a won dispute puts the invoice back to the paid state of the disputed payment and
   // zeroes amount_paid, which would swallow a part received meanwhile. Undecided (no dispute_final), or won while this invoice is still
   // open (the combined closure marks the payment won before it restores each invoice; a crash can stop in between). Lost lets parts in.
+  // The shapes the dispute handlers persist: markPaymentDisputed sets status 'disputed' (+ dispute_invoice_id), a closure adds dispute_final.
   const openDispute = await conn('payments')
     .whereRaw("(metadata->>'dispute_invoice_id' = CAST(? AS text) OR metadata->>'invoice_id' = CAST(? AS text))", [invoice.id, invoice.id])
-    .whereRaw("metadata->>'dispute_id' IS NOT NULL")
-    .whereRaw("(metadata->>'dispute_final' IS NULL OR metadata->>'dispute_final' = 'won')")
+    .whereRaw("((status = 'disputed' AND metadata->>'dispute_final' IS NULL) OR metadata->>'dispute_final' IN ('won', 'warning_closed'))")
     .first('id');
   if (openDispute) return 'This invoice has a card dispute that is not settled yet, so a part payment cannot be recorded until it is.';
   const { resolveInvoiceTermId } = require('./invoice-prepay');

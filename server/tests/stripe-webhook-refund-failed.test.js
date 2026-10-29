@@ -831,6 +831,12 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     expect(row('invoices', 'inv_1')).toMatchObject({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null });
     expect(Number(row('invoices', 'inv_1').amount_paid)).toBe(40); // the $40 cash still counts
     expect(total()).toBe(100); // the surcharge came out of the reopened total
+    // The row shape the part-payment guard keys on (invoice-manual-payment.js partPaymentRefusal): disputed, bound to the invoice,
+    // no outcome yet, and no dispute_id (markPaymentDisputed does not write one).
+    const disputedRow = row('payments', 'pay_card');
+    expect(disputedRow.status).toBe('disputed');
+    expect(meta(disputedRow)).toMatchObject({ dispute_invoice_id: 'inv_1' });
+    expect(meta(disputedRow).dispute_final).toBeUndefined();
     expect(invoiceAmountDue(row('invoices', 'inv_1'))).toBe(60); // the customer owes the card part only
 
     await handleDisputeClosed({ ...cardDispute, status: 'won' });
