@@ -113,6 +113,7 @@
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
  *   GATE_IB_TARGET_RULES_V2=true (Intelligence Bar target rules, owner rulings 2026-10-12 decision 3, 2026-10-20 and 2026-10-22, owner login in owner-direct mode only: (1) a card-free internal customer edit runs direct only for the on-screen customer, an operator pick, the sole match of one typed full name with no other identifier, or the sole match of one phone or email used alone; any qualifier, second name, unresolved name or choice-button reply keeps the card; (2) a request carrying several candidate customers cards every write and marks the thread for 30 minutes; (3) the same-name lookup lists up to 25 rows (id, name, checked city, last visit) the model may offer as buttons; (4) a grounded customer tool may make 5 direct edits per request, counted as each commits; lead and other exempt tools keep 2. Read at call time via ibTargetRulesV2Live(), strict 'true', dark by default; off = today's behavior byte for byte.)
  *   GATE_IB_RECORD_PAYMENT=true (the Intelligence Bar's record_payment write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can record money ALREADY RECEIVED outside the portal (cash, check, Zelle, Venmo, PayPal or other) against one open invoice on a confirm card (never owner-direct), by running the Invoices page's own Record payment handler (POST /admin/invoices/:id/record-payment) in process. Settles the whole amount due and sends NO receipt (a receipt is the separate resend_receipt tool or the Invoices page). It never charges a card, creates a Stripe payment, refunds or voids; read at call time via ibRecordPaymentLive(), strict === 'true', dark by default, needs GATE_IB_PLATFORM; kill: unset)
+ *   GATE_IB_RECORD_PAYMENT_PARTIAL=true (the Intelligence Bar's record_payment card may record PART of a bill (an amount less than the balance due) when GATE_PARTIAL_PAYMENTS is on too, owner 2026-10-28/29 "the bar does what the Invoices page does": the same recordManualPayment writer, a bar-only internal marker, the Invoices page's part-payment refusals, and the amount owed the card showed pinned and re-checked at Confirm. Never a receipt, never a card charge; read at call time via ibRecordPaymentPartialLive(), strict === 'true', dark by default; needs GATE_IB_RECORD_PAYMENT, GATE_IB_PLATFORM and GATE_PARTIAL_PAYMENTS; kill: unset)
  *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_MODEL_FAILURE_NOTICE=true (when the Intelligence Bar's AI model call fails (a provider 4xx/5xx, a timeout, an overload such as the monthly spend limit), /query answers 200 with a plain reply (what failed, whether anything was changed, try again in a few minutes), records one 'ib-model' gap row, and rings one admin bell at most once an hour; never a customer message. Owner request 2026-10-20 after the 2026-10-19 limit outage. Read at call time via ibModelFailureNoticeLive(), strict 'true', dark by default; off = the error goes to the error handler, the task is marked outcome_unknown and nothing else is recorded, as before.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
@@ -6381,6 +6382,12 @@ function partialPaymentsLive() {
   return process.env.GATE_PARTIAL_PAYMENTS === 'true';
 }
 
+// GATE_IB_RECORD_PAYMENT_PARTIAL read at CALL time. Strict `=== 'true'`. The Intelligence Bar's record_payment card may record a part of the
+// balance only while this AND GATE_PARTIAL_PAYMENTS are on (recordManualPayment re-checks both when the bar marks a part).
+function ibRecordPaymentPartialLive() {
+  return process.env.GATE_IB_RECORD_PAYMENT_PARTIAL === 'true';
+}
+
 // GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
 function taxServiceCountyLive() {
   return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
@@ -8471,6 +8478,8 @@ module.exports.knownGateCatalog = knownGateCatalog;
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_PARTIAL_PAYMENTS reader, on its own line so gate PRs never conflict.
 module.exports.partialPaymentsLive = partialPaymentsLive;
+// GATE_IB_RECORD_PAYMENT_PARTIAL reader, on its own line.
+module.exports.ibRecordPaymentPartialLive = ibRecordPaymentPartialLive;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;

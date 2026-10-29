@@ -19,6 +19,9 @@
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
+ *       The same fence guards a PART payment (GATE_IB_RECORD_PAYMENT_PARTIAL): it runs before the lock and under it, every check above
+ *       unchanged. A part carries no closeout visit (closeoutTarget 'none', closeout null). The amount check is the settlement's own
+ *       expectedAmountCents, which for a part is the card's pinned amount owed (never the part): it must equal owedCentsSeen.
  *       The function also carries `closeoutTarget` (the visit the card said the payment would complete, or 'none') and `closeoutVisit`
  *       (that visit's facts as the card showed them): the settlement pins both and the closeout re-asserts the facts under the visit's lock.
  */

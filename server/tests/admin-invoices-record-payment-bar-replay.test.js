@@ -150,6 +150,52 @@ describe('the bar shim runs the same handler', () => {
     expect(args.requireSelfPay).toBe(true);
   });
 
+  describe('a part payment the card priced (GATE_IB_RECORD_PAYMENT_PARTIAL)', () => {
+    const PART = { amountCents: 4000, owedCentsSeen: 11700 };
+    const APPROVED_PART = { ...APPROVED, part: PART };
+
+    test('the writer gets the card\'s figures and the internal marker, never the body\'s: a body amount or owedSeen is ignored', async () => {
+      recordManualPayment.mockResolvedValueOnce({ invoice: { ...PAID, status: 'sent' }, receipt: null, partial: { amount: 40, remaining: 77 } });
+      const res = await viaBar({ ...BODY, amount: 99, owedSeen: 5 }, APPROVED_PART);
+      expect(res).toEqual({ status: 200, json: { ok: true, invoice: { ...PAID, status: 'sent' }, receipt: null, partial: { amount: 40, remaining: 77 }, closeout: null } });
+      const [, args] = recordManualPayment.mock.calls[0];
+      expect(args).toMatchObject({
+        amountCents: 4000, owedCentsSeen: 11700, expectedAmountCents: 11700, settlementFence: APPROVED.settlementFence,
+        requireSelfPay: true, barApprovedPart: true, sendReceipt: false,
+      });
+    });
+
+    test('without an approved part the bar still drops an amount (gates off or a whole-balance card): no amount, no marker', async () => {
+      await viaBar({ ...BODY, amount: 10, owedSeen: 117 });
+      await viaBar({ ...BODY, amount: 10, owedSeen: 117 }, { ...APPROVED, part: null });
+      for (const [, args] of recordManualPayment.mock.calls) {
+        expect(args).not.toHaveProperty('amountCents');
+        expect(args).not.toHaveProperty('owedCentsSeen');
+        expect(args).not.toHaveProperty('barApprovedPart');
+      }
+    });
+
+    test('the marker cannot come from an HTTP body: the page route never sets it, whatever the body says', async () => {
+      await viaPage({ ...BODY, amount: 40, owedSeen: 117, barApprovedPart: true, part: PART });
+      const [, args] = recordManualPayment.mock.calls[0];
+      expect(args).not.toHaveProperty('barApprovedPart');
+      expect(args).toMatchObject({ amountCents: 4000, owedCentsSeen: 11700 });
+      expect(args).not.toHaveProperty('settlementFence');
+    });
+
+    test('a writer refusal of the part (gates off, an Auto Pay customer) answers its own 400 and nothing falls back to the whole balance', async () => {
+      recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('Part payments from the Intelligence Bar are not turned on. Record the whole amount owed, or use the Invoices page.'), { statusCode: 400 }));
+      expect(await viaBar(BODY, APPROVED_PART)).toMatchObject({ status: 400, json: { error: expect.stringMatching(/not turned on/) } });
+      expect(recordManualPayment).toHaveBeenCalledTimes(1);
+      expect(recordManualPayment.mock.calls[0][1].amountCents).toBe(4000);
+    });
+
+    test('an amount owed that moved is the page\'s PREVIEW_CHANGED 409', async () => {
+      recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('The amount owed on this invoice changed'), { statusCode: 409, amountMismatch: { expectedCents: 11700, actualCents: 7700 } }));
+      expect(await viaBar(BODY, APPROVED_PART)).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED' } });
+    });
+  });
+
   test('a card pin refusal answers 409 with the PREVIEW_CHANGED code; any other 409 carries none', async () => {
     recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('The invoice changed after the confirmation card was shown — nothing was recorded'), { statusCode: 409, drift: true }));
     expect(await viaBar()).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED' } });
