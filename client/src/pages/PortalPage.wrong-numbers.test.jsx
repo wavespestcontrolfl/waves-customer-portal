@@ -152,7 +152,7 @@ describe('expanded visit hydration and pagination', () => {
     render(<ServicesTab />);
 
     expect(await screen.findByRole('button', { name: 'Load More Visits' })).toBeInTheDocument();
-    expect(screen.getByText('Showing 3 of 5 visits')).toBeInTheDocument();
+    expect(screen.getByText('Showing 3 of 5 services')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
 
