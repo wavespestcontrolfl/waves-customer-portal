@@ -23,6 +23,8 @@ const { bankLinesLeftOut, leaveOutPayRunCategory, payRunTotals } = require('../s
 
 jest.setTimeout(60000);
 const GATE = 'GATE_PAYROLL_BANK_MATCH';
+// the match also needs the books to read the pay runs (payrollBankMatchLive reads both gates)
+const PNL = 'GATE_PNL_PAY_RUN_WAGES';
 const CATEGORY = 'Payroll (counted from pay runs)';
 
 postgres('payroll bank match in the bank import', () => {
@@ -33,6 +35,7 @@ postgres('payroll bank match in the bank import', () => {
   let checkB;
   let filingId;
   const OLD_GATE = process.env[GATE];
+  const OLD_PNL = process.env[PNL];
 
   const insertCheck = async (patch) => {
     const w4 = randomUUID();
@@ -76,6 +79,7 @@ postgres('payroll bank match in the bank import', () => {
     trx = await database.transaction();
     mockConnection = trx;
     delete process.env[GATE];
+    delete process.env[PNL];
     runId = randomUUID();
     await trx('payroll_runs').insert({ id: runId, week_start: '2026-10-12', pay_date: '2026-10-23', status: 'finalized' });
     checkA = await insertCheck({ name: 'Sample Alpha', net: 81263 });
@@ -89,6 +93,7 @@ postgres('payroll bank match in the bank import', () => {
   afterEach(async () => {
     await trx.rollback();
     if (OLD_GATE === undefined) delete process.env[GATE]; else process.env[GATE] = OLD_GATE;
+    if (OLD_PNL === undefined) delete process.env[PNL]; else process.env[PNL] = OLD_PNL;
   });
   afterAll(async () => { if (database) await database.destroy(); });
 
@@ -115,7 +120,21 @@ postgres('payroll bank match in the bank import', () => {
   });
 
   describe('gate on', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
+    beforeEach(() => { process.env[GATE] = 'true'; process.env[PNL] = 'true'; });
+
+    it('with GATE_PNL_PAY_RUN_WAGES off the matcher links nothing, moves no expense and writes no payroll key', async () => {
+      delete process.env[PNL];
+      const ids = await seedLines();
+      const summary = await bankImport.runDeterministicMatching();
+      expect(summary).not.toHaveProperty('payrollChecksLinked');
+      for (const id of Object.values(ids)) {
+        const r = await row(id);
+        expect(r.status).toBe('unmatched');
+        expect(JSON.stringify(r.suggestion || {})).not.toMatch(/payroll/i);
+      }
+      const cat = await trx('expense_categories').where({ name: CATEGORY }).first('id');
+      expect(await trx('expenses').where({ category_id: cat.id }).count('* as n').first()).toMatchObject({ n: '0' });
+    });
 
     it('links the exact net pay and the EFTPS deposit, suggests the one-cent line, and leaves the rest alone', async () => {
       const ids = await seedLines();
@@ -149,7 +168,9 @@ postgres('payroll bank match in the bank import', () => {
       const cat = await trx('expense_categories').where({ name: CATEGORY }).first('id');
       const expenses = await trx('expenses').where({ category_id: cat.id }).orderBy('amount');
       expect(expenses.map((e) => e.amount)).toEqual(['350.00', '812.63']);
-      expect(expenses.every((e) => Number(e.tax_deductible_amount) === 0 && e.notes.includes('[Payroll bank match]'))).toBe(true);
+      // the deductible an ordinary bank-import expense gets (the full amount): never zeroed, so the readers that
+      // do not know about pay runs, and the books with the pay-run gate off, still see it
+      expect(expenses.every((e) => Number(e.tax_deductible_amount) === Number(e.amount) && e.notes.includes('[Payroll bank match]'))).toBe(true);
       expect((await row(ids.exact)).matched_expense_id).toBe(expenses.find((e) => e.amount === '812.63').id);
 
       expect(await bankLinesLeftOut(trx, '2026-10-01', '2026-11-30')).toEqual({ count: 2, amount: 1162.63 });
@@ -237,7 +258,8 @@ postgres('payroll bank match in the bank import', () => {
         const ok = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
         expect(ok).toMatchObject({ ok: true, reused: true });
         const e = await trx('expenses').where({ id: expenseId }).first();
-        expect(e).toMatchObject({ category_id: await payrollCategory(), tax_deductible_amount: '0.00' });
+        // moved into the payroll category only: its own deductible is never touched
+        expect(e).toMatchObject({ category_id: await payrollCategory(), tax_deductible_amount: '812.63' });
         expect(await row(id)).toMatchObject({ status: 'matched_expense', matched_expense_id: expenseId, matched_payroll_check_id: checkA });
         expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
 
@@ -266,7 +288,7 @@ postgres('payroll bank match in the bank import', () => {
         expect((await trx('expenses').where({ id: expenseId }).first()).category_id).toBe(await payrollCategory());
       });
 
-      it('the owner\'s Unlink gives the reused expense its category and deduction back and keeps the evidence', async () => {
+      it('the owner\'s Unlink gives the reused expense its category back and keeps the evidence', async () => {
         const expenseId = await manual({ tax_deductible_amount: '812.63' });
         const id = await line('CHECK 1042', '812.63', '2026-10-28');
         await bankImport.runDeterministicMatching();
@@ -276,8 +298,8 @@ postgres('payroll bank match in the bank import', () => {
         const r = await row(id);
         expect(r).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payroll_check_id: null });
         expect(r.suggestion.payrollMatch).toBeUndefined();
-        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'owner_unlinked', checkId: checkA });
-        expect(r.suggestion.payrollUnlinked.was).toMatchObject({ reusedExpense: true, prevDeductible: '812.63' });
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'owner_unlinked', checkId: checkA, expenseId });
+        expect(r.suggestion.payrollUnlinked.was).toMatchObject({ reusedExpense: true, prevCategoryId: null });
         expect(r.suggestion.rejectedExpenseIds).toEqual([expenseId]);
       });
 
@@ -335,22 +357,25 @@ postgres('payroll bank match in the bank import', () => {
         expect(ok).toMatchObject({ ok: true, reused: true });
       });
 
-      it('restores the deduction in proportion to the expense\'s amount now, and keeps a deduction the owner typed since', async () => {
+      it('never edits a reused expense\'s deduction, and a release restores only its category while it is still in the payroll category', async () => {
         const expenseId = await manual({ amount: '812.63', tax_deductible_amount: '406.32' });
         const id = await line('CHECK 1042', '812.63', '2026-10-28');
         await bankImport.runDeterministicMatching();
         await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
-        // a refund later cut the expense to half
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: await payrollCategory(), tax_deductible_amount: '406.32' });
+        // a refund later cut the expense; the release still touches nothing but the category
         await trx('expenses').where({ id: expenseId }).update({ amount: '406.32' });
         expect(await bankImport.unlinkPayrollMatched(await row(id))).toBe(true);
-        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '203.16' });
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, amount: '406.32', tax_deductible_amount: '406.32' });
 
-        const typed = await manual({ amount: '812.63', tax_deductible_amount: '100.00', vendor_name: 'Typed sample' });
+        // an expense the owner moved to another category since the match stays where the owner put it
+        const other = (await trx('expense_categories').whereNot({ name: CATEGORY }).first('id')).id;
+        const moved = await manual({ amount: '812.63', tax_deductible_amount: '100.00', vendor_name: 'Moved sample' });
         const second = await line('CHECK 1042 B', '812.63', '2026-10-29');
-        await bankImport.claimPayrollLink({ row: await row(second), check: { id: checkA }, by: 'owner', expenseId: typed, createNew: false });
-        await trx('expenses').where({ id: typed }).update({ tax_deductible_amount: '50.00' });
+        await bankImport.claimPayrollLink({ row: await row(second), check: { id: checkA }, by: 'owner', expenseId: moved });
+        await trx('expenses').where({ id: moved }).update({ category_id: other });
         await bankImport.unlinkPayrollMatched(await row(second));
-        expect(await trx('expenses').where({ id: typed }).first()).toMatchObject({ tax_deductible_amount: '50.00' });
+        expect(await trx('expenses').where({ id: moved }).first()).toMatchObject({ category_id: other, tax_deductible_amount: '100.00' });
       });
 
       it('the owner may book as new beside it', async () => {
@@ -371,7 +396,7 @@ postgres('payroll bank match in the bank import', () => {
         return { id, expenseId: r.matched_expense_id };
       };
 
-      it('goes back to review when the row amount changes: expense removed, evidence kept, seen-in-bank gone', async () => {
+      it('goes back to review when the row amount changes: expense kept, evidence kept, seen-in-bank gone', async () => {
         const { id, expenseId } = await linkedTax();
         expect((await row(id)).suggestion.payrollMatch.amountCents).toBe(35000);
         await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '700.00' });
@@ -379,19 +404,21 @@ postgres('payroll bank match in the bank import', () => {
         const r = await row(id);
         expect(r).toMatchObject({ status: 'unmatched', matched_tax_filing_id: null, matched_expense_id: null, match_method: null });
         expect(r.suggestion.payrollMatch).toBeUndefined();
-        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_changed', filingId, bankCents: 35000, calendarCents: 70000, matchedCents: 35000 });
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_changed', filingId, expenseId, bankCents: 35000, calendarCents: 70000, matchedCents: 35000 });
         expect(r.suggestion.payrollUnlinked.was).toMatchObject({ expenseId, filingId });
         // an automatic release is not a rejection
         expect(r.suggestion.rejectedTaxFilingIds).toBeUndefined();
-        expect(await trx('expenses').where({ id: expenseId }).first()).toBeUndefined();
+        // the expense the match made is untouched: still there, still in the payroll category, deduction as booked
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ amount: '350.00', tax_deductible_amount: '350.00', category_id: await trx('expense_categories').where({ name: CATEGORY }).first('id').then((c) => c.id) });
         expect(await trx('bank_transactions').where({ matched_tax_filing_id: filingId }).count('* as n').first()).toMatchObject({ n: '0' });
         // it does not re-link to the row that no longer says its amount ...
         await bankImport.runDeterministicMatching();
-        expect((await row(id)).status).toBe('unmatched');
-        // ... and matches again when a correction brings the amount back
+        expect((await row(id)).matched_tax_filing_id).toBeNull();
+        // ... and when a correction brings the amount back the pass finds the kept expense: no second one is made
         await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '350.00' });
         await bankImport.runDeterministicMatching();
-        expect(await row(id)).toMatchObject({ status: 'created_expense', matched_tax_filing_id: filingId });
+        expect((await row(id)).matched_tax_filing_id).toBeNull();
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
       });
 
       it('goes back to review when the row is deleted, with the evidence', async () => {
@@ -400,9 +427,10 @@ postgres('payroll bank match in the bank import', () => {
         await bankImport.runDeterministicMatching();
         const r = await row(id);
         expect(r).toMatchObject({ status: 'unmatched', matched_tax_filing_id: null, matched_expense_id: null });
-        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_deleted', filingId, bankCents: 35000, calendarCents: null });
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_deleted', filingId, expenseId, bankCents: 35000, calendarCents: null });
         expect(r.suggestion.rejectedTaxFilingIds).toBeUndefined();
-        expect(await trx('expenses').where({ id: expenseId }).first()).toBeUndefined();
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ amount: '350.00', tax_deductible_amount: '350.00' });
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
       });
 
       it('keeps an owner-approved one-cent link while the calendar row is unchanged, and releases it when the row changes', async () => {
@@ -446,16 +474,34 @@ postgres('payroll bank match in the bank import', () => {
       expect((await row(near)).suggestion.payrollCandidates).toBeUndefined();
     });
 
-    it('a void keeps an expense the owner corrected after the match, and flags the line', async () => {
+    it('a void keeps the created expense untouched, whatever the owner edited, and the next pass parks the line beside it', async () => {
       const id = await line('CHECK 1042', '812.63', '2026-10-28');
       await bankImport.runDeterministicMatching();
       const { matched_expense_id: expenseId } = await row(id);
-      await trx('expenses').where({ id: expenseId }).update({ amount: '800.00' });
+      const created = await trx('expenses').where({ id: expenseId }).first();
+      expect(created.tax_deductible_amount).toBe('812.63');
+      // the owner edits date, description and vendor (admin-job-expenses does this) and attaches a receipt
+      await trx('expenses').where({ id: expenseId }).update({ expense_date: '2026-10-27', description: 'Alpha pay, owner note', vendor_name: 'Owner typed vendor' });
+      const edited = await trx('expenses').where({ id: expenseId }).first();
       await trx('payroll_checks').where({ run_id: runId }).update({ status: 'voided' });
       await trx('payroll_runs').where({ id: runId }).update({ status: 'voided', voided_at: trx.fn.now(), void_reason: 'redo' });
       expect(await bankImport.releaseVoidedPayrollLinks()).toBe(1);
-      expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ amount: '800.00' });
-      expect((await row(id)).suggestion.payrollExpenseKept).toMatchObject({ expenseId });
+      expect(await trx('expenses').where({ id: expenseId }).first()).toEqual(edited);
+      const released = await row(id);
+      expect(released).toMatchObject({ status: 'unmatched', matched_expense_id: null });
+      expect(released.suggestion.payrollUnlinked).toMatchObject({ checkId: checkA, expenseId });
+      expect(released.suggestion.payrollExpenseKept).toBeUndefined();
+
+      // a redone run: the same net pay is paid again; the claim finds the kept expense instead of creating a second one
+      const redo = await insertCheck({ name: 'Sample Delta', net: 81263 });
+      await bankImport.runDeterministicMatching();
+      const parked = await row(id);
+      expect(parked.status).toBe('unmatched');
+      expect(parked.suggestion.payrollCandidates).toEqual([expect.objectContaining({
+        id: redo, existingExpenses: [expect.objectContaining({ id: expenseId })],
+      })]);
+      expect(await bankImport.claimPayrollLink({ row: parked, check: { id: redo }, by: 'auto' })).toMatchObject({ ok: false, reason: 'existing_expense' });
+      expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
     });
 
     it('with the gate off, an edit heal still restores a reused expense and clears the payroll links', async () => {
@@ -520,11 +566,12 @@ postgres('payroll bank match in the bank import', () => {
       expect(await bankImport.releaseVoidedPayrollLinks()).toBe(1);
       const r = await row(ids.exact);
       expect(r).toMatchObject({ status: 'unmatched', matched_payroll_check_id: null, matched_expense_id: null, match_method: null });
-      expect(r.suggestion.payrollUnlinked).toMatchObject({ checkId: checkA, reason: 'the pay run was voided' });
+      expect(r.suggestion.payrollUnlinked).toMatchObject({ checkId: checkA, reason: 'the pay run was voided', expenseId: expect.any(String) });
       expect(r.suggestion.rejectedPayrollCheckIds).toEqual([checkA]);
       expect(r.suggestion.payrollMatch).toBeUndefined();
+      // both payroll expenses (the paycheck's and the tax deposit's) are still there
       const cat = await trx('expense_categories').where({ name: CATEGORY }).first('id');
-      expect(await trx('expenses').where({ category_id: cat.id }).count('* as n').first()).toMatchObject({ n: '1' });
+      expect(await trx('expenses').where({ category_id: cat.id }).count('* as n').first()).toMatchObject({ n: '2' });
       await bankImport.runDeterministicMatching();
       expect((await row(ids.exact)).status).toBe('unmatched');
     });
@@ -567,6 +614,7 @@ postgres('payroll bank match in the bank import', () => {
     it('is idempotent, and down refuses while a bank line is linked', async () => {
       await migration.up(trx);
       process.env[GATE] = 'true';
+      process.env[PNL] = 'true';
       await seedLines();
       await bankImport.runDeterministicMatching();
       await expect(migration.down(trx)).rejects.toThrow(/cannot roll back/);

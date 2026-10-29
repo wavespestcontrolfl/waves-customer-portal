@@ -20,6 +20,7 @@ const featureGates = require('../config/feature-gates');
 const { gateEnvValue } = featureGates;
 const payrollMatch = require('./payroll-bank-match');
 const { taxPeriodFor } = require('../utils/tax-period');
+const { categoryDeductibleAmount } = require('./expense-categorizer');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
@@ -1443,7 +1444,11 @@ const NO_MANUAL_LINK_SQL = "coalesce(suggestion->>'manualLink','') <> 'true'";
 // exact one-to-one pair links the line and books it in the category the P&L
 // and Schedule C leave out ("Payroll (counted from pay runs)"); anything else
 // parks in suggestion.payrollCandidates for the owner. Never moves money and
-// never marks a calendar row paid. Gate off: none of this runs.
+// never marks a calendar row paid. Gate off: none of this runs. It needs GATE_PNL_PAY_RUN_WAGES on as well
+// (payrollBankMatchLive reads both): the P&L and Schedule C leave the category out only then, so with
+// that gate off the match would hide a payment's deduction. The match never edits an expense's deduction
+// and never deletes an expense: a created expense keeps the ordinary deductible, a re-categorized one
+// keeps its own, and a release only puts the category back.
 const PAYROLL_NOTE_MARK = '[Payroll bank match]';
 const PAYROLL_CANDIDATE_KEYS = ['payrollCandidates', 'payrollCandidatesTotal'];
 function payrollBankMatchOn() {
@@ -1560,7 +1565,7 @@ async function resolvePayrollExpense(trx, { live, txnDate, target, spec, by, exp
   const window = payrollExpenseWindow(txnDate, spec.payDates(target));
   if (expenseId) {
     const existing = await trx('expenses').where({ id: expenseId }).forUpdate()
-      .first('id', 'amount', 'expense_date', 'category_id', 'tax_deductible_amount');
+      .first('id', 'amount', 'expense_date', 'category_id');
     if (!existing) throw claimStop('expense_gone');
     const refunded = await appliedRefundTotal(existing.id, trx);
     const expDate = toDateStr(existing.expense_date);
@@ -1597,14 +1602,15 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
       const book = spec.book(target);
       let expense;
       if (reused) {
-        await trx('expenses').where({ id: reused.id }).update({ category_id: category.id, tax_deductible_amount: 0 });
+        await trx('expenses').where({ id: reused.id }).update({ category_id: category.id });
         expense = { ...reused, category_id: category.id };
       } else [expense] = await trx('expenses').insert({
         category_id: category.id,
         description: String(live.description).slice(0, 300),
         amount: live.amount,
-        // The deduction comes from the pay runs (pay-run-books), not from this bank line.
-        tax_deductible_amount: 0,
+        // The deductible an ordinary bank-import expense gets (the category's own partial rule, else the full
+        // amount). The P&L leaves the whole category out and counts the pay runs instead.
+        tax_deductible_amount: categoryDeductibleAmount(PAY_RUN_CATEGORY_NAME, live.amount) ?? Number(live.amount),
         expense_date: period.date,
         vendor_name: String(book.vendor || live.description).slice(0, 200),
         payment_method: book.paymentMethod,
@@ -1613,9 +1619,7 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
         notes: `[Bank import ${live.account_label}] ${PAYROLL_NOTE_MARK} ${book.label}`,
       }).returning('*');
 
-      const kept = reused
-        ? { reusedExpense: true, prevAmount: reused.amount, prevCategoryId: reused.category_id, prevDeductible: reused.tax_deductible_amount }
-        : { createdSnapshot: { amount: expense.amount, categoryId: expense.category_id } };
+      const kept = reused ? { reusedExpense: true, prevCategoryId: reused.category_id } : {};
       const changed = await trx('bank_transactions')
         .where({ id: live.id, status: 'unmatched' })
         .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
@@ -1696,52 +1700,22 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
   return held.length ? 'held' : false;
 }
 
-// Undo what a payroll match did to the books: an expense the match CREATED is removed (it counted
-// nothing); an expense the owner already had and the match re-categorized gets its category and
-// deductible amount back. Called after the bank line has been released.
-async function releasePayrollExpense(trx, live) {
-  if (!live.matched_expense_id) return;
+// Undo what a payroll match did to the books, after the bank line has been released. An expense the match
+// CREATED stays exactly as it is (it is the owner's record of the payment; the next pass finds it as the
+// existing expense, so no second one is made). An expense the owner already had and the match re-categorized
+// gets its category back, only while it is still in the pay-run category.
+async function restoreReusedCategory(trx, live) {
   const pm = (live.suggestion && live.suggestion.payrollMatch) || {};
-  if (pm.reusedExpense) {
-    const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
-    const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME }).first('id');
-    if (!category) return;
-    const current = await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).forUpdate()
-      .first('amount', 'tax_deductible_amount');
-    if (!current) return;
-    const patch = { category_id: pm.prevCategoryId || null };
-    // The match set the deduction to 0. A value the owner has typed since stays. Otherwise the old deduction
-    // comes back in proportion to the amount now (a refund or an edit may have changed it), never above it.
-    if (!Number(current.tax_deductible_amount)) {
-      const prevAmount = Number(pm.prevAmount);
-      const scaled = prevAmount > 0 && Number(current.amount) !== prevAmount
-        ? Math.round(Number(pm.prevDeductible) * (Number(current.amount) / prevAmount) * 100) / 100
-        : Number(pm.prevDeductible);
-      patch.tax_deductible_amount = pm.prevDeductible == null ? null : Math.min(scaled, Number(current.amount));
-    }
-    await trx('expenses').where({ id: live.matched_expense_id }).update(patch);
-    return;
-  }
-  // An expense the match CREATED goes only if it is still what the match made: the owner may have corrected
-  // its amount or category since. A changed one stays (flagged on the line for review) so no ledger edit is lost.
-  const made = await trx('expenses').where({ id: live.matched_expense_id }).where('notes', 'like', `%${PAYROLL_NOTE_MARK}%`).forUpdate()
-    .first('id', 'amount', 'category_id', 'description');
-  if (!made) return;
-  const snap = pm.createdSnapshot;
-  const unchanged = !snap || (Math.round(Number(made.amount) * 100) === Math.round(Number(snap.amount) * 100)
-    && made.category_id === snap.categoryId);
-  if (unchanged) { await trx('expenses').where({ id: made.id }).del(); return; }
-  if (live.id) {
-    await trx('bank_transactions').where({ id: live.id }).update({
-      suggestion: suggestionMerge({ payrollExpenseKept: { expenseId: made.id, reason: 'the owner changed the expense after the match; review it' } }),
-      updated_at: new Date(),
-    });
-  }
+  if (!live.matched_expense_id || !pm.reusedExpense) return;
+  const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
+  const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME }).first('id');
+  if (!category) return;
+  await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).update({ category_id: pm.prevCategoryId || null });
 }
 
 // A voided pay run unlinks the lines matched to its checks: the line returns to review, the
-// expense this match created is removed (it counted nothing in the books), and the audit trail
-// stays in suggestion.payrollUnlinked. The check is remembered as rejected for that line.
+// expense the match made or re-categorized stays (a re-categorized one gets its category back), and the
+// evidence, with the expense id, stays in suggestion.payrollUnlinked. The check is remembered as rejected for that line.
 async function releaseVoidedPayrollLinks() {
   if (!payrollBankMatchOn()) return 0;
   const rows = await db('bank_transactions as bt')
@@ -1764,12 +1738,12 @@ async function releaseVoidedPayrollLinks() {
           matched_at: null,
           suggestion: suggestionMerge({
             rejectedPayrollCheckIds: rejectedIds,
-            payrollUnlinked: { at: new Date().toISOString(), checkId: found.check_id, reason: 'the pay run was voided' },
+            payrollUnlinked: { at: new Date().toISOString(), checkId: found.check_id, expenseId: live.matched_expense_id, reason: 'the pay run was voided' },
           }, ['payrollMatch']),
           updated_at: new Date(),
         });
         if (!changed) return;
-        await releasePayrollExpense(trx, live);
+        await restoreReusedCategory(trx, live);
         released++;
       });
     } catch (err) {
@@ -1783,7 +1757,7 @@ async function releaseVoidedPayrollLinks() {
 // row's amount when another run is finalized, and deletes a row whose duty is gone. A linked line whose
 // row no longer says the amount it had when linked (amount_paid if recorded, else amount_due), or whose row is gone
 // (the FK went NULL but suggestion.payrollMatch still names it), goes back to review: the expense the
-// match made is removed (or restored, if it was the owner's), the evidence stays in
+// match made stays (a re-categorized one gets its category back), the evidence, with the expense id, stays in
 // suggestion.payrollUnlinked, and the row is remembered as rejected only while its amount still differs.
 async function reconcileTaxLinks() {
   const rows = await db('bank_transactions as bt')
@@ -1826,14 +1800,14 @@ async function reconcileTaxLinks() {
           matched_at: null,
           suggestion: suggestionMerge({
             payrollUnlinked: {
-              at: new Date().toISOString(), filingId, reason: filing ? 'calendar_changed' : 'calendar_deleted',
+              at: new Date().toISOString(), filingId, expenseId: live.matched_expense_id, reason: filing ? 'calendar_changed' : 'calendar_deleted',
               bankCents, calendarCents, matchedCents: pm.amountCents == null ? null : pm.amountCents, was: pm,
             },
           }, ['payrollMatch']),
           updated_at: new Date(),
         });
         if (!changed) return;
-        await releasePayrollExpense(trx, { id: live.id, matched_expense_id: live.matched_expense_id, suggestion: live.suggestion });
+        await restoreReusedCategory(trx, { id: live.id, matched_expense_id: live.matched_expense_id, suggestion: live.suggestion });
         released++;
       });
     } catch (err) {
@@ -1864,7 +1838,7 @@ async function unlinkPayrollMatched(row) {
       ...(live.matched_tax_filing_id ? { rejectedTaxFilingIds: [...new Set([...(sug.rejectedTaxFilingIds || []), live.matched_tax_filing_id])] } : {}),
       lastUnlink: { at: new Date().toISOString(), was: live.status, method: live.match_method, ...(live.matched_expense_id ? { expenseId: live.matched_expense_id } : {}) },
       payrollUnlinked: {
-        at: new Date().toISOString(), reason: 'owner_unlinked', was: sug.payrollMatch || null,
+        at: new Date().toISOString(), reason: 'owner_unlinked', was: sug.payrollMatch || null, expenseId: live.matched_expense_id,
         ...(live.matched_payroll_check_id ? { checkId: live.matched_payroll_check_id } : {}),
         ...(live.matched_tax_filing_id ? { filingId: live.matched_tax_filing_id } : {}),
       },
@@ -1876,7 +1850,7 @@ async function unlinkPayrollMatched(row) {
       updated_at: new Date(),
     });
     if (!changed) return false;
-    await releasePayrollExpense(trx, live);
+    await restoreReusedCategory(trx, live);
     return true;
   });
 }
@@ -1893,7 +1867,7 @@ async function clearPayrollLinks(trx, id) {
   if (!hasPayrollProvenance(o)) return false;
   const pm = sug.payrollMatch || null;
   // an expense the match reused and another path (an edit heal, a generic unlink) released
-  if (pm && pm.reusedExpense && pm.expenseId) await releasePayrollExpense(trx, { id: o.id, matched_expense_id: pm.expenseId, suggestion: sug });
+  if (pm && pm.reusedExpense && pm.expenseId) await restoreReusedCategory(trx, { id: o.id, matched_expense_id: pm.expenseId, suggestion: sug });
   const patch = {};
   const checkId = o.matched_payroll_check_id || (pm && pm.checkId) || null;
   const filingId = o.matched_tax_filing_id || (pm && pm.filingId) || null;

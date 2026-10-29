@@ -75,6 +75,7 @@ const post = (path, body) => fetch(`${baseUrl}${path}`, { method: 'POST', header
 beforeEach(() => {
   process.env.GATE_BANK_IMPORT = 'true';
   process.env.GATE_PAYROLL_BANK_MATCH = 'true';
+  process.env.GATE_PNL_PAY_RUN_WAGES = 'true'; // the match reads both gates
   state.bankRow = { id: UUID_A, direction: 'debit', status: 'unmatched', suggestion: null };
   state.filings = [];
   state.seen = [];
@@ -84,6 +85,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.GATE_BANK_IMPORT;
   delete process.env.GATE_PAYROLL_BANK_MATCH;
+  delete process.env.GATE_PNL_PAY_RUN_WAGES;
 });
 
 describe('link-payroll', () => {
