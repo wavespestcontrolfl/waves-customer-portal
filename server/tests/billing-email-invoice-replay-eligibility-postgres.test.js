@@ -31,7 +31,7 @@ postgres('direct invoice Email replay eligibility (PostgreSQL)', () => {
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.text('status');
       table.uuid('payer_id'); table.text('scheduled_send_error');
-      table.decimal('total', 10, 2); table.decimal('credit_applied', 10, 2);
+      table.decimal('total', 10, 2); table.decimal('credit_applied', 10, 2); table.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       table.uuid('scheduled_service_id'); table.uuid('service_record_id');
       table.timestamp('sent_at', { useTz: true });
     });

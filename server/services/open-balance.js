@@ -17,7 +17,7 @@
  *     A payer-billed row is the third party's debt, never the homeowner's
  *     balance; a failed resolve DROPS the row (fail closed, same direction
  *     as previsit-balance-reminder).
- *   - positive remainder (total − credit_applied), computed in SQL with the
+ *   - positive remainder (total − credit_applied − amount_paid), computed in SQL with the
  *     same GREATEST expression as the balance sum, oldest first.
  *
  * Invoices are NEVER merged, voided, or re-totalled here — each row keeps
@@ -70,7 +70,7 @@ function applyOpenSelfPayPredicates(query) {
     // another billed member of the same packet. Left in, the row rides a
     // sibling's combined payment and the homeowner pays payer-owned debt.
     .whereRaw("COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
-    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0');
+    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) > 0');
 }
 
 function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db } = {}) {
@@ -80,7 +80,7 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
     .select(
       'id', 'invoice_number', 'status', 'service_type', 'service_date',
       'due_date', 'created_at', 'subtotal', 'discount_amount', 'total',
-      'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
+      'credit_applied', 'amount_paid', 'scheduled_service_id', 'stripe_payment_intent_id',
       database.raw("? AS is_overdue", [invoiceOverdueSql(database)]),
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
@@ -101,13 +101,13 @@ async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0,
   const hi = cents + Math.max(0, Math.round(Number(toleranceCents) || 0));
   return applyOpenSelfPayPredicates(database('invoices'))
     .join('customers', 'customers.id', 'invoices.customer_id')
-    .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
+    .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
     .orderBy('invoices.created_at', 'asc')
     .limit(Math.min(Math.max(1, Number(limit) || MAX_AMOUNT_CANDIDATES), MAX_AMOUNT_CANDIDATES))
     .select(
       'invoices.id', 'invoices.invoice_number', 'invoices.status', 'invoices.customer_id',
       'invoices.service_type', 'invoices.service_date', 'invoices.due_date', 'invoices.created_at',
-      'invoices.total', 'invoices.credit_applied', 'invoices.scheduled_service_id',
+      'invoices.total', 'invoices.credit_applied', 'invoices.amount_paid', 'invoices.scheduled_service_id',
       'customers.first_name as customer_first_name', 'customers.last_name as customer_last_name',
     );
 }
@@ -172,11 +172,11 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
 async function openBalanceExists(customerId, { excludeInvoiceId = null, database = db } = {}) {
   if (!customerId) return false;
   // ⭐ NO AMOUNTS LEAVE THE DATABASE. The full read's projection carries
-  // subtotal/total/credit_applied because its callers render them; an
+  // subtotal/total/credit_applied/amount_paid because its callers render them; an
   // existence probe has no business materializing 200 invoices' figures to
   // reduce them to a boolean. The cents-positive test runs IN SQL — the exact
   // integer arithmetic invoiceAmountDue performs
-  // (ROUND(total·100) − ROUND(credit·100) > 0), not the float GREATEST the
+  // (ROUND(total·100) − ROUND(credit·100) − ROUND(amount_paid·100) > 0), not the float GREATEST the
   // broad-phase WHERE uses — and the projection is only what the live payer
   // re-resolution needs. Same eligibility rules, no figures in the process.
   const query = database('invoices')
@@ -187,7 +187,7 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
     // Same withdrawal exclusion as the full read (pre-push P0) — this boolean
     // is SPOKEN to the customer, and payer-owned debt is not their balance.
     .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
-    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100)) > 0')
+    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100) - ROUND(COALESCE(amount_paid, 0) * 100)) > 0')
     .orderBy('created_at', 'asc')
     .limit(MAX_OPEN_INVOICES)
     .select('id', 'invoice_number', 'scheduled_service_id');

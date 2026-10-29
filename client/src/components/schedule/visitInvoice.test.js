@@ -62,6 +62,17 @@ describe('attachedVisitInvoice', () => {
       .toMatchObject({ creditApplied: 0, amountDue: 214 });
   });
 
+  it('a part payment (amount_paid) comes off the amount due too', () => {
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceAmountPaid: 100 }))
+      .toMatchObject({ total: 214, amountPaid: 100, amountDue: 114 });
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceCreditApplied: 50, checkoutInvoiceAmountPaid: 100 }))
+      .toMatchObject({ creditApplied: 50, amountPaid: 100, amountDue: 64 });
+    // Absent or negative amount paid is today's number.
+    expect(attachedVisitInvoice(ACCEPT_MINTED_FIRST_VISIT)).toMatchObject({ amountPaid: 0, amountDue: 214 });
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceAmountPaid: -5 }))
+      .toMatchObject({ amountPaid: 0, amountDue: 214 });
+  });
+
   it('carries the prepaid-already-applied flag', () => {
     expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoicePrepaidApplied: true }))
       .toMatchObject({ prepaidApplied: true });

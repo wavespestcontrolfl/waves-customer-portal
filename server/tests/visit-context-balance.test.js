@@ -47,7 +47,7 @@ describe('openInvoiceFacts', () => {
       ['whereIn', ['status', OPEN_INVOICE_STATUSES]],
       ['whereNull', ['payer_id']],
       ['first', [
-        'COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance',
+        'COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0)::float as balance',
         'COUNT(*)::int as count',
         "COALESCE(BOOL_OR(status = 'overdue'), false) as overdue",
       ]],

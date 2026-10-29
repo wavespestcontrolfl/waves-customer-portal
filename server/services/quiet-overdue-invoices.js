@@ -120,7 +120,7 @@ function candidatesQuery(now = new Date(), database = db) {
     })
     .whereNull('i.archived_at')
     .whereNull('c.deleted_at')
-    .whereRaw('COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0) > 0')
+    .whereRaw('COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0) - COALESCE(i.amount_paid, 0) > 0')
     .whereRaw(`${dueDay} <= ? - ?::int`, [today, AUTOPAY_HOLD_DAYS])
     .whereNotExists(function noActivePlan() {
       this.select(1).from('payment_plans')
@@ -133,7 +133,7 @@ function candidatesQuery(now = new Date(), database = db) {
         .whereIn('d.status', OPEN_CUSTOMER_SCHEDULE_STATUSES);
     })
     .select(
-      'i.id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.amount_paid',
       'c.first_name', 'c.last_name',
       's.status as seq_status', 's.next_touch_at', 's.paused_until', 's.stopped_by_admin_id', 's.stopped_reason',
       's.autopay_failures_observed',
