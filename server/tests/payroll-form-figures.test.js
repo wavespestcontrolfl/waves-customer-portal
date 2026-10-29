@@ -606,13 +606,27 @@ describe('pay lines on the forms', () => {
     expect(line(out.rt6, '2').value).toBe(400000);
   });
 
-  test('gate off: every overtime premium is reported, there is no code W and line 4 is 0', () => {
+  test('gate turned off after lines were paid: the stored figures stay, and a check without them reads as before', () => {
     delete process.env.GATE_PAYROLL_PAY_LINES;
     const out = build(rows(), { flsaCovered });
-    expect(w2(out, 'Sample Covered').box12TT).toBe(2300);
-    expect(w2(out, 'Sample Notcovered').box12TT).toBe(2300);
-    expect(w2(out, 'Sample Covered')).not.toHaveProperty('box12W');
-    expect(line(out.f940, '3').value).toBe(400000);
+    // Stored qualified overtime and HSA money are what the checks paid; turning the gate off changes neither.
+    expect(w2(out, 'Sample Covered')).toMatchObject({ box12TT: 2481, box12W: 20000 });
+    expect(w2(out, 'Sample Notcovered').box12TT).toBeNull();
+    expect(w2(out, 'Sample Notcovered')).not.toHaveProperty('box12W');
+    expect(line(out.f940, '3').value).toBe(400000 + 20000);
+    expect(line(out.f940, '4')).toMatchObject({ value: 20000 });
+    // No stored figure: every overtime premium is reported, as before the gate existed.
+    expect(w2(out, 'Sample Older').box12TT).toBe(1100);
+    expect(w2(out, 'Sample Olderunset').box12TT).toBe(1100);
+  });
+
+  test('gate off with no check that stored pay line figures: every output reads as it always did', () => {
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    const out = build(rows().slice(2), { flsaCovered });
+    for (const name of ['Sample Older', 'Sample Olderunset']) {
+      expect(w2(out, name).box12TT).toBe(1100);
+      expect(w2(out, name)).not.toHaveProperty('box12W');
+    }
     expect(line(out.f940, '4')).toEqual({ line: '4', label: 'Payments exempt from FUTA tax', kind: 'cents', value: 0 });
   });
 });

@@ -264,9 +264,11 @@ const lineSpan = (line) => (line.coversFrom ? { coversFrom: line.coversFrom, cov
  * openLinesFor returns). Each line's weeks are read from the APPROVED weekly
  * timesheets; a week with none counts as no hours worked. Returns a Map of
  * technician id -> { extraPremiumCents, weeks } (payroll-regular-rate.js), plus
- * missingWeeks: the covered weeks with no approved timesheet, oldest first. The
- * pay run makes the technician wait when one of those weeks holds worked time, so
- * a line is never paid without that week's overtime.
+ * coveredWeeks: every week the lines cover, and missingWeeks: the covered weeks with
+ * no approved timesheet, oldest first. The pay run makes the technician wait when a
+ * missing week holds worked time, so a line is never paid without that week's
+ * overtime, and holds the check when a covered week has an unreviewed automatic
+ * clock-out (GATE_SHIFT_CLOSE_REVIEW).
  */
 async function priceLines(conn, byTech, { lock = false } = {}) {
   const priced = new Map();
@@ -292,6 +294,7 @@ async function priceLines(conn, byTech, { lock = false } = {}) {
     const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
     priced.set(technicianId, {
       ...lineOvertimePremium({ weeks, lines }),
+      coveredWeeks: covered,
       missingWeeks: covered.filter((week) => !approvedWeeks.has(week)),
     });
   }

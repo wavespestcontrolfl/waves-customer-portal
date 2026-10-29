@@ -111,6 +111,10 @@ const PAY_LINE_COLUMNS = {
   simple_compensation_cents: 'simpleCompensationCents',
 };
 const PAY_LINE_KEYS = Object.keys(PAY_LINE_COLUMNS);
+// A check drafted with the gate on stored its pay line figures (qualified_overtime_cents is
+// never null then). It keeps showing them after the gate is turned off, so a paid stub, run
+// and CSV still add up; a check drafted with the gate off stored none and shows none.
+const storedLines = (row) => row.qualified_overtime_cents != null;
 
 const requireUuid = (id, what) => {
   if (!UUID_RE.test(String(id || ''))) throw new PayrollError(404, `${what} not found.`);
@@ -305,7 +309,7 @@ const runColumns = (conn) => [
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
   ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
-  ...(payLinesOn() ? [...PAY_LINE_KEYS, conn.raw("calc_snapshot->'payLines' as pay_lines")] : []),
+  ...PAY_LINE_KEYS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -347,7 +351,7 @@ function serializeCheck(row) {
       ptoPayCents: Number(row.pto_pay_cents || 0),
       holidayPayCents: Number(row.holiday_pay_cents || 0),
     } : {}),
-    ...(payLinesOn() ? {
+    ...(payLinesOn() || storedLines(row) ? {
       reviewBonusCents: Number(row.review_bonus_cents || 0),
       commissionCents: Number(row.commission_cents || 0),
       healthAllowanceCents: Number(row.health_allowance_cents || 0),
@@ -411,6 +415,28 @@ async function lineWeeksWaiting(conn, priced) {
     }
   }
   return waitingOn;
+}
+
+// GATE_SHIFT_CLOSE_REVIEW: a covered week that holds a shift the system closed (the 11 PM
+// job or the 14-hour check) that no admin has edited or confirmed may hold wrong hours, so
+// a line priced from it is held like the run's own week. Map of technician id -> the
+// oldest such week.
+async function lineWeeksUnreviewed(conn, priced) {
+  const heldOn = new Map();
+  for (const [technicianId, { coveredWeeks = [] }] of priced) {
+    if (!coveredWeeks.length) continue;
+    const covered = new Set(coveredWeeks);
+    const rows = await conn('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'shift' })
+      .whereNotNull('auto_closed_at')
+      .whereNull('auto_close_reviewed_at')
+      .whereNot({ status: 'voided' })
+      .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [coveredWeeks[0], addStaffWorkDays(coveredWeeks[coveredWeeks.length - 1], 6)])
+      .select(conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') as work_date`));
+    const weeks = rows.map((row) => staffWeekStartForWorkDate(row.work_date)).filter((week) => covered.has(week)).sort();
+    if (weeks.length) heldOn.set(technicianId, weeks[0]);
+  }
+  return heldOn;
 }
 
 // GATE_PAYROLL_TIME_OFF: paid time off and holiday minutes of W-2 technicians
@@ -542,6 +568,8 @@ async function evaluate(conn, run, { lock = false } = {}) {
       .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
       .distinct('technician_id')).map((row) => row.technician_id))
     : new Set();
+  // The same hold for every earlier week a pay line takes its overtime from.
+  const lineUnreviewed = shiftCloseReviewLive() && priced.size ? await lineWeeksUnreviewed(conn, priced) : new Map();
   const checks = [];
   const blocked = [];
   for (const row of [...withHours, ...timeOffOnlyRows, ...linesOnlyRows]) {
@@ -550,6 +578,14 @@ async function evaluate(conn, run, { lock = false } = {}) {
     const tech = held ? { ...row, pay_lines: held.lines, line_premium: priced.get(row.technician_id) } : row;
     if (unreviewed.has(tech.technician_id)) {
       blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: AUTO_CLOSE_BLOCK_REASON });
+      continue;
+    }
+    if (lineUnreviewed.has(tech.technician_id)) {
+      blocked.push({
+        technicianId: tech.technician_id,
+        name: tech.name,
+        reason: `${AUTO_CLOSE_BLOCK_REASON} in the week of ${lineUnreviewed.get(tech.technician_id)}, which a pay line covers`,
+      });
       continue;
     }
     const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
@@ -818,6 +854,8 @@ async function getStub(checkId, conn = db) {
       conn.raw('COALESCE(SUM(net_cents), 0) AS net'),
     );
   const c = serializeCheck(check);
+  // Gate on, or a check that stored pay line figures (drafted while it was on).
+  const withLines = 'reviewBonusCents' in c;
   const withheld = c.federalIncomeTaxCents + c.socialSecurityCents + c.medicareCents + c.additionalMedicareCents;
   return {
     checkId: c.id,
@@ -836,7 +874,7 @@ async function getStub(checkId, conn = db) {
       regularPayCents: c.regularPayCents,
       overtimePayCents: c.overtimePayCents,
       ...(timeOffOn() ? { ptoPayCents: c.ptoPayCents, holidayPayCents: c.holidayPayCents } : {}),
-      ...(payLinesOn() ? {
+      ...(withLines ? {
         reviewBonusCents: c.reviewBonusCents,
         commissionCents: c.commissionCents,
         healthAllowanceCents: c.healthAllowanceCents,
@@ -845,7 +883,7 @@ async function getStub(checkId, conn = db) {
       grossCents: c.grossCents,
     },
     // The employer HSA money is not wages: it is not in gross pay, taxes or net pay.
-    ...(payLinesOn() ? { employerContributions: { hsaCents: c.hsaEmployerCents } } : {}),
+    ...(withLines ? { employerContributions: { hsaCents: c.hsaEmployerCents } } : {}),
     taxes: {
       federalIncomeTaxCents: c.federalIncomeTaxCents,
       socialSecurityCents: c.socialSecurityCents,
@@ -882,7 +920,8 @@ const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 
 
 function checksToCsv(rows) {
   const withTimeOff = timeOffOn();
-  const withLines = payLinesOn();
+  // Gate on, or a check in the run that stored pay line figures (drafted while it was on).
+  const withLines = payLinesOn() || rows.some(storedLines);
   const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);

@@ -46,7 +46,7 @@ const W2 = '2026-09-21'; // pay Fri 2026-10-02
 const W3 = '2026-09-28'; // pay Fri 2026-10-09
 const W4 = '2026-10-05'; // pay Fri 2026-10-16
 
-const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_PAYROLL_FORM_FIGURES', 'GATE_PAYROLL_TIME_OFF'];
+const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_PAYROLL_FORM_FIGURES', 'GATE_PAYROLL_TIME_OFF', 'GATE_SHIFT_CLOSE_REVIEW'];
 
 postgres('payroll pay lines', () => {
   let database;
@@ -381,6 +381,34 @@ postgres('payroll pay lines', () => {
       expect((await lineRow(line.id)).status).toBe('paid');
     });
 
+    it('hold the check while a covered earlier week has an automatic clock-out no one has reviewed', async () => {
+      process.env.GATE_SHIFT_CLOSE_REVIEW = 'true';
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1, '2400.00', '240.00');
+      await approvedWeek(id, W2, '2400.00', '0.00');
+      const shiftId = randomUUID();
+      await trx('time_entries').insert({
+        id: shiftId, technician_id: id, entry_type: 'shift', status: 'completed', approval_status: 'approved',
+        clock_in: `${addDays(W1, 1)}T11:30:00Z`, clock_out: `${addDays(W1, 1)}T21:00:00Z`, duration_minutes: 570,
+        auto_closed_at: `${addDays(W1, 2)}T03:00:00Z`, auto_close_reason: 'cron_11pm',
+      });
+      await addLine(id, { kind: 'commission', amountCents: 40000, coversFrom: W1, coversTo: addDays(W2, 6), earnedWeekStart: W2 });
+      const created = (await draft(W2)).body.run;
+      expect(created.checks).toEqual([]);
+      expect(created.blocked).toEqual([{
+        technicianId: id, name: 'Sample Alpha',
+        reason: `An automatic clock-out needs a real time in the week of ${W1}, which a pay line covers`,
+      }]);
+      expect((await finalize(created.id)).status).toBe(409);
+
+      // An admin confirms it: the line is priced with W1's overtime and the run finalizes.
+      await trx('time_entries').where({ id: shiftId }).update({ auto_close_reviewed_at: new Date(), auto_close_reviewed_by: ADMIN_ID });
+      const released = (await api('POST', `/runs/${created.id}/recompute`)).body.run;
+      expect(released.blocked).toEqual([]);
+      expect(byName(released, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 909 });
+      expect((await finalize(created.id)).status).toBe(200);
+    });
+
     it('treat a covered week with no worked time and no timesheet as no hours, without waiting', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W2, '2400.00', '0.00');
@@ -604,21 +632,40 @@ postgres('payroll pay lines', () => {
       expect(byName(recomputed, 'Sample Alpha').reviewBonusCents).toBe(0);
     });
 
-    it('add the new columns to the CSV and the check row only with the gate on', async () => {
+    it('add the new columns to the CSV, check row and stub, and keep them on a paid run after the gate is turned off', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W1);
       await addLine(id, { kind: 'hsa_employer', amountCents: 20000 });
+      await addLine(id, { amountCents: 3000 });
       const run = await draftAndFinalize(W1);
+      const header = /Check Number,Review Bonus,Commission,Health Allowance,Overtime On Bonus And Allowance,HSA From Waves$/;
       const on = await api('GET', `/runs/${run.id}/export.csv`, { raw: true });
-      const headerOn = on.text.split('\n')[0];
-      expect(headerOn).toMatch(/Check Number,Review Bonus,Commission,Health Allowance,Overtime On Bonus And Allowance,HSA From Waves$/);
-      expect(on.text.split('\n')[1]).toMatch(/0\.00,0\.00,0\.00,0\.00,200\.00$/);
+      expect(on.text.split('\n')[0]).toMatch(header);
+      expect(on.text.split('\n')[1]).toMatch(/30\.00,0\.00,0\.00,0\.00,200\.00$/);
+      // Turning the gate off never changes what a paid run shows: its stub still adds up to gross.
       delete process.env.GATE_PAYROLL_PAY_LINES;
       const off = await api('GET', `/runs/${run.id}/export.csv`, { raw: true });
-      expect(off.text.split('\n')[0]).toMatch(/Pay Method,Check Number$/);
+      expect(off.text).toBe(on.text);
+      const view = (await api('GET', `/runs/${run.id}`)).body.run;
+      expect(view.checks[0]).toMatchObject({ reviewBonusCents: 3000, hsaEmployerCents: 20000 });
+      const stub = (await api('GET', `/checks/${view.checks[0].id}/stub`)).body.stub;
+      expect(stub.earnings).toMatchObject({ reviewBonusCents: 3000, grossCents: 88000 + 3000 });
+      expect(stub.employerContributions).toEqual({ hsaCents: 20000 });
+    });
+
+    it('show no pay line columns on a run drafted with the gate off', async () => {
+      delete process.env.GATE_PAYROLL_PAY_LINES;
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const run = await draftAndFinalize(W1);
+      const csv = await api('GET', `/runs/${run.id}/export.csv`, { raw: true });
+      expect(csv.text.split('\n')[0]).toMatch(/Pay Method,Check Number$/);
       const view = (await api('GET', `/runs/${run.id}`)).body.run;
       expect(view.checks[0]).not.toHaveProperty('hsaEmployerCents');
       expect(view.checks[0]).not.toHaveProperty('payLines');
+      const stub = (await api('GET', `/checks/${view.checks[0].id}/stub`)).body.stub;
+      expect(stub).not.toHaveProperty('employerContributions');
+      expect(stub.earnings).not.toHaveProperty('reviewBonusCents');
     });
   });
 
@@ -727,15 +774,31 @@ postgres('payroll pay lines', () => {
       expect(w2Of(figures, 'Sample Unset').box12TT).toBeNull();
     });
 
-    it('read exactly what they read before with the gate off', async () => {
+    it('keep what the paid checks stored when the gate is turned off', async () => {
       process.env.GATE_PAYROLL_FORM_FIGURES = 'true';
       await paidWeek();
+      const before = await forms();
       delete process.env.GATE_PAYROLL_PAY_LINES;
+      const after = await forms();
+      // Code TT, code W and Form 940 lines 3 and 4 read the stored figures, not the gate.
+      expect(w2Of(after, 'Sample Covered')).toMatchObject({ box12TT: 2300 + 658, box12W: 20000 });
+      expect(w2Of(after, 'Sample Notcovered').box12TT).toBeNull();
+      expect(after.f940).toEqual(before.f940);
+      // Every W-2 box reads the same; an employee with no HSA money shows no code W either way.
+      const boxes = (figures) => figures.w2.map(({ box12W = null, ...rest }) => ({ ...rest, box12W }));
+      expect(boxes(after)).toEqual(boxes(before));
+    });
+
+    it('read exactly what they read before with the gate off and no check drafted with it on', async () => {
+      process.env.GATE_PAYROLL_FORM_FIGURES = 'true';
+      delete process.env.GATE_PAYROLL_PAY_LINES;
+      const id = await readyTech('Sample Older', { pay_rate: '23.00' });
+      await approvedWeek(id, W1, '2400.00', '120.00');
+      await draftAndFinalize(W1);
       const figures = await forms();
-      const notCovered = w2Of(figures, 'Sample Notcovered');
-      // Gate off: every overtime premium is reported, covered or not, and there is no code W.
-      expect(notCovered.box12TT).toBe(2300);
-      expect(notCovered).not.toHaveProperty('box12W');
+      // Gate off: every overtime premium is reported and there is no code W.
+      expect(w2Of(figures, 'Sample Older').box12TT).toBe(2300);
+      expect(w2Of(figures, 'Sample Older')).not.toHaveProperty('box12W');
       expect(row940(figures, '4').value).toBe(0);
       expect(row940(figures, '4')).not.toHaveProperty('note');
     });
