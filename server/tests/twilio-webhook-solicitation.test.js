@@ -276,6 +276,24 @@ describe('GATE_SMS_BARE_YES_REPLY=true', () => {
     expect(markRecipientOptin).toHaveBeenCalledWith('+12025550101', 'confirmed', expect.anything());
   });
 
+  test('a bare YES called a reply takes the ordinary recruiting lookup, which fails closed for a plausible applicant', async () => {
+    // As a command the lookup is best-effort (a STOP must never wait on it);
+    // as an ordinary text it defers for a Twilio retry, so an applicant's
+    // answer never lands in technician-visible readers untyped.
+    const recruiting = require('../services/recruiting-inbound');
+    recruiting.matchApplicantReply.mockRejectedValueOnce(Object.assign(new Error('recruiting store down'), { code: '08006' }));
+    recruiting.isPlausibleRecruitingPhone = jest.fn(async () => true);
+    try {
+      findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+      const res = await receive('YES', undefined, 503);
+      expect(res.body).toBe('<Response></Response>');
+      expect(releaseInboundWebhook).toHaveBeenCalledWith('SM-synthetic-solicitation');
+      expect(clearSuppression).not.toHaveBeenCalled();
+    } finally {
+      delete recruiting.isPlausibleRecruitingPhone;
+    }
+  });
+
   test('START never consults the bare-YES rule', async () => {
     findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
     const res = await receive('START');
