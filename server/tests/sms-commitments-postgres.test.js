@@ -4084,7 +4084,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(prompt).toContain('Annual prepay for 4 quarterly visits');
       });
 
-      test('gate true: the model saying open still rings; an invoice sent BEFORE the promise, a void one, and another customer\'s are not evidence', async () => {
+      test('gate true: the model saying open still rings; an invoice sent BEFORE the promise, a void one, another customer\'s and a payer-billed one are not evidence', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         await staffPromise();
         await prepayInvoice(at(-60000));
@@ -4092,9 +4092,13 @@ postgres('SMS commitments on PostgreSQL', () => {
         const stranger = randomUUID();
         await mockPg('customers').insert({ id: stranger, first_name: 'Other', last_name: 'Fixture', phone: '+12025550188' });
         await prepayInvoice(at(60000), { customer_id: stranger });
+        const [payer] = await mockPg('payers').insert({ display_name: 'Synthetic Property Manager' }).returning('id');
+        const payerBilled = await prepayInvoice(at(60000), { payer_id: payer.id });
         const current = await currentOf(await mockPg('call_commitments').first());
         const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
         expect(evidence.records.filter((r) => r.type === 'invoice' && admissibleWitness(r, current, evidence.records))).toEqual([]);
+        // A payer-billed invoice went to the payer, not to this customer: not even loaded.
+        expect(evidence.records.find((r) => r.type === 'invoice' && r.id === payerBilled.id)).toBeUndefined();
         dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
         await tick(3600000);
         expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -4339,13 +4343,33 @@ postgres('SMS commitments on PostgreSQL', () => {
             description: 'send the service report', channel: 'sms', due_at: at(3 * 86400000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
             evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
             sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+          const other = await mockPg('call_commitments').where({ kind: 'send_report' }).first('id');
           const shared = await openAlert(`sms-commitment-source:${message.id}`);
           const own = await openAlert(`sms-commitment:${row.id}`);
           await mockPg('scheduled_services').insert(visitRow());
           await tick();
-          expect(rings()).toBe(0);
           expect((await alertOf(shared)).done_at).toBeNull();
           expect((await alertOf(own)).done_at).not.toBeNull();
+          // The usual closer rewrites the shared alert to the promise still open: a quiet refresh, no ring.
+          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+          const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+          expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-source:${message.id}`, dedupeOpenOnly: true });
+          expect(refreshed.ringOnRefresh()).toBe(false);
+          expect(refreshed.metadata.commitment_ids).toEqual([other.id]);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      test('gate true: an alert a person already marked done stays theirs (the on-track close touches open rows only)', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          await staffPromise();
+          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          const person = randomUUID();
+          await mockPg('notifications').where({ id: alert }).update({ done_at: at(-60000), done_by: person, resolution: 'Called them' });
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(await alertOf(alert)).toMatchObject({ done_by: person, resolution: 'Called them' });
         } finally { delete process.env.GATE_ALERT_RING_ONCE; }
       });
 

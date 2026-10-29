@@ -1172,13 +1172,15 @@ const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
   .orderBy('created_at').orderBy('id');
 
 // Close the alert for a finished commitment. The shared source alert stays
-// open while another promise from the same text is still open.
-async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true }, update) {
+// open while another promise from the same text is still open. `openOnly`
+// touches open rows only: a temporary close (GATE_PROMISE_RECORD_EVIDENCE
+// rule 3, on track until a visit) never takes over a row a person marked done.
+async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false }, update) {
   // A non-settling update (edit, snooze) marks both alerts read; a settling
   // one finishes the shared alert only when no other promise from the text is open.
   const remaining = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
   const keys = [legacyCommitmentAlertKey(commitmentId), ...(remaining.length ? [] : [smsSourceAlertKey(smsLogId)])];
-  await trx('notifications').where({ recipient_type: 'admin' })
+  await trx('notifications').where({ recipient_type: 'admin' }).modify((q) => { if (openOnly) q.whereNull('done_at'); })
     .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
   if (remaining.length) await refreshSharedSmsAlert(trx, smsLogId, remaining);
 }
@@ -1375,6 +1377,8 @@ const SHADOW_FULFILLMENT_ACTION = 'sms_commitment.fulfillment.shadow';
 const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
 // Extra model calls per refresh run in shadow mode.
 const SHADOW_MODEL_CALLS_PER_RUN = 10;
+const alertRingOnce = () => require('../config/feature-gates').alertRingOnceLive?.() === true;
+const etShortDateTime = (at) => new Date(at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 // Rule 3: a waves row of these kinds (a promise Waves made or a customer's
 // request, whatever its basis) that is booked onto a visit is on track until
 // that visit's window ends.
@@ -1480,24 +1484,6 @@ async function recordFulfillmentShadow(conn, { current, message, evidence, baseV
     logger.warn(`[sms-operations] fulfillment shadow failed for commitment ${current.id}: ${err.message}`);
     return false;
   }
-}
-
-// Rule 3 in 'true' mode: an overdue alert that rang before the visit was
-// booked closes while that visit is still to come. A shared alert closes only
-// when no other promise from its text is open (it still speaks for those). The
-// ring after the window ends then raises a fresh alert: the open-only probe
-// (GATE_ALERT_RING_ONCE) ignores a closed row, and the ring's supersede step
-// leaves a system close alone. Without that probe a closed row would absorb
-// the next ring for a day, so the alert stays as it is.
-async function closeOnTrackAlerts(trx, { commitmentId, smsLogId, onTrack, now }) {
-  if (!require('../config/feature-gates').alertRingOnceLive?.()) return;
-  const others = await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
-  const keys = [legacyCommitmentAlertKey(commitmentId), ...(others ? [] : [smsSourceAlertKey(smsLogId)])];
-  const until = new Date(onTrack.window_end).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-    .whereIn(trx.raw("metadata->>'dedupeKey'"), keys)
-    .update(require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
-      resolution: `On track: a visit is booked until ${until} ET`, at: now, keepExisting: true, conn: trx }));
 }
 
 // The shadow rows of one refresh, written after its transaction so an audit
@@ -1607,8 +1593,18 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // never rings a bell on its own (there is no stated deadline to have
     // passed). The fulfillment_check above is still stored so a later
     // pass with new evidence does not repeat the same model call for free.
+    // Rule 3 ('true'): an overdue alert that rang before the visit was booked
+    // closes while the visit is ahead, through the usual closer (open rows
+    // only; a shared alert keeps the text's other open promises). Only with
+    // GATE_ALERT_RING_ONCE on: its open-only probe lets the ring after the
+    // window raise a fresh alert, and the ring's supersede step leaves a system
+    // close alone. Without it a closed row would absorb that ring for a day.
     if (holdBell) {
-      await closeOnTrackAlerts(trx, { commitmentId: row.id, smsLogId: source.id, onTrack, now });
+      if (alertRingOnce()) {
+        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true },
+          require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
+            resolution: `On track: a visit is booked until ${etShortDateTime(onTrack.window_end)} ET`, at: now, keepExisting: true, conn: trx }));
+      }
       return;
     }
     if (deadlinePassed) {

@@ -310,8 +310,11 @@ const INVOICE_PROPERTY_SQL = `COALESCE(
     LEFT JOIN estimates se ON se.id = sfc.estimate_id WHERE sfc.invoice_id = invoices.id LIMIT 1),
   (SELECT pe.property_id FROM annual_prepay_terms apt JOIN estimates pe ON pe.id = apt.source_estimate_id
     WHERE apt.prepay_invoice_id = invoices.id LIMIT 1))`;
+// A payer-billed invoice (payer_id set) went to the payer, not to the
+// customer the promise was made to, so it is never evidence here (the same
+// rule as the payment leg's invoices, payer_id IS NULL).
 const invoiceRecords = (conn, customerId, after, now, scopedProperty) => Promise.all([
-  conn('invoices').where({ customer_id: customerId })
+  conn('invoices').where({ customer_id: customerId }).whereNull('payer_id')
     .where('sent_at', '>', after).where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
     .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id', 'invoice_number', 'total', 'line_items',
       conn.raw('EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id) AS annual_prepay'),
