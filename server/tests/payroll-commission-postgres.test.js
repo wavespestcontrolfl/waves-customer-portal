@@ -1002,45 +1002,68 @@ postgres('payroll commission ledger', () => {
   });
 
   describe('an estimate deposit', () => {
-    // A $100 sold service; the $20 deposit paid at acceptance is credited on the minted invoice after tax, as a prior
-    // payment (invoice.js create), so the invoice asks $80. Deposits have no payments row.
+    // A $100 sold service; the $20 deposit paid at acceptance lives in the deposit ledger (estimate_deposits, no payments
+    // row) and is credited on the minted invoice after tax, as a prior payment (invoice.js create), so the invoice asks $80.
     const depositWorld = async () => {
       const { tech, cust, est } = await soldWorld();
       await approvedWeek(tech, W2);
       const inv = await mintedInvoice(cust, est, {
-        subtotal: '100.00', total: '80.00', created_at: '2026-09-15T15:00:00Z', updated_at: '2026-09-15T15:00:00Z',
+        subtotal: '100.00', total: '80.00',
         line_items: JSON.stringify([
           { client_id: 'line_sold', description: 'Sample service', amount: 100 },
           { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -20, amount: -20, category: 'deposit_credit', estimate_id: est },
         ]),
       });
-      return { cust, est, inv };
+      const [row] = await trx('estimate_deposits').insert({
+        estimate_id: est, customer_id: cust, amount: '20.00', card_surcharge: '0.60', credited_amount: '20.00', status: 'credited',
+        credited_invoice_id: inv, stripe_payment_intent_id: `pi_sample_${randomUUID()}`,
+        received_at: '2026-09-14T15:00:00Z', updated_at: '2026-09-14T15:00:00Z',
+      }).returning('id');
+      return { cust, est, inv, deposit: idOf(row) };
     };
 
-    it('counts the deposit credited on the invoice with the balance payment: $20 + $80 earns $10', async () => {
-      const { cust, inv } = await depositWorld();
+    it('counts the deposit, never its card surcharge, with the balance payment: $20 + $80 earns $10', async () => {
+      const { cust, inv, deposit } = await depositWorld();
       const paid = await payment(cust, inv, '2026-09-16', '80.00');
       const created = await draft(W1);
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
       const rows = await entries();
       expect(rows.map((e) => [e.payment_source, e.payment_id, e.invoice_id, Number(e.counted_cents)]).sort())
-        .toEqual([['deposit_credit', inv, inv, 2000], ['payment', paid, inv, 8000]]);
-      // A second sync never counts the credit again.
+        .toEqual([['estimate_deposit', deposit, inv, 2000], ['payment', paid, inv, 8000]]);
+      expect(dateOnly(rows.find((e) => e.payment_source === 'estimate_deposit').payment_on)).toBe('2026-09-14');
+      // A second sync never counts the deposit again.
       expect((await recompute(created.body.run.id)).status).toBe(200);
       expect(await entries()).toHaveLength(2);
     });
 
-    it('takes the deposit credit off when its invoice is voided inside the 12 months', async () => {
-      const { inv } = await depositWorld();
+    it('takes a refunded or disputed deposit off though its invoice keeps the credit', async () => {
+      const { deposit } = await depositWorld();
       const created = await draft(W1);
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(200);
       expect((await finalize(created.body.run.id)).status).toBe(200);
-      // Voided: the credit goes back to the deposit, so it comes off the next commission (none comes: nothing is owed).
-      await trx('invoices').where({ id: inv }).update({ status: 'void', updated_at: '2026-09-22T15:00:00Z' });
+      // A dashboard refund of $5: the deposit ledger records it, the invoice keeps its credit line.
+      await trx('estimate_deposits').where({ id: deposit }).update({ refunded_amount: '5.00', updated_at: '2026-09-22T15:00:00Z' });
+      expect((await entries()).map((e) => Number(e.counted_cents))).toEqual([2000]);
       const next = await draft(W2);
-      expect(commissionOf(next.body.run, 'Sample Alpha')).toBe(0);
+      expect(next.status).toBe(201);
+      expect((await entries()).map((e) => Number(e.counted_cents))).toEqual([1500]);
+      // A dispute reverses the rest (estimate-deposits.js handleDepositChargeReversed: refunded in full).
+      await trx('estimate_deposits').where({ id: deposit }).update({ status: 'refunded', refunded_amount: '20.00' });
+      expect((await recompute(next.body.run.id)).status).toBe(200);
       expect((await entries()).map((e) => Number(e.counted_cents))).toEqual([0]);
-      expect(await ledgerLines()).toHaveLength(1);
+      // Never below $0, never from wages: the $2.00 already paid is not taken back when no later commission comes.
+      expect(commissionOf((await api('GET', `/runs/${next.body.run.id}`)).body.run, 'Sample Alpha')).toBe(0);
+    });
+
+    it('waits for a deposit that sits on no invoice of the sale, and counts a pending one never', async () => {
+      const { tech, est } = await soldWorld();
+      await approvedWeek(tech, W2);
+      await trx('estimate_deposits').insert([
+        { estimate_id: est, amount: '20.00', status: 'received', stripe_payment_intent_id: `pi_sample_${randomUUID()}`, received_at: '2026-09-14T15:00:00Z' },
+        { estimate_id: est, amount: '30.00', status: 'pending', stripe_payment_intent_id: `pi_sample_${randomUUID()}` },
+      ]);
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(0);
+      expect(await entries()).toHaveLength(0);
     });
   });
 
