@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, DESOTO_ZIPS } = require('../config/county-zips');
-const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive, taxServiceCountyLive } = require('../config/feature-gates');
+const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive, taxServiceCountyLive, slabBusinessSiteTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -97,7 +97,7 @@ const TaxCalculator = {
     const isCommercial = opts.isCommercial === true
       || customer.property_type === 'commercial' || customer.property_type === 'business';
 
-    const notTaxable = await this.serviceNotTaxable(conn, serviceType, isCommercial);
+    const notTaxable = await this.serviceNotTaxable(conn, serviceType, isCommercial, { customer, opts });
     if (notTaxable) return notTaxable;
 
     // 3. Look up county tax rate. The surtax is due in the county where the
@@ -171,7 +171,7 @@ const TaxCalculator = {
    * Step 2 of calculateTax: the no-tax answer this service earns, or null when
    * the county rate applies (a taxable or unknown service).
    */
-  async serviceNotTaxable(conn, serviceType, isCommercial) {
+  async serviceNotTaxable(conn, serviceType, isCommercial, { customer = null, opts = {} } = {}) {
     if (!serviceType) return null;
     // Pre-construction termite treatment (slab pre-treat): Florida taxes it
     // only for a nonresidential building (Rule 12A-1.009); for a home it is
@@ -179,9 +179,15 @@ const TaxCalculator = {
     // account is commercial. A builder's account holds homes and its own
     // offices alike, so the service name carries the building's use here
     // (GATE_SLAB_HOME_NO_TAX); the account-level use in step 1b covers a
-    // whole residential site.
+    // whole residential site. A commercial account's slab job whose serviced
+    // property has Occupancy "Commercial" (the office's per-site mark) is a
+    // business building's and keeps the county tax (GATE_SLAB_BUSINESS_SITE_TAX).
     if (slabHomeNoTaxLive() && this.isHomeSlabPretreat(serviceType)) {
-      return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
+      const businessSite = isCommercial && customer && customer.building_use !== 'residential'
+        && slabBusinessSiteTaxLive() && (await this.servicedOccupancy(conn, customer, opts)) === 'commercial';
+      if (!businessSite) {
+        return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
+      }
     }
     // Lawn and landscape treatments: Florida does not tax lawn spraying,
     // residential or nonresidential (Rule 12A-1.009(6)), and taxes pest control
@@ -285,6 +291,27 @@ const TaxCalculator = {
       if (zip) return { zip, fromProperty: true };
     }
     return { zip: customer.zip, fromProperty: false };
+  },
+
+  /**
+   * The serviced property's occupancy_type, by the same ids taxZipFor reads:
+   * opts.propertyId (a saved property of this customer), else the saved
+   * property of opts.scheduledServiceId (a visit of this customer). No id, or
+   * an id that is not this customer's = null.
+   */
+  async servicedOccupancy(conn, customer, { propertyId, scheduledServiceId } = {}) {
+    const [pid, visitId] = [propertyId, scheduledServiceId].map((id) => String(id ?? '').trim());
+    let row = null;
+    if (UUID_RE.test(pid)) {
+      row = await conn('customer_properties').where({ id: pid, customer_id: customer.id }).first('occupancy_type');
+    }
+    if (!row && UUID_RE.test(visitId)) {
+      row = await conn('scheduled_services as s')
+        .join('customer_properties as p', 'p.id', 's.property_id')
+        .where({ 's.id': visitId, 's.customer_id': customer.id, 'p.customer_id': customer.id })
+        .first('p.occupancy_type as occupancy_type');
+    }
+    return row?.occupancy_type ?? null;
   },
 
   inferCountyFromZip(zip) {

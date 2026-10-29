@@ -3851,6 +3851,15 @@ const gates = {
   // covers the county. Read at call time via taxServiceCountyLive(); dark by
   // default. Off = the customer's ZIP and the 7% fallback, as before.
   taxServiceCounty: gateEnvValue('GATE_TAX_SERVICE_COUNTY'),
+  // A slab pre-treat at a business building keeps its tax (2026-10-29, fix 5 of
+  // the proposal defaults check): with GATE_SLAB_HOME_NO_TAX on, every slab
+  // name not saying Commercial is billed as a home job, and the catalog has no
+  // Commercial slab service. On, a commercial account's slab job whose serviced
+  // property has Occupancy "Commercial" (customer_properties.occupancy_type)
+  // keeps the county tax (Rule 12A-1.009). Read at call time via
+  // slabBusinessSiteTaxLive(); dark by default. Off = every slab job of a
+  // commercial account follows GATE_SLAB_HOME_NO_TAX exactly as before.
+  slabBusinessSiteTax: gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX'),
 
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
@@ -6259,6 +6268,11 @@ function buildingUseTaxLive() {
 // GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
 function taxServiceCountyLive() {
   return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
+}
+
+// GATE_SLAB_BUSINESS_SITE_TAX read at CALL time (so a flip needs no redeploy).
+function slabBusinessSiteTaxLive() {
+  return gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX');
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -8968,3 +8982,5 @@ module.exports.buildingUseTaxLive = buildingUseTaxLive;
 module.exports.stockCountAwareUsageLive = stockCountAwareUsageLive;
 // GATE_TAX_SERVICE_COUNTY reader, on its own line so gate PRs never conflict.
 module.exports.taxServiceCountyLive = taxServiceCountyLive;
+// GATE_SLAB_BUSINESS_SITE_TAX reader, on its own line so gate PRs never conflict.
+module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
