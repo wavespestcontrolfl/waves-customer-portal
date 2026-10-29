@@ -685,7 +685,7 @@ async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
 // names a service id, so a lawn plan whose label does not say "lawn" still
 // reads as lawn. Gate off, or any other series: the input comes back
 // unchanged and no query runs.
-async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null }) {
+async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null, serviceKey = null }) {
   if (!lawnRoundsGateOn()) return { pattern, intervalDays };
   let service = null;
   if (serviceId) {
@@ -697,7 +697,7 @@ async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, service
     pattern,
     intervalDays,
     service_type: serviceType,
-    service_key: service?.service_key || undefined,
+    service_key: service?.service_key || serviceKey || undefined,
     name: service?.name || undefined,
   });
 }
@@ -14522,11 +14522,29 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         .where({ id: req.params.id })
         .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
       if (seriesCurrent && !seriesCurrent.is_recurring && !seriesCurrent.recurring_parent_id) {
+        // The EFFECTIVE identity of this save, resolved the way the service
+        // change below treats the request: a posted serviceId (truthy) is the
+        // catalog row; a posted null clears it (the static-fallback pick
+        // carries postedServiceKey, else the label); a label with no
+        // serviceId is the label alone, never the stored id; nothing posted
+        // keeps the stored identity.
+        let effectiveId = seriesCurrent.service_id;
+        let effectiveKey = null;
+        let effectiveLabel = seriesCurrent.service_type;
+        if (serviceId !== undefined) {
+          effectiveId = serviceId || null;
+          effectiveKey = !serviceId ? String(postedServiceKey || '').trim().toLowerCase() || null : null;
+          effectiveLabel = serviceType;
+        } else if (serviceType !== undefined) {
+          effectiveId = null;
+          effectiveLabel = serviceType;
+        }
         ({ pattern: recurringPattern, intervalDays: recurringIntervalDays } = await lawnRoundsSeriesForBooking(db, {
           pattern: recurringPattern,
           intervalDays: recurringIntervalDays,
-          serviceType: serviceType || seriesCurrent.service_type,
-          serviceId: seriesCurrent.service_id,
+          serviceType: effectiveLabel,
+          serviceId: effectiveId,
+          serviceKey: effectiveKey,
         }));
       }
     }

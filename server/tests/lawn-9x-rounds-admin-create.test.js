@@ -24,6 +24,10 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/package-followup-booking', () => ({
+  ...jest.requireActual('../services/package-followup-booking'),
+  hasLivePackageChild: jest.fn(async () => false),
+}));
 jest.mock('../services/estimate-manual-acceptance', () => ({
   ...jest.requireActual('../services/estimate-manual-acceptance'),
   persistedAddOnRefusal: jest.fn(() => null),
@@ -360,10 +364,23 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
   let spawned;
   let parentUpdates;
 
+  const CATALOG = [
+    { id: 'svc-lawn', service_key: 'lawn_care_6week', name: 'Lawn Care', category: 'lawn_care' },
+    { id: 'svc-ts', service_key: 'tree_shrub_6week', name: 'Tree & Shrub Care', category: 'tree_shrub' },
+  ];
+
   function mockVisit(row) {
     spawned = [];
     parentUpdates = [];
     const make = (table) => {
+      if (table === 'services') {
+        const c = chain(undefined);
+        c.first = jest.fn(async () => {
+          const wheres = c.where.mock.calls.map((args) => args[0]).filter((w) => w && typeof w === 'object');
+          return CATALOG.find((r) => wheres.some((w) => (w.id && w.id === r.id) || (w.service_key && w.service_key === r.service_key))) || undefined;
+        });
+        return c;
+      }
       const c = chain(table === 'scheduled_services'
         ? { ...row }
         : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33 } : undefined));
@@ -424,6 +441,65 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
     expect(status).toBe(200);
     expect(parentWrites()[0]).toMatchObject({ recurring_pattern: 'custom', recurring_interval_days: 42 });
     expect(spawned.map((d) => d.recurring_pattern)).toEqual(['custom', 'custom']);
+  });
+
+  describe('gate on: the identity is the EFFECTIVE posted service, not the stored one', () => {
+    const asCustom = () => {
+      expect(parentWrites()[0]).toMatchObject({ recurring_pattern: 'custom', recurring_interval_days: 42 });
+      expect(spawned.map((d) => d.recurring_pattern)).toEqual(['custom', 'custom']);
+    };
+    const asRounds = () => {
+      expect(parentWrites()[0].recurring_pattern).toBe('lawn_rounds_9');
+      expect(spawned.map((d) => d.recurring_pattern)).toEqual(['lawn_rounds_9', 'lawn_rounds_9']);
+    };
+    const lawnStored = { ...lawnVisit, service_id: 'svc-lawn' };
+    const tsStored = { ...lawnVisit, service_type: 'Tree & Shrub Care', service_id: 'svc-ts' };
+
+    test('a lawn visit changed to tree & shrub (T&S serviceId) and made recurring stays custom/42', async () => {
+      gateOn(); mockVisit(lawnStored);
+      const r = await put({ ...makeRecurring, serviceId: 'svc-ts', serviceType: 'Tree & Shrub Care' })
+      expect(r.status).toBe(200);
+      asCustom();
+    });
+
+    test('a tree & shrub visit changed to lawn (lawn serviceId) and made recurring becomes lawn_rounds_9', async () => {
+      gateOn(); mockVisit(tsStored);
+      expect((await put({ ...makeRecurring, serviceId: 'svc-lawn', serviceType: 'Lawn Care' })).status).toBe(200);
+      asRounds();
+    });
+
+    test('serviceId null with a "Lawn Care" label becomes lawn_rounds_9, even from a tree & shrub row', async () => {
+      gateOn(); mockVisit(tsStored);
+      expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Lawn Care' })).status).toBe(200);
+      asRounds();
+    });
+
+    test('serviceId null with postedServiceKey lawn_care_6week becomes lawn_rounds_9 (label does not say lawn)', async () => {
+      gateOn(); mockVisit(tsStored);
+      expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Enhanced Program', serviceKey: 'lawn_care_6week' })).status).toBe(200);
+      asRounds();
+    });
+
+    test('serviceId null with a tree & shrub label stays custom/42 even from a lawn row', async () => {
+      gateOn(); mockVisit(lawnStored);
+      expect((await put({ ...makeRecurring, serviceId: null, serviceType: 'Tree & Shrub Care' })).status).toBe(200);
+      asCustom();
+    });
+
+    test('a label-only change to tree & shrub (no serviceId) stays custom/42 — the stale lawn id is not used', async () => {
+      gateOn(); mockVisit(lawnStored);
+      expect((await put({ ...makeRecurring, serviceType: 'Tree & Shrub Care' })).status).toBe(200);
+      asCustom();
+    });
+
+    test('no service fields posted keeps the stored identity (lawn row → rounds, tree & shrub row → custom)', async () => {
+      gateOn(); mockVisit(lawnStored);
+      expect((await put(makeRecurring)).status).toBe(200);
+      asRounds();
+      mockVisit(tsStored);
+      expect((await put(makeRecurring)).status).toBe(200);
+      asCustom();
+    });
   });
 
   test('gate on: a lawn visit that is already in a series is never re-written (a series never mixes the two patterns)', async () => {
