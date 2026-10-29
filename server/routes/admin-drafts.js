@@ -731,8 +731,9 @@ async function barRecipientRefusal(recipient, pins) {
   return String(latest?.id || '') !== String(pins.latestInboundId || '') ? barPinsChangedBody() : null;
 }
 
-// The last await before the provider handoff (sendCustomerMessage's preDispatchCheck): a text from
-// the customer that landed while the send pipeline ran stops the send and releases the claim.
+// Run at BOTH of the sender's late hooks: preDispatchCheck (after the validators, before provider preparation) and
+// preProviderCheck (the provider boundary: after preparation, the reservation and Twilio's own async checks, the sender's
+// last callback). A text from the customer that landed in between stops the send and releases the claim.
 function barDispatchCheck(recipient, pins) {
   if (!pins) return undefined;
   return async () => {
@@ -961,7 +962,9 @@ async function approveDraftHandler(req, res, next) {
         // At most one is set: clarify and photo-triage drafts are distinct intents.
         preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck
           || barDispatchCheck(recipient, barPins),
-        preProviderCheck: photoTriageGuard.preProviderCheck,
+        // The bar's pin runs here too: the provider boundary is the sender's own last callback, after provider
+        // preparation, the handoff reservation and Twilio's async checks.
+        preProviderCheck: photoTriageGuard.preProviderCheck || barDispatchCheck(recipient, barPins),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -1142,6 +1145,8 @@ async function reviseDraftHandler(req, res, next) {
         // shape exactly.
         ...sendPolicy,
         preDispatchCheck: clarifyGuard.preDispatchCheck || barDispatchCheck(recipient, barPins),
+        // Page path: no key at all (unchanged). Bar path: the same pin at the provider boundary.
+        ...(barPins ? { preProviderCheck: barDispatchCheck(recipient, barPins) } : {}),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',

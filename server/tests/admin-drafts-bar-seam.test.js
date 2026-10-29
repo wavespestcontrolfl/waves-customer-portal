@@ -105,6 +105,25 @@ describe('approveDraftFromBar', () => {
     expect(await check()).toMatchObject({ ok: false, code: 'preview_changed' });
   });
 
+  test('the sender\'s provider-boundary callback carries the same pin: a text after preDispatchCheck but before dispatch is caught there', async () => {
+    happy();
+    await draftsRouter.approveDraftFromBar({ draftId: 'draft-1', actor, pins: pins() });
+    const input = sendManualCustomerSms.mock.calls[0][0];
+    expect(typeof input.preProviderCheck).toBe('function');
+    enqueue('sms_log', { first: { id: 'log-1' } });
+    expect(await input.preDispatchCheck()).toEqual({ ok: true });
+    enqueue('sms_log', { first: { id: 'log-2' } });
+    expect(await input.preProviderCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'preview_changed' });
+  });
+
+  test('the page path passes no bar callback at all', async () => {
+    happy();
+    await draftsRouter.approveDraftFromBar({ draftId: 'draft-1', actor, pins: null });
+    const input = sendManualCustomerSms.mock.calls[0][0];
+    expect(input.preDispatchCheck).toBeUndefined();
+    expect(input.preProviderCheck).toBeUndefined();
+  });
+
   test('a draft already handled or edited is not claimed: 409 preview_changed, nothing sent', async () => {
     enqueue('message_drafts', { returning: [] });
     enqueue('message_drafts', { first: draftRow({ status: 'approved' }) });
@@ -172,6 +191,7 @@ describe('reviseDraftFromBar', () => {
     expect(status).toBe(200);
     expect(wheres.some((w) => w.table === 'message_drafts' && w.args[0] === 'draft_response' && w.args[1] === TEXT)).toBe(true);
     expect(sendManualCustomerSms.mock.calls[0][0]).toMatchObject({ body: 'Thursday at 10 works.', entryPoint: 'admin_draft_revise' });
+    expect(typeof sendManualCustomerSms.mock.calls[0][0].preProviderCheck).toBe('function');
     expect(updates[0].payload).toMatchObject({ status: 'revised', revised_response: 'Thursday at 10 works.' });
   });
 

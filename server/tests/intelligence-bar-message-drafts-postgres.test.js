@@ -173,6 +173,28 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(await row(id)).toMatchObject({ status: 'pending', approved_by: null });
   });
 
+  test.each([['approve', 'approveDraftFromBar', undefined], ['revise', 'reviseDraftFromBar', { revisedResponse: 'Thursday at 10 works.' }]])(
+    '%s: a text landing AFTER preDispatchCheck but BEFORE dispatch is stopped at the provider boundary, nothing sent, claim released', async (_n, fn, body) => {
+      const c = await customer();
+      const log = await inbound(c);
+      const id = await draft(c, log);
+      const pins = { draftText: TEXT, recipientPhone: PHONE, customerId: c, latestInboundId: log };
+      let atDispatch;
+      sendManualCustomerSms.mockImplementation(async (input) => {
+        // The sender's order: preDispatchCheck passes, provider preparation runs, THEN the customer texts, THEN the boundary.
+        expect(await input.preDispatchCheck({ channel: 'sms' })).toEqual({ ok: true });
+        await inbound(c, { message_body: 'Never mind, Friday.', created_at: new Date(Date.now() + 5000) });
+        atDispatch = await input.preProviderCheck({ channel: 'sms' });
+        return atDispatch.ok ? { sent: true, providerMessageId: 'SM_synthetic' }
+          : { sent: false, blocked: true, code: atDispatch.code, reason: atDispatch.reason };
+      });
+      const out = await drafts[fn]({ draftId: id, actor: {}, pins, body });
+      expect(atDispatch).toMatchObject({ ok: false, code: 'preview_changed' });
+      expect(out.status).toBe(422);
+      expect(out.json.code).toBe('preview_changed');
+      expect(await row(id)).toMatchObject({ status: 'pending', approved_by: null, sent_at: null });
+    });
+
   test('a campaign draft is refused before the campaign guard can retire it', async () => {
     const c = await customer();
     const id = await draft(c, null, { campaign_type: 'upsell', purpose: 'marketing', source_ref: 'upsell_opportunities:none' });
