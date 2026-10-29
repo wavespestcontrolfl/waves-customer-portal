@@ -308,6 +308,28 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     for (const v of [w.tue, w.wed]) expect((await get(v.id)).technician_id).toBe(w.hireId);
   });
 
+  test('rollback keeps a series with the hire when its inherited template follows a parent row the undo could not restore', async () => {
+    const w = await world();
+    // A series whose parent row is itself an open visit ahead; its template inherits (no recurring technician, no override).
+    w.openParent = await series(w.ownerId, await customer(), { status: 'confirmed', scheduled_date: '2099-07-07' });
+    w.openParentChild = await child(w.ownerId, w.openParent, '2099-07-08');
+    const result = await go(w, { refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+    expect(await get(w.openParent.id)).toMatchObject({ technician_id: w.hireId, recurring_technician_id: w.hireId, recurring_technician_override: true });
+    // Since the run: the parent visit moved to another day, so its own undo is skipped.
+    await knex('scheduled_services').where({ id: w.openParent.id }).update({ scheduled_date: '2099-07-14' });
+
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+
+    expect(undo.skipped.series).toEqual([w.openParent.id]);
+    expect(undo.skipped.visits).toEqual([w.openParent.id]);
+    // The template still seeds to the hire, as the parent row it would inherit from says; the rest went back.
+    expect(await get(w.openParent.id)).toMatchObject({ technician_id: w.hireId, recurring_technician_id: w.hireId, recurring_technician_override: true });
+    expect((await get(w.openParentChild.id)).technician_id).toBe(w.ownerId);
+    for (const s of [w.pest, w.fridayOnly]) {
+      expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
+    }
+  });
+
   test('a failure after the first update rolls the whole run back', async () => {
     const w = await world();
     const plan = await dryRun(w);

@@ -43,7 +43,9 @@
 // while it is still open, still held by --to, still on the day the run moved it, and the original
 // technician can still take that day (assertAssignableTechnician). Everything else is listed. A
 // restored visit gets back the route number the file kept (the run cleared it): an undo returns the
-// old route, and the route repair that would renumber it is dark.
+// old route, and the route repair that would renumber it is dark. Series go back after the visits,
+// and only when the restored template gives new visits to --from again: a template that inherits from
+// its parent row (no recurring technician, no override) follows whoever holds that row now.
 //
 // SENDERS (rule 12), checked against the save path (dispatch-assignment assignDispatchJob):
 //   NOT CALLED: tech-visit-notifications notifyAssignmentChange (the per-visit visit_assigned /
@@ -341,12 +343,6 @@ async function rollbackHandover(db, opts) {
       const skipped = { series: [], visits: [] };
       let seriesRestored = 0;
       let visitsRestored = 0;
-      for (const s of record.series) {
-        const n = await trx('scheduled_services')
-          .where({ id: s.id, recurring_technician_id: to, recurring_technician_override: true })
-          .update({ recurring_technician_id: s.recurring_technician_id, recurring_technician_override: s.recurring_technician_override, updated_at: new Date() });
-        if (n === 1) seriesRestored += 1; else skipped.series.push(s.id);
-      }
       // The original technician must still be able to take each day (the app's save-time check);
       // a day it cannot take keeps its visits with --to and lists them.
       const fromCanTake = new Map();
@@ -368,6 +364,21 @@ async function rollbackHandover(db, opts) {
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [v.date])
           .update({ technician_id: v.technician_id, route_order: v.route_order ?? null, updated_at: trx.fn.now() });
         if (n === 1) visitsRestored += 1; else skipped.visits.push(v.id);
+      }
+      // Series AFTER the visits: a template with no recurring technician and no override gives new visits to
+      // whoever holds the parent row, and the parent row can be one of the visits above. A series goes back only
+      // while its template still reads (--to, override) AND the restored template gives new visits to --from
+      // again (the plan's ON FROM rule); a parent row its own undo skipped, or that the office has moved to
+      // someone else, keeps the series with --to, listed.
+      for (const s of record.series) {
+        const parent = await trx('scheduled_services').where({ id: s.id }).forUpdate()
+          .first('id', 'technician_id', 'recurring_technician_id', 'recurring_technician_override');
+        const stillTo = parent && parent.recurring_technician_id === to && parent.recurring_technician_override === true;
+        const restored = parent && { ...parent, recurring_technician_id: s.recurring_technician_id, recurring_technician_override: s.recurring_technician_override };
+        if (!stillTo || planner.seriesTechnicianId(restored) !== from) { skipped.series.push(s.id); continue; }
+        await trx('scheduled_services').where({ id: s.id })
+          .update({ recurring_technician_id: s.recurring_technician_id, recurring_technician_override: s.recurring_technician_override, updated_at: new Date() });
+        seriesRestored += 1;
       }
       await auditLog.recordAuditEvent({
         actor_type: 'system',
