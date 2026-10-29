@@ -8295,6 +8295,9 @@ async function sendTermNoticeEmail({
         daysOut,
         termId: term.id,
         lastServiceDate: dateOnly(term.last_scheduled_service_date),
+        // 15/7-day rungs of a termite plan share this generic sender; flag
+        // them so the prepaid-year wording applies to prepay terms only.
+        ...(isTermiteAnnualPlanTerm(term) ? { termitePlan: true } : {}),
       });
     const confirmed = result?.sent === true || result?.ok === true;
     if (!confirmed) logger.warn(`[annual-prepay] renewal email not sent for term ${term.id}: ${result?.reason || 'not_sent'}`);
