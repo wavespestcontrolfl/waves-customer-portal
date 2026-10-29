@@ -236,6 +236,7 @@
  *   GATE_PREPAY_MINT_PRICE_HOLD=shadow|true (stamp-time price check for every annual prepay, not only a /secure pick: a new term records each covered visit's price when it is created (activity_log annual_prepay_mint_visit_prices); `true` = a visit whose price changed since then is not stamped as covered, bills normally and raises the existing 'repriced visit left uncovered' office alert; `shadow` = the price is recorded and a would-hold is only logged. Termite annual plans are left out. Off = byte-identical to today: nothing recorded, nothing read. Canonical CALL-TIME reader prepayMintPriceHoldMode(). Kill switch: unset.)
  *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
  *   GATE_ASK_WAVES_JEV_CHECK=shadow|enforce (Ask Waves Jev second check: a model-written website chat reply is also put to Jev as ask_waves_safety.v1, two yes/no reads (a blanket safety claim, a re-entry or use time), beside the existing word list; services/typed-decisions/ask-waves-safety-check.js. `shadow` changes nothing a visitor sees and adds no wait: after the chat log writes the assistant row, both answers are recorded in decision_reviews (subject_type agent_messages); `enforce` also swaps a reply Jev flags for the reviewed safety copy the word list serves (waits at most 800 ms, any miss keeps the reply); reviewed copy and emergency turns are never asked; anything else = off; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via askWavesJevCheckMode(); unset = off)
+ *   GATE_LAWN_JEV_TIMING_CHECK=off|shadow|enforce (owner 2026-10-28/29: a TypeSafe Jev result-timing check on each sentence of the model-written lawn DIAGNOSIS summary (the contract's customer_summary stored in lawn_diagnostics by the public lawn assessment, the tech lawn diagnostic persist and the admin Analyze photos button), package lawn_result_timing.v1, services/service-report/lawn-jev-timing-check.js; needs GATE_TYPED_DECISIONS; `shadow` = store unchanged, add no wait, then ask Jev and record the verdict in decision_reviews (subject lawn_diagnostics); `enforce` = wait up to 3 s before the insert and drop the sentences Jev flags, so the stored summary never carries them; a failed or late verdict keeps the text; a technician's typed aiSummary is never checked; anything else = off; ships DARK, read at call time via lawnJevTimingCheckMode(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
@@ -1040,6 +1041,9 @@ const gates = {
   // reader is prepayMintPriceHoldMode() below ('shadow' or 'true'); this entry
   // is for logGateStatus only.
   prepayMintPriceHold: ['shadow', 'true'].includes(String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase()),
+  // Lawn Jev timing check: ships DARK. CALL-TIME reader is lawnJevTimingCheckMode()
+  // below; this entry is for logGateStatus only and carries the typed-decisions prerequisite.
+  lawnJevTimingCheck: gateEnvValue('GATE_TYPED_DECISIONS') && ['shadow', 'enforce'].includes(String(process.env.GATE_LAWN_JEV_TIMING_CHECK || '').trim().toLowerCase()),
   // Photo privacy shadow: ships DARK. CALL-TIME reader is photoPrivacyMode()
   // below; this entry is for logGateStatus only and carries the reader's
   // prerequisites, so it never reads as enabled while the Clef leg is dark.
@@ -6353,6 +6357,15 @@ function photoPrivacyMode() {
   return String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow' ? 'shadow' : 'off';
 }
 
+// GATE_LAWN_JEV_TIMING_CHECK read at CALL time: 'shadow', 'enforce' or 'off'.
+// The Jev result-timing check on the model-written lawn diagnosis summary
+// (services/service-report/lawn-jev-timing-check.js). Any other value is off.
+// Unset is the kill, no redeploy.
+function lawnJevTimingCheckMode() {
+  const raw = String(process.env.GATE_LAWN_JEV_TIMING_CHECK || '').trim().toLowerCase();
+  return raw === 'shadow' || raw === 'enforce' ? raw : 'off';
+}
+
 // GATE_PREPAY_MINT_PRICE_HOLD read at CALL time: 'shadow', 'true' or 'off'.
 // The stamp-time price check (annual-prepay-renewals.js holdPriceDriftedRows)
 // for annual prepay terms that are not a /secure pick. 'shadow' records each
@@ -8296,6 +8309,7 @@ module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
 module.exports.visitAccessShadowLive = visitAccessShadowLive;
 module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.askWavesJevCheckMode = askWavesJevCheckMode;
+module.exports.lawnJevTimingCheckMode = lawnJevTimingCheckMode;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
 module.exports.tsLightingLive = tsLightingLive;
