@@ -184,8 +184,12 @@ async function sendRefusal({ rawText, text }, recipient, customerId) {
     logger.warn(`[intelligence-bar:message-drafts] link check unavailable (${err?.code || err?.name || 'error'})`);
   }
   try {
-    const { sendSmsProposalRefusal } = require('./comms-tools');
-    const blocked = await sendSmsProposalRefusal({ message: text, phone: recipient.toPhone, customer_id: customerId || undefined });
+    // A customer's text gets the consent and suppression verdict the sender will reach. A number with no customer on it is sent as a
+    // lead (draftSendPolicyFields): the consent validator there is the sender's own, so only the link check runs in the preview.
+    const { sendSmsProposalRefusal, customerLinkSendRefusal } = require('./comms-tools');
+    const blocked = customerId
+      ? await sendSmsProposalRefusal({ message: text, phone: recipient.toPhone, customer_id: customerId })
+      : await customerLinkSendRefusal(text, recipient.toPhone, null, { phase: 'proposal', recipientSelected: false });
     if (blocked) return refusal(blocked.error || 'This text cannot go out', blocked.code || 'send_blocked', { blocked: true });
   } catch (err) {
     logger.warn(`[intelligence-bar:message-drafts] consent check unavailable (${err?.code || err?.name || 'error'})`);
@@ -261,11 +265,16 @@ async function buildPlan(toolName, input = {}) {
     if (blocked) return blocked;
   }
 
-  const customerId = recipient.customerId || draft.customer_id || null;
+  // The identity the send uses, exactly as the page resolves it (resolveDraftRecipient deliberately returns no customer when the
+  // draft's own number is not that customer's): this is what the card names and the confirm pins. The draft's filing customer is
+  // display only and never pinned.
+  const customerId = recipient.customerId || null;
   const linkNotes = action === 'ignore' ? []
     : await deliveryLinkNotes(finalText, { audience: customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: action === 'revise' ? 'ai_revised' : 'ai_approved' });
   const customer = customerId ? await db('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
   const name = fullName(customer);
+  const filedUnder = !customerId && draft.customer_id
+    ? fullName(await db('customers').where({ id: draft.customer_id }).first('first_name', 'last_name')) : null;
   const toPhone = recipient.toPhone || null;
   const latest = toPhone ? await latestInboundFrom(toPhone) : null;
   const newerInbound = Boolean(latest && draft.sms_log_id && String(latest.id) !== String(draft.sms_log_id));
@@ -278,6 +287,7 @@ async function buildPlan(toolName, input = {}) {
     draft_id: draft.id,
     customer_id: customerId,
     customer_name: name,
+    filed_under: filedUnder,
     recipient: recipientLabel,
     inbound_message: inbound,
     suggested_text: text,
@@ -401,6 +411,7 @@ function cardLines(toolName, preview) {
     if (preview.action === 'revise') lines.push({ kind: 'comms', text: `Edited from the suggestion: "${preview.suggested_text}"` });
   }
   lines.push({ kind: 'comms', text: preview.inbound_message ? `Answers their message: "${preview.inbound_message}"` : 'Answers no inbound text (a follow-up the system drafted).' });
+  if (preview.filed_under) lines.push({ kind: 'comms', text: `This draft is filed under ${preview.filed_under}, but its number is not theirs: it goes to the number shown, not to their account.` });
   if (preview.newer_inbound) lines.push({ kind: 'comms', text: 'The customer has sent a newer text since this suggestion was written. Read the conversation before sending.' });
   if (preview.action === 'ignore') {
     lines.push({ kind: 'comms', text: 'Nothing is sent: no text, email or call goes to anyone. The draft is marked rejected and no page restores it.' });

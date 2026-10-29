@@ -22,8 +22,10 @@ const mockRoute = {
 };
 jest.mock('../routes/admin-drafts', () => mockRoute);
 const mockProposalRefusal = jest.fn();
+const mockLinkRefusal = jest.fn();
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   sendSmsProposalRefusal: (...a) => mockProposalRefusal(...a),
+  customerLinkSendRefusal: (...a) => mockLinkRefusal(...a),
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
 }));
 
@@ -95,6 +97,7 @@ beforeEach(() => {
   mockRoute._internals.latestInboundFrom.mockResolvedValue({ id: LOG, created_at: '2026-10-28T12:00:00Z' });
   mockRoute._internals.draftImmediateOnlyLinkRefusal.mockResolvedValue(null);
   mockProposalRefusal.mockResolvedValue(null);
+  mockLinkRefusal.mockResolvedValue(null);
   mockRoute.approveDraftFromBar.mockResolvedValue({ status: 200, json: { success: true, responseTimeSeconds: 60 } });
   mockRoute.reviseDraftFromBar.mockResolvedValue({ status: 200, json: { success: true, responseTimeSeconds: 60 } });
   mockRoute.rejectDraftFromBar.mockResolvedValue({ status: 200, json: { success: true } });
@@ -344,6 +347,60 @@ describe('links the sender rewrites at delivery', () => {
   test('the bar\'s own send purposes are the refuse policy: the estimate rewrite never applies, so no estimate note', async () => {
     const Annual = require('../services/estimate-annual-guard');
     expect(Annual.withheldLinkPolicyForSmsPurpose('conversational', 'ai_approved')).toBe('refuse');
+  });
+});
+
+// resolveDraftRecipient deliberately returns customerId null when an anchorless draft's own number is not its customer's: the card names
+// and pins the identity the send uses (none), and shows the filing customer separately.
+describe('an anchorless draft whose number is not its customer\'s', () => {
+  const OTHER = '+19415550199';
+  beforeEach(() => {
+    state.draft.sms_log_id = null;
+    mockRoute._internals.resolveDraftRecipient.mockResolvedValue({ toPhone: OTHER, customerId: null });
+    mockRoute._internals.latestInboundFrom.mockResolvedValue(null);
+  });
+
+  test('the consent verdict is the sender\'s for a lead number: the preview runs only the link check (no false NO_CONSENT_RECORD)', async () => {
+    mockProposalRefusal.mockResolvedValue({ success: false, error: 'No notification_prefs record', code: 'NO_CONSENT_RECORD', blocked: true });
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card.preview).toBe(true);
+    expect(mockProposalRefusal).not.toHaveBeenCalled();
+    expect(mockLinkRefusal).toHaveBeenCalledWith(TEXT, OTHER, null, expect.objectContaining({ phase: 'proposal' }));
+    mockLinkRefusal.mockResolvedValue({ success: false, error: 'Composer-only link', code: 'composer_only_link', blocked: true });
+    expect(await run('approve_suggested_reply', { draft_id: ID })).toMatchObject({ code: 'composer_only_link', blocked: true });
+  });
+
+  test('the card shows the number without the customer\'s name, and says whose draft it is', async () => {
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card).toMatchObject({ preview: true, customer_id: null, customer_name: null, recipient: 'Unknown sender (\u20260199)', filed_under: 'Robin Sample' });
+    expect(card._version).toMatchObject({ recipient_phone: OTHER, customer_id: null, customer_name: null });
+    const lines = cardLines('approve_suggested_reply', card).map((l) => l.text);
+    expect(lines[0]).toBe(`Text to Unknown sender (\u20260199): "${TEXT}"`);
+    expect(lines.join(' ')).toContain('filed under Robin Sample, but its number is not theirs');
+    expect(JSON.stringify(lines)).not.toContain('Robin Sample (');
+  });
+
+  test('Confirm runs with the identity as resolved (no customer id) and nothing has drifted', async () => {
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    const out = await confirm('approve_suggested_reply', card);
+    expect(out).toMatchObject({ success: true, sent_to_customer: true });
+    expect(mockRoute.approveDraftFromBar).toHaveBeenCalledWith(expect.objectContaining({
+      pins: { draftText: TEXT, recipientPhone: OTHER, customerId: null, latestInboundId: null },
+    }));
+  });
+
+  test('revise and ignore pin the same resolved identity', async () => {
+    const card = await run('revise_suggested_reply', { draft_id: ID, revised_text: 'Thursday at 10 works.' });
+    expect(card._version).toMatchObject({ customer_id: null, recipient_phone: OTHER });
+    expect(await confirm('revise_suggested_reply', card, { revised_text: 'Thursday at 10 works.' })).toMatchObject({ success: true });
+    expect(mockRoute.reviseDraftFromBar).toHaveBeenCalledWith(expect.objectContaining({ pins: expect.objectContaining({ customerId: null }) }));
+    expect((await run('ignore_suggested_reply', { draft_id: ID })).customer_id).toBeNull();
+  });
+
+  test('a draft whose number IS its customer\'s keeps naming and pinning the customer', async () => {
+    mockRoute._internals.resolveDraftRecipient.mockResolvedValue({ toPhone: PHONE, customerId: CUST });
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card).toMatchObject({ customer_id: CUST, customer_name: 'Robin Sample', recipient: 'Robin Sample (\u20260142)', filed_under: null });
   });
 });
 

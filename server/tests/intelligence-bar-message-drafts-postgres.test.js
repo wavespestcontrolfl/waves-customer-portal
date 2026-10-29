@@ -126,6 +126,20 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(sendManualCustomerSms.mock.calls[0][0].body).toBe(delivered(REV));
   });
 
+  test('an anchorless draft whose number is not its customer\'s: the card shows the number without the name, Confirm sends to that number with no customer id', async () => {
+    const OTHER = `+1941555${String(1000 + Math.floor(Math.random() * 9000))}`;
+    const c = await customer();
+    const id = await draft(c, null, { flags: JSON.stringify({ toPhone: OTHER }) });
+    const preview = await card('approve_suggested_reply', id);
+    expect(preview).toMatchObject({ customer_id: null, customer_name: null, recipient: `Unknown sender (…${OTHER.slice(-4)})`, filed_under: 'Fixture Reply' });
+    expect(await confirm('approve_suggested_reply', preview, id)).toMatchObject({ success: true, sent_to_customer: true });
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+    const sent = sendManualCustomerSms.mock.calls[0][0];
+    expect(sent.to).toBe(OTHER);
+    expect(sent.customerId).toBeUndefined();
+    expect(await row(id)).toMatchObject({ status: 'approved' });
+  });
+
   test('a double Confirm sends once: the second is refused and nothing more goes out', async () => {
     const c = await customer();
     const id = await draft(c, await inbound(c));
