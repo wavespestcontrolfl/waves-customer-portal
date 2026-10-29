@@ -98,6 +98,20 @@ function bodyCanReplay(body) {
   return false;
 }
 
+// True when the body keeps this call on the main key: it cannot be sent twice;
+// an Anthropic body names a file_id or container (they live in the main
+// organization); a /v1/responses body lacks "store":false; or an OpenAI body
+// asks for or replays encrypted reasoning, which only decrypts in the
+// organization that wrote it (Intelligence Bar OpenAI loop, Sandy's voice
+// relay), so every turn of those conversations stays on the main key.
+function bodyPinsMainKey(provider, pathname, body) {
+  if (!bodyCanReplay(body)) return true;
+  if (typeof body !== 'string') return provider === 'openai' && pathname === '/v1/responses';
+  if (provider === 'anthropic') return body.includes('"file_id"') || body.includes('"container"');
+  if (pathname === '/v1/responses' && !/"store"\s*:\s*false/.test(body)) return true;
+  return body.includes('encrypted_content');
+}
+
 function modelOf(body) {
   const match = /"model"\s*:\s*"([^"\\]{1,120})"/.exec(body);
   return match ? match[1] : '';
@@ -258,19 +272,7 @@ function createCreditKeyFetch(baseFetch, opts = {}) {
     if (!pool.keys.length) return baseFetch(input, init);
 
     const body = init.body;
-    if (!bodyCanReplay(body)) return baseFetch(input, init);
-    if (provider === 'anthropic' && typeof body === 'string' && (body.includes('"file_id"') || body.includes('"container"'))) {
-      return baseFetch(input, init);
-    }
-    if (provider === 'openai' && pathname === '/v1/responses' && !(typeof body === 'string' && /"store"\s*:\s*false/.test(body))) {
-      return baseFetch(input, init);
-    }
-    // Encrypted reasoning only decrypts in the organization that wrote it, so a
-    // conversation that asks for or replays it (Intelligence Bar OpenAI loop,
-    // Sandy's voice relay) stays on the main key for every turn.
-    if (provider === 'openai' && typeof body === 'string' && body.includes('encrypted_content')) {
-      return baseFetch(input, init);
-    }
+    if (bodyPinsMainKey(provider, pathname, body)) return baseFetch(input, init);
     const original = mainKeyMatches(provider, init);
     if (!original) return baseFetch(input, init);
     const model = typeof body === 'string' ? modelOf(body) : '';
