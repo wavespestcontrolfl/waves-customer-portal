@@ -116,7 +116,7 @@ const RERING = [
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',
     decision: 'expire: only a new truck check that still finds tools missing raises it again' },
   { emitter: 'autopay-hold-charge', files: ['services/invoice-followups.js'], prefixes: ['autopay_hold_charge:'], kind: 'event',
-    decision: 'expire: only a new Auto Pay hold charge attempt raises it again; an attempt keeps its invoice out of the charge sweep' },
+    decision: 'expire: only a new Auto Pay hold charge attempt raises it again; an attempt keeps its invoice out of the charge sweep, and a review (over the agreed price, no price, not performed, a payer, a refusal) re-rings only after the bill or visit price changes' },
 ];
 
 const parseMeta = (metadata) => {

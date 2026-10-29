@@ -2914,7 +2914,7 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
   // - default ('true' and 'shadow'): no attempt row at all, no payment for the customer since the hold began
   //   other than an off-gateway paid tender;
   // - chargeMode (GATE_AUTOPAY_HOLD_TIMEOUT=charge candidates): chargeModeAttemptRule + chargeModePaymentRules +
-  //   no active dispute hold (the charge would refuse it, see collections/collection-hold.js);
+  //   no active dispute hold (the charge would refuse it, see collections/collection-hold.js) + chargeModeUnreviewedRule;
   // - afterOwnCharge (with the observed holdStamp): the sweep itself called the charge on this invoice and it
   //   failed cleanly, so ONLY the rows that charge wrote are exempt: a 'failed' attempt (not
   //   authentication_required) and a 'failed' payment. The age rule and the hold-stamp equality are dropped (the
@@ -2939,6 +2939,7 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
         require('./collections/collection-hold').disputeHoldExistsSql(this, 's.customer_id');
       });
     chargeModeAttemptRule(base);
+    chargeModeUnreviewedRule(base);
     chargeModePaymentRules(base, 's.updated_at', []);
   } else {
     base
@@ -2978,19 +2979,55 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
     .where(notOwnedByCustomerSchedule);
 }
 
+// The facts the visit-bill verdict (visitBillVerdict) reads, as one hash: the invoice's subtotal, discount, total and
+// payer, the visit's price and payer, and the customer's per-application fee, dues rate, billing mode and payer. An
+// office review is stored with this hash, and the same SQL reads it again, so an unchanged bill is not reviewed twice
+// and a changed one is (a new event). The caller names the invoice and customer columns (`s.invoice_id`, `s.customer_id`).
+function chargeFactsFingerprintSql(invoiceRef, customerRef) {
+  const field = (column) => `COALESCE(${column}::text, '~')`;
+  return `(SELECT md5(concat_ws('|', ${[
+    'fi.subtotal', 'fi.discount_amount', 'fi.total', 'fi.payer_id', 'fv.estimated_price', 'fv.primary_line_price', 'fv.payer_id',
+    'fc.per_application_fee', 'fc.monthly_rate', 'fc.billing_mode', 'fc.payer_id',
+  ].map(field).join(', ')}))
+    FROM invoices fi
+    LEFT JOIN scheduled_services fv ON fv.id = fi.scheduled_service_id
+    LEFT JOIN customers fc ON fc.id = ${customerRef}
+    WHERE fi.id = ${invoiceRef})`;
+}
+
 // Charge mode, attempts: any attempt row excludes the invoice (an attempt means Auto Pay acted and an unresolved
-// one still needs its reconciliation), EXCEPT a 'failed' attempt covered by a final 'deferred' audit row written
-// after it: that attempt was a collection-hold refusal, which is retryable once the hold clears.
+// one still needs its reconciliation), EXCEPT a 'failed' attempt covered by a final audit row written after it:
+// 'deferred' (a collection-hold refusal, retryable once the hold clears) or 'review' whose fingerprint no longer matches
+// the bill (a refusal the office has since changed the bill for: one retry per change).
 function chargeModeAttemptRule(base) {
   return base.whereNotExists(function noUncoveredAttempt() {
     this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
       .whereRaw('a.invoice_id = s.invoice_id')
       .whereRaw(
         `NOT (COALESCE(a.status, '') = 'failed' AND EXISTS (
-          SELECT 1 FROM audit_log d WHERE d.action = ? AND d.resource_id = s.invoice_id
-            AND d.metadata->>'outcome' = 'deferred' AND a.created_at <= d.created_at))`,
+          SELECT 1 FROM audit_log d WHERE d.action = ? AND d.resource_id = s.invoice_id AND a.created_at <= d.created_at
+            AND (d.metadata->>'outcome' = 'deferred'
+              OR (d.metadata->>'outcome' = 'review' AND d.metadata->>'fingerprint' IS DISTINCT FROM ${chargeFactsFingerprintSql('s.invoice_id', 's.customer_id')}))))`,
         [AUTOPAY_HOLD_CHARGE_ACTION],
       );
+  });
+}
+
+// Charge mode, office review: a hold whose newest final row is a 'review' of the SAME facts is not a candidate. The
+// office was told once; only a changed bill or visit price (a new fingerprint) is evaluated again.
+function chargeModeUnreviewedRule(base) {
+  return base.whereNotExists(function noUnchangedReview() {
+    this.select(db.raw('1')).from('audit_log as r')
+      .where('r.action', AUTOPAY_HOLD_CHARGE_ACTION)
+      .whereRaw('r.resource_id = s.invoice_id')
+      .whereRaw("r.metadata->>'outcome' = 'review'")
+      .whereRaw(`r.metadata->>'fingerprint' = ${chargeFactsFingerprintSql('s.invoice_id', 's.customer_id')}`)
+      .whereNotExists(function noLaterFinalRow() {
+        this.select(db.raw('1')).from('audit_log as l')
+          .where('l.action', AUTOPAY_HOLD_CHARGE_ACTION)
+          .whereRaw('l.resource_id = r.resource_id')
+          .whereRaw('l.created_at > r.created_at');
+      });
   });
 }
 
@@ -3103,6 +3140,10 @@ const AUTOPAY_HOLD_REASON_TEXT = {
   declined: 'the card was declined',
   refused: 'Auto Pay refused the charge',
   no_method: 'no Auto Pay card or bank is on file',
+  over_cap: 'the bill is above the visit price the customer agreed to',
+  no_cap: 'no agreed visit price or dues rate is on file to cap the charge',
+  not_performed: 'the visit is not a finished, performed visit',
+  payer: 'the bill goes to a third-party payer',
 };
 const AUTOPAY_HOLD_ALERT_COPY = {
   ambiguous: {
@@ -3116,6 +3157,14 @@ const AUTOPAY_HOLD_ALERT_COPY = {
     doneWhen: 'invoice_collected_or_marked_done',
     why: (c) => `${c.label} was not charged (${c.reasonText}); reminders start.`,
     detail: (c) => `The Auto Pay hold on invoice ${c.number} timed out and the sweep tried to charge the saved Auto Pay method for ${c.amount}: ${c.reasonText}${c.errorMessage ? ` (${String(c.errorMessage).slice(0, 200)})` : ''}. The sweep releases the hold next, so the normal reminder ladder starts unless the invoice changed in the meantime.`,
+  },
+  // Office review (owner 2026-10-29, option B): the hold is KEPT, nothing was charged, no reminder goes to the customer.
+  // One alert per invoice; a changed bill or visit price is evaluated again (the fingerprint on the final audit row).
+  review: {
+    actions: [(who) => `review ${who}'s held Auto Pay charge`, (who) => `review ${who}'s Auto Pay charge`],
+    doneWhen: 'invoice_reviewed_or_marked_done',
+    why: (c) => `${c.label} was not charged: ${c.reasonText}.`,
+    detail: (c) => `The Auto Pay hold on invoice ${c.number} timed out, but the sweep did not charge the saved Auto Pay method for ${c.amount}: ${c.reasonText}${c.errorMessage ? ` (${String(c.errorMessage).slice(0, 200)})` : ''}. The hold was kept and no reminder goes to the customer. Fix the invoice or the visit price, or collect it yourself. The sweep looks at it again only after the bill or the visit price changes.`,
   },
   deferred: {
     actions: [(who) => `check ${who}'s held Auto Pay charge`, (who) => `check ${who}'s held charge`],
@@ -3167,7 +3216,7 @@ async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, re
 
 // One audit_log row per charge attempt: ids, amounts and codes only, no card data, no names. critical: a write
 // that fails throws, so a final row that was not recorded is never mistaken for a finished attempt.
-async function recordAutopayHoldChargeAudit({ row, invoice, outcome, reason = null, errorCode = null, amountCents, methodType = null, released = null }) {
+async function recordAutopayHoldChargeAudit({ row, invoice, outcome, reason = null, errorCode = null, amountCents, methodType = null, released = null, fingerprint = null }) {
   const { recordAuditEvent } = require('./audit-log');
   await recordAuditEvent({
     critical: true,
@@ -3184,6 +3233,8 @@ async function recordAutopayHoldChargeAudit({ row, invoice, outcome, reason = nu
       amount_cents: amountCents,
       method_type: methodType,
       released,
+      // An office review carries the hash of the facts the verdict read (chargeFactsFingerprintSql).
+      ...(fingerprint ? { fingerprint } : {}),
     },
   });
 }
@@ -3198,18 +3249,161 @@ async function disputeHoldBlocksCharge(customerId) {
   }
 }
 
+// ---- charge mode: visit bills only, inside the completion rail's own authorization (owner 2026-10-29, option B) ----
+
+// The customer's Auto Pay columns on the visit read (customerOnAutopay's input) and the aliases the completion
+// verdict functions read (completion-charge-verdict.js: svc.cust_billing_mode, cust_monthly_rate, cust_per_application_fee).
+const VISIT_BILL_CUSTOMER_COLUMNS = [
+  'c.billing_mode as cust_billing_mode', 'c.monthly_rate as cust_monthly_rate', 'c.per_application_fee as cust_per_application_fee',
+  'c.autopay_enabled as cust_autopay_enabled', 'c.autopay_paused_until as cust_autopay_paused_until',
+  'c.autopay_payment_method_id as cust_autopay_payment_method_id', 'c.ach_status as cust_ach_status',
+];
+// Invoice states the completion route never charges (complete-scheduled-service.js): the hold waits.
+const VISIT_BILL_NO_CHARGE_STATUSES = ['paid', 'prepaid', 'void', 'processing'];
+
+// Every fact the verdict reads. The fingerprint is read FIRST: a bill edited after it was read changes the hash the
+// review is stored with, so the next run evaluates it again (never the other way round). A failed read throws.
+async function readVisitBillFacts(row, invoiceId) {
+  const fingerprintRow = await db('invoice_followup_sequences as s').where('s.id', row.id)
+    .first(db.raw(`${chargeFactsFingerprintSql('s.invoice_id', 's.customer_id')} AS fingerprint`));
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  const svc = invoice?.scheduled_service_id
+    ? await db('scheduled_services as ss').join('customers as c', 'c.id', 'ss.customer_id')
+      .where('ss.id', invoice.scheduled_service_id).first('ss.*', ...VISIT_BILL_CUSTOMER_COLUMNS)
+    : null;
+  if (!invoice || !svc || !fingerprintRow?.fingerprint) throw new Error('the invoice or its visit could not be read');
+  const record = await db('service_records').where({ scheduled_service_id: svc.id })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+  return { fingerprint: fingerprintRow.fingerprint, invoice, svc, record };
+}
+
+// The completion route's lane admission for this visit bill: the same read-only verdict functions it runs, strict
+// (a lookup failure throws, so the hold waits and is retried), and the same Auto Pay test (customerOnAutopay).
+async function visitBillLane(svc, invoice) {
+  const verdicts = require('./completion-charge-verdict');
+  const customerAutopayActive = await require('./autopay-eligibility').customerOnAutopay({
+    id: svc.customer_id,
+    autopay_enabled: svc.cust_autopay_enabled,
+    autopay_paused_until: svc.cust_autopay_paused_until,
+    autopay_payment_method_id: svc.cust_autopay_payment_method_id,
+    ach_status: svc.cust_ach_status,
+  }, { db, failClosed: true });
+  const perApplicationBilling = svc.cust_billing_mode === 'per_application';
+  const appt = await verdicts.resolveAppointmentCardLane({
+    svc, invoice, alreadyPaid: false, visitPerformed: true, perApplicationBilling,
+    annualPrepayBilling: svc.cust_billing_mode === 'annual_prepay', explicitMembershipLane: svc.cust_billing_mode === 'monthly_membership',
+    conn: db, strict: true,
+  });
+  const ext = await verdicts.resolveExtendedLane({
+    svc, invoice, alreadyPaid: false, visitPerformed: true, perApplicationBilling,
+    apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved, customerAutopayActive,
+    conn: db, strict: true,
+  });
+  const admitted = customerAutopayActive && (perApplicationBilling || appt.apptCardOneTimeCharge || ext.extendedChargeCandidate);
+  return { admitted, perApplicationBilling, appt, ext };
+}
+
+// The completion route's charge options (complete-scheduled-service.js), by name, plus the hold's own guards. The
+// cap ceiling replaces the exact-total demand: the charge may be lower than the quote, never above the agreed price.
+function visitBillChargeOptions(row, invoice, svc, lane, cap) {
+  const extended = lane.ext.extendedAutopayCharge;
+  return {
+    maxAuthorizedSubtotal: cap.capCeiling,
+    requireAutopayForCustomerId: row.customer_id,
+    requireSelfPayScheduledServiceId: svc.id,
+    requireOneTimeLane: lane.appt.apptCardOneTimeCharge,
+    requireNoAppointmentCardLane: extended,
+    requireExtendedCompletionAnchor: extended,
+    requireInvoiceScheduledServiceBinding: true,
+    refuseWhenDunningStopped: true,
+    requireCompletedVisit: true,
+    requirePerformedVisit: true,
+    allowIssuedInvoiceCloseoutFor: invoice.id,
+    requireBankDebitDue: true,
+    ...(extended ? { maxAuthorizedChargeCents: Math.round(invoiceAmountDue(invoice) * 100) } : {}),
+  };
+}
+
+async function decideVisitBill(row, { fingerprint, invoice, svc, record }) {
+  const review = (reason) => ({ kind: 'review', reason, fingerprint });
+  if (VISIT_BILL_NO_CHARGE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return { kind: 'skipped' };
+  if (invoice.payer_id) return review('payer');
+  // A visit the issued-invoice closeout job closed after its bill was sent counts as performed FOR THIS CHARGE only.
+  if (String(svc.status || '') !== 'completed' || !require('./visit-outcomes').closeoutPerformedForCharge(record, { issuedCloseoutInvoiceId: invoice.id })) {
+    return review('not_performed');
+  }
+  const payer = await require('./payer').resolveForInvoice({
+    database: db, customerId: String(svc.customer_id), scheduledServiceId: String(svc.id), throwOnError: true,
+  });
+  if (payer?.payerId) return review('payer');
+  const lane = await visitBillLane(svc, invoice);
+  if (!lane.admitted) return { kind: 'release_true' };
+  const cap = await require('./completion-charge-verdict').resolveCompletionChargeCap({
+    svc, invoice, perApplicationBilling: lane.perApplicationBilling,
+    apptCardOneTimeCharge: lane.appt.apptCardOneTimeCharge, apptCardAcceptedAmount: lane.appt.apptCardAcceptedAmount,
+    extendedLaneAnchor: lane.ext.extendedLaneAnchor, secureSetupFee: null, conn: db, strict: true,
+  });
+  if (cap.verdict === 'above_cap') return review('over_cap');
+  if (cap.verdict === 'no_accepted_amount') return review('no_cap');
+  return { kind: 'proceed', fingerprint, options: visitBillChargeOptions(row, invoice, svc, lane, cap) };
+}
+
 /**
- * GATE_AUTOPAY_HOLD_TIMEOUT=charge, step one for ONE stale hold: pick the method Auto Pay itself would charge,
- * quote it, charge it, and report what happened as ONE decision object:
- *   { kind: 'skipped' }                                   a method lookup that threw: nothing was tried
+ * The verdict for a hold on a visit-bound invoice, before any quote, marker or charge. Writes nothing.
+ *   { kind: 'skipped' }                            a lookup failed (or the invoice is settling): hold kept, retried
+ *   { kind: 'release_true' }                       no completion lane admits the bill (gate off, Auto Pay inactive, ...)
+ *   { kind: 'review', reason, fingerprint }        office review, hold kept: not_performed | payer | over_cap | no_cap
+ *   { kind: 'proceed', options, fingerprint }      charge with these options (the completion route's own set)
+ */
+async function visitBillVerdict(row, invoiceId) {
+  try {
+    return await decideVisitBill(row, await readVisitBillFacts(row, invoiceId));
+  } catch (err) {
+    logger.error(`[invoice-followups] autopay hold charge: visit-bill verdict failed for invoice ${invoiceId}; hold kept, next run retries: ${err.message}`);
+    return { kind: 'skipped' };
+  }
+}
+
+// The durable marker: committed BEFORE the charge, so a crash or a failed release after a clean decline can be
+// recovered (recoverAutopayHoldCharges). Returns false when it cannot be written (nothing is then charged).
+async function writeChargeStartMarker(row, invoice, quote) {
+  try {
+    await require('./audit-log').recordAuditEvent({
+      critical: true,
+      actor_type: 'system',
+      action: AUTOPAY_HOLD_CHARGE_STARTED_ACTION,
+      resource_type: 'invoice',
+      resource_id: invoice.id,
+      metadata: { sequence_id: row.id, customer_id: row.customer_id, hold_stamp: row.hold_stamp, amount_cents: Math.round(quote.total * 100) },
+    });
+    return true;
+  } catch (markerErr) {
+    logger.error(`[invoice-followups] autopay hold charge: could not write the start marker for invoice ${invoice.id}; nothing charged, next run retries: ${markerErr.message}`);
+    return false;
+  }
+}
+
+// Why the charge path refused a visit bill before submitting anything (the review alert's reason).
+function refusalReviewReason(err) {
+  if (err?.code === 'PAYER_BILLED_GUARD') return 'payer';
+  return err?.code === 'VISIT_NOT_COMPLETED' ? 'not_performed' : 'refused';
+}
+
+/**
+ * GATE_AUTOPAY_HOLD_TIMEOUT=charge, step one for ONE stale hold on a visit-bound invoice: pick the method Auto Pay
+ * itself would charge, judge the bill with the completion route's own authorization (visitBillVerdict), quote it,
+ * charge it, and report what happened as ONE decision object:
+ *   { kind: 'skipped' }                                   a method or verdict lookup that threw: nothing was tried
+ *   { kind: 'release_true' }                              no completion lane admits the bill: released as 'true' releases it
  *   { kind: 'charged', status, result, ... }              paid, processing (bank) or covered by account credit
  *   { kind: 'held_off' }                                  a dispute hold stops the charge: nothing was tried, nothing written
  *   { kind: 'bank_wait' }                                 a bank method whose invoice due date is after today (ET): nothing was tried, nothing written
  *   { kind: 'no_debit_date' }                             a bank method on an invoice with no due date: no authorized debit date, nothing was tried
+ *   { kind: 'review', reason, fingerprint, ... }          over the agreed price, no price, not performed, a payer, or a guard refusal: hold kept, one office alert
  *   { kind: 'deferred', reason: 'deferred', err, ... }    the charge itself refused on a dispute hold (a race): retried later
  *   { kind: 'not_due', reason: 'not_due', err, ... }      the charge itself refused a bank debit before the due date (a race): retried later
  *   { kind: 'ambiguous', reason: 'ambiguous', err, ... }  money may have moved or a charge is still settling
- *   { kind: 'declined', reason: 'declined' | 'refused' | 'no_method', err, ... }   clean, nothing was charged
+ *   { kind: 'declined', reason: 'declined' | 'no_method', err, ... }   a real decline or no method; nothing was charged
  * `chargeCalled` says whether chargeInvoiceWithSavedCard was reached (it decides the release guards).
  */
 async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
@@ -3222,7 +3416,7 @@ async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
     logger.error(`[invoice-followups] autopay hold charge: Auto Pay method lookup failed for invoice ${row.invoice_id}; hold kept, next run retries: ${lookupErr.message}`);
     return { kind: 'skipped' };
   }
-  const decision = (fields) => ({ kind: 'declined', reason: null, chargeCalled: false, err: null, result: null, status: null, quote: null, method, ...fields });
+  const decision = (fields) => ({ kind: 'declined', reason: null, chargeCalled: false, err: null, result: null, status: null, quote: null, method, fingerprint: null, ...fields });
   if (!method) return decision({ reason: 'no_method' });
   // A dispute hold that appeared since the select (or one that cannot be read): the charge would refuse it, so
   // nothing is attempted. No marker, no attempt, no release, no alert; the next run tries again.
@@ -3235,56 +3429,41 @@ async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
     if (!invoice.due_date) return { kind: 'no_debit_date' };
     if (etCalendarDayOf(invoice.due_date) > etDateString(now)) return { kind: 'bank_wait' };
   }
+  const verdict = await visitBillVerdict(row, invoice.id);
+  if (verdict.kind === 'review') return decision({ kind: 'review', reason: verdict.reason, fingerprint: verdict.fingerprint });
+  if (verdict.kind !== 'proceed') return verdict;
 
   let quote;
   try {
     quote = await StripeService.quoteInvoiceSavedCardCharge(invoice.id, method.id);
   } catch (quoteErr) {
-    // A quote moves no money.
-    return decision({ reason: 'refused', err: quoteErr });
+    // A quote moves no money, and a refused quote is never a reason to start reminders (it can be a payer): review.
+    return decision({ kind: 'review', reason: refusalReviewReason(quoteErr), fingerprint: verdict.fingerprint, err: quoteErr });
   }
-
-  // The open-visit rule was judged on unlocked reads. The charge path re-checks the visit under its locks,
-  // before credit is applied or Stripe is called: a bound invoice needs its visit still completed and the
-  // invoice still bound to exactly that visit (and re-resolves that visit's payer); an unbound invoice must
-  // still be unbound and the customer's CURRENT default payer is re-resolved under the lock (a Bill-To update
-  // can assign one after the invoice was minted), so third-party debt is never charged to the homeowner.
-  const visitGuards = invoice.scheduled_service_id
-    ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id, requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
-    : { requireUnboundInvoice: true, requireSelfPayCustomerId: row.customer_id };
+  if (!await writeChargeStartMarker(row, invoice, quote)) return { kind: 'skipped' };
   try {
-    // The durable marker: committed BEFORE the charge, so a crash or a failed release after a clean decline
-    // can be recovered (recoverAutopayHoldCharges). If it cannot be written, nothing is charged.
-    await require('./audit-log').recordAuditEvent({
-      critical: true,
-      actor_type: 'system',
-      action: AUTOPAY_HOLD_CHARGE_STARTED_ACTION,
-      resource_type: 'invoice',
-      resource_id: invoice.id,
-      metadata: { sequence_id: row.id, customer_id: row.customer_id, hold_stamp: row.hold_stamp, amount_cents: Math.round(quote.total * 100) },
-    });
-  } catch (markerErr) {
-    logger.error(`[invoice-followups] autopay hold charge: could not write the start marker for invoice ${invoice.id}; nothing charged, next run retries: ${markerErr.message}`);
-    return { kind: 'skipped' };
-  }
-  try {
-    // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
+    // quote.total is the surcharge-inclusive total: the ceiling on what the charge path may collect. No exact-total
+    // demand: the verdict's cap ceiling (maxAuthorizedSubtotal) is the agreed price, and a lower total is allowed.
     const result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
-      expectedTotal: quote.total,
+      ...verdict.options,
       maxAuthorizedTotalCents: Math.round(quote.total * 100),
-      requireAutopayForCustomerId: row.customer_id,
-      refuseWhenDunningStopped: true,
-      requireBankDebitDue: true,
-      ...visitGuards,
     });
     const status = result && result.covered_by_credit === true ? 'covered_by_credit' : String(result?.status || 'paid');
     return decision({ kind: 'charged', chargeCalled: true, quote, result, status });
   } catch (chargeErr) {
-    let reason = classifyAutopayHoldChargeError(chargeErr);
-    // A clean decline, refusal or deferral leaves no open attempt. Anything else may have reached Stripe.
-    if (reason !== 'ambiguous' && await invoiceHasOpenChargeAttempt(invoice.id)) reason = 'ambiguous';
-    return decision({ kind: ['ambiguous', 'deferred', 'not_due'].includes(reason) ? reason : 'declined', reason, chargeCalled: true, quote, err: chargeErr });
+    return decision(await chargeFailureFields(chargeErr, invoice.id, { quote, fingerprint: verdict.fingerprint }));
   }
+}
+
+// What a thrown charge means as decision fields. A clean decline, refusal or deferral leaves no open attempt;
+// anything else may have reached Stripe. A refusal raised before anything reached Stripe is never a decline: the
+// office reviews it and the hold is kept.
+async function chargeFailureFields(chargeErr, invoiceId, { quote, fingerprint }) {
+  let reason = classifyAutopayHoldChargeError(chargeErr);
+  if (reason !== 'ambiguous' && await invoiceHasOpenChargeAttempt(invoiceId)) reason = 'ambiguous';
+  const fields = { chargeCalled: true, quote, err: chargeErr, fingerprint };
+  if (reason === 'refused') return { ...fields, kind: 'review', reason: refusalReviewReason(chargeErr) };
+  return { ...fields, kind: ['ambiguous', 'deferred', 'not_due'].includes(reason) ? reason : 'declined', reason };
 }
 
 // Step two: what each decision does. One table instead of parallel branches.
@@ -3338,6 +3517,16 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
     log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} bank debit date not reached; hold kept, retried on or after the due date`],
     result: () => 'not_due',
   },
+  // Office review: the hold is kept and nobody is texted. The final row carries the fingerprint of the facts the verdict
+  // read; chargeModeUnreviewedRule keeps the hold out of the sweep until the bill or the visit price changes.
+  review: {
+    releases: false,
+    stops: () => false,
+    audit: () => 'review',
+    alert: 'review',
+    log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} needs office review (${d.reason}); hold kept, nothing charged`],
+    result: () => 'review',
+  },
   declined: {
     releases: true,
     stops: () => false,
@@ -3350,7 +3539,8 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
 
 // Released exactly as GATE_AUTOPAY_HOLD_TIMEOUT=true releases it: its clause and recheck (releaseStaleAutopayHold with
 // no charge-mode options), its office alert, no charge attempt, no marker, no charge audit row. Used for an invoice
-// a dedicated annual-prepay rail governs and for a bank method with no authorized debit date.
+// a dedicated annual-prepay rail governs, an invoice bound to no visit, a visit bill no completion lane admits and a
+// bank method with no authorized debit date.
 async function releaseAsTrue(row, cutoff, now) {
   return { outcome: (await releaseStaleAutopayHold(row, cutoff, now)) ? 'true_released' : 'skipped' };
 }
@@ -3360,16 +3550,21 @@ const AUTOPAY_HOLD_EARLY_OUTCOMES = { skipped: 'skipped', held_off: 'deferred', 
 
 /**
  * GATE_AUTOPAY_HOLD_TIMEOUT=charge: the action for ONE stale hold the sweep selected. Charges the method Auto
- * Pay itself would charge (attemptAutopayHoldCharge), then applies the decision's plan:
+ * Pay itself would charge (attemptAutopayHoldCharge), then applies the decision's plan. Only a visit's own bill is
+ * charged by itself, inside the completion route's authorization (visitBillVerdict); an invoice bound to no visit is
+ * released as 'true' releases it.
  * - paid / processing (bank) / covered by account credit: the hold stays; a paid or credit-covered invoice
  *   closes its follow-up sequence through stopOnPayment (the charge path calls it; this is the same call
  *   again, a no-op once completed), a bank charge closes it when the webhook settles it;
- * - declined, refused or no chargeable method: the hold is released as 'true' releases it (original guards
+ * - a real card decline or no chargeable method: the hold is released as 'true' releases it (original guards
  *   when no charge was called; only our own failed rows exempted when one was), and one office alert says why;
+ * - over the agreed price, no agreed price, not a performed visit, a payer, or a guard refusal ('review'): the hold is
+ *   KEPT, nothing is charged or sent, one office alert says why, and the final audit row carries a fingerprint of the
+ *   facts read; the hold is looked at again only after those facts change;
  * - ambiguous: the hold stays, nothing retries, and one office alert says to check Stripe.
  * - a bank method before its invoice due date: nothing is written and the hold stays ('not_due'); a bank method on an
  *   invoice with no due date has no authorized debit date, so it is released as 'true' releases it ('true_released').
- * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'deferred' | 'not_due' | 'true_released' | 'skipped' | 'alert_failed' }.
+ * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'review' | 'ambiguous' | 'deferred' | 'not_due' | 'true_released' | 'skipped' | 'alert_failed' }.
  */
 async function chargeStaleAutopayHold(row, cutoff, now = new Date()) {
   // An annual-prepay term rail invoice (row.termRail, see annualPrepayTermRail) is never charged here.
@@ -3383,10 +3578,13 @@ async function chargeStaleAutopayHold(row, cutoff, now = new Date()) {
   if (!stillStale) return { outcome: 'skipped' };
   const invoice = await db('invoices').where({ id: row.invoice_id }).first();
   if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return { outcome: 'skipped' };
+  // Only a visit's own bill is charged by itself (owner 2026-10-29): an invoice bound to no visit has no agreed price
+  // to cap it, so it is released as 'true' releases it.
+  if (!invoice.scheduled_service_id) return releaseAsTrue(row, cutoff, now);
 
   const d = await attemptAutopayHoldCharge(row, invoice, now);
   if (AUTOPAY_HOLD_EARLY_OUTCOMES[d.kind]) return { outcome: AUTOPAY_HOLD_EARLY_OUTCOMES[d.kind] };
-  if (d.kind === 'no_debit_date') return releaseAsTrue(row, cutoff, now);
+  if (d.kind === 'no_debit_date' || d.kind === 'release_true') return releaseAsTrue(row, cutoff, now);
 
   const covered = d.status === 'covered_by_credit';
   const amountCents = covered ? 0 : (d.quote ? Math.round(d.quote.total * 100) : cents(invoiceAmountDue(invoice)));
@@ -3397,6 +3595,14 @@ async function chargeStaleAutopayHold(row, cutoff, now = new Date()) {
 // done (no release, no final row), the hold stays 'autopay_hold' with an unfinished marker, and the next run's
 // recovery retries the alert and finishes. After a delivered alert: release, stopOnPayment, and the final audit
 // row LAST, so the presence of that row means the attempt finished.
+// The hash stored on a review's final row: the one the verdict read, else (a recovered attempt) the bill as it is now.
+async function reviewFingerprint(row, d) {
+  if (d.fingerprint) return d.fingerprint;
+  const current = await db('invoice_followup_sequences as s').where('s.id', row.id)
+    .first(db.raw(`${chargeFactsFingerprintSql('s.invoice_id', 's.customer_id')} AS fingerprint`));
+  return current?.fingerprint || null;
+}
+
 async function applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents) {
   const plan = AUTOPAY_HOLD_CHARGE_PLANS[d.kind];
   if (plan.alert) {
@@ -3416,6 +3622,7 @@ async function applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents) {
   }
   await recordAutopayHoldChargeAudit({
     row, invoice, outcome: plan.audit(d, released), reason: d.reason, errorCode: d.err?.code || null, amountCents, methodType: d.method?.method_type || null, released,
+    fingerprint: plan.alert === 'review' ? await reviewFingerprint(row, d) : null,
   });
   const [level, text] = plan.log(d, released, invoice);
   logger[level](text);
@@ -3447,17 +3654,18 @@ async function unfinishedAutopayHoldCharges() {
 // Which plan an unfinished attempt maps to, from the attempt rows created since its marker. A failed attempt that
 // asks the customer to authenticate is ambiguous, like the live classifier reads it. A failed attempt whose message
 // is a collection-hold or bank-debit-date refusal was never attempted: retry later (the first alerts, the second
-// is quiet).
+// is quiet). Any other failed attempt with no decline code was a guard refusal before Stripe (the charge path stores
+// a decline code only for a customer decline): office review, never a release. One with a decline code is declined.
 function recoveredAttemptKind(attempts, invoice) {
   if (!attempts.length) return 'abandoned';
   const clean = attempts.every((attempt) => attempt.status === 'failed' && attempt.decline_code !== 'authentication_required');
   const refusedBy = (pattern) => attempts.some((attempt) => pattern.test(String(attempt.error_message || '')));
   if (clean && refusedBy(/billing dispute|Collection hold could not be verified/i)) return 'deferred';
   if (clean && refusedBy(BANK_DEBIT_NOT_DUE_PATTERN)) return 'not_due';
-  if (clean) return 'declined';
+  if (clean) return attempts.some((attempt) => attempt.decline_code) ? 'declined' : 'review';
   return ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase()) ? 'charged' : 'ambiguous';
 }
-const RECOVERED_REASON = { declined: 'recovered', ambiguous: 'ambiguous', deferred: 'collection_hold', not_due: 'bank_debit_not_due' };
+const RECOVERED_REASON = { declined: 'recovered', ambiguous: 'ambiguous', deferred: 'collection_hold', not_due: 'bank_debit_not_due', review: 'refused' };
 
 async function recoverAutopayHoldCharge(marker, cutoff) {
   const meta = marker.metadata || {};
@@ -3469,7 +3677,7 @@ async function recoverAutopayHoldCharge(marker, cutoff) {
     .select('status', 'decline_code', 'error_message');
   const kind = recoveredAttemptKind(attempts, invoice);
   const row = { id: meta.sequence_id, invoice_id: marker.invoice_id, customer_id: marker.customer_id, hold_stamp: meta.hold_stamp };
-  const d = { kind, reason: RECOVERED_REASON[kind] || null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null };
+  const d = { kind, reason: RECOVERED_REASON[kind] || null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null, fingerprint: null };
   return (await applyAutopayHoldPlan(row, cutoff, invoice, d, Number(meta.amount_cents) || 0)).outcome;
 }
 
@@ -3504,7 +3712,7 @@ async function recoverAutopayHoldCharges(cutoff) {
  * own attempt row fences the invoice.
  */
 async function chargeStaleAutopayHolds(allDue, cutoff, now = new Date()) {
-  const counts = { charged: 0, declined_released: 0, true_released: 0, release_failed: 0, ambiguous: 0, deferred: 0, not_due: 0, skipped: 0, errors: 0 };
+  const counts = { charged: 0, declined_released: 0, true_released: 0, release_failed: 0, ambiguous: 0, review: 0, deferred: 0, not_due: 0, skipped: 0, errors: 0 };
   // First finish what an earlier run left half done. The recovery pass never charges, and an invoice it
   // touched is not charged again in this run.
   const recovery = await recoverAutopayHoldCharges(cutoff);
@@ -3520,7 +3728,7 @@ async function chargeStaleAutopayHolds(allDue, cutoff, now = new Date()) {
       logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
     }
   }
-  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.true_released} released as true (term rail or no bank debit date), ${counts.ambiguous} ambiguous, ${counts.deferred} deferred, ${counts.not_due} waiting for a bank debit date, ${counts.skipped} skipped, ${counts.release_failed} not released, ${recovery.recovered} recovered, ${counts.errors} error(s)`);
+  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.true_released} released as true (term rail, no visit, no completion lane or no bank debit date), ${counts.review} held for office review, ${counts.ambiguous} ambiguous, ${counts.deferred} deferred, ${counts.not_due} waiting for a bank debit date, ${counts.skipped} skipped, ${counts.release_failed} not released, ${recovery.recovered} recovered, ${counts.errors} error(s)`);
   return { mode: 'charge', candidates: due.length, released: counts.declined_released + counts.true_released, recorded: 0, recovered: recovery.recovered, ...counts };
 }
 
@@ -3585,9 +3793,10 @@ async function selectStaleAutopayHolds(cutoff, pageSize, clauseOptions) {
  * covered customers would leave every uncharged Auto Pay invoice held for good. Every held row is read, in
  * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
  * writes at most one audit_log row per invoice per ET day and changes nothing; 'charge' charges the saved
- * Auto Pay method first (chargeStaleAutopayHold) and releases only a declined or refused hold, except that an
- * annual-prepay term rail invoice is never charged (released as 'true' releases it) and a bank method waits for the
- * invoice due date (no due date: released as 'true'); off returns before any query.
+ * Auto Pay method first (chargeStaleAutopayHold) and releases only a declined hold or one with no method, except that an
+ * annual-prepay term rail invoice, an invoice bound to no visit and a bill no completion lane admits are never charged
+ * (released as 'true' releases them), an over-cap, no-cap, unperformed or payer bill is kept for office review, and a bank
+ * method waits for the invoice due date (no due date: released as 'true'); off returns before any query.
  */
 async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
   const mode = require('../config/feature-gates').autopayHoldTimeoutMode();

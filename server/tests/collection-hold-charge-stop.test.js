@@ -269,7 +269,6 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return { ...invoice, ...invoiceExtra };
         if (table === 'payment_methods') return { ...card, ...cardExtra };
-        if (table === 'scheduled_services') return { id: invoiceExtra.scheduled_service_id, customer_id: 'cust-1', source_estimate_id: null };
         if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
         if (table === 'collections_flags') {
           events.push('flags-read');
@@ -329,29 +328,6 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
         .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('flags table unreadable') });
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
-    });
-
-    describe('requireUnboundInvoice (opt-in: the Auto Pay hold charge mode)', () => {
-      test('an invoice bound to a visit under the lock refuses before any Stripe create', async () => {
-        const { StripeService, stripeClient } = setup({ invoiceExtra: { scheduled_service_id: 'visit-1' } });
-        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireUnboundInvoice: true }))
-          .rejects.toThrow('The invoice is now bound to a visit');
-        expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
-      });
-
-      test('an unbound invoice with the option still proceeds to Stripe', async () => {
-        const { StripeService, stripeClient } = setup({});
-        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireUnboundInvoice: true }))
-          .rejects.not.toThrow('The invoice is now bound to a visit');
-        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
-      });
-
-      test('without the option a bound invoice behaves as before', async () => {
-        const { StripeService, stripeClient } = setup({ invoiceExtra: { scheduled_service_id: 'visit-1' } });
-        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
-          .rejects.not.toThrow('The invoice is now bound to a visit');
-        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
-      });
     });
 
     describe('requireBankDebitDue (opt-in: the Auto Pay hold charge mode)', () => {

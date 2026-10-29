@@ -2186,6 +2186,10 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
+  // opts.allowIssuedInvoiceCloseoutFor — an invoice id; with requirePerformedVisit only (the Auto Pay hold charge
+  // mode): the visit's latest record may be the issued-invoice closeout job's own (backfill true, visitOutcome
+  // 'completed', structured_notes.issuedInvoiceCloseout.invoiceId = THIS invoice) and still count as performed.
+  // Any other backfill, or a marker for another invoice, is refused as before (closeoutPerformedForCharge).
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
   // (admin card-on-file): skips the default collections-dispute-hold guard and
   // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
@@ -2197,7 +2201,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, requireUnboundInvoice = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2305,12 +2309,6 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
-        // Opt-in (the Auto Pay hold charge mode, GATE_AUTOPAY_HOLD_TIMEOUT=charge): that caller found the invoice
-        // unbound in its unlocked read. A visit bound to it since then (read here under the invoice lock, before
-        // any credit apply or Stripe call) would aim this charge at an upcoming visit's bill, so it refuses.
-        if (requireUnboundInvoice && lockedInvoice.scheduled_service_id) {
-          throw new Error('The invoice is now bound to a visit. Review before charging.');
-        }
         // Opt-in (the Auto Pay hold charge mode): a bank debit before the invoice's authorized debit date refuses here,
         // before any credit apply or Stripe call.
         if (requireBankDebitDue) assertBankDebitDue(card, lockedInvoice);
@@ -2484,12 +2482,8 @@ const StripeService = {
           if (requirePerformedVisit) {
             const latestRecord = await trx('service_records').where({ scheduled_service_id: lockedSvc.id })
               .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
-            let latestNotes = latestRecord?.structured_notes;
-            if (typeof latestNotes === 'string') { try { latestNotes = JSON.parse(latestNotes); } catch { latestNotes = null; } }
-            const outcome = String(latestNotes?.visitOutcome || '');
-            if (!latestRecord || String(latestRecord.status || '') !== 'completed'
-              || ['inspection_only', 'customer_declined', 'incomplete'].includes(outcome)
-              || String(latestNotes?.backfill || '') === 'true') {
+            // allowIssuedInvoiceCloseoutFor (opt-in, the Auto Pay hold charge): the issued-invoice closeout of THIS invoice counts.
+            if (!require('./visit-outcomes').closeoutPerformedForCharge(latestRecord, { issuedCloseoutInvoiceId: String(allowIssuedInvoiceCloseoutFor) === String(invoiceId) ? invoiceId : null })) {
               throw Object.assign(new Error('The visit\'s current closeout is not a performed visit. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
             }
           }
