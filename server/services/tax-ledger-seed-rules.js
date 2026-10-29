@@ -53,7 +53,7 @@ const SEED_RULES = [
   x('deposit from stripe|stripe transfer|stripe payout', 'review', null, 'Stripe payout the matcher could not link: check the payout list before anything else', 90),
   // ── receipts and payments to people: the owner decides
   x('zelle money received from|check deposit|mobile deposit|cash added|deposit from venmo|deposit from cash app|deposit from paypal', 'review', null, 'customer payment not in the books, or personal money?'),
-  x('zelle money sent to|cash app \\*|venmo payment|withdrawal from wise|wise us inc', 'review', L, 'a helper (contract labor, 1099-NEC at $600) or personal?'),
+  x('zelle money sent to|cash app \\*|venmo payment|withdrawal from wise|wise us inc', 'review', L, 'a helper (contract labor, 1099-NEC at $600 through 2025, $2,000 from 2026) or personal?'),
   // ── advertising (line 8)
   x('google\\W*ads|facebk|meta ads|sticker mule|beehiiv|vistaprint|whitespark|yelp|nextdoor|thumbtack|\\bangi\\b|homeadvisor|semrush|canva|brightlocal|moz\\.com|ahrefs|mamo\\W*social|otc brands|age graphics|indexsy|loominost|kev s best|buylinks|useviral|help-a-marketer|aidirectori|outscraper|peoplefinders|content at scale|gmass|ein presswire|super cheap signs|onlineprintus|dri\\W*printplace|craigslist|serp empire|fatjoe|proxy-seller|linkedin|indeed jobs|onlinejobs\\.ph|the-qrcode-generator|adaired|madwire|usps\\.com every door', 'expense', A, null, 90),
   x('usps po\\b', 'review', A, 'an EDDM postcard drop (advertising) or stamps (office)?', 80),

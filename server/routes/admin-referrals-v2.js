@@ -8,6 +8,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const inbound = require('../services/referral-inbound');
+const { form1099ThresholdCents } = require('../services/referral-1099');
 const { referralInboundConfirmLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -331,7 +332,7 @@ router.post('/payouts/:id/approve', async (req, res, next) => {
         processed_by: adminAuditor,
         tax_year: year,
         ytd_total_at_payout: ytdTotal,
-        requires_1099: ytdTotal >= 60000, // $600 threshold in cents
+        requires_1099: ytdTotal >= form1099ThresholdCents(year), // $600 through 2025, $2,000 from 2026
       });
 
       // Deduct exact balance — no GREATEST() floor since we already verified it.
