@@ -126,6 +126,7 @@
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
+ *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
@@ -4818,6 +4819,10 @@ const gates = {
   // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
   alertRetention: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase()),
 
+  // Promise record evidence (owner 2026-10-29). Registered for logGateStatus only; consumers read
+  // promiseRecordEvidenceMode() at CALL time. 'shadow' records, 'true' applies. Kill switch: unset.
+  promiseRecordEvidence: ['shadow', 'true'].includes(String(process.env.GATE_PROMISE_RECORD_EVIDENCE || '').trim().toLowerCase()),
+
   // SMS courtesy tail (owner 2026-10-29). Registered for logGateStatus only; isCourtesyOnly and the
   // inbound webhook read courtesyTailMode() at CALL time. 'shadow' stamps, 'true' applies. Kill switch: unset.
   smsCourtesyTail: ['shadow', 'true'].includes(String(process.env.GATE_SMS_COURTESY_TAIL || '').trim().toLowerCase()),
@@ -6777,6 +6782,14 @@ function secondTechLowsLive() {
 // nothing; 'true' marks the expired rows done. Anything else is off: no query. Unset is the kill.
 function alertRetentionMode() {
   const value = String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
+// GATE_PROMISE_RECORD_EVIDENCE read at CALL time: 'shadow', 'true' or 'off' (services/sms-commitment-fulfillment.js
+// and sms-operational-actions.js). 'shadow' (trimmed, any case) records what would change and changes nothing;
+// 'true' applies it. Anything else is off. Unset is the kill.
+function promiseRecordEvidenceMode() {
+  const value = String(process.env.GATE_PROMISE_RECORD_EVIDENCE || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
@@ -8978,6 +8991,8 @@ module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNot
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
 // GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.buildingUseTaxLive = buildingUseTaxLive;
+// GATE_PROMISE_RECORD_EVIDENCE reader, on its own line so gate PRs never conflict.
+module.exports.promiseRecordEvidenceMode = promiseRecordEvidenceMode;
 // GATE_STOCK_COUNT_AWARE_USAGE reader, on its own line so gate PRs never conflict.
 module.exports.stockCountAwareUsageLive = stockCountAwareUsageLive;
 // GATE_TAX_SERVICE_COUNTY reader, on its own line so gate PRs never conflict.
