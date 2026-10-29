@@ -828,6 +828,74 @@ describe('lawn bounded product section', () => {
     });
   });
 
+  describe('a 9x rounds visit (recurring_pattern lawn_rounds_9) reads the step of its round', () => {
+    const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+    const febWindow = (gates) => ({
+      window: { key: 'feb_v13_spreader_green_up', month: 2, title: 'February Green-Up Feeding (spreader)', visitType: 'granular', goal: 'One spreader feeding' },
+      products: [
+        { productName: F24, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, analysis: { n: 24, p: 0, k: 11 }, gates },
+        { productName: 'Celsius WG', productId: 'cel', role: 'post_emergent_spot', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', defaultInPlan: false, gates: {} },
+      ],
+    });
+    const STORED = { targetN: '0.75 lb N/1000', blackoutSensitive: true };
+    const briefFor = async (extra, summary = febWindow({ ...STORED, roundsTargetN: '1.0 lb N/1000' })) => {
+      mockSummarize.mockReturnValue(summary);
+      const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', recurring_pattern: 'lawn_rounds_9', scheduled_date: '2027-03-20', ...extra }] }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+    const targetOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === F24).gates?.targetN;
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test('round 3 asks for the round\'s step window and states the rounds nitrogen target (1.0 lb N), not February\'s 0.75', async () => {
+      const guidance = await briefFor({});
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2 });
+      expect(guidance.window.key).toBe('feb_v13_spreader_green_up');
+      expect(targetOf(guidance)).toBe('1.0 lb N/1000');
+    });
+
+    test('a database without the stored rounds target states the recipe\'s own rounds variant (1.0 lb N)', async () => {
+      expect(targetOf(await briefFor({}, febWindow({ ...STORED })))).toBe('1.0 lb N/1000');
+    });
+
+    test('round 2 asks for April\'s window and no rounds target is stated', async () => {
+      await briefFor({ scheduled_date: '2027-02-10' }, { ...febWindow(STORED), window: { key: 'apr_v13_spreader_feeding', month: 4, title: 'April', visitType: 'granular', goal: 'g' } });
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 2, month: 4 });
+    });
+
+    test('a 12x or legacy 9x February visit asks for no round and keeps the stored 0.75 lb N', async () => {
+      for (const pattern of ['monthly', 'every_6_weeks', 'custom', null]) {
+        mockWindowContext.mockClear();
+        const guidance = await briefFor({ recurring_pattern: pattern, scheduled_date: '2027-02-10' }, febWindow({ ...STORED, roundsTargetN: '1.0 lb N/1000' }));
+        expect(mockWindowContext.mock.calls[0][1].roundStep).toBeUndefined();
+        expect(targetOf(guidance)).toBe('0.75 lb N/1000');
+      }
+    });
+
+    test('the stored northPortBlocked gate (the April month\'s) is left off a rounds visit dated before Apr 1 and kept inside the ban', async () => {
+      const april = { ...febWindow({ ...STORED }), window: { key: 'apr_v13_spreader_feeding', month: 4, title: 'April', visitType: 'granular', goal: 'g' } };
+      april.products[0] = { ...april.products[0], gates: { targetN: '0.5 lb N/1000', northPortBlocked: true } };
+      const gatesOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === F24).gates;
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20' }, april))).not.toHaveProperty('northPortBlocked');
+      // A 12x or legacy visit keeps the stored gate whatever the date.
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20', recurring_pattern: 'monthly' }, april))).toHaveProperty('northPortBlocked', true);
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-04-05', recurring_pattern: 'lawn_rounds_9' }, april))).toHaveProperty('northPortBlocked', true);
+    });
+
+    test('North Port, round 3 on Apr 5: the 24-0-11 is a hold with the ban text and no dose; on Mar 25 it is guidance', async () => {
+      const held = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'North Port' });
+      expect(held.held_products).toHaveLength(1);
+      expect(held.held_products[0]).toMatchObject({ name: F24, hold: true });
+      expect(held.held_products[0].message).toBe(`${F24}: North Port bans nitrogen and phosphorus from April 1 to September 30. The plan holds this round-3 feeding back; do not apply it at this visit.`);
+      expect([...held.products, ...held.conditional_products].map((p) => p.name)).toEqual(['Celsius WG']);
+      const before = await briefFor({ scheduled_date: '2027-03-25', service_address_city: 'North Port' });
+      expect(before.held_products).toEqual([]);
+      const elsewhere = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'Sarasota' });
+      expect(elsewhere.held_products).toEqual([]);
+    });
+  });
+
   test('a customer at an application limit demotes the fixed product to conditional (codex P1)', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },

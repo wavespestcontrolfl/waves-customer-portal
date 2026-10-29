@@ -199,8 +199,49 @@ function roundTaken(dates, dateStr) {
   return false;
 }
 
+// Which v13 program step a rounds visit takes (owner 2026-10-29). The 12x program names its step by the calendar month; a rounds
+// visit takes the step of its ROUND, so a visit placed a week early or late still gets its own round's products. `month` is the
+// v13 step's month (1-12); `variant` names the rounds-only form of that step:
+//   'cadence9'  the step's cadenceVariants["9"] (April's LESCO Dimension 18-0-10, 0.5 lb N) - round 2
+//   'rounds'    the step's roundVariants.lawn_rounds_9 (February's 24-0-11 at 1.0 lb N) - round 3
+//   null        the step as written
+// The spot and weed rows of a rounds visit do NOT follow this map; they follow the real date (roundSpotMonth).
+const ROUND_STEPS = Object.freeze({
+  1: Object.freeze({ month: 1, variant: null }),
+  2: Object.freeze({ month: 4, variant: 'cadence9' }),
+  3: Object.freeze({ month: 2, variant: 'rounds' }),
+  4: Object.freeze({ month: 5, variant: null }),
+  5: Object.freeze({ month: 6, variant: null }),
+  6: Object.freeze({ month: 8, variant: null }),
+  7: Object.freeze({ month: 9, variant: null }),
+  8: Object.freeze({ month: 10, variant: null }),
+  9: Object.freeze({ month: 12, variant: null }),
+});
+
+// The step a booked visit takes, or null. ONLY a visit whose own row says recurring_pattern 'lawn_rounds_9' has one (the pattern is
+// written on rounds series only, so no gate is read); every other visit (12x, legacy 9x, one-time, other services) returns null and
+// is planned exactly as before. `row` needs recurring_pattern and scheduled_date.
+function roundStepForVisit(row) {
+  if (row?.recurring_pattern !== LAWN_ROUNDS_9) return null;
+  const home = roundOf(row.scheduled_date);
+  if (!home) return null;
+  const step = ROUND_STEPS[home.round];
+  return { round: home.round, programYear: home.programYear, month: step.month, variant: step.variant };
+}
+
+// The month (1-12) whose window supplies the weed and spot rows of a rounds visit: the real date's month, with ONE exception the
+// approved page states. The St. Augustine green-up rule (Celsius alone, no Certainty; February window data) covers all of round 2,
+// real dates Feb 3 to Mar 14, so a St. Augustine round-2 visit dated in March reads February's rows. `realMonth` is 1-12.
+function roundSpotMonth({ round, realMonth, grassTrack }) {
+  if (Number(round) === 2 && Number(realMonth) === 3 && grassTrack === 'st_augustine') return 2;
+  return Number(realMonth);
+}
+
 module.exports = {
   LAWN_ROUNDS_9,
+  ROUND_STEPS,
+  roundStepForVisit,
+  roundSpotMonth,
   ROUNDS_PER_YEAR,
   LAWN_ROUND_TABLE,
   roundOf,

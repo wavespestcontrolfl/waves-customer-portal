@@ -1553,6 +1553,18 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
       if (!again.length && at !== -1) overlappedIds.splice(at, 1);
     }
   }
+  // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op when
+  // off): once every stop sits in its new place, each moved stop gets the
+  // arrival-window check Edit's save runs, on the road times the pickers
+  // already bought. ADVISORY ONLY: the warnings ride on the stops
+  // (`routeWarnings`) into the result's warning; a route result never refuses
+  // or rolls back the batch, and the overlap probes above are unchanged.
+  for (const c of classified) {
+    const { start, end } = probeWindowOf(c.s);
+    c.routeWarnings = await require('../scheduling/staff-save-route-check').staffSaveRouteWarnings(trx, {
+      serviceId: c.s.id, date: dateStr, windowStart: start, windowEnd: end, technicianId: c.committedTechId,
+    });
+  }
   return overlappedIds;
 }
 
@@ -1762,7 +1774,7 @@ function moveWarning(plan, run, movedCount) {
   const auditNote = run.auditFailures.length
     ? `${run.auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
     : null;
-  return [overlapNote, notifyNote, lifecycleNote, run.moveGroupWarning, auditNote].filter(Boolean).join(' ');
+  return [overlapNote, ...(run.routeWarnings || []), notifyNote, lifecycleNote, run.moveGroupWarning, auditNote].filter(Boolean).join(' ');
 }
 
 function moveResult(plan, run) {
@@ -1797,11 +1809,12 @@ async function commitMove(plan, actionContext) {
     return moveBatchFailure(err);
   }
   const movedIds = new Set(classified.map((c) => c.s.id));
+  const routeWarnings = [...new Set(classified.flatMap((c) => c.routeWarnings || []))];
   notifyTechsOfMove(classified, plan.dateStr, actionContext);
   const post = await applyPostCommit(classified, plan.dateStr, plan.reason);
   const notices = await notifyMovedCustomers(plan, movedIds);
   const moveGroupWarning = await repairMovedGroups(movedIds, plan.movable);
-  return moveResult(plan, { movedIds, overlapMovedIds, moveGroupWarning, ...post, ...notices });
+  return moveResult(plan, { movedIds, overlapMovedIds, routeWarnings, moveGroupWarning, ...post, ...notices });
 }
 
 // The skipped lists that hold a stop, named as the card and the result show

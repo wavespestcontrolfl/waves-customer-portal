@@ -2452,3 +2452,217 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
     expect(booking.insertChain.insert).not.toHaveBeenCalled();
   });
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// create and reschedule saves also run the arrival-window route check on the
+// saved visit, as a SECOND advisory probe. The real-overlap probe above stays
+// as it was, so a pinned "no overlap" card refuses a real new overlap only.
+describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create and reschedule saves', () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const arrivalRoute = require('../services/scheduling/arrival-route');
+  const actualOccupancy = jest.requireActual('../services/scheduling/occupancy');
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-01-15. Review the route before driving it.';
+  let placeSpy;
+  const arrivalCalls = () => occupancy.findConflictingVisits.mock.calls.filter(([args]) => args && args.arrivalWindow);
+
+  beforeEach(() => {
+    occupancy.findConflictingVisits.mockImplementation((args) => (args && args.arrivalWindow
+      ? Promise.resolve([{ id: args.arrivalWindow.serviceId, conflict_reason: 'arrival_window', warning: ROUTE_WARNING }])
+      : actualOccupancy.findConflictingVisits(args)));
+    placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    placeSpy.mockRestore();
+    occupancy.findConflictingVisits.mockImplementation((...args) => actualOccupancy.findConflictingVisits(...args));
+  });
+  const gateOn = () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+
+  describe('create_appointment', () => {
+    const adaCustomer = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+    const created = { id: 'appt-1', technician_id: 'tech-1', window_start: '10:00:00', window_end: '11:00:00' };
+    const wire = (probe) => {
+      const insertChain = chain({ returning: jest.fn().mockResolvedValue([created]) });
+      wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [probe, insertChain] });
+      return insertChain;
+    };
+    const realOverlap = () => chain({
+      orderBy: jest.fn().mockResolvedValue([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]),
+    });
+    const bookAt = (extra = {}) => executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', ...extra,
+    });
+
+    test('gate off: no route check and no route number, the result is as before', async () => {
+      wire(chain());
+      const result = await bookAt();
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+      expect(result.warning).toBeUndefined();
+      expect(arrivalCalls()).toHaveLength(0);
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the saved visit is checked on cached road times, the warning shows, and its day is numbered in the transaction', async () => {
+      gateOn();
+      wire(chain());
+      const result = await bookAt();
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+      expect(result.warning).toBe(ROUTE_WARNING);
+      expect(arrivalCalls()).toHaveLength(1);
+      expect(arrivalCalls()[0][0]).toMatchObject({
+        date: '2099-01-15', windowStart: '10:00', windowEnd: '11:00', excludeServiceIds: ['appt-1'],
+        arrivalWindow: { serviceId: 'appt-1', roads: 'cache' },
+      });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', staffSave: true, source: 'intelligence_bar' });
+      expect(typeof placeSpy.mock.calls[0][0]).toBe('function'); // the booking transaction, not the root connection
+    });
+
+    test('gate on, the card pinned no overlap, only the route fails: books with the warning, never refuses', async () => {
+      gateOn();
+      const insertChain = wire(chain());
+      const result = await bookAt({ _booking_overlap: false });
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1', warning: ROUTE_WARNING });
+      expect(insertChain.insert).toHaveBeenCalled();
+    });
+
+    test('gate on, the card pinned no overlap and a REAL overlap appeared: still refused, nothing booked, no route check', async () => {
+      gateOn();
+      const insertChain = wire(realOverlap());
+      const result = await bookAt({ _booking_overlap: false });
+      expect(result).toMatchObject({ preview_changed: true, error: expect.stringMatching(/^Another visit now overlaps this time\./) });
+      expect(insertChain.insert).not.toHaveBeenCalled();
+      expect(arrivalCalls()).toHaveLength(0);
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('gate on, a real overlap and a failing route both warn (one result.warning), the visit books', async () => {
+      gateOn();
+      wire(realOverlap());
+      const result = await bookAt();
+      expect(result.success).toBe(true);
+      expect(result.warning).toMatch(/overlaps another appointment/);
+      expect(result.warning).toContain(ROUTE_WARNING);
+    });
+
+    test('gate on, an unassigned visit is not route-checked', async () => {
+      gateOn();
+      const insertChain = chain({ returning: jest.fn().mockResolvedValue([{ ...created, technician_id: null }]) });
+      wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
+      const result = await bookAt();
+      expect(result.success).toBe(true);
+      expect(result.warning).toBeUndefined();
+      expect(arrivalCalls()).toHaveLength(0);
+    });
+  });
+
+  describe('reschedule_appointment', () => {
+    const appt = {
+      id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+      window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
+    };
+    const wire = (updateChain = chain()) => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), updateChain],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      return updateChain;
+    };
+    const move = () => executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM' });
+
+    test('gate off: no route check and no route number', async () => {
+      wire();
+      const result = await move();
+      expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+      expect(result.warning).toBeUndefined();
+      expect(arrivalCalls()).toHaveLength(0);
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the moved visit is checked on cached road times, the warning shows, the move commits and is numbered in the transaction', async () => {
+      gateOn();
+      const updateChain = wire();
+      const result = await move();
+      expect(result).toMatchObject({ success: true, new_date: '2099-01-15', warning: ROUTE_WARNING });
+      expect(updateChain.update).toHaveBeenCalled();
+      expect(arrivalCalls()).toHaveLength(1);
+      expect(arrivalCalls()[0][0]).toMatchObject({
+        date: '2099-01-15', windowStart: '10:00', windowEnd: '11:00',
+        arrivalWindow: { serviceId: 'svc-1', roads: 'cache' },
+      });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, source: 'intelligence_bar' });
+    });
+
+    test('gate on: a move whose compare-and-swap missed is not route-checked or numbered', async () => {
+      gateOn();
+      wire(chain({ update: jest.fn().mockImplementation(() => ({
+        then: (res) => Promise.resolve(0).then(res), catch: () => {}, returning: jest.fn().mockResolvedValue([]),
+      })) }));
+      const result = await move();
+      expect(result.error).toMatch(/changed concurrently/);
+      expect(arrivalCalls()).toHaveLength(0);
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // Placement first, then the route warning (Codex P1 on 9837f0c3d4). The REAL
+  // arrival evaluator on an in-memory route (helpers/in-memory-route.js): read
+  // where it is saved the visit misses a promise that the staff placement then
+  // fixes, so a warning collected before placement would reach staff.
+  describe('placement runs before the route warning (real evaluator, in-memory route)', () => {
+    const { createRoute } = require('./helpers/in-memory-route');
+    let route;
+    beforeEach(() => {
+      gateOn();
+      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+      route = createRoute();
+      occupancy.findConflictingVisits.mockImplementation((args) => (args && args.arrivalWindow
+        ? Promise.resolve(route.conflictRows()) : actualOccupancy.findConflictingVisits(args)));
+      placeSpy.mockImplementation(async () => route.place());
+    });
+    afterEach(() => { delete process.env.GATE_STAFF_ROUTE_INSERTION; });
+
+    test('premise: unplaced, the saved visit reads infeasible', () => {
+      expect(route.savedFit().feasible).toBe(false);
+    });
+
+    test('create_appointment: the visit is placed, then checked, and no stale warning is returned', async () => {
+      const created = { id: 'appt-1', technician_id: 'tech-1', window_start: '09:00:00', window_end: '10:00:00' };
+      const insertChain = chain({ returning: jest.fn().mockResolvedValue([created]) });
+      const cust = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+      wireDb({ customers: [cust(), cust()], scheduled_services: [chain(), insertChain] });
+      const result = await executeTool('create_appointment', {
+        customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+      });
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+      expect(result.warning).toBeUndefined();
+      expect(route.state.target.route_order).toBe(1);
+      const arrivalIdx = occupancy.findConflictingVisits.mock.calls.findIndex(([a]) => a && a.arrivalWindow);
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(occupancy.findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+    });
+
+    test('reschedule_appointment: the moved visit is placed, then checked, and no stale warning is returned', async () => {
+      const appt = {
+        id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+        window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
+      };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), chain()],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '9:00 AM' });
+      expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+      expect(result.warning).toBeUndefined();
+      expect(route.state.target.route_order).toBe(1);
+      const arrivalIdx = occupancy.findConflictingVisits.mock.calls.findIndex(([a]) => a && a.arrivalWindow);
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(occupancy.findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+    });
+  });
+});
