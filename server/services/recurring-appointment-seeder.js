@@ -12,6 +12,7 @@ const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./sche
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
 const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
+const { lawn9xRoundsLive } = require('../config/feature-gates');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -275,6 +276,65 @@ function serviceKeyFor(value = {}) {
   if (/termite/.test(raw)) return 'termite_bait';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
+}
+
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS, owner 2026-10-28). The pattern a NEW
+// series is WRITTEN with: lawn_rounds_9 and no interval when the gate is on
+// and the series is a RESIDENTIAL LAWN 9x plan (lawn family; every_6_weeks, or
+// custom with a 42-day interval), else the input unchanged. Quotes and every
+// upstream cadence word stay every_6_weeks / custom-42; only a writer of
+// recurring_pattern / recurring_interval_days calls this, and it writes the
+// result on the parent AND every child of one series.
+//
+// Identity is the converter's own: seedingFamilyKey (the seeder's
+// serviceKeyFor plus the palm correction; catalog keys such as
+// lawn_care_6week and labels such as "Lawn Care" both read lawn_care) and
+// isCommercialRecurringLine (any "commercial" in the line or label), so
+// tree & shrub, mosquito, pest, palm and commercial lawn are never
+// translated. Pass whatever names the service: service / serviceKey /
+// service_key / name / label / service_type (or serviceType) / isCommercial.
+// Lazy converter require (it loads this module at boot); an identity that
+// cannot be read fails closed to the unchanged pattern.
+function lawnRoundsSeriesPattern({ pattern, intervalDays = null, ...identity } = {}) {
+  const unchanged = { pattern, intervalDays };
+  try {
+    if (!lawn9xRoundsLive()) return unchanged;
+    const normalized = normalizeRecurringPattern(pattern);
+    const parsedInterval = Number.parseInt(intervalDays, 10);
+    const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
+    const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
+      || (normalized === 'custom' && interval === 42);
+    if (!sixWeek) return unchanged;
+    const svc = { ...identity };
+    if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
+    const parentRow = { service_type: svc.service_type };
+    const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
+    if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, parentRow)) return unchanged;
+    if (seedingFamilyKey(svc, parentRow) !== 'lawn_care') return unchanged;
+    return { pattern: LAWN_ROUNDS_9, intervalDays: null };
+  } catch (err) {
+    require('./logger').warn(`[recurring-seeder] lawn rounds identity unreadable (series left unchanged): ${err.message}`);
+    return unchanged;
+  }
+}
+
+// The seeder's own follow-up rows: when it is handed a lawn 9x parent with the
+// every-6-weeks vocabulary, the parent mark and every seeded child carry
+// lawn_rounds_9 and no interval. Returns null when nothing translates.
+function lawnRoundsSeedInput(parent, opts) {
+  const pattern = normalizeRecurringPattern(opts?.pattern || parent?.recurring_pattern);
+  if (!pattern || pattern === LAWN_ROUNDS_9 || !parent) return null;
+  const translated = lawnRoundsSeriesPattern({
+    pattern,
+    intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days ?? null,
+    service_type: parent.service_type || opts.serviceType,
+    service_key: parent.service_key_snapshot || undefined,
+  });
+  if (translated.pattern !== LAWN_ROUNDS_9) return null;
+  return {
+    parent: { ...parent, recurring_interval_days: null },
+    opts: { ...opts, pattern: LAWN_ROUNDS_9, recurringIntervalDays: null },
+  };
 }
 
 function visitsForService(value = {}) {
@@ -1242,7 +1302,10 @@ async function seedingBlackoutDates(conn, parent, opts = {}) {
 // them) and fail closed on drift (codex #3504 r3 hook). Mirrors the seed
 // call's B6 weekday-preference resolution so the planned dates match what
 // the seeder will actually place.
-async function planFollowUpSeedDates(conn, parent, opts = {}) {
+async function planFollowUpSeedDates(conn, inputParent, inputOpts = {}) {
+  const rounds = lawnRoundsSeedInput(inputParent, inputOpts);
+  const parent = rounds ? rounds.parent : inputParent;
+  const opts = rounds ? rounds.opts : inputOpts;
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) return [];
   const columns = opts.columns || await scheduledServiceColumns(conn);
@@ -1359,7 +1422,10 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
   }
 }
 
-async function seedFollowUpsForParent(conn, parent, opts = {}) {
+async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
+  const rounds = lawnRoundsSeedInput(inputParent, inputOpts);
+  const parent = rounds ? rounds.parent : inputParent;
+  const opts = rounds ? rounds.opts : inputOpts;
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
@@ -1573,6 +1639,7 @@ module.exports = {
   planFollowUpSeedDates,
   seedFollowUpsForParent,
   serviceKeyFor,
+  lawnRoundsSeriesPattern,
   shiftPastWeekend,
   _internals: {
     applySeededPrepayCoverage,

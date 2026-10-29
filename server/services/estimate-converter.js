@@ -4727,7 +4727,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFr
     && !visitCountFieldsInvalid(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
     const lawnField = lawnCadenceFieldForService(svc);
-    if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
+    // GATE_LAWN_9X_ROUNDS: the series is written as lawn_rounds_9, so the term
+    // records that (and the quote prepay decision refuses it like seasonal).
+    if (mapped && (lawnField == null || lawnField === mapped)) {
+      return RecurringAppointmentSeeder.lawnRoundsSeriesPattern({ ...svc, pattern: mapped, intervalDays: null }).pattern;
+    }
   }
   if (seedingFamilyKey(svc) === 'tree_shrub'
     && explicitServiceCadence(svc) === 'every_6_weeks') {
@@ -4833,8 +4837,15 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
   const visitsPerYear = annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency);
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
+  // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the quote, the seeding gate, the
+  // catalog link and the coverage math above all keep every_6_weeks; only the
+  // pattern the series is WRITTEN with changes, so the parent mark and every
+  // seeded child agree. Off, or any other line: the pattern is unchanged.
+  const seriesWrite = RecurringAppointmentSeeder.lawnRoundsSeriesPattern({
+    ...svc, service_type: parentRow?.service_type, pattern, intervalDays: null,
+  });
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
-    pattern,
+    pattern: seriesWrite.pattern,
     visitsPerYear,
     skipWeekends: true,
     weekendShift: 'forward',
@@ -8395,6 +8406,7 @@ const EstimateConverter = {
           let coverageVisitCount;
           let coverageCadence;
           let seasonalPrepayCoverageUnsupported = false;
+          let lawnRoundsPrepayUnsupported = false;
           let recurringPrepayCoverageInvalid = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
@@ -8423,7 +8435,12 @@ const EstimateConverter = {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
             const cadence = annualPrepayCoverageCadence(coverageSvc, inferredFrequencyKey, acceptedPlanFrequency);
-            if (cadence === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+            if (cadence === RecurringAppointmentSeeder.SEASONAL_FEB_OCT
+              || cadence === RecurringAppointmentSeeder.LAWN_ROUNDS_9) {
+              // lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) fails closed the same way
+              // until the prepay coverage change teaches the renewal seeder the
+              // nine rounds; annualPrepayCoverageCadence only returns it when
+              // the series will actually be written as rounds.
               // seasonal_feb_oct is UNSUPPORTED as a prepay coverage cadence
               // (see prepayCoverageCadenceForPattern): the coverage seeder fills
               // remaining visits with same-day-of-month math from one stored
@@ -8433,6 +8450,7 @@ const EstimateConverter = {
               // raw inferred cadence here would diverge from the real series.
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
+              lawnRoundsPrepayUnsupported = cadence === RecurringAppointmentSeeder.LAWN_ROUNDS_9;
             } else if (cadence === PREPAY_COVERAGE_INVALID) {
               // Palm validation refused the cadence (contradictory visit
               // count or a commercial line). Falling through would set
@@ -8500,7 +8518,9 @@ const EstimateConverter = {
             // the draft invoice; the enclosing transaction rolls back the rest.
             if (seasonalPrepayCoverageUnsupported) {
               const err = new Error(
-                `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
+                lawnRoundsPrepayUnsupported
+                  ? `Annual prepay isn't supported for the nine-round lawn program yet — the renewal seeder can't represent its cadence and would place prepaid visits on the wrong dates. Convert as monthly or bill the prepay manually.`
+                  : `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
               );
               err.code = 'ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED';
               err.isOperational = true;
@@ -9260,6 +9280,8 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
+module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;
 module.exports.isPalmInjectionFamily = isPalmInjectionFamily;
 module.exports.guardServiceTypeFor = guardServiceTypeFor;
 module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;

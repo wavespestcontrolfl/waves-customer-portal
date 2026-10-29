@@ -3863,6 +3863,18 @@ const gates = {
   // slabBusinessSiteTaxLive(); dark by default. Off = every slab job of a
   // commercial account follows GATE_SLAB_HOME_NO_TAX exactly as before.
   slabBusinessSiteTax: gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX'),
+  // Lawn 9x rounds (owner 2026-10-28): a NEW residential lawn 9x series (9
+  // applications a year, today every-6-weeks or custom 42 days) is stored as
+  // recurring_pattern 'lawn_rounds_9' with no interval, so it books one visit
+  // in each of the nine fixed rounds a year instead of drifting on a 42-day
+  // gap. Applied where a series' pattern is WRITTEN (office create and
+  // make-recurring, estimate accept, online booking wizard, seeder follow-ups)
+  // by lawnRoundsSeriesPattern in recurring-appointment-seeder.js; quotes and
+  // cadence vocabulary stay every-6-weeks. Annual prepay on such a series fails
+  // closed until the prepay coverage change ships. Read at call time via
+  // lawn9xRoundsLive(); dark by default. Off = every series is written exactly
+  // as before.
+  lawn9xRounds: gateEnvValue('GATE_LAWN_9X_ROUNDS'),
 
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
@@ -6293,6 +6305,11 @@ function taxServiceCountyLive() {
 // GATE_SLAB_BUSINESS_SITE_TAX read at CALL time (so a flip needs no redeploy).
 function slabBusinessSiteTaxLive() {
   return gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX');
+}
+
+// GATE_LAWN_9X_ROUNDS read at CALL time (so a flip needs no redeploy).
+function lawn9xRoundsLive() {
+  return gateEnvValue('GATE_LAWN_9X_ROUNDS');
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -9024,3 +9041,5 @@ module.exports.stockCountAwareUsageLive = stockCountAwareUsageLive;
 module.exports.taxServiceCountyLive = taxServiceCountyLive;
 // GATE_SLAB_BUSINESS_SITE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
+// GATE_LAWN_9X_ROUNDS reader, on its own line so gate PRs never conflict.
+module.exports.lawn9xRoundsLive = lawn9xRoundsLive;
