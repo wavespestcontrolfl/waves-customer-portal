@@ -258,8 +258,6 @@ const LANE_RUNTIME = {
   // M2 (Codex r20): persists the brief + an unpriced, disabled estimate scaffold; the operator prices, enables and sends.
   commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   churn_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  signal_detector: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', ...LONG_BATCH },
-  retention_drafts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
 
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
