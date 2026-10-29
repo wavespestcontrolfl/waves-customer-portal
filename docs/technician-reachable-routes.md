@@ -301,6 +301,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
+| GET | `/api/tech/payroll/checks` | tech-payroll |
+| GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
 | POST | `/api/tech/services/:id/dictation` | tech-track |
 | GET | `/api/tech/services/:id/dictation/availability` | tech-track |
 | POST | `/api/tech/services/:id/en-route` | tech-track |
