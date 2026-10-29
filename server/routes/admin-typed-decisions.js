@@ -25,7 +25,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
-const { callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -39,6 +39,7 @@ const SMS_SUBJECT = 'sms_log';
 const CALL_SUBJECT = 'call_log';
 const SOCIAL_POST_SUBJECT = 'social_post';
 const VISIT_SUBJECT = 'scheduled_services';
+const CHAT_SUBJECT = 'agent_messages';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
 const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
@@ -112,6 +113,34 @@ function publicSubject({ hash: _hash, ...rest }) {
   return rest;
 }
 
+// An Ask Waves chat turn (ask_waves_safety): the assistant agent_messages row
+// the shadow recorded against, with the visitor message just before it. The
+// chat log writes both rows in one statement, so they share a created_at: the
+// visitor message is the newest user row of the conversation at or before the
+// assistant row's time. That comparison runs in SQL, where created_at keeps its
+// microseconds: a JS Date keeps only milliseconds and would miss the user row
+// written in the same statement. The assistant text carries the leading
+// "[<intent>] " tag logIntakeExchange adds (always exactly one, so any one
+// leading tag is stripped and no second copy of the intent list can drift); the
+// digest is built from the message and reply exactly as the shadow built Jev's
+// state (askWavesSubjectHash).
+const CHAT_INTENT_TAG_RE = /^\[[a-z_]+\] /;
+const CHAT_VISITOR_MESSAGE_SQL = `(SELECT u.content FROM agent_messages u
+  WHERE u.conversation_id = a.conversation_id AND u.role = 'user' AND u.created_at <= a.created_at
+  ORDER BY u.created_at DESC LIMIT 1) AS visitor_message`;
+async function readChatTurns(ids) {
+  const assistants = await db('agent_messages as a').whereIn('a.id', ids).where('a.role', 'assistant')
+    .select('a.id', 'a.content', 'a.created_at', db.raw(CHAT_VISITOR_MESSAGE_SQL));
+  const turns = new Map();
+  for (const a of assistants) {
+    const reply = String(a.content || '').replace(CHAT_INTENT_TAG_RE, '');
+    const found = a.visitor_message !== null && a.visitor_message !== undefined;
+    const visitorMessage = found ? String(a.visitor_message) : null;
+    turns.set(a.id, { visitorMessage, reply, at: a.created_at, hash: found ? askWavesSubjectHash({ visitorMessage, reply }) : null });
+  }
+  return turns;
+}
+
 // Display text for a page of rows, read live. Failures leave a row without
 // its text rather than failing the page.
 async function loadSubjects(rows) {
@@ -120,6 +149,7 @@ async function loadSubjects(rows) {
   const smsIds = subjectIds(SMS_SUBJECT);
   const callIds = subjectIds(CALL_SUBJECT);
   const postIds = subjectIds(SOCIAL_POST_SUBJECT);
+  const chatIds = subjectIds(CHAT_SUBJECT);
   try {
     if (smsIds.length) {
       const texts = await db('sms_log').whereIn('id', smsIds).modify(excludeUnresolvedSendReservations)
@@ -156,6 +186,11 @@ async function loadSubjects(rows) {
           type: SOCIAL_POST_SUBJECT, text: socialPostCaption(p.published_content) || null, imageUrl: p.image_url || null, at: p.created_at,
           hash: socialPostSubjectHash({ imageUrl: p.image_url, captions: p.published_content }),
         });
+      }
+    }
+    if (chatIds.length) {
+      for (const [id, turn] of await readChatTurns(chatIds)) {
+        subjects.set(`${CHAT_SUBJECT}:${id}`, { type: CHAT_SUBJECT, text: turn.reply || null, visitorMessage: turn.visitorMessage, at: turn.at, hash: turn.hash });
       }
     }
     // A visit (visit_access): the stored state each row was judged on, already
@@ -253,8 +288,8 @@ function correctValueFor(target, { verdict, seen }, value) {
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer / transcript version moved since the page loaded (409, by code).
 // The subject changed after Jev answered: the live digest (a call's transcript,
-// a text plus the previous Waves text, or a social post's photo URL and
-// caption, rebuilt exactly as the shadow built the model's state) no longer matches the one stored with the decision, so a label
+// a text plus the previous Waves text, a chat reply plus the visitor message
+// it answered, or a social post's photo URL and caption, rebuilt exactly as the shadow built the model's state) no longer matches the one stored with the decision, so a label
 // would confirm an answer against content Jev never saw.
 async function liveSubjectHash(target) {
   if (target.subject_type === CALL_SUBJECT) {
@@ -270,6 +305,10 @@ async function liveSubjectHash(target) {
   if (target.subject_type === SOCIAL_POST_SUBJECT) {
     const post = await db('social_media_posts').where({ id: target.subject_id }).first('image_url', 'published_content');
     return post ? socialPostSubjectHash({ imageUrl: post.image_url, captions: post.published_content }) : null;
+  }
+  if (target.subject_type === CHAT_SUBJECT) {
+    const turn = (await readChatTurns([target.subject_id])).get(target.subject_id);
+    return turn ? turn.hash : null;
   }
   // A subject type this route cannot read back has no live digest: a row that
   // stored one is then refused (subject_changed), never judged as a text.

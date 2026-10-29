@@ -4970,7 +4970,26 @@ over the visitor side: Poison Control / veterinary lines as above; no quote
 CTA). It only ever adds the emergency script; a no, a failed or late check,
 or a malformed verdict leaves the answer unchanged (fails open to the
 answer, which keeps every guard above). Its accuracy is the classifier's —
-there is no regex on this path. NOT CORS-open — credentialed allowlist
+there is no regex on this path.
+With `GATE_ASK_WAVES_JEV_CHECK` set (dark; `askWavesJevCheckMode()` =
+`shadow` | `enforce`, read at call time, anything else is off; asks also need
+`GATE_TYPED_DECISIONS`, without which they return at once and the reply is
+kept), a model-written reply that the claim chokepoint above passed — never
+reviewed copy, the emergency script, an `emergency`-intent answer or the
+provider-failure fallback — is also put to Jev (TypeSafe typed decision
+`ask_waves_safety.v1`: a blanket safety claim? a re-entry or use time?). Its
+only state is the visitor's active message and the reply; both go to TypeSafe
+only while the gate is set. `shadow` changes nothing on the wire and adds no
+wait: Jev is asked after the conversation log has written the turn, and the
+answers are recorded in `decision_reviews` (subject `agent_messages`, the
+assistant row) for labeling. `enforce` waits at most 800 ms
+(`ASK_WAVES_JEV_CHECK_GRACE_MS`) once the reply is settled: a yes on either
+question replaces the reply with the same reviewed copy the claim chokepoint
+serves (emergency direction when it applies, else the English or Spanish
+"follow the product label" answer); a no, or a late or failed answer, keeps
+the reply (fails open: the chokepoint already passed it), and a kept reply's
+answers are recorded as in shadow. The response shape is unchanged in every
+mode. Kill switch: unset the gate. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
