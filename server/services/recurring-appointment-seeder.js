@@ -147,14 +147,16 @@ function clampDateToRound(pattern, dateStr, { skipWeekends = false, blackoutDate
   const round = roundOf(intendedDate);
   if (!round) return dateStr;
   if (dateStr >= round.start && dateStr <= round.end) return dateStr;
+  // Start AT the edge that was crossed and walk inward, so the result never
+  // depends on how far outside the round the date is (an admin-moved exception
+  // can sit months away). Null only when every day of the round is closed.
   const step = dateStr > round.end ? -1 : 1;
-  let candidate = dateStr;
-  for (let i = 0; i < 75; i++) {
-    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
-    if (candidate < round.start || candidate > round.end) continue;
+  let candidate = step < 0 ? round.end : round.start;
+  for (let i = 0; i < round.length; i++) {
     const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
     const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
     if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
   }
   return null;
 }

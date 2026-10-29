@@ -351,6 +351,32 @@ describe('rebooker: a round visit stays in its round', () => {
       expect(ord(moved)).toBe(ord(newAnchor) + 1);
     });
 
+    test('a distant date exception (an admin move months away) still lands in its own round', async () => {
+      // Audit finding (P1, round 2): the round-4 visit was moved by an admin to Wed Sep 15. After the
+      // +7 re-anchor its shifted date is Sep 22, ~110 days past round 4's end. The old 75-day walk
+      // exhausted and kept September (round 4 empty, round 7 doubled); the clamp now starts at the
+      // crossed round edge.
+      const oldAnchor = '2027-03-17';
+      const newAnchor = '2027-03-24';
+      const { projectOccurrenceDate, cadenceSlotDate } = await rebooker.makeSeriesProjector({
+        service: { scheduled_date: oldAnchor, customer_id: 'c', skip_weekends: true },
+        parent: { recurring_pattern: LAWN_ROUNDS_9, customer_id: 'c', skip_weekends: true },
+        newDate: newAnchor, seriesDateStr: newAnchor, prefersNoWeekends: true,
+      });
+      const rows = [
+        null,
+        { date_exception: true, scheduled_date: '2027-09-15' },
+        { date_exception: false, scheduled_date: lawnRoundDate(oldAnchor, 2) },
+        { date_exception: false, scheduled_date: lawnRoundDate(oldAnchor, 3) },
+      ];
+      const dates = rows.map((row, i) => {
+        cadenceSlotDate(i);
+        return projectOccurrenceDate(i, row);
+      });
+      expect(dates.map((d) => ord(d))).toEqual([0, 1, 2, 3].map((k) => ord(newAnchor) + k));
+      expect(new Set(dates).size).toBe(dates.length);
+    });
+
     test('two occurrences never share a day, and a collision stays in the round', async () => {
       const anchor = '2027-03-12';
       const { cadenceSlotDate } = await make(anchor);

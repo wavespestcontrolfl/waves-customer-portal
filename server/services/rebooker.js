@@ -1251,10 +1251,14 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     // own round. A date exception's shifted date (the anchor delta can carry it
     // past its round's end) stays in the round of the occurrence's own cadence
     // slot, never the shifted date's round: that would leave a round empty and
-    // put two visits in the next one. Exhausts only if every day of the round
-    // is closed.
+    // put two visits in the next one. The clamp starts at the crossed round
+    // edge, so a distant exception (an admin move months away) still lands in
+    // its own round. If every day of the round is closed, the round's edge day
+    // itself is kept (closures ignored): the date never leaves its round.
     if (pattern === LAWN_ROUNDS_9) {
-      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate: String(roundSlot || raw).split('T')[0] }) || out;
+      const intendedDate = String(roundSlot || raw).split('T')[0];
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate })
+        || clampDateToRound(pattern, out, { intendedDate }) || out;
     }
     if (pattern !== SEASONAL_FEB_OCT) return out;
     // The clamp can exhaust only on 75 straight in-season closed or weekend
