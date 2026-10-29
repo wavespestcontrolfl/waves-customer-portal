@@ -5368,7 +5368,8 @@ function UndoPaymentModal({ invoice, onClose, onUndone }) {
     try {
       const res = await adminFetch(`/admin/invoices/${invoice.id}/undo-payment`, {
         method: "POST",
-        body: JSON.stringify({ reason: reason.trim() }),
+        // The payment the server described when this opened: if another one sits on the invoice now, the server refuses.
+        body: JSON.stringify({ reason: reason.trim(), paymentId: check.payment.id }),
       });
       onUndone(
         res.remindersRearmed === false

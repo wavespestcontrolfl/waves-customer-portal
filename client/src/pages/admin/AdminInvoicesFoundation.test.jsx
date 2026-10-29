@@ -1067,7 +1067,7 @@ describe("Undo payment (GATE_UNDO_MANUAL_PAYMENT)", () => {
 
   it("will not undo without a reason, then sends the reason and closes", async () => {
     rows = [paidToday()]; listWith(true);
-    overrides.set(`GET ${undoKey}`, () => response({ eligible: true, payment: { amount: 120, method: "check", recordedAt: rows[0].payment_recorded_at } }));
+    overrides.set(`GET ${undoKey}`, () => response({ eligible: true, payment: { id: "payment-a", amount: 120, method: "check", recordedAt: rows[0].payment_recorded_at } }));
     overrides.set(`POST ${undoKey}`, () => response({ ok: true, remindersRearmed: true }));
     await openPage(); await expandPaid();
     const dialog = await dialogFrom("Undo payment", "Undo payment");
@@ -1078,7 +1078,7 @@ describe("Undo payment (GATE_UNDO_MANUAL_PAYMENT)", () => {
     fireEvent.change(dialog.getByLabelText(/Reason/), { target: { value: "Recorded on the wrong invoice" } });
     expect(confirm).toBeEnabled();
     fireEvent.click(confirm);
-    await waitFor(() => expect(requests.find(request => request.key === `POST ${undoKey}`)?.body).toEqual({ reason: "Recorded on the wrong invoice" }));
+    await waitFor(() => expect(requests.find(request => request.key === `POST ${undoKey}`)?.body).toEqual({ reason: "Recorded on the wrong invoice", paymentId: "payment-a" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Undo payment" })).not.toBeInTheDocument());
   });
 });
