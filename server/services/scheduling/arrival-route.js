@@ -597,12 +597,22 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 
 /** Why an `arrival_window` failure happened, from the same simulation re-run to report
  *  lateness instead of stopping at the first miss (explain: true only). The new visit is
- *  tried at EVERY position of the day's current order, whatever capacity mode or staff
- *  insertion do for the real placement, so one cramped order never speaks for the day.
- *  - targetLate: at some position the new visit itself misses its window.
- *  - newlyLateStopIds: OTHER stops that arrive after their window at EVERY position and
- *    are not late in the day without the new visit. Empty unless every position shows
- *    one, so a non-empty list means no place for the visit keeps everyone else on time.
+ *  tried at EVERY position of the day's current order (n+1), whatever capacity mode or
+ *  GATE_STAFF_ROUTE_INSERTION do for the real placement, so one cramped order never speaks
+ *  for the day.
+ *
+ *  A position is VIABLE only if the new visit keeps its OWN 2-hour window there. A position
+ *  that misses it (typically the new visit appended after everyone) "saves" the other
+ *  customers only by breaking the new customer's promise, so it is not a way to keep the
+ *  hour: an hour that fits only by arriving late to the new customer is not offered, and
+ *  one that fits only by making somebody else late is removed. Per position:
+ *  - others(p): stops late with the visit there that are NOT late in the day without it.
+ *  - Any viable position with no others(p): the hour can be kept with every promise
+ *    kept, so nothing is confirmed.
+ *  - No viable position: the new customer cannot be reached in their own window anywhere
+ *    (`targetLate`); nobody else is blamed.
+ *  - Viable positions all with others(p): `newlyLateStopIds` is the UNION of the stops
+ *    made late at the viable positions.
  *  - baselineLateStopIds: stops already late in the day without the new visit.
  *  - dayEndExceeded: at some position the route runs past the day end. */
 const EXPLAIN_MAX_STOPS = 30;
@@ -616,23 +626,25 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
   const baselineLate = new Set(baselines.flatMap(baseline => lateIds(baseline) || []));
   const orders = baselines.flatMap(baseline => (baseline.length > EXPLAIN_MAX_STOPS ? []
     : Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])));
-  const newlyLate = new Set();
-  let everyPositionCrowdsAnotherStop = orders.length > 0;
-  let targetLate = false;
+  const crowded = new Set();
+  let viable = 0;
+  let unconfirmed = orders.length === 0; // an unsimulable position, or a viable one that keeps everyone on time
   let dayEndExceeded = false;
   for (const order of orders) {
     const late = lateIds(order);
     if (late == null) {
-      everyPositionCrowdsAnotherStop = false;
+      unconfirmed = true;
       continue;
     }
-    if (late.includes(target.id)) targetLate = true;
-    const others = late.filter(id => id !== target.id && !baselineLate.has(id));
-    if (others.length) others.forEach(id => newlyLate.add(id));
-    else everyPositionCrowdsAnotherStop = false;
     if (!simulate(order, [], { reportLate: true })) dayEndExceeded = true;
+    if (late.includes(target.id)) continue;
+    viable += 1;
+    const others = late.filter(id => !baselineLate.has(id));
+    if (others.length) others.forEach(id => crowded.add(id));
+    else unconfirmed = true;
   }
-  return { targetLate, newlyLateStopIds: everyPositionCrowdsAnotherStop ? [...newlyLate] : [],
+  return { targetLate: orders.length > 0 && viable === 0,
+    newlyLateStopIds: viable > 0 && !unconfirmed ? [...crowded] : [],
     baselineLateStopIds: [...baselineLate], dayEndExceeded };
 }
 

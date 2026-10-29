@@ -6234,11 +6234,14 @@ code, error code, message text, limiter, signature or token changes.
 - `off`: byte-identical to before; the check code is never loaded.
 - `shadow`: the check runs and logs one `[customer-route-check]` line; the
   list is today's list.
-- `true`: a start is removed only when the route check CONFIRMS that placing
-  the visit there, wherever it goes in the day, would make ANOTHER customer
-  arrive after their 2-hour window while they are on time without the visit
-  (the evaluator's `explain` diagnosis, `newlyLateStopIds`). A visit that
-  only misses its own window (`target_late`), a route past the day end
+- `true`: a start is removed only if every placement that keeps the new
+  customer's own 2-hour window makes ANOTHER customer arrive after their
+  2-hour window while they are on time without the visit (the evaluator's
+  `explain` diagnosis tries the visit at every position of the day;
+  `newlyLateStopIds`). A placement that "saves" the others only by missing the
+  new customer's own window does not count. If one placement keeps every
+  promise, or the new customer cannot be reached in their own window anywhere
+  (`target_late`), the start stays. Also kept: a route past the day end
   (`day_end`), a day already late without the visit (`baseline_late`),
   unverified routes, return-time, margin or overcommitted results, errors, a
   missing diagnosis, and starts not checked in time all stay. Each start is checked

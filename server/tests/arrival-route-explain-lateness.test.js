@@ -41,44 +41,40 @@ beforeEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
 describe('explain: true on the real evaluator', () => {
-  test('(1) the auditor repro: A 09:00 for 120, B 10:30 for 60, new 10:00 visit. Placing it after B leaves both customers on time, so nobody is newly late', () => {
+  // WHY the auditor's case removes the hour: the new visit placed after B "saves" A and B
+  // only by arriving at 12:40, past its own 2-hour window (10:00 + 120 = 12:00). That position
+  // breaks the new customer's promise, so it is not a way to keep the hour. Every position
+  // that keeps the new customer's window makes A or B late.
+  test('(1) the auditor repro: A 09:00 for 120, B 10:30 for 60, new 10:00 visit. Before A makes A late, between A and B makes B late, after B misses the new visit\'s own window', () => {
     const rows = [stop('A', '09:00', 120), stop('B', '10:30', 60)];
     const fit = evaluate(rows, '10:00', 60, { explain: true });
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
-    // Before A it makes A late, between A and B it makes B late, after B it makes only itself late.
-    expect(fit.lateness).toEqual({ targetLate: true, newlyLateStopIds: [], baselineLateStopIds: [], dayEndExceeded: false });
+    expect(fit.lateness).toEqual({ targetLate: false, newlyLateStopIds: ['A', 'B'], baselineLateStopIds: [], dayEndExceeded: false });
   });
 
-  test('every position of the day is tried, whatever capacity mode does: the same answer with capacity on', () => {
+  test('(1b) the same answer with capacity mode on: every position is tried either way', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    const rows = [stop('A', '09:00', 120), stop('B', '10:30', 60)];
-    const fit = evaluate(rows, '10:00', 60, { explain: true });
-    expect(fit.lateness ? fit.lateness.newlyLateStopIds : []).toEqual([]);
+    const fit = evaluate([stop('A', '09:00', 120), stop('B', '10:30', 60)], '10:00', 60, { explain: true });
+    if (!fit.feasible) expect(fit.lateness.newlyLateStopIds).toEqual(['A', 'B']);
   });
 
-  test('the tried positions are the n+1 insertion points of the current order', () => {
-    const optimizer = require('../services/route-optimizer');
-    const rows = [stop('A', '09:00', 120), stop('B', '10:30', 60), stop('C', '13:00', 60)];
-    const spy = jest.spyOn(optimizer, 'fallbackLegMetrics');
-    evaluate(rows, '10:00', 60);
-    const plain = spy.mock.calls.length;
-    spy.mockClear();
-    evaluate(rows, '10:00', 60, { explain: true });
-    // (default calls) + baseline (3 legs + home) + 4 positions x 2 simulations each; only bounded growth
-    expect(spy.mock.calls.length - plain).toBeGreaterThan(0);
-    expect(spy.mock.calls.length - plain).toBeLessThan(200);
-    spy.mockRestore();
+  test('(2) one position keeps everyone on time: nothing is confirmed', () => {
+    // A is promised 10:00-12:00 for 2 hours. The new 10:00 visit sorts after A (same window, later
+    // created) and would arrive 12:20, past its own limit. Placed FIRST it arrives 10:00 and A
+    // still arrives 11:20, inside its window: every promise is kept.
+    const fit = evaluate([stop('A', '10:00', 120)], '10:00', 60, { explain: true });
+    expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
+    expect(fit.lateness).toEqual({ targetLate: false, newlyLateStopIds: [], baselineLateStopIds: [], dayEndExceeded: false });
   });
 
-  test('(2) the new visit misses only its own window: nobody else is late', () => {
-    // A runs 08:00-11:00; a new 08:00 visit queued behind it arrives 11:20, after its 10:00 limit.
-    const rows = [stop('A', '08:00', 180)];
-    const fit = evaluate(rows, '08:00', 60, { explain: true });
+  test('(3) the new customer cannot be reached in their own window anywhere and nobody else is late: target_late', () => {
+    // The van leaves at 11:00; the new visit is promised 08:00-10:00. No other stops.
+    const fit = evaluate([], '08:00', 60, { explain: true, departureMin: 11 * 60 });
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
     expect(fit.lateness).toEqual({ targetLate: true, newlyLateStopIds: [], baselineLateStopIds: [], dayEndExceeded: false });
   });
 
-  test('(3) the day is already late before the new visit: that stop is baseline, not newly late', () => {
+  test('(4) the day is already late before the new visit: that stop is baseline, not newly late', () => {
     // A takes four hours, so B (promised 08:30, arrive by 10:30) is late with or without the new 15:00 visit.
     const rows = [stop('A', '08:00', 240), stop('B', '08:30', 60)];
     const fit = evaluate(rows, '15:00', 60, { explain: true });
@@ -88,7 +84,7 @@ describe('explain: true on the real evaluator', () => {
     expect(fit.lateness.targetLate).toBe(false);
   });
 
-  test('(4) the route runs past the day end: nobody is late', () => {
+  test('the route runs past the day end: nobody is late, day end is flagged', () => {
     const fit = evaluate([stop('A', '09:00', 60)], '19:00', 120, { explain: true });
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
     expect(fit.lateness).toEqual({ targetLate: false, newlyLateStopIds: [], baselineLateStopIds: [], dayEndExceeded: true });
@@ -98,6 +94,19 @@ describe('explain: true on the real evaluator', () => {
     const fit = evaluate([stop('A', '09:00', 60)], '13:00', 60, { explain: true });
     expect(fit.feasible).toBe(true);
     expect(fit).not.toHaveProperty('lateness');
+  });
+
+  test('the tried positions are the n+1 insertion points of the current order, with bounded work', () => {
+    const optimizer = require('../services/route-optimizer');
+    const rows = [stop('A', '09:00', 120), stop('B', '10:30', 60), stop('C', '13:00', 60)];
+    const spy = jest.spyOn(optimizer, 'fallbackLegMetrics');
+    evaluate(rows, '10:00', 60);
+    const plain = spy.mock.calls.length;
+    spy.mockClear();
+    evaluate(rows, '10:00', 60, { explain: true });
+    expect(spy.mock.calls.length - plain).toBeGreaterThan(0);
+    expect(spy.mock.calls.length - plain).toBeLessThan(200);
+    spy.mockRestore();
   });
 });
 
@@ -162,33 +171,17 @@ describe('customer route check with the real evaluator', () => {
     });
   }
 
-  test('the auditor repro slot is kept (no position leaves another customer newly late)', async () => {
+  test('the auditor repro slot is removed: every placement that keeps the new customer\'s window makes A or B late', async () => {
     const { slots, report } = await check([stop('A', '09:00', 120), stop('B', '10:30', 60)], 10 * 60, 60);
-    expect(slots).toHaveLength(2);
-    expect(report).toMatchObject({ removed: 0, targetLate: 1 });
+    expect(slots.map((x) => x.start_time)).toEqual(['16:00']);
+    expect(report.removed).toBe(1);
+    expect(report.removedSlots[0].lateVisitId).toBe('A,B');
   });
 
-  // The new visit appended LAST delays nobody, so with every position tried a real route never
-  // confirms newly late stops. The removal path itself is covered with a mocked diagnosis in
-  // customer-route-check.test.js.
-  test('crowded days never confirm newly late stops on the real evaluator', async () => {
-    const days = [
-      [stop('A', '08:00', 120), stop('B', '09:30', 120), stop('C', '11:00', 120), stop('D', '13:00', 60)],
-      [stop('A', '09:00', 240), stop('B', '09:30', 60)],
-      [stop('A', '10:00', 60)],
-    ];
-    for (const rows of days) {
-      for (const startMin of [8 * 60, 9 * 60, 10 * 60, 11 * 60, 13 * 60]) {
-        const fit = evaluate(rows, hh(startMin), 60, { explain: true });
-        if (!fit.feasible && fit.reason === 'arrival_window') expect(fit.lateness.newlyLateStopIds).toEqual([]);
-      }
-    }
-  });
-
-  test('keeps a slot that only misses its own window and counts target_late', async () => {
-    const { slots, report } = await check([stop('A', '08:00', 180)], 8 * 60, 60);
+  test('a slot that some placement can keep is kept', async () => {
+    const { slots, report } = await check([stop('A', '10:00', 120)], 10 * 60, 60);
     expect(slots).toHaveLength(2);
-    expect(report).toMatchObject({ removed: 0, targetLate: 1 });
+    expect(report.removed).toBe(0);
   });
 
   test('keeps a slot on a day that was already late and counts baseline_late', async () => {
@@ -218,8 +211,8 @@ describe('customer route check with the real evaluator', () => {
   test('the summary line carries the new counts', async () => {
     const logger = require('../services/logger');
     logger.info.mockClear();
-    const out = await check([stop('A', '08:00', 180)], 8 * 60, 60);
-    expect(out.report.targetLate).toBe(1);
-    expect(logger.info.mock.calls[0][0]).toMatch(/kept_other=\d+ target_late=1 baseline_late=0 day_end=0 floor_kept=/);
+    const out = await check([stop('A', '08:00', 240), stop('B', '08:30', 60)], 15 * 60, 60);
+    expect(out.report.baselineLate).toBe(2);
+    expect(logger.info.mock.calls[0][0]).toMatch(/kept_other=\d+ target_late=0 baseline_late=2 day_end=0 floor_kept=/);
   });
 });

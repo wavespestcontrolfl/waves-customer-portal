@@ -9,10 +9,10 @@
  * page) were built on the older gap engine, which does not run that check.
  * This module runs it over a list the picker ALREADY built, as a DROP-ONLY
  * filter: a slot is removed only when the evaluator confirms (explain: true)
- * that ANOTHER customer would arrive after their window because of the new
- * visit, wherever it is placed. A visit that only misses its own window, a
- * route past the day end, a day already late without the visit, and every
- * other outcome keep the slot.
+ * that every placement keeping the NEW customer's own window makes ANOTHER
+ * customer arrive after theirs. A new customer who cannot be reached in their
+ * own window anywhere, a route past the day end, a day already late without
+ * the visit, and every other outcome keep the slot.
  *
  * Modes (customerRouteCheckMode, read at CALL time):
  *   off     unset or any other value. Callers never reach this module.
