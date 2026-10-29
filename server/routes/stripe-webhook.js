@@ -8331,7 +8331,7 @@ async function handleDisputeClosed(dispute) {
                 await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
                 await trx('invoices')
                   .where({ id: invId })
-                  .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
+                  .update({ status: 'overdue', paid_at: null, amount_paid: handPartsPaidSql(trx, invId), stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
               });
             }
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
@@ -8577,6 +8577,7 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: lostInvoice.id }).update({
               status: 'overdue',
               paid_at: null,
+              amount_paid: handPartsPaidSql(trx, lostInvoice.id),
               stripe_payment_intent_id: null,
               stripe_charge_id: null,
               updated_at: trx.fn.now(),
@@ -8764,6 +8765,8 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: lostInvoice.id }).update({
               status: 'overdue',
               paid_at: null,
+              // Hand part payments still received come off what is owed again (closed(lost) can arrive before created).
+              amount_paid: handPartsPaidSql(trx, lostInvoice.id),
               // Same PI-linkage clear as dispute-created: a lingering
               // non-canceled intent blocks the pay page / card-on-file
               // re-collection paths with "payment already in progress".

@@ -134,6 +134,23 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
   });
 
+  it('Undo of a part waits while a saved-card charge for the rest is unresolved (a crash can roll the invoice back but keep the claim)', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id, { amountCents: 4000 });
+    await database('stripe_invoice_charge_attempts').insert({
+      invoice_id: invoice.id, stripe_payment_method_id: 'pm_synthetic', idempotency_key: `synthetic-${invoice.id}`, status: 'ambiguous',
+      submitted_at: new Date(),
+    });
+    try {
+      const err = await refusalOf(undo(invoice.id));
+      expect(err).toMatchObject({ statusCode: 409, code: 'card_charge_pending' });
+      expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+      expect((await describeManualPaymentUndo(invoice.id)).code).toBe('card_charge_pending');
+    } finally {
+      await database('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id }).del();
+    }
+  });
+
   it('a part payment adds to amount_paid and leaves the invoice open: same status, reminders running, one ledger row, no receipt', async () => {
     const invoice = await makeInvoice();
     await seedSequence(invoice);

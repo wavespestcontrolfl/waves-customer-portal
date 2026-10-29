@@ -174,6 +174,14 @@ async function manualPaymentUndoRefusal(conn, invoice) {
     if (invoice.stripe_payment_intent_id) {
       return notEligible('payment_session', 'The customer opened a payment page for this invoice after the part payment, so it cannot be undone here.');
     }
+    // A saved-card charge for the rest that is submitted or unresolved keeps its own claim row even when a crash rolled the invoice
+    // write back: if it settles after this Undo, the settle books the invoice paid without the part. Read only, never released here.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true });
+    } catch (err) {
+      if (!['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) throw err;
+      return notEligible('card_charge_pending', 'A card charge for the rest of this invoice is still being settled, so the part payment cannot be undone now. Try again later.');
+    }
   } else if (invoice.status !== 'paid' || !VALID_PAYMENT_METHODS.includes(invoice.payment_method)
     || invoice.stripe_payment_intent_id || invoice.stripe_charge_id || invoice.processor) {
     return notEligible('not_manual_paid', manualOnly);
