@@ -314,6 +314,18 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('the list filtered by customer_id returns only that customer\'s drafts and counts only them', async () => {
+    const mine = await customer();
+    const theirs = await customer();
+    const mineId = await decision(mine, await inbound(mine));
+    const theirId = await decision(theirs, await inbound(theirs));
+    const only = await executeAgentReviewTool('list_agent_review_drafts', { customer_id: mine, limit: 25 }, ADMIN);
+    expect(only.agent_review_drafts.map((r) => r.decision_id)).toEqual([mineId]);
+    expect(only.waiting_drafts).toBe(1);
+    const all = (await executeAgentReviewTool('list_agent_review_drafts', { limit: 25 }, ADMIN)).agent_review_drafts.map((r) => r.decision_id);
+    expect(all).toEqual(expect.arrayContaining([mineId, theirId]));
+  });
+
   test('the list shows the waiting draft with a masked number', async () => {
     const c = await customer();
     const id = await decision(c, await inbound(c));

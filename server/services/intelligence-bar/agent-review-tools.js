@@ -62,6 +62,7 @@ Use for: "any suggested replies waiting?", "what is in the Agent Review queue?",
       type: 'object',
       properties: {
         limit: { type: 'number', description: `How many to return (default ${LIST_DEFAULT}, max ${LIST_MAX})` },
+        customer_id: { type: 'string', format: 'uuid', description: 'Only the drafts filed under this customer. Inside a request about one customer this is that customer (filled in for you); leave it out to see the whole queue.' },
       },
     },
   },
@@ -117,6 +118,10 @@ const snapshotOf = (row) => {
   try { return JSON.parse(row.input_snapshot); } catch { return {}; }
 };
 const suggest = () => require('../sms-suggest-mode');
+// The drafter's flags as the list and the card both show them: lint it flagged, and the actions the draft promises (as labels).
+const actionLabel = (a) => (typeof a === 'string' ? a : (a?.label || a?.type || JSON.stringify(a)));
+const listOf = (v) => (Array.isArray(v) ? v : []);
+const draftFlags = (snap) => ({ lint_failures: listOf(snap?.comms_lint), promised_actions: listOf(snap?.intended_actions).map(actionLabel) });
 const communications = () => require('../../routes/admin-communications');
 
 // ── read ─────────────────────────────────────────────────────────
@@ -131,12 +136,16 @@ function waitingDrafts(q) {
 }
 
 async function listAgentReviewDrafts(input = {}) {
+  const only = String(input.customer_id || '').trim().toLowerCase();
+  if (only && !UUID_RE.test(only)) return refusal('customer_id must be a valid customer id', 'invalid_target');
+  // A customer filter is on the filing customer (agent_decisions.customer_id), for the rows and the count alike.
+  const filtered = (q) => (only ? q.where('ad.customer_id', only) : q);
   const asked = Math.floor(Number(input.limit));
   const limit = Math.min(Math.max(Number.isFinite(asked) && asked > 0 ? asked : LIST_DEFAULT, 1), LIST_MAX);
-  const base = () => waitingDrafts(db('agent_decisions as ad'));
-  const rows = await waitingDrafts(db('agent_decisions as ad')
+  const base = () => filtered(waitingDrafts(db('agent_decisions as ad')));
+  const rows = await filtered(waitingDrafts(db('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-    .leftJoin('customers as c', 'ad.customer_id', 'c.id'))
+    .leftJoin('customers as c', 'ad.customer_id', 'c.id')))
     .select('ad.id', 'ad.customer_id', 'ad.suggested_message', 'ad.input_snapshot', 'ad.created_at',
       's.from_phone as sms_from_phone', 's.message_body as inbound_message', 'c.first_name', 'c.last_name', 'c.phone as customer_phone')
     .orderBy('ad.created_at', 'asc').orderBy('ad.id', 'asc')
@@ -152,8 +161,7 @@ async function listAgentReviewDrafts(input = {}) {
       sends_to: maskPhone(r.sms_from_phone || r.customer_phone),
       inbound_message: clip(r.inbound_message || snap?.sms?.body, 600),
       suggested_reply: clip(r.suggested_message, MAX_REPLY_CHARS),
-      lint_failures: Array.isArray(snap?.comms_lint) ? snap.comms_lint : [],
-      promised_actions: Array.isArray(snap?.intended_actions) ? snap.intended_actions : [],
+      ...draftFlags(snap),
       waiting_minutes: Math.max(0, Math.round((now - new Date(r.created_at).getTime()) / 60000)),
       received_at: r.created_at,
     };
@@ -255,8 +263,16 @@ async function deliveryLinkNotes(text, { audience, purpose, messageType }) {
   return notes;
 }
 
+const PREVIEW_NOTES = {
+  ignore: 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this draft and sends nothing.',
+  approve: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly the text shown, to the number shown; if anything changed it refuses and sends nothing.',
+};
+PREVIEW_NOTES.revise = PREVIEW_NOTES.approve;
+const AUDIENCE = { true: 'customer', false: 'lead' };
+
 async function buildPlan(toolName, input = {}) {
   const action = TOOL_ACTION[toolName];
+  const sends = action !== 'ignore';
   const loaded = await loadPlannableDecision(input);
   if (loaded.error) return loaded;
   const { decision: d } = loaded;
@@ -266,28 +282,22 @@ async function buildPlan(toolName, input = {}) {
 
   // An active job applicant's number (with no customer on it) is answered from Recruiting; the composer's send takes its
   // applicant rail there, so no Agent Review card is offered for it.
-  if (action !== 'ignore' && !target.customerId) {
-    const { isRecruitingPhone } = require('../../utils/recruiting-thread-scope');
-    if (await isRecruitingPhone(target.to, undefined, { activeOnly: true })) {
-      return refusal('This number belongs to an active job applicant. Handle it from the Communications page.', 'needs_communications_page');
-    }
+  if (sends && !target.customerId && await require('../../utils/recruiting-thread-scope').isRecruitingPhone(target.to, undefined, { activeOnly: true })) {
+    return refusal('This number belongs to an active job applicant. Handle it from the Communications page.', 'needs_communications_page');
   }
 
   const texted = finalTextFor(action, text, input);
   if (texted.error) return texted;
   const { finalText } = texted;
-  if (action !== 'ignore') {
-    const blocked = await sendRefusal(finalText, target);
-    if (blocked) return blocked;
-  }
+  const blocked = sends && await sendRefusal(finalText, target);
+  if (blocked) return blocked;
 
-  const linkNotes = action === 'ignore' ? []
-    : await deliveryLinkNotes(finalText, { audience: target.customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: 'manual' });
+  const linkNotes = sends ? await deliveryLinkNotes(finalText, { audience: AUDIENCE[Boolean(target.customerId)], purpose: 'conversational', messageType: 'manual' }) : [];
   const snap = snapshotOf(d);
   // The card names the identity the send uses (the customer only when the number is theirs: sendTarget), as the confirm pins it. The
   // decision's filing customer is display only, never pinned.
-  const name = target.customerId ? fullName(d) : null;
-  const filedUnder = !target.customerId && d.customer_id ? fullName(d) : null;
+  // (fullName is null when the decision has no customer, so the filing customer needs no separate check.)
+  const [name, filedUnder] = target.customerId ? [fullName(d), null] : [null, fullName(d)];
   const latestId = await suggest().newestInboundIdForThread(last10(target.to));
   const newerInbound = Boolean(latestId && d.sms_log_id && latestId !== String(d.sms_log_id));
   const inbound = d.inbound_message || snap?.sms?.body || null;
@@ -304,11 +314,10 @@ async function buildPlan(toolName, input = {}) {
     suggested_text: text,
     final_text: finalText,
     char_count: finalText.length,
-    lint_failures: Array.isArray(snap?.comms_lint) ? snap.comms_lint : [],
-    promised_actions: Array.isArray(snap?.intended_actions) ? snap.intended_actions.map((a) => (typeof a === 'string' ? a : (a?.label || a?.type || JSON.stringify(a)))) : [],
+    ...draftFlags(snap),
     newer_inbound: newerInbound,
     link_notes: linkNotes,
-    sends_to_customer: action !== 'ignore',
+    sends_to_customer: sends,
     // The office line the customer texted (one of ours); the composer posts it as fromNumber.
     from_number: target.fromNumber || null,
     // What the confirm re-checks: every fact the card showed. The exact texts and the full number ride here only.
@@ -325,9 +334,7 @@ async function buildPlan(toolName, input = {}) {
       latest_inbound_id: latestId,
       link_notes: linkNotes,
     },
-    note: action === 'ignore'
-      ? 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this draft and sends nothing.'
-      : 'PREVIEW ONLY — nothing was sent. Confirm sends exactly the text shown, to the number shown; if anything changed it refuses and sends nothing.',
+    note: PREVIEW_NOTES[action],
   };
 }
 
@@ -375,29 +382,34 @@ function okResult(plan, base) {
   };
 }
 
+// A handler refusal that carries its own code: how each one reads to the operator. A Map, so an arbitrary code cannot hit a
+// prototype property.
+const CODED_REFUSALS = new Map([
+  ['preview_changed', (json) => ({ preview_changed: true, error: json.error })],
+  ['needs_communications_page', (json) => ({ error: `Nothing was sent: ${json.error}` })],
+]);
+const REFUSED_STATUS_CODES = { 404: 'customer_not_found' };
+
+// Only approve and revise reach here (an ignore never runs the send handler: commitIgnore).
 async function replyResult({ status, json }, plan, base) {
   const { isAmbiguousProviderOutcome, isRealProviderSend } = require('../sms-auto-send');
+  const body = json || {};
   if (status === 200) {
     const now = await readBack(plan.decision_id);
-    const recorded = now && SENT_STATUSES.includes(now.status);
-    const real = isRealProviderSend(json);
-    if (!real && plan.action !== 'ignore') {
-      // sent:true with a sentinel id: the sender suppressed it, nothing left (the composer still records the draft).
-      return { ...base, success: true, warning: true, sent_to_customer: false, note: 'The send was suppressed upstream (for example a disabled template), so no text went out. Check the Communications page.' };
-    }
+    // sent:true with a sentinel id: the sender suppressed it, nothing left (the composer still records the draft).
+    if (!isRealProviderSend(json)) return { ...base, success: true, warning: true, sent_to_customer: false, note: 'The send was suppressed upstream (for example a disabled template), so no text went out. Check the Communications page.' };
     const out = okResult(plan, base);
-    if (!recorded) return { ...out, warning: true, note: `${out.note} The draft's status could not be confirmed as recorded; check the Communications page.` };
-    return out;
+    return SENT_STATUSES.includes(now?.status) ? out : { ...out, warning: true, note: `${out.note} The draft's status could not be confirmed as recorded; check the Communications page.` };
   }
-  if (json?.code === 'preview_changed') return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: json.error };
+  const coded = CODED_REFUSALS.get(body.code);
+  if (coded) return { ...base, failed: true, code: body.code, ...coded(body) };
   if (isAmbiguousProviderOutcome(json)) {
     return { ...base, outcome_unknown: true, code: 'sms_delivery_uncertain', error: 'The carrier did not confirm this text. It may still go out; check the conversation and do not send it again until it is reconciled.' };
   }
-  if (status === 409 && json?.code === 'needs_communications_page') return { ...base, failed: true, code: 'needs_communications_page', error: `Nothing was sent: ${json.error}` };
-  if (status === 409 && !json?.code) return refusedResult(json, plan, base);
-  const error = `Nothing was sent: ${String(json?.error || json?.reason || 'the Communications send refused it')}`;
-  if (status === 422 || json?.blocked === true) return { ...base, success: false, blocked: true, code: json?.code || 'send_blocked', error, ...(json?.nextAllowedAt ? { next_allowed_at: json.nextAllowedAt } : {}) };
-  return { ...base, failed: true, code: status === 404 ? 'customer_not_found' : 'send_refused', error };
+  if (status === 409 && !body.code) return refusedResult(json, plan, base);
+  const error = `Nothing was sent: ${String(body.error || body.reason || 'the Communications send refused it')}`;
+  if (status === 422 || body.blocked === true) return { ...base, success: false, blocked: true, code: body.code || 'send_blocked', error, next_allowed_at: body.nextAllowedAt };
+  return { ...base, failed: true, code: REFUSED_STATUS_CODES[status] ?? 'send_refused', error };
 }
 
 async function errorResult(err, plan, base) {

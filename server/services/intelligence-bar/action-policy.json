@@ -157,7 +157,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "broad"
+    "scope": "record"
   },
   "approve_agent_review_draft": {
     "module": "agent-review-tools.js",
