@@ -1809,6 +1809,9 @@ function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
+                      {opt.driveMinutes != null && (
+                        <span style={{ color: FIELD.muted, fontSize: 14 }}>{` · +${opt.driveMinutes} min drive`}</span>
+                      )}
                       {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
                         <span style={{ color: FIELD.muted, fontSize: 14 }}> — storm may pass</span>
                       )}
