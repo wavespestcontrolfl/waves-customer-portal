@@ -1459,6 +1459,12 @@ function fixedCardIsFallback({ isCampaignRun, engineProduced, creativeEligible, 
   return !engineProduced && !!creativeEligible && !!engineEnabled;
 }
 
+// Under the creative engine the GBP card is the designed GBP visual; it only
+// counts as a fallback when a live page was linked (so a hero was expected).
+function engineGbpCardIsFallback(suggestedLink) {
+  return !!suggestedLink;
+}
+
 // Everything that differs per run kind, in ONE table: the creative engine's
 // variant + overlay input, the deterministic card renderer (the GBP image and
 // the engine-off / engine-failed fallback, at 'gbp' or square), and the
@@ -2753,7 +2759,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         const gbp = await deterministicVisual('gbp');
         gbpImageUrl = gbp.url;
         gbpImageBranded = !gbp.hero;
-        trackFallbackCard(gbp);
+        // With the engine's scene on Meta, GBP's branded card is the designed
+        // path (GBP never posts AI imagery). It is a fallback only when a live
+        // page was linked and its hero was unavailable; no linked page means
+        // there was never a hero to use, so no FIX: email.
+        if (engineGbpCardIsFallback(finalPreview.suggestedLink)) trackFallbackCard(gbp);
       }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
@@ -4154,6 +4164,7 @@ module.exports = {
   RUN_KINDS,
   runKindFor,
   fixedCardIsFallback,
+  engineGbpCardIsFallback,
   firstLivePage,
   suggestedLink,
   suggestedLinkTitle,
