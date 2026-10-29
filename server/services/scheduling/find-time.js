@@ -296,6 +296,9 @@ async function findCapacitySlots(opts) {
         // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): the night tool
         // passes the Settings time; every other caller keeps 08:00.
         vanDepartureMin: opts.arrivalSearch === true ? opts.departureMinutes : undefined,
+        // The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES): today's route
+        // continues from the current stop, as on the non-capacity path above.
+        fromActiveStop: opts.fromActiveStop === true,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
           // Same as the non-capacity path above.

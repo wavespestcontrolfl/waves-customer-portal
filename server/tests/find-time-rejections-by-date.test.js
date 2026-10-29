@@ -105,6 +105,20 @@ test('the capacity finder splits its refusal counts by date', async () => {
   expect(summed).toEqual(result.rejections);
 });
 
+// Codex #6932 r3: the capacity finder forwards the Quick Move's current-stop
+// continuation too; any other capacity caller keeps it off.
+test('the capacity finder forwards fromActiveStop only when asked', async () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots({ ...BASE, fromActiveStop: true });
+  expect(loadArrivalRouteContext.mock.calls.length).toBeGreaterThan(0);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots(BASE);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === false)).toBe(true);
+});
+
 test('an advisory caller spends none of the shared Google drive-time allowance', async () => {
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   const { createSchedulingTravel } = require('../services/route-optimizer');
