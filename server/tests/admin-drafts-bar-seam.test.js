@@ -72,6 +72,14 @@ function happy(draft = draftRow(), latest = { id: 'log-1', created_at: '2026-10-
   enqueue('sms_log', { first: latest });
 }
 
+// One run of the bar's late check: it re-reads the draft, re-resolves its recipient (the thread row) and reads the newest inbound text.
+function enqueueLateCheck({ draft = draftRow({ status: 'approved' }), phone = PHONE, latest = 'log-1', customer } = {}) {
+  enqueue('message_drafts', { first: draft });
+  enqueue('sms_log', { first: { id: 'log-1', from_phone: phone, to_phone: '+19415550100', customer_id: 'cust-1' } });
+  if (customer) enqueue('customers', { first: customer });
+  enqueue('sms_log', { first: latest ? { id: latest } : undefined });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   updates.length = 0;
@@ -99,9 +107,9 @@ describe('approveDraftFromBar', () => {
     happy();
     await draftsRouter.approveDraftFromBar({ draftId: 'draft-1', actor, pins: pins() });
     const check = sendManualCustomerSms.mock.calls[0][0].preDispatchCheck;
-    enqueue('sms_log', { first: { id: 'log-1' } });
+    enqueueLateCheck();
     expect(await check()).toEqual({ ok: true });
-    enqueue('sms_log', { first: { id: 'log-2' } });
+    enqueueLateCheck({ latest: 'log-2' });
     expect(await check()).toMatchObject({ ok: false, code: 'preview_changed' });
   });
 
@@ -110,9 +118,24 @@ describe('approveDraftFromBar', () => {
     await draftsRouter.approveDraftFromBar({ draftId: 'draft-1', actor, pins: pins() });
     const input = sendManualCustomerSms.mock.calls[0][0];
     expect(typeof input.preProviderCheck).toBe('function');
-    enqueue('sms_log', { first: { id: 'log-1' } });
+    enqueueLateCheck();
     expect(await input.preDispatchCheck()).toEqual({ ok: true });
-    enqueue('sms_log', { first: { id: 'log-2' } });
+    enqueueLateCheck({ latest: 'log-2' });
+    expect(await input.preProviderCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'preview_changed' });
+  });
+
+  test('the late check re-resolves the recipient with the page\'s resolver: a changed number or customer stops the send at the boundary', async () => {
+    happy();
+    await draftsRouter.approveDraftFromBar({ draftId: 'draft-1', actor, pins: pins() });
+    const input = sendManualCustomerSms.mock.calls[0][0];
+    // the thread row now names another number
+    enqueueLateCheck({ phone: '+19415550199' });
+    expect(await input.preProviderCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'preview_changed', reason: expect.stringContaining('recipient changed') });
+    // an anchorless draft whose flags now point at another number
+    enqueueLateCheck({ draft: draftRow({ sms_log_id: null, flags: { toPhone: '+19415550177' } }) });
+    expect(await input.preDispatchCheck()).toMatchObject({ ok: false, code: 'preview_changed' });
+    // the draft row vanished
+    enqueue('message_drafts', { first: undefined });
     expect(await input.preProviderCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'preview_changed' });
   });
 

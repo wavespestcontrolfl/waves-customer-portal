@@ -733,14 +733,23 @@ async function barRecipientRefusal(recipient, pins) {
 
 // Run at BOTH of the sender's late hooks: preDispatchCheck (after the validators, before provider preparation) and
 // preProviderCheck (the provider boundary: after preparation, the reservation and Twilio's own async checks, the sender's
-// last callback). A text from the customer that landed in between stops the send and releases the claim.
-function barDispatchCheck(recipient, pins) {
+// last callback). Each call re-reads the draft and re-resolves its recipient with the page's own resolver, so a number or customer
+// that changed meanwhile (an anchorless draft's flags, the customer's phone) is caught against the pins, and re-reads the newest
+// inbound text from the pinned number: either drift stops the send and releases the claim.
+function barDispatchCheck(draft, pins) {
   if (!pins) return undefined;
+  const drift = (reason) => ({ ok: false, code: 'preview_changed', reason });
   return async () => {
+    const fresh = await db('message_drafts').where({ id: draft.id }).first();
+    if (!fresh) return drift('The suggested reply is gone; nothing was sent.');
+    const recipient = await resolveDraftRecipient(fresh);
+    if (!samePhone(recipient.toPhone, pins.recipientPhone) || String(recipient.customerId || '') !== String(pins.customerId || '')) {
+      return drift('The recipient changed after the card was shown; nothing was sent.');
+    }
     const latest = await latestInboundFrom(recipient.toPhone);
     return String(latest?.id || '') === String(pins.latestInboundId || '')
       ? { ok: true }
-      : { ok: false, code: 'preview_changed', reason: 'The customer sent a new message after the card was shown; nothing was sent.' };
+      : drift('The customer sent a new message after the card was shown; nothing was sent.');
   };
 }
 
@@ -961,10 +970,10 @@ async function approveDraftHandler(req, res, next) {
         ...sendPolicy,
         // At most one is set: clarify and photo-triage drafts are distinct intents.
         preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck
-          || barDispatchCheck(recipient, barPins),
+          || barDispatchCheck(draft, barPins),
         // The bar's pin runs here too: the provider boundary is the sender's own last callback, after provider
         // preparation, the handoff reservation and Twilio's async checks.
-        preProviderCheck: photoTriageGuard.preProviderCheck || barDispatchCheck(recipient, barPins),
+        preProviderCheck: photoTriageGuard.preProviderCheck || barDispatchCheck(draft, barPins),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -1144,9 +1153,9 @@ async function reviseDraftHandler(req, res, next) {
         // consentBasis); legacy null-purpose drafts keep the conversational
         // shape exactly.
         ...sendPolicy,
-        preDispatchCheck: clarifyGuard.preDispatchCheck || barDispatchCheck(recipient, barPins),
+        preDispatchCheck: clarifyGuard.preDispatchCheck || barDispatchCheck(draft, barPins),
         // Page path: no key at all (unchanged). Bar path: the same pin at the provider boundary.
-        ...(barPins ? { preProviderCheck: barDispatchCheck(recipient, barPins) } : {}),
+        ...(barPins ? { preProviderCheck: barDispatchCheck(draft, barPins) } : {}),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
