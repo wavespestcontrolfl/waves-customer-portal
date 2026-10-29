@@ -53,6 +53,17 @@ test('a legacy NULL-status record counts as completed in the list, the total and
   expect(source).toMatch(/AND COALESCE\(sib\.status, 'completed'\) = 'completed'/);
 });
 
+test('the kept sibling prefers the customer-visible record, then the one carrying the report, then the pinned one', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../services/portal-service-history.js'), 'utf8');
+  const order = source.slice(source.indexOf('ONE_RECORD_PER_APPOINTMENT = `'));
+  const visible = order.indexOf("typedReportDelivery', 'auto_send') = 'auto_send') DESC");
+  const report = order.indexOf('sib.report_view_token IS NOT NULL');
+  const pinned = order.indexOf('service_completion_attempts');
+  expect(visible).toBeGreaterThan(-1);
+  expect(report).toBeGreaterThan(visible);
+  expect(pinned).toBeGreaterThan(report);
+});
+
 test('GET /api/services asks for completed visits only', () => {
   const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/services.js'), 'utf8');
   expect(source).toMatch(/listPortalServiceHistory\(req\.customerId, \{\s*limit, offset, type, scope, completedOnly: true,/);

@@ -41,19 +41,20 @@ function suppressesCustomerArtifacts(structuredNotes = {}) {
   return Boolean(structuredNotes.typedReportDelivery) && structuredNotes.typedReportDelivery !== 'auto_send';
 }
 
-// One completed record per appointment: service_records.scheduled_service_id
-// is one-to-many (two completion rails can each write a record for the same
-// visit), and the customer saw each sibling as its own visit. The record kept
-// is the customer-visible one first (a typed-report shadow is
-// internal_only), then the one the newest succeeded completion attempt
-// pinned, then the newest — the closeout-status ordering
-// (completion-record-invariants CANONICAL_SIBLING) with visibility in front.
-// A record with no appointment link predates the back-link and is its own
-// visit.
 // A completed record; NULL is the column default's legacy shape (default
 // 'completed'), so a legacy row keeps showing.
 const COMPLETED_RECORD = "COALESCE(service_records.status, 'completed') = 'completed'";
 
+// One completed record per appointment: service_records.scheduled_service_id
+// is one-to-many (two completion rails can each write a record for the same
+// visit), and the customer saw each sibling as its own visit. The record kept
+// is the customer-visible one first (a typed-report shadow is
+// internal_only), then the one carrying the customer's report (a report
+// token, or an attached project report: the token can sit on an older
+// sibling, closeout-status.js), then the one the newest succeeded completion
+// attempt pinned, then the newest (the closeout-status ordering,
+// completion-record-invariants CANONICAL_SIBLING). A record with no
+// appointment link predates the back-link and is its own visit.
 const ONE_RECORD_PER_APPOINTMENT = `(
   service_records.scheduled_service_id IS NULL
   OR service_records.id = (
@@ -61,6 +62,9 @@ const ONE_RECORD_PER_APPOINTMENT = `(
      WHERE sib.scheduled_service_id = service_records.scheduled_service_id
        AND COALESCE(sib.status, 'completed') = 'completed'
      ORDER BY (COALESCE(sib.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send') DESC,
+              (sib.report_view_token IS NOT NULL
+               OR (sib.structured_notes->>'portalAttached' = 'true'
+                   AND sib.structured_notes->'projectReport'->>'url' IS NOT NULL)) DESC,
               (sib.id = (SELECT a.service_record_id FROM service_completion_attempts a
                           WHERE a.service_id = sib.scheduled_service_id AND a.status = 'succeeded'
                           ORDER BY a.updated_at DESC LIMIT 1)) IS TRUE DESC,
