@@ -95,7 +95,9 @@ const ALERT_COLUMNS = ['id', 'type', 'severity', 'tech_id', 'job_id', 'payload',
 
 // The open cards, newest first, for the "which one?" reply. Names are first name and last initial, like the board.
 async function openCandidates(database, jobId = null) {
-  const q = database('dispatch_alerts as a')
+  // Aliased through from(): the form the contract scanner (contract-tests/validators/db-columns.js) reads, so the a. columns are
+  // checked against dispatch_alerts instead of read as an unknown table (keep source comments free of query-shaped text for it).
+  const q = database.from('dispatch_alerts as a')
     .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .whereNull('a.resolved_at')

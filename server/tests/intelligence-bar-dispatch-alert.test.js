@@ -92,6 +92,7 @@ function makeTable(name) {
 
 function makeDb() {
   const fn = (name) => makeTable(name);
+  fn.from = (name) => makeTable(name);
   fn.fn = { now: () => 'NOW' };
   fn.raw = () => 'RAW';
   fn.transaction = async (cb) => {
@@ -99,6 +100,7 @@ function makeDb() {
     if (S.beforeTx) { const hook = S.beforeTx; S.beforeTx = null; hook(); }
     let commit; let rollback;
     const trx = (name) => makeTable(name);
+    trx.from = (name) => makeTable(name);
     trx.fn = fn.fn; trx.raw = fn.raw;
     trx.executionPromise = new Promise((res, rej) => { commit = res; rollback = rej; });
     trx.executionPromise.catch(() => {});
@@ -134,6 +136,7 @@ beforeEach(() => {
   db.mockImplementation(makeDb());
   db.transaction = makeDb().transaction;
   db.raw = () => 'RAW';
+  db.from = (name) => makeTable(name);
   envGate(true);
 });
 afterEach(() => envGate(false));
