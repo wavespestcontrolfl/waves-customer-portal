@@ -162,7 +162,7 @@ describe('getAvailableSlots — one combined route check per request', () => {
     expect(summaryLines()[0]).toContain('floor_kept=true');
   });
 
-  test('one check, one budget, one log line, and each route is read once across both lists', async () => {
+  test('one check, one budget, one log line, and each route is read once', async () => {
     const spy = jest.spyOn(routeCheck, 'filterOfferedSlots');
     await getAvailableSlots('est-rain-1', OFFER);
     expect(spy).toHaveBeenCalledTimes(1);
@@ -171,13 +171,25 @@ describe('getAvailableSlots — one combined route check per request', () => {
     const keys = arrivalRoute.loadArrivalRouteContext.mock.calls.map(([a]) => `${a.date}|${a.technicianId}`);
     expect(keys.length).toBeGreaterThan(0);
     expect(new Set(keys).size).toBe(keys.length);
-    // the route list's 09:00 start and the ASAP hours share the one (date, technician) route read
-    expect(keys.filter((k) => k === '2027-05-20|tech-1')).toHaveLength(1);
-    // route-list and ASAP slots both went in
-    const slots = spy.mock.calls[0][0].slots;
-    expect(slots.some((s) => s.capacityType === 'asap_open')).toBe(true);
-    expect(slots.some((s) => s.capacityType !== 'asap_open')).toBe(true);
     spy.mockRestore();
+  });
+
+  test('the check sees only the final eligible pool: a morning-only search is checked on morning slots alone', async () => {
+    const spy = jest.spyOn(routeCheck, 'filterOfferedSlots');
+    await getAvailableSlots('est-rain-1', { ...OFFER, timeOfDay: 'morning' });
+    const checked = spy.mock.calls[0][0].slots;
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.every((s) => s.windowStart < '12:00')).toBe(true);
+    spy.mockRestore();
+  });
+
+  test('morning-only search where every morning start fails and only an afternoon start passes: the morning offers come back, never an empty picker', async () => {
+    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_ctx, { windowStart }) => (windowStart < '12:00' ? { feasible: false, reason: 'arrival_window' } : { feasible: true }));
+    const served = slotKeys(await getAvailableSlots('est-rain-1', { ...OFFER, timeOfDay: 'morning' }));
+    expect(served.length).toBeGreaterThan(0);
+    expect(served.every((k) => k.split(' ')[1] < '12:00')).toBe(true);
+    expect(served).toContain('2027-05-20 09:00');
+    expect(summaryLines()[0]).toContain('floor_kept=true');
   });
 
   test('a cache hit does not check again', async () => {

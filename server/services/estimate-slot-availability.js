@@ -1947,25 +1947,24 @@ function routeCheckModeFor(userOpts) {
   }
 }
 
-// ONE check per request over the combined pool (route list + ASAP windows): one
-// floor, one time budget, one route-context cache. The helper returns the input's own
-// objects in the input's order, so each survivor is split back to the list it came
-// from by identity. Both lists are returned unchanged on any error or with the gate off.
-async function routeCheckedPools({ classified, asap }, { coords, estimateId, durationMinutes, mode }) {
-  const combined = [...classified, ...asap];
+// ONE check per request, over the FINAL eligible pool: after the collision, lead-time,
+// season, time-of-day and zone-day filters, right before the display selection. It sees
+// only slots the customer could be shown, so its floor is judged on that set and a
+// removal can never leave an empty picker (the floor returns the pool whole). The helper
+// returns the input's own objects in input order. Returns the pool unchanged with the
+// gate off or on any error.
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
   try {
-    if (mode === 'off' || !combined.length) return { classified, asap };
+    if (mode === 'off' || !pool.length) return pool;
     const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
-      surface: 'estimate', mode, slots: combined, durationMinutes, today: new Date(),
+      surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
       target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
     });
-    if (!Array.isArray(checked.slots)) return { classified, asap };
-    const kept = new Set(checked.slots);
-    return { classified: classified.filter((slot) => kept.has(slot)), asap: asap.filter((slot) => kept.has(slot)) };
+    return Array.isArray(checked.slots) ? checked.slots : pool;
   } catch (err) {
-    logger.warn(`[customer-route-check] estimate check failed, serving the unfiltered lists: ${err.message}`);
-    return { classified, asap };
+    logger.warn(`[customer-route-check] estimate check failed, serving the unfiltered list: ${err.message}`);
+    return pool;
   }
 }
 
@@ -2334,19 +2333,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const collisionFree = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asapCollisionFree = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
-  // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another
-  // customer late, over both lists together. Inside this uncached builder, so a
-  // wrapper cache hit neither recomputes nor logs.
-  const { classified, asap } = await routeCheckedPools(
-    { classified: collisionFree, asap: asapCollisionFree },
-    { coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode },
-  );
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
   const sortedPool = applyOnePerHour(dedupeSlots([...asap, ...classified])).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
@@ -2385,7 +2377,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
+  // over the final eligible pool (every filter above has run). Inside this uncached
+  // builder, so a wrapper cache hit neither recomputes nor logs.
+  const funneledBookable = await routeCheckedPool(funneledEligible, {
+    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+  });
+  // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
+  let countedBookable = bookable;
+  if (funneledBookable !== funneledEligible) {
+    const kept = new Set(funneledBookable);
+    const removed = new Set(funneledEligible.filter((slot) => !kept.has(slot)));
+    countedBookable = bookable.filter((slot) => !removed.has(slot));
+  }
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
@@ -2418,7 +2423,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // Admin diagnostics use getSlotDebug, which carries coords itself.
       // Funnel active → count the (time-filtered) days the customer can
       // see; inactive → the full bookable pool, exactly as before.
-      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
+      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : countedBookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,

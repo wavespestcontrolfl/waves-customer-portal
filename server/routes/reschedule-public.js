@@ -642,6 +642,8 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     excludeServiceIds: [svc.id],
     // Offer lists only (GATE_CUSTOMER_ROUTE_CHECK): the GET list and find-slots pass
     // `offer: true`. Every confirmation rebuild omits it, so it serves the unfiltered list.
+    // The two list routes also omit it while a late-move limit holds the page back: the limit
+    // drops later days AFTER this build, so the route check could not judge its floor on the final list.
     ...(offer ? { surface: 'reschedule' } : {}),
     serviceKey,
     serviceIdentity,
@@ -751,7 +753,7 @@ router.get('/:token', async (req, res, next) => {
         return null;
       });
     try {
-      availability = await buildAvailabilityForService(svc, { ...range, config, offer: true });
+      availability = await buildAvailabilityForService(svc, { ...range, config, offer: !limit?.lastDate });
     } catch (err) {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
@@ -822,7 +824,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
         rangeTo: when.dateTo,
         config,
         timeOfDay: when.timeOfDay,
-        offer: true,
+        offer: !limit?.lastDate,
       });
     } catch (err) {
       logger.error(`[reschedule-public] find-slots availability failed for ${svc.id}: ${err.message}`);

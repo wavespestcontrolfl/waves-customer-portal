@@ -122,7 +122,7 @@ describe('every call site of a page builder is classified (offer lists opt in, c
     const calls = callsOf(read(file), callee);
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
-      expect({ line: call.line, handler: call.handler, offer: call.text.includes('offer: true') })
+      expect({ line: call.line, handler: call.handler, offer: /offer: (true|!limit\?\.lastDate)/.test(call.text) })
         .toEqual({ line: call.line, handler: call.handler, offer: offerHandlers.includes(call.handler) });
     }
     // Each file also has at least one confirmation or recheck call, and it omits the flag.
