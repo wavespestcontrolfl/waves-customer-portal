@@ -20,6 +20,10 @@ jest.setTimeout(30000);
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+const { sendSmsFromBar } = require('../routes/admin-communications');
+const RecruitingComms = require('../services/recruiting-comms');
 const { executeAgentReviewTool } = require('../services/intelligence-bar/agent-review-tools');
 
 const ADMIN = { isAdmin: true, technicianId: null };
@@ -30,7 +34,7 @@ const OFFICE = '+19415550100';
 const TEXT = 'Yes, Thursday works. See you then!';
 
 (usable ? describe : describe.skip)('IB Agent Review drafts (real PG)', () => {
-  const created = { customers: [], logs: [], decisions: [] };
+  const created = { customers: [], logs: [], decisions: [], applications: [] };
   let providerHook = null;
 
   beforeAll(() => {
@@ -58,10 +62,11 @@ const TEXT = 'Yes, Thursday works. See you then!';
       await db('sms_log').whereIn('id', created.logs).del();
       await db('sms_log').where({ to_phone: PHONE, direction: 'outbound' }).del();
     }
+    if (created.applications.length) await db('job_applications').whereIn('id', created.applications).del();
     if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
-    created.customers = []; created.logs = []; created.decisions = [];
+    created.customers = []; created.logs = []; created.decisions = []; created.applications = [];
   }
-  afterEach(cleanUp);
+  afterEach(async () => { jest.restoreAllMocks(); await cleanUp(); });
   afterAll(async () => {
     delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
     delete process.env.GATE_IB_PLATFORM;
@@ -183,6 +188,87 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.results[0].value).resolves.toMatchObject({ sent: false });
     expect(await row(id)).toMatchObject({ status: 'pending_review' });
+  });
+
+  test('smart punctuation and an https link: the card shows what the sender delivers; the raw draft is posted, so the composer records accepted', async () => {
+    const SMART = 'We\u2019ll be there Thursday \u2014 \u201Cmorning\u201D. https://wavespestcontrol.com/appointments/abc';
+    const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+    const c = await customer();
+    const id = await decision(c, await inbound(c), { suggested_message: SMART });
+    const preview = await card('approve_agent_review_draft', id);
+    expect(preview.final_text).toBe(delivered(SMART));
+    expect(await confirm('approve_agent_review_draft', preview, id)).toMatchObject({ success: true, sent_text: delivered(SMART) });
+    const posted = sendCustomerMessage.mock.calls[0][0].body;
+    expect(posted).toBe(SMART);
+    // sendCustomerMessage (mocked here) applies exactly this before delivery: same text as the card.
+    expect(delivered(posted)).toBe(preview.final_text);
+    expect(await row(id)).toMatchObject({ status: 'accepted' });
+  });
+
+  test('revise with the same transformations: carded and sent as the delivered text, recorded corrected', async () => {
+    const REV = 'Thursday at 10 \u2013 we\u2019ll see you. https://wavespestcontrol.com/pay/xyz';
+    const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+    const c = await customer();
+    const id = await decision(c, await inbound(c));
+    const preview = await card('revise_agent_review_draft', id, { revised_text: REV });
+    expect(await confirm('revise_agent_review_draft', preview, id, { revised_text: REV })).toMatchObject({ success: true });
+    expect(delivered(sendCustomerMessage.mock.calls[0][0].body)).toBe(preview.final_text);
+    expect(await row(id)).toMatchObject({ status: 'corrected' });
+  });
+
+  describe('the handler\'s early branches, on the bar path (called directly, past the card)', () => {
+    async function applicant() {
+      const id = randomUUID();
+      await db('job_applications').insert({ id, status: 'new', contact_snapshot: JSON.stringify({ phone: PHONE }) });
+      created.applications.push(id);
+      return id;
+    }
+    const barSend = (id, body, over = {}) => sendSmsFromBar({
+      body: { to: PHONE, body, agentDecisionId: id, agentDraft: TEXT, ...over }, actor: {},
+      pins: { suggestedMessage: TEXT, latestInboundId: null },
+    });
+
+    test('an unlinked draft whose number belongs to an active applicant: nothing sent, the decision stays pending, the applicant rail is never entered', async () => {
+      const owner = jest.spyOn(RecruitingComms, 'sendOwnerReply');
+      await applicant();
+      const log = await inbound(null);
+      const id = await decision(null, log);
+      const out = await barSend(id, TEXT);
+      expect(out).toMatchObject({ status: 409, json: { code: 'needs_communications_page' } });
+      expect(owner).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await row(id)).toMatchObject({ status: 'pending_review' });
+      // and repeating it changes nothing
+      expect(await barSend(id, TEXT)).toMatchObject({ status: 409 });
+      expect(owner).not.toHaveBeenCalled();
+    });
+
+    test('through the tool: no card for that draft, and a forced confirm refuses the same way', async () => {
+      await applicant();
+      const id = await decision(null, await inbound(null));
+      expect(await card('approve_agent_review_draft', id)).toMatchObject({ code: 'needs_communications_page' });
+      expect(await card('ignore_agent_review_draft', id)).toMatchObject({ preview: true });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a review-request-looking body takes the review-ask path in the composer: refused before any claim', async () => {
+      const c = await customer();
+      const id = await decision(c, await inbound(c));
+      const out = await barSend(id, 'Would you leave us a review? https://portal.wavespestcontrol.com/rate/abc123', { customerId: c });
+      expect(out).toMatchObject({ status: 409, json: { code: 'needs_communications_page' } });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await row(id)).toMatchObject({ status: 'pending_review' });
+    });
+
+    test('the composer\'s own path for the same applicant number is untouched (no pins: the applicant rail runs)', async () => {
+      const owner = jest.spyOn(RecruitingComms, 'sendOwnerReply').mockResolvedValue({ outcome: 'sent' });
+      jest.spyOn(RecruitingComms, 'openApplicationIdForPhone').mockResolvedValue('app-1');
+      await applicant();
+      const id = await decision(null, await inbound(null));
+      const out = await sendSmsFromBar({ body: { to: PHONE, body: TEXT, agentDecisionId: id, agentDraft: TEXT }, actor: {}, pins: null });
+      expect(out.json).toMatchObject({ recruiting: true });
+      expect(owner).toHaveBeenCalledTimes(1);
+    });
   });
 
   test('a blocked send reopens the draft', async () => {

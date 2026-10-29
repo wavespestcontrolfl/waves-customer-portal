@@ -35,6 +35,10 @@
  * Dark behind GATE_IB_AGENT_REVIEW_DRAFTS (which needs GATE_IB_PLATFORM). Admin only (the Communications page's own send).
  */
 const db = require('../../models/db');
+// The sender's own body normalization (send-customer-message.js applies this to every customer SMS before delivery): the card shows
+// what it will deliver, so these are the sender's functions, imported, never re-implemented.
+const { normalizeGsmPunctuation } = require('../messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../messaging/sms-link-policy');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 
@@ -201,12 +205,18 @@ function sendTarget(d) {
   };
 }
 
+// What the sender delivers for a body: smart punctuation to plain GSM, URL scheme stripped. The card shows and the confirm pins THIS.
+// An approve still posts the stored draft untouched (the composer compares the posted body to the draft to record accepted, and the
+// sender applies the same transformation); a revision is posted as the delivered text.
+const deliveredText = (text) => normalizeGsmPunctuation(stripSmsUrlScheme(String(text ?? '')));
+
 function finalTextFor(action, text, input) {
-  if (action !== 'revise') return { finalText: text };
-  const finalText = String(input.revised_text ?? '').trim();
-  if (!finalText) return refusal('revised_text is required', 'invalid_target');
+  if (action !== 'revise') return { finalText: deliveredText(text) };
+  const revised = String(input.revised_text ?? '').trim();
+  if (!revised) return refusal('revised_text is required', 'invalid_target');
+  const finalText = deliveredText(revised);
   if (finalText.length > MAX_REPLY_CHARS) return refusal(`The revised text is over ${MAX_REPLY_CHARS} characters. Shorten it.`, 'text_too_long');
-  if (norm(finalText) === norm(text)) return refusal('The revised text is the same as the draft. Use approve_agent_review_draft to send it as written.', 'same_as_draft');
+  if (norm(finalText) === norm(deliveredText(text))) return refusal('The revised text is the same as the draft. Use approve_agent_review_draft to send it as written.', 'same_as_draft');
   return { finalText };
 }
 
@@ -229,6 +239,15 @@ async function buildPlan(toolName, input = {}) {
   const text = String(d.suggested_message);
   const target = sendTarget(d);
   if (!target.to) return refusal('The recipient\'s number cannot be determined, so nothing can be sent. Handle it from the Communications page.', 'no_recipient');
+
+  // An active job applicant's number (with no customer on it) is answered from Recruiting; the composer's send takes its
+  // applicant rail there, so no Agent Review card is offered for it.
+  if (action !== 'ignore' && !target.customerId) {
+    const { isRecruitingPhone } = require('../../utils/recruiting-thread-scope');
+    if (await isRecruitingPhone(target.to, undefined, { activeOnly: true })) {
+      return refusal('This number belongs to an active job applicant. Handle it from the Communications page.', 'needs_communications_page');
+    }
+  }
 
   const texted = finalTextFor(action, text, input);
   if (texted.error) return texted;
@@ -342,6 +361,7 @@ async function replyResult({ status, json }, plan, base) {
   if (isAmbiguousProviderOutcome(json)) {
     return { ...base, outcome_unknown: true, code: 'sms_delivery_uncertain', error: 'The carrier did not confirm this text. It may still go out; check the conversation and do not send it again until it is reconciled.' };
   }
+  if (status === 409 && json?.code === 'needs_communications_page') return { ...base, failed: true, code: 'needs_communications_page', error: `Nothing was sent: ${json.error}` };
   if (status === 409 && !json?.code) return refusedResult(json, plan, base);
   const error = `Nothing was sent: ${String(json?.error || json?.reason || 'the Communications send refused it')}`;
   if (status === 422 || json?.blocked === true) return { ...base, success: false, blocked: true, code: json?.code || 'send_blocked', error, ...(json?.nextAllowedAt ? { next_allowed_at: json.nextAllowedAt } : {}) };
@@ -391,7 +411,7 @@ async function commit(toolName, input, actionContext) {
   try {
     reply = await communications().sendSmsFromBar({
       // The body the composer posts for Use Draft: agentDraft marks the send as answering this decision.
-      body: { to: v.to, body: v.final_text, ...(v.customer_id ? { customerId: v.customer_id } : {}), ...(plan.from_number ? { fromNumber: plan.from_number } : {}), agentDecisionId: plan.decision_id, agentDraft: v.draft_text },
+      body: { to: v.to, body: plan.action === 'approve' ? v.draft_text : v.final_text, ...(v.customer_id ? { customerId: v.customer_id } : {}), ...(plan.from_number ? { fromNumber: plan.from_number } : {}), agentDecisionId: plan.decision_id, agentDraft: v.draft_text },
       actor: { technicianId: actionContext?.technicianId || null },
       pins: { suggestedMessage: v.draft_text, latestInboundId: v.latest_inbound_id },
     });

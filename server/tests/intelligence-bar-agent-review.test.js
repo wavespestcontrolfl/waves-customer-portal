@@ -19,6 +19,8 @@ const mockSuggest = {
 };
 jest.mock('../services/sms-suggest-mode', () => mockSuggest);
 const mockProposalRefusal = jest.fn();
+const mockRecruiting = jest.fn();
+jest.mock('../utils/recruiting-thread-scope', () => ({ isRecruitingPhone: (...a) => mockRecruiting(...a) }));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   sendSmsProposalRefusal: (...a) => mockProposalRefusal(...a),
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
@@ -29,6 +31,8 @@ const { executeAgentReviewTool, AGENT_REVIEW_TOOLS, cardLines } = require('../se
 const registry = require('../services/intelligence-bar/action-registry');
 const gates = require('../services/intelligence-bar/write-gates');
 const ownerDirect = require('../services/intelligence-bar/owner-direct');
+const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
 
 const ID = '00000000-0000-4000-8000-00000000a701';
@@ -93,6 +97,7 @@ beforeEach(() => {
   mockSuggest.newestInboundIdForThread.mockResolvedValue(LOG);
   mockSuggest.ignorePendingSuggestion.mockResolvedValue(true);
   mockProposalRefusal.mockResolvedValue(null);
+  mockRecruiting.mockResolvedValue(false);
   mockComms.sendSmsFromBar.mockResolvedValue({ status: 200, json: { sent: true, providerMessageId: 'SM_synthetic', deliveryOutcome: 'accepted' } });
 });
 afterEach(() => envGate(false));
@@ -242,6 +247,62 @@ describe('approve_agent_review_draft preview', () => {
     state.decision.sms_from_phone = PHONE; state.decision.customer_phone = PHONE;
     mockProposalRefusal.mockResolvedValue({ success: false, error: 'Customer opted out', code: 'OPTED_OUT', blocked: true });
     expect(await run('approve_agent_review_draft', { decision_id: ID })).toMatchObject({ code: 'OPTED_OUT', blocked: true });
+  });
+});
+
+// The sender (send-customer-message.js) delivers normalizeGsmPunctuation(stripSmsUrlScheme(body)); the card must show that text.
+describe('the card shows what the sender delivers', () => {
+  const SMART = 'We\u2019ll be there Thursday \u2014 \u201Cmorning\u201D. Details: https://wavespestcontrol.com/appointments/abc';
+  const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+
+  test('approve: final_text is the delivered text; the raw draft is posted and pinned (the composer compares it to record accepted)', async () => {
+    state.decision.suggested_message = SMART;
+    const card = await run('approve_agent_review_draft', { decision_id: ID });
+    expect(card.final_text).toBe(delivered(SMART));
+    expect(card.final_text).not.toMatch(/[\u2019\u2014\u201C\u201D]|https:\/\//);
+    expect(card._version).toMatchObject({ draft_text: SMART, final_text: delivered(SMART) });
+    expect(cardLines('approve_agent_review_draft', card)[0].text).toBe(`Text to Robin Sample (\u20260142): "${delivered(SMART)}"`);
+    const out = await confirm('approve_agent_review_draft', card);
+    expect(out.sent_text).toBe(delivered(SMART));
+    expect(mockComms.sendSmsFromBar).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ body: SMART, agentDraft: SMART }), pins: expect.objectContaining({ suggestedMessage: SMART }),
+    }));
+  });
+
+  test('revise: a smart-punctuation, https revision is carded and posted as the delivered text', async () => {
+    const revised = 'Thursday at 10 \u2013 we\u2019ll see you. https://wavespestcontrol.com/pay/xyz';
+    const card = await run('revise_agent_review_draft', { decision_id: ID, revised_text: revised });
+    expect(card.final_text).toBe(delivered(revised));
+    const out = await confirm('revise_agent_review_draft', card, { revised_text: revised });
+    expect(out.sent_text).toBe(delivered(revised));
+    expect(mockComms.sendSmsFromBar).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ body: delivered(revised), agentDraft: TEXT }) }));
+  });
+
+  test('a revision that differs only by punctuation the sender normalizes is the same text', async () => {
+    state.decision.suggested_message = 'We\u2019ll see you then.';
+    expect(await run('revise_agent_review_draft', { decision_id: ID, revised_text: "We'll see you then." })).toMatchObject({ code: 'same_as_draft' });
+  });
+});
+
+describe('an active job applicant\'s number', () => {
+  test('no card is offered for an unlinked draft whose number belongs to an active applicant (approve and revise); ignore still works', async () => {
+    state.decision.customer_id = null; state.decision.customer_phone = null;
+    mockRecruiting.mockResolvedValue(true);
+    expect(await run('approve_agent_review_draft', { decision_id: ID })).toMatchObject({ code: 'needs_communications_page' });
+    expect(await run('revise_agent_review_draft', { decision_id: ID, revised_text: 'Hello there.' })).toMatchObject({ code: 'needs_communications_page' });
+    expect(await run('ignore_agent_review_draft', { decision_id: ID })).toMatchObject({ preview: true });
+    expect(mockRecruiting).toHaveBeenCalledWith(PHONE, undefined, { activeOnly: true });
+  });
+
+  test('a customer-linked draft skips the applicant check (the composer does too)', async () => {
+    mockRecruiting.mockResolvedValue(true);
+    expect(await run('approve_agent_review_draft', { decision_id: ID })).toMatchObject({ preview: true });
+  });
+
+  test('a handler refusal of the applicant branch is reported as nothing sent, pointing at the Communications page', async () => {
+    const card = await run('approve_agent_review_draft', { decision_id: ID });
+    mockComms.sendSmsFromBar.mockResolvedValue({ status: 409, json: { error: 'This number belongs to an active job applicant.', code: 'needs_communications_page' } });
+    expect(await confirm('approve_agent_review_draft', card)).toMatchObject({ failed: true, code: 'needs_communications_page' });
   });
 });
 

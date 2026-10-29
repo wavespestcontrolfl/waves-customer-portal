@@ -584,6 +584,11 @@ async function sendSmsHandler(req, res, next) {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // Bar only: this branch SENDS (RecruitingComms.sendOwnerReply) before any draft verification, claim or pin, and it settles
+      // no Agent Review decision. An Agent Review draft never goes out on an applicant thread: refused before any send or write.
+      if (barPins) {
+        return res.status(409).json({ error: 'This number belongs to an active job applicant. Handle it from the Communications page.', code: 'needs_communications_page' });
+      }
       // A translation card's reply is a customer-service reply: the applicant rail sends without its
       // freshness, fact and claim checks, so it never goes out there.
       if (translationTrialId) {
@@ -613,6 +618,18 @@ async function sendSmsHandler(req, res, next) {
     }
 
     const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);
+    // Bar only: a review-ask-looking body takes the review-ask path (spacing history, its reservation, a customer found by phone), which
+    // is not the plain Use Draft send. Refused before any claim or write.
+    if (barPins && reviewLooking) {
+      return res.status(409).json({ error: 'This draft reads as a review request. Send it from the Communications page.', code: 'needs_communications_page' });
+    }
+    // Bar only: the composer-only link kinds (card request, contract signing, prep guide, statement, project report, consultation,
+    // Auto Pay) have claims and delivery bookkeeping that only the composer's seams carry. Read-only check, before any claim.
+    if (barPins) {
+      const linkBlock = await require('../services/intelligence-bar/comms-tools')
+        .customerLinkSendRefusal(cleanBody, to, trustedCustomerId || null, { phase: 'proposal', recipientSelected: Boolean(trustedCustomerId) });
+      if (linkBlock) return res.status(409).json({ error: linkBlock.error, code: 'needs_communications_page' });
+    }
     if (reviewLooking && !reviewRequestId && !trustedCustomerId) {
       const customer = await findSingleCustomerForPhone(to);
       if (!customer || normalizePhone(customer.phone) !== normalizePhone(to)) {
