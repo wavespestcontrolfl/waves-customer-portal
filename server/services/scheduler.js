@@ -9339,6 +9339,30 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // External job heartbeat watch — hourly at :05, 07:05-22:05 ET. A job that
+  // runs outside the portal (first entry: the plan gap sweep on the office
+  // Mac) upserts its job_health row at the end of each run; this rings ONE
+  // standing admin bell when no complete run has landed today by the job's
+  // due time (07:00 ET for the sweep), and closes it by itself when one does.
+  // Dark behind GATE_EXTERNAL_HEARTBEAT_WATCH (the service reads the gate
+  // itself); writes only admin notifications. See
+  // server/services/external-job-heartbeat-watch.js.
+  // =========================================================================
+  cron.schedule('5 7-22 * * *', async () => {
+    try {
+      await runExclusive('external-heartbeat-watch', async () => {
+        const { runExternalHeartbeatWatch } = require('./external-job-heartbeat-watch');
+        const result = await runExternalHeartbeatWatch();
+        if (!result.skipped && (result.alerted > 0 || result.closed > 0)) {
+          logger.warn(`[external-heartbeat-watch] alerted=${result.alerted} closed=${result.closed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`External heartbeat watch tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 10 MIN — the timed bells for a visit the office booked by address
   // that still has no customer (GATE_NEW_CALLER_BOOKING, checked each tick): no
   // call picked, a recording not processed 90 minutes after the call, a
