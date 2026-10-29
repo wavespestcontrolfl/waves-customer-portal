@@ -5494,8 +5494,10 @@ const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
     (option) => [option.value, String(option.visits)],
   ),
 );
-function annualPrepayCadenceOptionsFor(cadence) {
-  if (cadence !== ANNUAL_PREPAY_LAWN_ROUNDS_OPTION.value)
+// `cadences`: the current pick and the cadence the term or suggestion loaded
+// with, so the rounds option stays selectable after the operator tries another.
+export function annualPrepayCadenceOptionsFor(...cadences) {
+  if (!cadences.includes(ANNUAL_PREPAY_LAWN_ROUNDS_OPTION.value))
     return ANNUAL_PREPAY_CADENCE_OPTIONS;
   const at =
     ANNUAL_PREPAY_CADENCE_OPTIONS.findIndex(
@@ -5547,6 +5549,9 @@ function AnnualPrepayModal({
   // (label-first, then visit count) decides — the client must not overwrite a
   // legacy term's schedule with the default "quarterly".
   const [cadenceExplicit, setCadenceExplicit] = useState(false);
+  // The cadence the stored term or the server suggestion loaded with (keeps
+  // an applicable rounds option in the select after a different pick).
+  const [loadedCadence, setLoadedCadence] = useState(null);
   const [visitCount, setVisitCount] = useState("4");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -5585,6 +5590,7 @@ function AnnualPrepayModal({
           if (term.coverageCadence) {
             setCadence(term.coverageCadence);
             setCadenceExplicit(true);
+            setLoadedCadence(term.coverageCadence);
           }
         } else if (suggested?.serviceType) {
           // Brand-new term: default the covered service to the customer's real
@@ -5596,6 +5602,7 @@ function AnnualPrepayModal({
           if (suggested.cadence) {
             setCadence(suggested.cadence);
             setCadenceExplicit(true);
+            setLoadedCadence(suggested.cadence);
             const preset = ANNUAL_PREPAY_CADENCE_VISITS[suggested.cadence];
             if (preset) setVisitCount(preset);
           }
@@ -5797,7 +5804,7 @@ function AnnualPrepayModal({
                   removing
                 }
               >
-                {annualPrepayCadenceOptionsFor(cadence).map((option) => (
+                {annualPrepayCadenceOptionsFor(cadence, loadedCadence).map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
