@@ -50,7 +50,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       is_autopay_held boolean DEFAULT false, autopay_failures_observed integer DEFAULT 0,
       updated_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE stripe_invoice_charge_attempts (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text, created_at timestamptz DEFAULT now())`);
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text, decline_code text, created_at timestamptz DEFAULT now())`);
     await mockPg.raw('CREATE TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text)');
     await mockPg.raw(`CREATE TABLE payments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, next_retry_at timestamptz,
@@ -568,7 +568,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       const [category, headline, why, opts] = notify.mock.calls[0];
       expect(category).toBe('billing');
       expect(headline).toBe("Billing — check Test Customer's failed Auto Pay charge");
-      expect(why).toBe('$103.09 on invoice WPC-TEST-1 was not charged (the card was declined); reminders started.');
+      expect(why).toBe('$103.09 on invoice WPC-TEST-1 was not charged (the card was declined); reminders start.');
       expect(opts).toMatchObject({
         bell: true, dedupeKey: `autopay_hold_charge:declined:${h.invoiceId}`, link: `/admin/invoices?invoice=${h.invoiceId}`,
         metadata: { subject: { type: 'invoice', id: h.invoiceId }, severity: 'needs-you', reason: 'declined' },
@@ -717,15 +717,16 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await untouched(h);
     });
 
-    test('an alert that cannot be filed does not stop the release, the audit row or the next hold', async () => {
+    test('an alert that cannot be filed leaves the attempt unfinished (no release, no final row) and the sweep goes on to the next hold', async () => {
       const first = await held({ sequenceId: '00000000-0000-4000-8000-000000000001' });
       const second = await held({ sequenceId: '00000000-0000-4000-8000-000000000002' });
       notify.mockRejectedValue(new Error('bell down'));
       chargeCall.mockImplementation(async () => { throw decline(); });
-      expect(await sweep()).toMatchObject({ candidates: 2, declined_released: 2 });
-      expect((await seqOf(first.invoiceId)).status).toBe('active');
-      expect((await seqOf(second.invoiceId)).status).toBe('active');
-      expect(await chargeAuditRows()).toHaveLength(2);
+      expect(await sweep()).toMatchObject({ candidates: 2, errors: 2, declined_released: 0 });
+      expect(chargeCall).toHaveBeenCalledTimes(2);
+      await untouched(first);
+      await untouched(second);
+      expect(await chargeAuditRows()).toHaveLength(0);
     });
 
     test('a hold that changed after the read is skipped before any quote or charge', async () => {
@@ -799,7 +800,8 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         expect(first).toMatchObject({ candidates: 1, errors: 1, declined_released: 0 });
         await untouched(h);
         expect(await chargeAuditRows()).toHaveLength(0);
-        expect(notify).not.toHaveBeenCalled();
+        // The alert goes out before the release, so it was filed once already.
+        expect(notify).toHaveBeenCalledTimes(1);
         expect(await startedRows()).toHaveLength(1);
 
         await mockPg('fail_release').del();
@@ -809,7 +811,9 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         const seq = await seqOf(h.invoiceId);
         expect(seq.status).toBe('active');
         expect(seq.next_touch_at).not.toBeNull();
-        expect(notify).toHaveBeenCalledTimes(1);
+        // Recovery raises it again under the SAME dedupe key, so the office sees one open alert.
+        expect(notify).toHaveBeenCalledTimes(2);
+        expect(notify.mock.calls[1][3].dedupeKey).toBe(notify.mock.calls[0][3].dedupeKey);
         expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:declined:${h.invoiceId}`);
         const rows = await chargeAuditRows();
         expect(rows).toHaveLength(1);
@@ -818,7 +822,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         // Done: a third run finds nothing to recover and still does not charge.
         expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0 });
         expect(chargeCall).toHaveBeenCalledTimes(1);
-        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledTimes(2);
       });
 
       test('(b) a marker with a succeeded attempt on a paid invoice: sequence closed, final row charged, no alert, no charge', async () => {
@@ -864,6 +868,71 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         expect(second).toMatchObject({ recovered: 0, charged: 1 });
         expect(chargeCall).toHaveBeenCalledTimes(1);
         expect(await startedRows()).toHaveLength(2);
+      });
+
+      test('(1) a failed attempt with decline_code authentication_required after the marker is ambiguous: one alert, hold kept, no release', async () => {
+        const h = await held();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', decline_code: 'authentication_required' });
+        expect(await sweep()).toMatchObject({ recovered: 1, declined_released: 0 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', released: false });
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(2) the own-charge release never releases a hold whose attempt asks the customer to authenticate', async () => {
+        const { releaseStaleAutopayHold: releaseOne } = require('../services/invoice-followups')._test;
+        const observed = async (h) => mockPg('invoice_followup_sequences as s').where('s.id', h.sequenceId)
+          .first('s.id', 's.invoice_id', 's.customer_id', mockPg.raw('s.updated_at::text as hold_stamp'));
+        const cutoff = new Date(Date.now() - TIMEOUT_DAYS * DAY);
+        const auth = await held();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: auth.invoiceId, status: 'failed', decline_code: 'authentication_required' });
+        expect(await releaseOne(await observed(auth), cutoff, { afterOwnCharge: true })).toBe(false);
+        await untouched(auth);
+        // The same failed attempt with a plain decline code is still released.
+        const plain = await held();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: plain.invoiceId, status: 'failed', decline_code: 'insufficient_funds' });
+        expect(await releaseOne(await observed(plain), cutoff, { afterOwnCharge: true })).toBe(true);
+      });
+
+      test('(3) a live ambiguous outcome whose alert fails: no final row, hold kept; the next run raises the alert and finishes', async () => {
+        const h = await held();
+        chargeCall.mockImplementation(async () => {
+          await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'ambiguous' });
+          throw Object.assign(new Error('unclear'), { code: 'STRIPE_AMBIGUOUS_OUTCOME' });
+        });
+        notify.mockResolvedValue(null);
+        expect(await sweep()).toMatchObject({ candidates: 1, errors: 1, ambiguous: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+
+        notify.mockResolvedValue({ id: 'bell-2' });
+        expect(await sweep()).toMatchObject({ recovered: 1, errors: 0 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(2);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', released: false });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('(4) a live decline whose alert fails: no release, no final row; the next run alerts, releases, finishes, and never charges again', async () => {
+        const h = await held();
+        chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline(); });
+        notify.mockRejectedValue(new Error('bell down'));
+        expect(await sweep()).toMatchObject({ candidates: 1, errors: 1, declined_released: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+
+        notify.mockResolvedValue({ id: 'bell-2' });
+        expect(await sweep()).toMatchObject({ recovered: 1, errors: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        const rows = await chargeAuditRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ outcome: 'declined_released', reason: 'recovered', released: true });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
       });
 
       test('(e) a failed attempt without our marker (Auto Pay itself) is never touched by recovery', async () => {

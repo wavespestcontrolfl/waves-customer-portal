@@ -2888,7 +2888,8 @@ const AUTOPAY_HOLD_AMBIGUOUS_CODES = [
 function staleAutopayHoldClause(query, cutoff, { afterOwnCharge = false, holdStamp = null } = {}) {
   // afterOwnCharge (GATE_AUTOPAY_HOLD_TIMEOUT=charge only, with the observed holdStamp): the sweep itself called
   // the charge on this invoice and it failed cleanly, so ONLY the rows that charge writes are exempt: a
-  // stripe_invoice_charge_attempts row with status 'failed' and a payments row with status 'failed'. Any other
+  // stripe_invoice_charge_attempts row with status 'failed' (not authentication_required) and a payments row
+  // with status 'failed'. Any other
   // attempt or any other payment since the hold began still keeps the hold. The age rule and the hold-stamp
   // equality are dropped (the charge can bump updated_at). Every other rule is unchanged.
   const base = query.where('s.status', 'autopay_hold');
@@ -2896,9 +2897,11 @@ function staleAutopayHoldClause(query, cutoff, { afterOwnCharge = false, holdSta
     if (!holdStamp) throw new Error('afterOwnCharge needs the observed holdStamp');
     base
       .whereNotExists(function noOpenChargeAttempt() {
+        // A 'failed' attempt that asks the customer to authenticate (authentication_required) leaves a live
+        // PaymentIntent the customer can still complete, so it blocks the release like an open attempt does.
         this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
           .whereRaw('a.invoice_id = s.invoice_id')
-          .whereRaw("a.status IS DISTINCT FROM 'failed'");
+          .whereRaw("(a.status IS DISTINCT FROM 'failed' OR a.decline_code = 'authentication_required')");
       })
       .whereNotExists(function noNonFailedPayment() {
         this.select(db.raw('1')).from('payments as p')
@@ -2991,8 +2994,8 @@ async function invoiceHasOpenChargeAttempt(invoiceId) {
 }
 
 // One office alert (category billing) per invoice and kind. Never throws: the charge is already decided.
-// 'released' false on a declined kind means the hold was already gone or changed under the sweep.
-async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, reason, errorCode, errorMessage, released }) {
+// It goes out BEFORE the release and the final audit row (applyAutopayHoldPlan), so its copy never claims a release.
+async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, reason, errorCode, errorMessage }) {
   try {
     const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
     const { lookupCustomerName, fitAction } = require('./admin-alert-names');
@@ -3006,7 +3009,7 @@ async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, re
     }[reason] || 'Auto Pay refused the charge';
     const why = ambiguous
       ? cutAtWord(`${label} may have been charged; check Stripe before anything else.`, 110)
-      : cutAtWord(`${label} was not charged (${reasonText}); ${released ? 'reminders started' : 'check the reminders'}.`, 110);
+      : cutAtWord(`${label} was not charged (${reasonText}); reminders start.`, 110);
     const alert = await raiseAdminAlert('billing', {
       area: 'Billing',
       action: fitAction('Billing', name, ambiguous
@@ -3025,7 +3028,7 @@ async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, re
       dedupeOpenOnly: true,
       detail: ambiguous
         ? `The Auto Pay hold on invoice ${invoice.invoice_number || invoice.id} timed out and the sweep tried to charge the saved Auto Pay method for ${moneyLabel(amountCents)}. The outcome is unclear (${errorCode || 'unknown'}). The hold was NOT released and nothing will retry. Check Stripe for a payment on this invoice before you collect, retry or send anything.`
-        : `The Auto Pay hold on invoice ${invoice.invoice_number || invoice.id} timed out and the sweep tried to charge the saved Auto Pay method for ${moneyLabel(amountCents)}: ${reasonText}${errorMessage ? ` (${String(errorMessage).slice(0, 200)})` : ''}. ${released ? 'The hold was released, so the normal reminder ladder runs.' : 'The hold could not be released by the sweep (it was already released or changed); check the reminders.'}`,
+        : `The Auto Pay hold on invoice ${invoice.invoice_number || invoice.id} timed out and the sweep tried to charge the saved Auto Pay method for ${moneyLabel(amountCents)}: ${reasonText}${errorMessage ? ` (${String(errorMessage).slice(0, 200)})` : ''}. The sweep releases the hold next, so the normal reminder ladder starts unless the invoice changed in the meantime.`,
       metadata: { customerId: String(row.customer_id), invoiceId: String(invoice.id), sequenceId: String(row.id), reason, errorCode: errorCode || null },
     });
     if (!alert) logger.error(`[invoice-followups] autopay hold charge: office alert NOT filed for invoice ${invoice.id} (${kind})`);
@@ -3181,7 +3184,7 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
  * - declined, refused or no chargeable method: the hold is released as 'true' releases it (original guards
  *   when no charge was called; only our own failed rows exempted when one was), and one office alert says why;
  * - ambiguous: the hold stays, nothing retries, and one office alert says to check Stripe.
- * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'skipped' }.
+ * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'skipped' | 'alert_failed' }.
  */
 async function chargeStaleAutopayHold(row, cutoff) {
   // Still the same stale hold? Minutes can pass between the read and this row; money must not move on a
@@ -3202,20 +3205,26 @@ async function chargeStaleAutopayHold(row, cutoff) {
   return applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents);
 }
 
-// Applies a decision's plan. Order matters: release, stopOnPayment, alert, and the final audit row LAST, so the
-// presence of that row means the attempt finished (recoverAutopayHoldCharges looks for the rows that are missing).
+// Applies a decision's plan. Order matters. The office alert goes FIRST: if it cannot be filed nothing else is
+// done (no release, no final row), the hold stays 'autopay_hold' with an unfinished marker, and the next run's
+// recovery retries the alert and finishes. After a delivered alert: release, stopOnPayment, and the final audit
+// row LAST, so the presence of that row means the attempt finished.
 async function applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents) {
   const plan = AUTOPAY_HOLD_CHARGE_PLANS[d.kind];
+  if (plan.alert) {
+    const alert = await raiseAutopayHoldChargeAlert({
+      kind: plan.alert, invoice, row, amountCents, reason: d.reason, errorCode: d.err?.code || null, errorMessage: d.err?.message || null,
+    });
+    if (!alert) {
+      logger.error(`[invoice-followups] autopay hold charge: the office alert was not filed for invoice ${invoice.id}; attempt left unfinished, the next run retries`);
+      return { outcome: 'alert_failed' };
+    }
+  }
   // No charge called (no method, quote refused): the original guards, hold stamp included. A charge that
   // failed cleanly exempts only the failed attempt and failed payment it wrote itself.
   const released = plan.releases && await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: d.chargeCalled });
   if (plan.stops(d)) {
     await stopOnPayment(invoice.id).catch((stopErr) => logger.error(`[invoice-followups] autopay hold charge: stopOnPayment failed for invoice ${invoice.id}: ${stopErr.message}`));
-  }
-  if (plan.alert) {
-    await raiseAutopayHoldChargeAlert({
-      kind: plan.alert, invoice, row, amountCents, reason: d.reason, errorCode: d.err?.code || null, errorMessage: d.err?.message || null, released,
-    });
   }
   await recordAutopayHoldChargeAudit({
     row, invoice, outcome: plan.audit(d, released), reason: d.reason, errorCode: d.err?.code || null, amountCents, methodType: d.method?.method_type || null, released,
@@ -3250,20 +3259,21 @@ async function unfinishedAutopayHoldCharges() {
 async function recoverAutopayHoldCharge(marker, cutoff) {
   const meta = marker.metadata || {};
   const invoice = await db('invoices').where({ id: marker.invoice_id }).first();
-  if (!invoice) return false;
-  const statuses = await db('stripe_invoice_charge_attempts')
+  if (!invoice) return null;
+  const attempts = await db('stripe_invoice_charge_attempts')
     .where({ invoice_id: marker.invoice_id })
     .where('created_at', '>=', marker.started_at)
-    .pluck('status');
+    .select('status', 'decline_code');
+  // A failed attempt that asks the customer to authenticate is ambiguous, like the live classifier reads it.
+  const cleanDecline = (attempt) => attempt.status === 'failed' && attempt.decline_code !== 'authentication_required';
   let kind = 'ambiguous';
-  if (!statuses.length) kind = 'abandoned';
-  else if (statuses.every((status) => status === 'failed')) kind = 'declined';
+  if (!attempts.length) kind = 'abandoned';
+  else if (attempts.every(cleanDecline)) kind = 'declined';
   else if (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) kind = 'charged';
   const row = { id: meta.sequence_id, invoice_id: marker.invoice_id, customer_id: marker.customer_id, hold_stamp: meta.hold_stamp };
   const d = { kind, reason: kind === 'declined' ? 'recovered' : null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null };
   if (kind === 'ambiguous') d.reason = 'ambiguous';
-  await applyAutopayHoldPlan(row, cutoff, invoice, d, Number(meta.amount_cents) || 0);
-  return true;
+  return (await applyAutopayHoldPlan(row, cutoff, invoice, d, Number(meta.amount_cents) || 0)).outcome;
 }
 
 // Returns { recovered, errors, invoiceIds }. invoiceIds are left out of this run's charges, abandoned ones too.
@@ -3280,7 +3290,9 @@ async function recoverAutopayHoldCharges(cutoff) {
   for (const marker of markers) {
     result.invoiceIds.add(String(marker.invoice_id));
     try {
-      if (await recoverAutopayHoldCharge(marker, cutoff)) result.recovered += 1;
+      const outcome = await recoverAutopayHoldCharge(marker, cutoff);
+      if (outcome === 'alert_failed') result.errors += 1;
+      else if (outcome) result.recovered += 1;
     } catch (err) {
       result.errors += 1;
       logger.error(`[invoice-followups] autopay hold charge recovery failed for invoice ${marker.invoice_id}: ${err.message}`);
@@ -3304,7 +3316,8 @@ async function chargeStaleAutopayHolds(allDue, cutoff) {
   for (const row of due) {
     try {
       const { outcome } = await chargeStaleAutopayHold(row, cutoff);
-      counts[outcome] += 1;
+      // An alert that could not be filed leaves the attempt unfinished for the next run's recovery.
+      counts[outcome === 'alert_failed' ? 'errors' : outcome] += 1;
     } catch (err) {
       counts.errors += 1;
       logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
