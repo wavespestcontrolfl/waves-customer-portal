@@ -3,9 +3,8 @@
  * /api/admin/schedule stores a NEW residential lawn 9x series as
  * lawn_rounds_9 with no interval on the parent AND every child; the
  * make-recurring spawn of PUT /:id/update-details does the same; prepay on
- * book and the prepay preview refuse it (fail closed, like seasonal_feb_oct)
- * until the prepay coverage change ships. Off, every value is stored as
- * posted. Harness mirrors admin-schedule-create-tech-absence.test.js.
+ * book and the prepay preview cover it on the lawn_rounds_9 coverage cadence
+ * (9 visits, no downgrade). Off, every value is stored as posted. Harness mirrors admin-schedule-create-tech-absence.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -32,6 +31,7 @@ jest.mock('../services/estimate-manual-acceptance', () => ({
   ...jest.requireActual('../services/estimate-manual-acceptance'),
   persistedAddOnRefusal: jest.fn(() => null),
   prepayBookingEligibility: jest.fn(async () => ({ eligible: true })),
+  markEstimateManuallyAccepted: jest.fn((...args) => jest.requireActual('../services/estimate-manual-acceptance').markEstimateManuallyAccepted(...args)),
 }));
 jest.mock('../services/area-addon-limits', () => ({
   ...jest.requireActual('../services/area-addon-limits'),
@@ -304,12 +304,22 @@ describe('GET /annual-prepay-preview — lawn 9x draft', () => {
     expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
   });
 
-  test('gate on: a lawn 9x draft is refused as an unsupported cadence, like seasonal_feb_oct', async () => {
+  test('gate on: a lawn 9x draft is covered on the lawn_rounds_9 cadence with 9 visits (no cadence refusal)', async () => {
     gateOn();
     const { status, body } = await preview();
     expect(status).toBe(200);
-    expect(body.eligible).toBe(false);
-    expect(body.blockReason).toMatch(/visit cadence/);
+    expect(String(body.blockReason || '')).not.toMatch(/visit cadence/);
+    expect(body.eligible).toBe(true);
+    expect(body.coverageCadence).toBe('lawn_rounds_9');
+    expect(body.visitsPerYear).toBe(9);
+    expect(body.mintPayload.coverageCadence).toBe('lawn_rounds_9');
+    expect(body.mintPayload.visitCount).toBe(9);
+  });
+
+  test('gate off: the same draft stays every_6_weeks', async () => {
+    const { body } = await preview();
+    expect(body.eligible).toBe(true);
+    expect(body.coverageCadence).toBe('every_6_weeks');
   });
 
   test('gate on: a tree and shrub custom/42 draft is not refused for its cadence', async () => {
@@ -342,13 +352,20 @@ describe('POST / — admin create — prepay on book for a lawn 9x series', () =
     trx.mockImplementation((table) => (table === 'estimates' ? chain({ ...lawnQuote }) : baseTrx(table)));
   });
 
-  test('gate on: the series is written as rounds and the prepay downgrades to a standard accept, like seasonal_feb_oct', async () => {
+  test('gate on: the series is written as rounds and prepay on book mints a lawn_rounds_9 term (no downgrade)', async () => {
     gateOn();
+    const accept = require('../services/estimate-manual-acceptance').markEstimateManuallyAccepted;
+    accept.mockClear();
+    accept.mockResolvedValueOnce({ conversion: { draftInvoiceId: 'inv-1' } });
     const { status, body } = await post(prepayBody);
     expect(status).toBe(201);
     expect(seriesRows().map((d) => d.recurring_pattern)).toEqual(Array(4).fill('lawn_rounds_9'));
-    expect(body.warnings.some((w) => /booked as standard — annual prepay isn.t available yet for the nine-round lawn program/.test(w))).toBe(true);
-    expect(body.warnings.some((w) => /seasonal|every-6-weeks/i.test(w))).toBe(false);
+    expect((body.warnings || []).some((w) => /booked as standard|annual prepay/i.test(w))).toBe(false);
+    expect(accept).toHaveBeenCalledTimes(1);
+    expect(accept.mock.calls[0][0]).toMatchObject({
+      billingTerm: 'prepay_annual',
+      annualPrepayCoverage: { coverageServiceType: 'Lawn Care', coverageVisitCount: 9, coverageCadence: 'lawn_rounds_9' },
+    });
   });
 
   test('gate off: custom/42 keeps its supported every_6_weeks coverage cadence (no cadence downgrade)', async () => {

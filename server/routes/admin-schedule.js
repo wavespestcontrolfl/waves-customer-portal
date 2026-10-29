@@ -8829,14 +8829,12 @@ async function scheduleCreateHandler(req, res, next) {
       const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
         ? 'every_6_weeks'
         : recurringPattern;
-      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) has no prepay
-      // coverage yet: nine visits a year, but no supported coverage cadence,
-      // so it downgrades like seasonal_feb_oct (see prepayCoverageCadenceForPattern)
-      // with its own message.
+      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) is the nine-round
+      // lawn plan: 9 covered visits, coverage cadence lawn_rounds_9
+      // (prepayCoverageCadenceForPattern), placed on the round calendar.
       const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
-      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern)
-        || (prepayRoundsSeries ? 9 : null);
-      const prepayCoverageCadence = prepayRoundsSeries ? null : prepayCoverageCadenceForPattern(prepayBookedPattern);
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
+      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name + cadence — sourced
@@ -8945,8 +8943,6 @@ async function scheduleCreateHandler(req, res, next) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
-      } else if (prepayRoundsSeries) {
-        downgrade('Appointment booked as standard — annual prepay isn’t available yet for the nine-round lawn program.');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
@@ -8966,7 +8962,9 @@ async function scheduleCreateHandler(req, res, next) {
         // invoice prices the quoted plan, so an unverifiable cadence could
         // stamp the wrong number of covered visits for that price.
         downgrade('Appointment booked as standard — the quoted plan’s cadence could not be determined, so annual prepay can’t verify the booked series matches what was sold. Use the estimate’s Annual Prepay action or set up prepay from Customer 360.');
-      } else if (quoteRecurringCadence !== prepayCoverageCadence) {
+      } else if ((prepayRoundsSeries && quoteRecurringCadence === 'every_6_weeks' ? prepayCoverageCadence : quoteRecurringCadence) !== prepayCoverageCadence) {
+        // (A quoted lawn 9x plan reads every_6_weeks in the quote vocabulary;
+        // the booked rounds series is that same plan, so the two match.)
         // The prepay invoice prices the QUOTED cadence's annual — booking a
         // different cadence would stamp a different number of visits as
         // covered for that price (quoted quarterly → booked monthly = 12
@@ -24687,13 +24685,15 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
     // A NEW series (the draft probe) that GATE_LAWN_9X_ROUNDS will write as
-    // lawn_rounds_9 has no prepay coverage yet: refused like seasonal_feb_oct.
-    // A committed series is read as it is stored.
+    // lawn_rounds_9 is covered on the rounds cadence: the term records the
+    // pattern the series is written with. A committed series is read as it is
+    // stored.
     const draftWrittenAsRounds = input.mode === 'draft' && lawnRoundsSeriesPattern({
       pattern: input.rawCadence, intervalDays: input.intervalDays, service_type: coverageServiceType,
     }).pattern === LAWN_ROUNDS_9;
-    const visitsPerYear = visitsPerYearForCadence(cadence) || (draftWrittenAsRounds ? 9 : null);
-    const coverageCadence = draftWrittenAsRounds ? null : prepayCoverageCadenceForPattern(cadence);
+    const coveredCadence = draftWrittenAsRounds ? LAWN_ROUNDS_9 : cadence;
+    const visitsPerYear = visitsPerYearForCadence(coveredCadence);
+    const coverageCadence = prepayCoverageCadenceForPattern(coveredCadence);
     if (!visitsPerYear || !coverageCadence) {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }

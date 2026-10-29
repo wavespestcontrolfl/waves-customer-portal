@@ -20,8 +20,7 @@ function visitsPerYearForCadence(cadence) {
     case 'monthly': case 'monthly_nth_weekday': return 12;
     case 'every_6_weeks': return 9;
     // lawn_rounds_9 is the same 9x lawn plan as every_6_weeks (nine fixed
-    // rounds a year). Only the visit count is read here; coverage stays null
-    // below.
+    // rounds a year); its coverage cadence is lawn_rounds_9 below.
     case 'lawn_rounds_9': return 9;
     // seasonal_feb_oct (mosquito 9x) is deliberately absent — see
     // prepayCoverageCadenceForPattern below.
@@ -58,15 +57,15 @@ function visitsPerYearForCadence(cadence) {
 // again. Returning null downgrades the sale to a standard accept (fail closed).
 // Supporting it means teaching the coverage seeder the season first.
 //
-// lawn_rounds_9 (lawn 9x, nine fixed rounds a year) is UNSUPPORTED for the same
-// reason: the coverage seeder fills remaining covered visits with 42-day math,
-// not the round calendar, so prepaid visits would land outside their rounds.
-// Prepay coverage for rounds ships in its own PR; until then it returns null
-// and the sale downgrades to a standard accept (fail closed).
+// lawn_rounds_9 (lawn 9x, nine fixed rounds a year) IS supported: the coverage
+// seeder places its covered visits on the round calendar (annual-prepay-renewals
+// coverageScheduleDates, lawnRoundDate), the same dates the series is seeded
+// with. The term stores coverage_cadence 'lawn_rounds_9'.
 function prepayCoverageCadenceForPattern(cadence) {
   switch (String(cadence || '').trim().toLowerCase().replace(/[\s-]+/g, '_')) {
     case 'monthly': return 'monthly';
     case 'every_6_weeks': return 'every_6_weeks';
+    case 'lawn_rounds_9': return 'lawn_rounds_9';
     case 'bimonthly': case 'bi_monthly': return 'bimonthly';
     case 'quarterly': return 'quarterly';
     case 'triannual': case 'every_4_months': return 'triannual';

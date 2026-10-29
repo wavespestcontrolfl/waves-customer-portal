@@ -5481,12 +5481,32 @@ const ANNUAL_PREPAY_CADENCE_OPTIONS = [
     visits: 1,
   },
 ];
+// Lawn 9x rounds (lawn_rounds_9): staff-only cadence of a lawn series on the
+// nine fixed rounds a year. Offered only when the term or the suggestion
+// already carries it, never as a choice for other plans.
+const ANNUAL_PREPAY_LAWN_ROUNDS_OPTION = {
+  value: "lawn_rounds_9",
+  label: "Lawn rounds (9 a year)",
+  visits: 9,
+};
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
-  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [
-    option.value,
-    String(option.visits),
-  ]),
+  [...ANNUAL_PREPAY_CADENCE_OPTIONS, ANNUAL_PREPAY_LAWN_ROUNDS_OPTION].map(
+    (option) => [option.value, String(option.visits)],
+  ),
 );
+function annualPrepayCadenceOptionsFor(cadence) {
+  if (cadence !== ANNUAL_PREPAY_LAWN_ROUNDS_OPTION.value)
+    return ANNUAL_PREPAY_CADENCE_OPTIONS;
+  const at =
+    ANNUAL_PREPAY_CADENCE_OPTIONS.findIndex(
+      (option) => option.value === "every_6_weeks",
+    ) + 1;
+  return [
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(0, at),
+    ANNUAL_PREPAY_LAWN_ROUNDS_OPTION,
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(at),
+  ];
+}
 
 // Flags an existing invoice as an annual prepayment so the customer-facing
 // coverage banner renders on the pay page + PDF. When a service type + visit
@@ -5777,7 +5797,7 @@ function AnnualPrepayModal({
                   removing
                 }
               >
-                {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+                {annualPrepayCadenceOptionsFor(cadence).map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>

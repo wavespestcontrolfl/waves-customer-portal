@@ -185,23 +185,6 @@ describe('seedFollowUpsForParent — the seeder\'s own follow-up rows (booking w
     expect(planned).toEqual(inserted.map((r) => r.scheduled_date));
   });
 
-  test('gate on, opts.lawnRounds === false: planFollowUpSeedDates and seedFollowUpsForParent both keep every_6_weeks, with agreeing dates', async () => {
-    gateOn();
-    const { conn, inserted, parentUpdates } = makeConn();
-    const parent = lawnParent();
-    const opts = { pattern: 'every_6_weeks', plannedCount: 9, skipWeekends: true, weekendShift: 'forward', lawnRounds: false };
-    const planned = await planFollowUpSeedDates(conn, parent, opts);
-    const res = await seedFollowUpsForParent(conn, parent, opts);
-    expect(res.pattern).toBe('every_6_weeks');
-    expect(parentUpdates[0].recurring_pattern).toBe('every_6_weeks');
-    expect(inserted.every((r) => r.recurring_pattern === 'every_6_weeks')).toBe(true);
-    expect(planned).toEqual(inserted.map((r) => r.scheduled_date));
-    // The same call without the flag is rounds, on different dates.
-    const rounds = makeConn();
-    const roundsPlanned = await planFollowUpSeedDates(rounds.conn, parent, { ...opts, lawnRounds: undefined });
-    expect(roundsPlanned).not.toEqual(planned);
-  });
-
   test.each([
     ['tree and shrub', 'Tree & Shrub Care', 'every_6_weeks'],
     ['mosquito', 'Mosquito Control', 'every_6_weeks'],
@@ -257,15 +240,35 @@ describe('estimate converter series write (seedRecurringFollowUpsForParent)', ()
     expect(inserted.every((r) => r.recurring_pattern === LAWN_ROUNDS_9 && r.recurring_interval_days === undefined)).toBe(true);
   });
 
-  test('gate on + annual-prepay accept: parent and children stay every_6_weeks, 42 days apart', async () => {
+  test('gate on + annual-prepay accept: parent and children are written lawn_rounds_9 too (no prepay exception)', async () => {
     gateOn();
     const { conn, inserted, parentUpdates } = makeConn();
     await converter.seedRecurringFollowUpsForParent(conn, lawnParent(), lawnLine(), { registerReminders: false, annualPrepay: true });
-    expect(parentUpdates[0].recurring_pattern).toBe('every_6_weeks');
-    expect(inserted.length).toBeGreaterThan(0);
-    expect(inserted.every((r) => r.recurring_pattern === 'every_6_weeks')).toBe(true);
-    expect(gapDays('2099-03-17', inserted[0].scheduled_date)).toBeGreaterThanOrEqual(42);
+    expect(parentUpdates[0].recurring_pattern).toBe(LAWN_ROUNDS_9);
+    expect(inserted).toHaveLength(8);
+    expect(inserted.every((r) => r.recurring_pattern === LAWN_ROUNDS_9 && r.recurring_interval_days === undefined)).toBe(true);
+    // The same series as an accept without prepay: same dates.
+    const plain = makeConn();
+    await converter.seedRecurringFollowUpsForParent(plain.conn, lawnParent(), lawnLine(), { registerReminders: false });
+    expect(inserted.map((r) => r.scheduled_date)).toEqual(plain.inserted.map((r) => r.scheduled_date));
   });
+
+  test.each(['2099-03-16', '2099-03-17', '2099-03-18', '2099-03-19', '2099-03-20', '2099-08-24', '2099-12-28'])(
+    'gate on + annual-prepay accept: the term coverage dates equal the seeded rounds rows (anchor %s)',
+    async (anchor) => {
+      gateOn();
+      const { conn, inserted } = makeConn();
+      await converter.seedRecurringFollowUpsForParent(conn, lawnParent({ scheduled_date: anchor }), lawnLine(), { registerReminders: false, annualPrepay: true });
+      const { coverageScheduleDates } = require('../services/annual-prepay-renewals')._private;
+      const cadence = converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks');
+      expect(cadence).toBe('lawn_rounds_9');
+      const coverage = coverageScheduleDates(anchor, 9, cadence);
+      // The parent is the first covered visit; the seeder writes the other eight.
+      expect(coverage).toHaveLength(9);
+      expect(coverage[0]).toBe(anchor);
+      expect(inserted.map((r) => r.scheduled_date)).toEqual(coverage.slice(1));
+    },
+  );
 
   test('gate on: a tree and shrub 9x line still writes every_6_weeks', async () => {
     gateOn();
@@ -293,12 +296,20 @@ describe('estimate converter quote prepay decision', () => {
     expect(converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks')).toBe('every_6_weeks');
   });
 
-  test('gate on: the prepay term still records every_6_weeks, so an annual-prepay accept has no rounds refusal', () => {
+  test('gate on: the prepay term records lawn_rounds_9, the pattern the series is written with', () => {
     gateOn();
-    expect(converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks')).toBe('every_6_weeks');
+    expect(converter.annualPrepayCoverageCadence(lawnLine(), 'every_6_weeks')).toBe('lawn_rounds_9');
+    // A count-only lawn row (no frequency field) is the same plan.
+    expect(converter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'every_6_weeks')).toBe('lawn_rounds_9');
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-converter.js'), 'utf8');
-    expect(src).not.toMatch(/LAWN_ROUNDS_9/);
     expect(src).toMatch(/if \(cadence === RecurringAppointmentSeeder\.SEASONAL_FEB_OCT\) \{/);
+    expect(src).not.toMatch(/lawnRounds: false/);
+  });
+
+  test('gate on: a commercial lawn 9x line and a tree and shrub 9x line keep every_6_weeks', () => {
+    gateOn();
+    expect(converter.annualPrepayCoverageCadence({ ...lawnLine(), name: 'Commercial Lawn Care' }, 'every_6_weeks')).not.toBe('lawn_rounds_9');
+    expect(converter.annualPrepayCoverageCadence({ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'every_6_weeks', visitsPerYear: 9 }, 'every_6_weeks')).toBe('every_6_weeks');
   });
 
   test('gate on: the seasonal mosquito prepay refusal is unchanged (cadence seasonal_feb_oct)', () => {

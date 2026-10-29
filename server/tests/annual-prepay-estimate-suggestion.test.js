@@ -133,6 +133,33 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.coverageVisitCount).toBe(4);
   });
 
+  test('a priced option keyed lawn_rounds_9 is a supported 9-visit cadence; every_6_weeks is unchanged', async () => {
+    const estimatePublic = require('../routes/estimate-public');
+    const lawn = pestEstimate({
+      monthly_total: 75,
+      estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9 }] } } },
+    });
+    const bundleWith = (row) => jest.spyOn(estimatePublic, 'buildPricingBundle')
+      .mockResolvedValue({ frequencies: [{ monthly: 75, annual: 900, annualPrepayEligible: true, ...row }] });
+    try {
+      for (const key of ['every_6_weeks', 'lawn_rounds_9']) {
+        const spy = bundleWith({ key, visitsPerYear: 9 });
+        const suggestion = await buildSuggestion([lawn]);
+        spy.mockRestore();
+        expect(suggestion.blocked).toBeUndefined();
+        expect(suggestion.coverageCadence).toBe(key);
+        expect(suggestion.coverageVisitCount).toBe(9);
+      }
+      // The option's own count must still agree with the cadence's.
+      const spy = bundleWith({ key: 'lawn_rounds_9', visitsPerYear: 6 });
+      const mismatch = await buildSuggestion([lawn]);
+      spy.mockRestore();
+      expect(mismatch.blocked).toBe(true);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
   test('seasonal mosquito (prepay-unsupported schedule) never auto-prices', async () => {
     const seasonal = pestEstimate({
       monthly_total: 55,
