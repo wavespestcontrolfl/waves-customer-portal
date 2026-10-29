@@ -91,6 +91,7 @@
  *   GATE_PAYROLL_TAX_CALENDAR=true (basic payroll layer 2, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Puts the amount and due date of each payroll tax deposit and filing on the existing Tax page filing calendar: the monthly federal deposit, Form 941, Florida RT-6, a FUTA over $500 alert (FUTA deposits are out of scope), Form 940, W-2 and W-3, and the Florida new hire report. Due dates move past weekends and legal holidays by the IRS and Florida rules. The 14-day reminder text to the owner is the existing tax deadline alert. A row the owner marks filed or paid is never changed; if a pay run later raises an amount above what the marked rows cover, a new balance row holds the difference, and if the pay checks behind a marked return change, a review row asks the owner to check the figures. Read at call time via payrollTaxCalendarLive(), strict 'true', dark by default; off = the sync returns before any query. The owner makes every deposit and filing himself; sends nothing to a customer or staff member. Rollback = unset.)
  *   GATE_PAYROLL_FORM_FIGURES=true (basic payroll layer 3a, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Adds a Tax forms section to the Payroll tab and GET /api/admin/payroll/forms: the line-by-line figures to type onto Form 941 and the Florida RT-6 (one quarter), Form 940, and each employee's W-2 with the W-3 totals (one year), added up from finalized, not-voided pay checks by pay date, with a copy button on each amount. Rates come from the payroll calculator. Shows numbers to an admin only: no PDF is filled in, no SSN, EIN or bank number is held (those fields read "Enter from your records"), and nothing is filed, paid or sent. Read at call time via payrollFormFiguresLive(), strict 'true', dark by default; off = the route answers 404 and the section does not render. Rollback = unset.)
  *   GATE_PAYROLL_TIME_OFF=true (basic payroll, owner ruling 2026-10-26: "Paid days off. The portal's payroll cannot pay time off or holidays. Fix: add this before the tech's first day off." Needs GATE_PAYROLL. Adds paid time off and holidays to pay runs: an admin records a day per W-2 technician (kind pto or holiday, hours up to 24); the pay run pays those hours at the straight hourly rate on the same check, taxed like any wages, and never counts them toward overtime (hours not worked are not hours worked). A week with only time off still makes a check. A per-technician yearly allowance (technicians.pto_hours_per_year, a setting) only warns when paid time off passes it. A record is locked once the pay run for its week is final, whichever technician it paid; void the pay run to change it. The stub, the pay run table, the CSV and the tax package W-2 CSV show the new lines. Read at call time via payrollTimeOffLive(), strict 'true', dark by default; off = every output and route is byte for byte today's. Pays, sends and files nothing; rollback = unset.)
+ *   GATE_PAYROLL_PAY_LINES=true (basic payroll, owner ruling 2026-10-29, D5 part 1 of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL (and reads paid time off when GATE_PAYROLL_TIME_OFF is also on). Adds four kinds of pay line to pay runs: a review bonus, a sales commission, a monthly health allowance and an employer HSA contribution. An admin enters a line on the Payroll tab's Pay runs section (payroll_pay_lines) and the next pay run for that technician pays it, even for a technician who has left; a bonus, commission and allowance are taxable wages, while the employer HSA contribution is Section 125 cafeteria-plan money (not wages, not net pay, not in FIT/Social Security/Medicare/FUTA/RT-6 wages). Every line, the HSA one too, counts in the federal regular rate: the extra overtime half-time it causes is paid on the same check, a commission or allowance that covers several weeks is spread equally over those workweeks (29 CFR 778.120) and paid back from each week's approved hours. A covered week with worked time not yet approved makes the technician wait, and one with an unreviewed automatic clock-out holds the check (GATE_SHIFT_CLOSE_REVIEW); once a line is paid, the weeks it priced stay closed to timesheet edits and unlocks until its pay run is voided. W-2 box 12 code TT is filled only for a technician marked FLSA-covered (technicians.flsa_overtime_covered), from qualified_overtime_cents, and code W reports the employer HSA money; Form 940 line 3 includes it and line 4 lists it as exempt fringe benefits. Read at call time via payrollPayLinesLive(), strict 'true', dark by default; off = every output and route is byte for byte today's for checks drafted with it off (the pay-lines routes answer 404), and a check drafted with it on keeps showing and reporting the figures it stored; rollback = unset. Pays, sends and files nothing; the owner makes every payment and filing himself.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
@@ -130,6 +131,7 @@
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
@@ -262,6 +264,7 @@
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
+ *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -2824,6 +2827,8 @@ const gates = {
   referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
   // GATE_REFERRAL_INBOUND_CONFIRM (Referrals Queue: confirm the referrer of a linked or named inbound plan customer, dark). Boot-log entry only; the call-time reader is referralInboundConfirmLive().
   referralInboundConfirm: process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true',
+  // GATE_REFERRAL_INBOUND_BELL (a bell row with Confirm / Not a referral for each card in Referrals → Queue, dark). Boot-log entry only; the call-time reader is referralInboundBellLive().
+  referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -3204,6 +3209,12 @@ const gates = {
   // every environment; read at call time via payrollTimeOffLive(). Kill switch: unset
   // GATE_PAYROLL_TIME_OFF.
   payrollTimeOff: process.env.GATE_PAYROLL_TIME_OFF === 'true',
+
+  // Payroll pay lines (owner 2026-10-29, D5 part 1): review bonus, commission, health
+  // allowance and employer HSA lines on pay runs, with the federal regular-rate overtime
+  // they cause. OFF in every environment; read at call time via payrollPayLinesLive().
+  // Kill switch: unset GATE_PAYROLL_PAY_LINES.
+  payrollPayLines: process.env.GATE_PAYROLL_PAY_LINES === 'true',
 
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
@@ -4847,6 +4858,11 @@ const gates = {
   // approved 2026-10-26). Tri-state: 'shadow' records what would close, 'true' closes. Registered
   // for logGateStatus only; consumers read alertContactCloseMode() at CALL time. Kill switch: unset.
   alertContactClose: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase()),
+
+  // A staff action answers a text (owner 2026-10-29, "Stuck Alert Fixes" F1). Tri-state; the alert
+  // rule rides on GATE_ALERT_CONTACT_CLOSE, the Messages reader reads it alone. Registered for
+  // logGateStatus only; consumers read staffActionAnswersMode() at CALL time. Kill switch: unset.
+  smsStaffActionAnswers: ['shadow', 'true'].includes(String(process.env.GATE_SMS_STAFF_ACTION_ANSWERS || '').trim().toLowerCase()),
 
   // A voicemail bell closes once the customer's own visit ran later that day (owner 2026-10-29,
   // "Stuck Alert Fixes" F3). Tri-state; rides on GATE_ALERT_CONTACT_CLOSE. Registered for
@@ -6726,6 +6742,13 @@ function referralInboundConfirmLive() {
   return process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true';
 }
 
+// GATE_REFERRAL_INBOUND_BELL read at CALL time, strict `=== 'true'`, dark by default. The one reader for the new-referral
+// bell row and its buttons (services/referral-inbound-bell.js, the scheduler's referral-inbound-bell job). It acts only
+// while referralInboundConfirmLive() is true too. Off: no row is raised, open rows serve no buttons, a tap answers 409. Kill: unset.
+function referralInboundBellLive() {
+  return process.env.GATE_REFERRAL_INBOUND_BELL === 'true';
+}
+
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
 // (server/routes/reservice-public.js). Strict 'true', and only alongside
 // GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
@@ -7362,6 +7385,18 @@ function alertContactCloseMode() {
 // unset included, is off: the reason is not offered, and a bell it closed is put back.
 function voicemailVisitUnderwayMode() {
   const value = String(process.env.GATE_VOICEMAIL_VISIT_UNDERWAY || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
+// GATE_SMS_STAFF_ACTION_ANSWERS read at CALL time: 'shadow', 'true' or 'off'. A staff action for the
+// text's customer (by customer id, never by phone) within 24 hours after the text answers it: a visit a
+// person booked in the admin, or a payment a person recorded (services/sms-staff-action-answers.js).
+// 'shadow' (trimmed, any case) makes the admin text alert RECORD the would-close in audit_log and changes
+// nothing else; 'true' closes the alert and makes the Messages reader (Unanswered list, badge, evening
+// digest) count the text as answered. Anything else, unset included, is off: no query, and the reader's
+// SQL is byte-identical to before. The alert rule runs inside GATE_ALERT_CONTACT_CLOSE.
+function staffActionAnswersMode() {
+  const value = String(process.env.GATE_SMS_STAFF_ACTION_ANSWERS || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
@@ -8215,6 +8250,15 @@ function payrollTimeOffLive() {
   return process.env.GATE_PAYROLL_TIME_OFF === 'true';
 }
 
+// GATE_PAYROLL_PAY_LINES read at CALL time — strict 'true' only, so an unset variable is
+// off. Gates the review bonus, commission, health allowance and employer HSA pay lines on
+// pay runs and the regular-rate overtime they cause (services/payroll-pay-lines.js,
+// payroll-regular-rate.js, payroll-runs.js, payroll-calc.js, payroll-form-figures.js,
+// routes/admin-payroll.js). Off = every output and route is byte for byte today's.
+function payrollPayLinesLive() {
+  return process.env.GATE_PAYROLL_PAY_LINES === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -8279,6 +8323,8 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
+module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
@@ -8481,6 +8527,8 @@ module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
 // GATE_REFERRAL_INBOUND_CONFIRM reader, on its own line so gate PRs never conflict.
 module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
+// GATE_REFERRAL_INBOUND_BELL reader, on its own line so gate PRs never conflict.
+module.exports.referralInboundBellLive = referralInboundBellLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -8643,6 +8691,8 @@ module.exports.payrollTaxCalendarLive = payrollTaxCalendarLive;
 module.exports.payrollFormFiguresLive = payrollFormFiguresLive;
 // GATE_PAYROLL_TIME_OFF reader, on its own line so gate PRs never conflict.
 module.exports.payrollTimeOffLive = payrollTimeOffLive;
+// GATE_PAYROLL_PAY_LINES reader, on its own line so gate PRs never conflict.
+module.exports.payrollPayLinesLive = payrollPayLinesLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
@@ -9028,8 +9078,8 @@ module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNot
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
 // GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.buildingUseTaxLive = buildingUseTaxLive;
-// GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
-module.exports.undoManualPaymentLive = undoManualPaymentLive;
+// GATE_SMS_STAFF_ACTION_ANSWERS reader, on its own line so gate PRs never conflict.
+module.exports.staffActionAnswersMode = staffActionAnswersMode;
 // GATE_PROMISE_RECORD_EVIDENCE reader, on its own line so gate PRs never conflict.
 module.exports.promiseRecordEvidenceMode = promiseRecordEvidenceMode;
 // GATE_STOCK_COUNT_AWARE_USAGE reader, on its own line so gate PRs never conflict.

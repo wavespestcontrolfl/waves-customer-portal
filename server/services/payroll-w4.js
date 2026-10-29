@@ -21,7 +21,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
-const { payrollTimeOffLive } = require('../config/feature-gates');
+const { payrollTimeOffLive, payrollPayLinesLive } = require('../config/feature-gates');
 
 const FILING_STATUSES = ['single', 'married_separately', 'married_jointly', 'head_of_household'];
 const PAY_METHODS = ['check', 'bank_transfer'];
@@ -227,12 +227,15 @@ async function listPayrollTechnicians(conn = db) {
   const today = etDateString();
   // GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance rides on each row.
   const withTimeOff = typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
+  // GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee rides on each row.
+  const withCoverage = typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
   const rows = await conn('technicians')
     .where({ employment_type: 'w2' })
     .whereIn('employment_status', ['active', 'prospective'])
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status',
       ...(withTimeOff ? ['pto_hours_per_year'] : []),
+      ...(withCoverage ? ['flsa_overtime_covered'] : []),
       conn.raw("to_char(pay_method_consent_on, 'YYYY-MM-DD') as pay_method_consent_on"));
   const out = [];
   // One at a time: the list is a dozen rows, and a caller may pass a single connection.
@@ -246,6 +249,7 @@ async function listPayrollTechnicians(conn = db) {
       payMethodConsentOn: row.pay_method_consent_on || null,
       currentW4: await currentW4For(row.id, today, conn),
       ...(withTimeOff ? { ptoHoursPerYear: row.pto_hours_per_year == null ? null : Number(row.pto_hours_per_year) } : {}),
+      ...(withCoverage ? { flsaOvertimeCovered: row.flsa_overtime_covered == null ? null : row.flsa_overtime_covered } : {}),
     });
   }
   return out;

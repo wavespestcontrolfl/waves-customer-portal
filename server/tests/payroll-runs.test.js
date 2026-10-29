@@ -327,3 +327,107 @@ describe('GATE_PAYROLL_TIME_OFF', () => {
     });
   });
 });
+
+// GATE_PAYROLL_PAY_LINES (owner 2026-10-29, D5 part 1): a check carries the lines
+// evaluate() attached, the review token sees them, and gate off adds nothing.
+describe('pay lines on a check', () => {
+  const run = { week_start: '2026-10-12', pay_date: '2026-10-23' };
+  const LINE = {
+    id: '77777777-7777-4777-8777-777777777777', kind: 'review_bonus', amountCents: 3000,
+    earnedWeekStart: '2026-10-12', coversFrom: null, coversTo: null,
+  };
+  const built = (patch = {}) => buildCheck({
+    tech: tech(patch), payDate: '2026-10-23', weekStart: '2026-10-12', w4: W4, ytdGrossCents: 0,
+  });
+  const OLD = process.env.GATE_PAYROLL_PAY_LINES;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_PAYROLL_PAY_LINES; else process.env.GATE_PAYROLL_PAY_LINES = OLD;
+  });
+
+  it('adds no column and no snapshot key with the gate off, even when lines are passed', () => {
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    const { check } = built({ pay_lines: [LINE], flsa_overtime_covered: true });
+    expect(check.gross_cents).toBe(88000);
+    for (const column of ['review_bonus_cents', 'qualified_overtime_cents', 'simple_compensation_cents']) expect(check).not.toHaveProperty(column);
+    expect(JSON.parse(check.calc_snapshot)).not.toHaveProperty('payLines');
+  });
+
+  it('with the gate on and no lines, stores zeros and the qualified overtime only for a covered employee', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const overtime = { regular_minutes: '2400.00', overtime_minutes: '120.00' };
+    const unset = built(overtime).check;
+    expect(unset).toMatchObject({
+      review_bonus_cents: 0, commission_cents: 0, health_allowance_cents: 0, hsa_employer_cents: 0,
+      line_overtime_premium_cents: 0, qualified_overtime_cents: 0, simple_compensation_cents: 94600, gross_cents: 94600,
+    });
+    expect(built({ ...overtime, flsa_overtime_covered: false }).check.qualified_overtime_cents).toBe(0);
+    expect(built({ ...overtime, flsa_overtime_covered: true }).check.qualified_overtime_cents).toBe(2200);
+    expect(JSON.parse(unset.calc_snapshot)).not.toHaveProperty('payLines');
+  });
+
+  it('with lines, adds them to gross and keeps them and the weekly breakdown in the snapshot', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const hsa = { ...LINE, id: '88888888-8888-4888-8888-888888888888', kind: 'hsa_employer', amountCents: 20000 };
+    const weeks = [{ weekStart: '2026-10-12', premiumCents: 181 }];
+    const { check } = built({ pay_lines: [LINE, hsa], line_premium: { extraPremiumCents: 181, weeks }, flsa_overtime_covered: true });
+    expect(check).toMatchObject({
+      review_bonus_cents: 3000, hsa_employer_cents: 20000, line_overtime_premium_cents: 181, gross_cents: 88000 + 3000 + 181,
+      simple_compensation_cents: 91181, qualified_overtime_cents: 181,
+    });
+    expect(check.net_cents).toBe(check.gross_cents - check.federal_income_tax_cents - check.social_security_cents - check.medicare_cents);
+    expect(JSON.parse(check.calc_snapshot)).toMatchObject({ payLines: [LINE, hsa], lineOvertimeWeeks: weeks });
+  });
+
+  it('lets a lines-only check be worked out, and blocks one with no pay rate', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const only = built({ regular_minutes: 0, overtime_minutes: 0, pay_lines: [{ ...LINE, kind: 'commission', amountCents: 50000 }] });
+    expect(only.check).toMatchObject({ gross_cents: 50000, regular_pay_cents: 0, commission_cents: 50000 });
+    expect(built({ regular_minutes: 0, overtime_minutes: 0, pay_rate: null, pay_lines: [LINE] }).blocked).toMatch(/No pay rate set/);
+  });
+
+  it('changes the review token when a line is added, removed or its span moves, and not otherwise', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const withLines = (lines) => built({ pay_lines: lines, line_premium: { extraPremiumCents: 0, weeks: [] } }).check;
+    const base = tokenOf(run, [withLines([LINE])]);
+    expect(tokenOf(run, [withLines([LINE])])).toBe(base);
+    expect(tokenOf(run, [withLines([])])).not.toBe(base);
+    expect(tokenOf(run, [withLines([{ ...LINE, id: '99999999-9999-4999-8999-999999999999' }])])).not.toBe(base);
+    expect(tokenOf(run, [withLines([{ ...LINE, coversFrom: '2026-10-05', coversTo: '2026-10-11' }])])).not.toBe(base);
+    // A stored row carries the lines as pay_lines (calc_snapshot->'payLines') and reads the same.
+    const fresh = withLines([LINE]);
+    const stored = {
+      ...fresh, pay_lines: JSON.parse(fresh.calc_snapshot).payLines, calc_snapshot: undefined,
+      hourly_rate: '22.00', regular_minutes: '2400.00', overtime_minutes: '0.00',
+      review_bonus_cents: '3000', gross_cents: String(fresh.gross_cents),
+    };
+    expect(tokenOf(run, [stored])).toBe(base);
+  });
+
+  it('leaves the token exactly as before with the gate off', () => {
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    const plain = built().check;
+    expect(tokenOf(run, [plain])).toBe(tokenOf(run, [{ ...plain, review_bonus_cents: 5000, pay_lines: [LINE] }]));
+  });
+});
+
+describe('checksToCsv with pay lines', () => {
+  const OLD = process.env.GATE_PAYROLL_PAY_LINES;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_PAYROLL_PAY_LINES; else process.env.GATE_PAYROLL_PAY_LINES = OLD;
+  });
+  const row = {
+    employee_name: 'Sample Alpha', regular_minutes: '2400.00', overtime_minutes: '0.00', hourly_rate: '22.00', gross_cents: 91000,
+    federal_income_tax_cents: 0, social_security_cents: 0, medicare_cents: 0, additional_medicare_cents: 0, net_cents: 91000,
+    employer_social_security_cents: 0, employer_medicare_cents: 0, futa_cents: 0, fl_reemployment_cents: 0, pay_method: 'check',
+    review_bonus_cents: '3000', commission_cents: '0', health_allowance_cents: '0', line_overtime_premium_cents: '0', hsa_employer_cents: '20000',
+  };
+
+  it('appends five columns at the end with the gate on and none with it off', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const on = checksToCsv([row]).split('\n');
+    expect(on[0]).toMatch(/Check Number,Review Bonus,Commission,Health Allowance,Overtime On Bonus And Allowance,HSA From Waves$/);
+    expect(on[1]).toMatch(/30\.00,0\.00,0\.00,0\.00,200\.00$/);
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    expect(checksToCsv([row]).split('\n')[0]).toMatch(/Pay Method,Check Number$/);
+  });
+});
