@@ -102,6 +102,9 @@ async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0,
   return applyOpenSelfPayPredicates(database('invoices'))
     .join('customers', 'customers.id', 'invoices.customer_id')
     .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
+    // Whole-balance match only (partial payments, owner 2026-10-29): a notice never matches an invoice that already holds a part payment.
+    // The office records what is left from the invoice itself.
+    .whereRaw('COALESCE(invoices.amount_paid, 0) = 0')
     .orderBy('invoices.created_at', 'asc')
     .limit(Math.min(Math.max(1, Number(limit) || MAX_AMOUNT_CANDIDATES), MAX_AMOUNT_CANDIDATES))
     .select(

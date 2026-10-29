@@ -11962,6 +11962,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
+        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+        // amount_paid. The office settles it from the Invoices page.
+        if (toCents(lockedInvoice.amount_paid) > 0) {
+          logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
+          return lockedInvoice;
+        }
         const existingCredit = await trx('payments')
           .where({ customer_id: svc.customer_id, status: 'paid' })
           .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])

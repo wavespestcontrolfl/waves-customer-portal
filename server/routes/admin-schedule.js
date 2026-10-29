@@ -19068,6 +19068,10 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       if (prepaidCents < Math.round(invoiceAmountDue(locked) * 100)) {
         return { reason: 'not_paid_in_full', invoice: locked };
       }
+      // A part payment is already on this invoice: the office settles the rest from the Invoices page (this flip would leave it in amount_paid).
+      if (Math.round((Number(locked.amount_paid) || 0) * 100) > 0) {
+        return { reason: 'part_payment', invoice: locked };
+      }
       const [updated] = await trx('invoices')
         .where({ id: locked.id })
         .update({
@@ -19497,6 +19501,12 @@ router.post('/:id/invoice', async (req, res, next) => {
         const amountPaidCents = toCents(lockedInvoice.amount_paid);
         const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents - amountPaidCents);
         if (!(dueCents > 0)) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+        // amount_paid. The office settles it from the Invoices page.
+        if (amountPaidCents > 0) {
+          logger.warn('[schedule] prepaid credit NOT applied — a part payment is on the invoice, the office records the rest', { invoiceId: lockedInvoice.id });
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
         const existingCredit = await trx('payments')
@@ -20095,7 +20105,7 @@ async function memberBillingInvoiceRows(conn, ids) {
       .orderBy('id')
       .forUpdate()
       .noWait()
-      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'amount_paid', 'line_items', 'stripe_payment_intent_id', 'total');
   } catch (err) {
     if (err?.code !== '55P03') throw err;
     throw busy();
@@ -20124,6 +20134,7 @@ async function memberBillingInvoiceRows(conn, ids) {
         scheduled_service_id: originalIdOf.get(member),
         status: inv.status,
         credit_applied: inv.credit_applied ?? 0,
+        amount_paid: inv.amount_paid ?? 0,
         line_items: inv.line_items,
         stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
         total: inv.total,
@@ -20413,7 +20424,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
-      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+      .select('scheduled_service_id', 'status', 'credit_applied', 'amount_paid', 'line_items', 'stripe_payment_intent_id', 'total');
     // liveInvoice also reaches an invoice
     // this visit carries WITHOUT its own
     // invoices.scheduled_service_id — the two indirect links the repricing
@@ -20438,7 +20449,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           .whereNotIn('inv.status', [...NO_MONEY_HELD])
           .select(
             'sr.scheduled_service_id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+            'inv.status', 'inv.credit_applied', 'inv.amount_paid', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
         invoiced.push(...srLinked);
       }
@@ -20449,7 +20460,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           .whereNotIn('inv.status', [...NO_MONEY_HELD])
           .select(
             'p.scheduled_service_id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+            'inv.status', 'inv.credit_applied', 'inv.amount_paid', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
         invoiced.push(...packetLinked);
       }
@@ -20472,6 +20483,8 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     for (const inv of invoiced) {
       if (settled.has(String(inv.status || '').trim().toLowerCase())) {
         mark(inv.scheduled_service_id, 'attached to an invoice that has money on it');
+      } else if (Number(inv.amount_paid) > 0) {
+        mark(inv.scheduled_service_id, 'attached to an invoice that has a part payment on it');
       } else if (Number(inv.credit_applied) > 0) {
         mark(inv.scheduled_service_id, 'attached to an invoice with account credit already applied');
       } else if (hasDepositCreditLine(inv.line_items)) {
@@ -24304,7 +24317,7 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
               .where('notes', 'like', `%Auto-generated from accepted estimate #${String(estimateId)}%`);
           });
       })
-      .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
+      .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
         'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
         'notes');
   } catch (err) {
@@ -24341,6 +24354,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     }
     if (status !== 'draft') {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
+    }
+    if (Number(inv.amount_paid || 0) > 0) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has a part payment on it. Resolve it from Invoices first` };
     }
     if (Number(inv.credit_applied || 0) > 0) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360` };

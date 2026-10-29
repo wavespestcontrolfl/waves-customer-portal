@@ -120,6 +120,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['K-Flow 0-0-25', FAMILY.POTASSIUM],
   ['LESCO K-Flow 0-0-25', FAMILY.POTASSIUM],
   ['LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer', FAMILY.POTASSIUM],
+  // August and September hose visits (v13): liquid potassium acetate. Exact name; the Nutra-TECH T&O micronutrient row below is a different product.
+  ['LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer', FAMILY.POTASSIUM],
   ['LESCO Green Flo Phyte Plus 0-0-26 + Micros Liquid Fertilizer', FAMILY.POTASSIUM],
   ['LESCO 0-0-18 Bio KMAG', FAMILY.POTASSIUM],
   ['LESCO 0-0-18 Bio KMAG 1% Fe 1% Mg 1% Mn 2.17% S Organic Turf Granular Fertilizer', FAMILY.POTASSIUM],

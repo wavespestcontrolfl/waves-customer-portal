@@ -52,7 +52,8 @@ describe('the v13 watering rules', () => {
     const granule = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
     const aprilPolymer = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
     const advion = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name), ...december.WATERING.map((item) => item.name), ...granule.WATERING.map((item) => item.name), ...aprilPolymer.WATERING.map((item) => item.name), ...advion.WATERING.map((item) => item.name)]);
+    const summerPotassium = require('../models/migrations/20261029170000_lawn_v13_summer_potassium');
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name), ...december.WATERING.map((item) => item.name), ...granule.WATERING.map((item) => item.name), ...aprilPolymer.WATERING.map((item) => item.name), ...advion.WATERING.map((item) => item.name), ...summerPotassium.WATERING.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 
@@ -73,6 +74,14 @@ describe('the v13 watering rules', () => {
     expect(checked.rule).toMatchObject({ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'owner' });
     expect({ mode: f24.mode, in: f24.water_in_inches, by: f24.water_in_by_hours }).toEqual({ mode: aprilPolymer.WATERING_RULE.mode, in: aprilPolymer.WATERING_RULE.water_in_inches, by: aprilPolymer.WATERING_RULE.water_in_by_hours });
     expect(aprilPolymer.WATERING).toEqual([{ name: aprilPolymer.NEW_NAME, rule: aprilPolymer.WATERING_RULE }]);
+  });
+
+  test('the summer potassium rule is the owner liquid fertilizer rule (no watering change, as K-Flow and Nutra-TECH), valid and owner-sourced', () => {
+    const summerPotassium = require('../models/migrations/20261029170000_lawn_v13_summer_potassium');
+    const checked = validateRule(summerPotassium.WATERING_RULE);
+    expect(checked.errors).toEqual([]);
+    expect(checked.rule).toMatchObject({ mode: 'none', source: 'owner' });
+    expect(summerPotassium.WATERING).toEqual([{ name: summerPotassium.NAME, rule: summerPotassium.WATERING_RULE }]);
   });
 
   test('Tetrino is watered in, so a soil-pest (white grub) application is never told "no change"', () => {
