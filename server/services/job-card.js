@@ -887,6 +887,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     return Number.isFinite(t) && t <= start && start < t + 3600000;
   });
   const startAt = startRow ? formatETTime(new Date(startRow.startTime)).replace(':00', '').toLowerCase() : null;
+  const startRows = startRow ? [startRow] : [];
   // Wind and temperature (step 2): the forecast period the work starts in and the next one, from that period's
   // start, not a span from the minute (a 2:01 pm start reads 2 pm and 3 pm, never 4 pm). Both periods are needed.
   const siteFrom = startRow ? Date.parse(startRow.startTime) : null;
@@ -896,12 +897,20 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
   });
   const siteComplete = siteFrom != null && Array.from({ length: SITE_HOURS }, (_, i) => siteFrom + i * 3600000)
     .every((t) => siteRows.some((h) => Date.parse(h.startTime) === t));
-  const siteLimitChecks = (limits) => LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
-    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: 'product limit',
-    tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
+  // One table: a label heat line (Celsius: no adjuvant above 90°F) first, then the catalog limits. When both
+  // temperature rows fire, the caution keeps the first of a kind, so the label's words show.
+  const siteLimitChecks = (limits, heat) => [
+    ...(heat ? [{ key: 'temperatureF', kind: 'temperature', source: 'label', action: heat.action, value: heat.aboveF, breaks: (v, l) => v > l, text: (v, at) => `${v}°F at ${at} — label: ${heat.text}` }] : []),
+    ...LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
+      ...c, source: 'product limit', value: limits[c.limit], low: c.limit === 'minTempF', text: (v, at) => SITE_TEXT[c.limit](v, at, limits[c.limit]),
+    })),
+  ].map((c) => ({
+    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: c.source, action: c.action,
+    tier: (known) => (known.some((v) => c.breaks(v, c.value)) ? 'hold' : null),
+    // Called only once the tier fired, so a reading past the limit is always there to name.
     reason: (known, rows) => {
-      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, limits[c.limit]), c.limit === 'minTempF');
-      return worst ? SITE_TEXT[c.limit](worst.value, worst.at, limits[c.limit]) : c.reason(limits[c.limit]);
+      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, c.value), c.low);
+      return c.text(worst.value, worst.at);
     },
   }));
   const rainRuleChecks = (product, limits) => {
@@ -910,23 +919,12 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     // The Waves rule gives a dry time to a tank spray whose label gives none (plan step 2: a label's "no spraying
     // during rain" line covers the start hour only), unless the label waters it in or the catalog states an
     // interval. A dust is not a spray.
-    const dust = /\bdust\b/i.test(`${product.application_method || ''} ${product.formulation || ''} ${product.name || ''}`);
+    const dust = /\bdust\b/i.test([product.application_method, product.formulation, product.name].join(' '));
     const waves = !dry && !rule?.waterIn && limits.rainFreeHours == null && isTankMixable(product) && !dust ? rainRules.waves[product.id] : null;
-    // A label heat line (Celsius: no adjuvant above 90°F) replaces a looser catalog maximum, so one line shows.
-    const heat = rule?.heat;
-    const siteLimits = heat && limits.maxTempF != null && heat.aboveF <= limits.maxTempF ? { ...limits, maxTempF: null } : limits;
     return [
-      ...siteLimitChecks(siteLimits),
-      heat && {
-        rows: siteRows, complete: siteComplete, key: 'temperatureF', label: 'temperature', kind: 'temperature', source: 'label', action: heat.action,
-        tier: (known) => (known.some((v) => v > heat.aboveF) ? 'hold' : null),
-        reason: (known, rows) => {
-          const worst = worstBreach(rows, 'temperatureF', (v) => v > heat.aboveF);
-          return `${worst ? `${worst.value}°F at ${worst.at}` : `over ${heat.aboveF}°F`} — label: ${heat.text}`;
-        },
-      },
+      ...siteLimitChecks(limits, rule?.heat),
       // "Do not make applications during rain": the hour the work starts (now, once the window opened).
-      rule?.duringRain && rainCheck({ rows: startRow ? [startRow] : [], complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
+      rule?.duringRain && rainCheck({ rows: startRows, complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
       dry && rainCheck({ hours: dry, source: 'label advice', holdAbove: Infinity, gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
       limits.rainFreeHours != null && rainCheck({ hours: limits.rainFreeHours, source: 'product limit', text: (pct) => `rain ${pct}% inside ${limits.rainFreeHours} h` }),
       waves && rainCheck({ hours: waves.hours, source: 'Waves rule', text: (pct) => `rain ${pct}% inside ${waves.hours} h — Waves rule` }),
