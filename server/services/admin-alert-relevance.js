@@ -108,7 +108,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode } = require('../config/feature-gates');
+const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
@@ -300,6 +300,7 @@ async function loadContact(rows, data, conn) {
       conn,
       bookedVisits: (ids) => bookedVisitsByCustomer(conn, ids),
       visitRan: voicemailVisitUnderwayMode() !== 'off',
+      staffActions: staffActionAnswersMode() !== 'off',
     });
   } catch (err) {
     data.contactFailed = true;
@@ -669,18 +670,36 @@ const contactAfter = (c, at) => !!at && new Date(at).getTime() > c.anchor.getTim
 // reader judges by phone alone and cannot say whom a reply reached, so its verdict
 // is not used. The bell closes only on this customer's own evidence by customer id
 // (a person's reply to them, a person's call with them), loaded as textAt / backAt /
-// inAt; nothing else, and never "no reply needed".
+// inAt, or a staff action; nothing else, and never "no reply needed".
 function textAnswered(s) {
   const c = s.contact;
   if (!c) return null;
+  const action = staffActionAnswer(c);
   if (c.shared) {
     if (contactAfter(c, c.textAt)) return 'Answered by text';
-    return contactAfter(c, c.backAt) || contactAfter(c, c.inAt) ? 'Answered by a call' : null;
+    if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
+    return action;
   }
-  if (c.pending !== false) return null;
+  if (c.pending !== false) return action;
   if (contactAfter(c, c.textAt)) return 'Answered by text';
   if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
+  // Before the plain fallback so the reason names the action. Only while live: in `shadow` the
+  // reader still answers this text by its own rules, so the real close keeps its plain reason.
+  if (action?.mode === 'true') return action;
   return 'Answered, or no reply needed';
+}
+
+// A staff action for the text's customer after the text (GATE_SMS_STAFF_ACTION_ANSWERS, "Stuck Alert
+// Fixes" F1: a visit a person booked in the admin, or a payment a person recorded, within 24 hours,
+// by customer id): answered with its own mode so it can run in shadow while the contact gate is `true`.
+let staffActionReasons;
+function staffActionAnswer(c) {
+  if (!c.staffActionKind || !contactAfter(c, c.staffActionAt)) return null;
+  const mode = staffActionAnswersMode();
+  if (mode === 'off') return null;
+  staffActionReasons ||= require('./sms-staff-action-answers').STAFF_ACTION_REASONS;
+  const reason = staffActionReasons[c.staffActionKind];
+  return reason ? { reason, mode } : null;
 }
 
 // A voicemail callback request: a person called back and
@@ -1145,7 +1164,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
-  const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode].some((mode) => mode() === 'shadow');
+  const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode].some((mode) => mode() === 'shadow');
   return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}) };
 }
 

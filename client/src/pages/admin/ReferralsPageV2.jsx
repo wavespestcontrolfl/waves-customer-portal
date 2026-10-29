@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { createPortal } from "react-dom";
 import {
   BarChart3,
@@ -447,8 +448,8 @@ function InboundReferralCard({ item, onDone, flash }) {
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
             {item.creditsNow
-              ? "Both accounts get the $25 credit now. No reward text or email goes out."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit, with the usual reward text.`}{" "}
+              ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
+              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -533,7 +534,12 @@ function InboundReferralCard({ item, onDone, flash }) {
 
 export default function ReferralsPageV2() {
   const isMobile = useIsMobile();
-  const [tab, setTab] = useState("dashboard");
+  // `?tab=queue` (the new-referral bell row's link) opens that tab on first render.
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState(() => {
+    const wanted = searchParams.get("tab");
+    return wanted && Object.hasOwn(REFERRALS_LEAF_BY_KEY, wanted) ? wanted : "dashboard";
+  });
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
   const [queue, setQueue] = useState([]);

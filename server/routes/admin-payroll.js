@@ -46,6 +46,18 @@
  * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
  *                                    The allowance only warns; it never blocks an entry.
  *
+ * Pay lines (GATE_PAYROLL_PAY_LINES, also dark; off answers 404 { enabled: false }).
+ * GET    /pay-lines?technicianId=&status=   lines, newest week first (status open, paid or voided).
+ * GET    /pay-lines/technicians             every W-2 employee a line can be for, one who has left too.
+ * POST   /pay-lines                         { kind: 'review_bonus' | 'commission' | 'health_allowance' |
+ *                                    'hsa_employer', technicianId, amountCents, earnedWeekStart (a Monday),
+ *                                    coversFrom?, coversTo?, note? } 201 { payLine }. The next pay run
+ *                                    that reaches the week pays it. A span (coversFrom, coversTo) is for
+ *                                    a commission or monthly allowance that covers several weeks.
+ * DELETE /pay-lines/:id                     remove a line that is not paid yet (409 once a final run paid it).
+ * PUT    /technicians/:id/flsa-coverage     { covered: true | false | null } whether federal overtime law
+ *                                    covers the employee; W-2 box 12 code TT is filled only for true.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -53,11 +65,12 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { payrollLive, payrollFormFiguresLive, payrollTimeOffLive } = require('../config/feature-gates');
+const { payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
 const payrollTimeOff = require('../services/payroll-time-off');
+const payrollPayLines = require('../services/payroll-pay-lines');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -131,6 +144,42 @@ router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set time off allowance', err); }
+});
+
+// GATE_PAYROLL_PAY_LINES off: the same answer the payroll routes give when their gate is off.
+const payLinesOnly = (req, res, next) => {
+  if (!(typeof payrollPayLinesLive === 'function' && payrollPayLinesLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.get('/pay-lines', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ payLines: await payrollPayLines.listPayLines(req.query) });
+  } catch (err) { fail(res, 'list pay lines', err); }
+});
+
+router.get('/pay-lines/technicians', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ technicians: await payrollPayLines.listPayLineTechnicians() });
+  } catch (err) { fail(res, 'list pay line employees', err); }
+});
+
+router.post('/pay-lines', payLinesOnly, async (req, res) => {
+  try {
+    res.status(201).json({ payLine: await payrollPayLines.createPayLine(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'add pay line', err); }
+});
+
+router.delete('/pay-lines/:id', payLinesOnly, async (req, res) => {
+  try {
+    res.json(await payrollPayLines.deletePayLine(req.params.id, req.technicianId));
+  } catch (err) { fail(res, 'remove pay line', err); }
+});
+
+router.put('/technicians/:id/flsa-coverage', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set overtime coverage', err); }
 });
 
 router.get('/technicians', async (req, res) => {

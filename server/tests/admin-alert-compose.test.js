@@ -219,3 +219,62 @@ describe('firstSentence takes the first sentence by the same rule', () => {
     expect(() => composeAdminAlert(spec({ why: expected || 'x' }))).not.toThrow();
   });
 });
+
+describe('buttons (section 2, part 9)', () => {
+  const buttons = (over = {}) => ({
+    kind: 'referral_inbound',
+    items: [
+      { id: 'confirm', label: ' Confirm Lea Quill ', prompt: 'Make Lea Quill the referrer of Ames Fenn?', args: { referrerCustomerId: 'c-2' } },
+      { id: 'dismiss', label: 'Not a referral' },
+    ],
+    ...over,
+  });
+
+  test('a row without buttons composes exactly as before', () => {
+    expect(composeAdminAlert(spec()).metadata).not.toHaveProperty('buttons');
+  });
+
+  test('valid buttons ride in metadata, labels and prompts trimmed, args kept', () => {
+    expect(composeAdminAlert(spec({ buttons: buttons() })).metadata.buttons).toEqual({
+      kind: 'referral_inbound',
+      items: [
+        { id: 'confirm', label: 'Confirm Lea Quill', prompt: 'Make Lea Quill the referrer of Ames Fenn?', args: { referrerCustomerId: 'c-2' } },
+        { id: 'dismiss', label: 'Not a referral' },
+      ],
+    });
+  });
+
+  test.each([
+    ['not an object', [], 'buttons_invalid'],
+    ['a kind that is not a slug', buttons({ kind: 'Referral Inbound' }), 'buttons_kind_invalid'],
+    ['no items', buttons({ items: [] }), 'buttons_items_invalid'],
+    ['four items', buttons({ items: ['a', 'b', 'c', 'd'].map((id) => ({ id, label: id })) }), 'buttons_items_invalid'],
+    ['a repeated id', buttons({ items: [{ id: 'a', label: 'A' }, { id: 'a', label: 'B' }] }), 'button_id_invalid'],
+    ['an id that is not a slug', buttons({ items: [{ id: 'Do It', label: 'A' }] }), 'button_id_invalid'],
+    ['an empty label', buttons({ items: [{ id: 'a', label: '  ' }] }), 'button_label_missing'],
+    ['a label over 32 characters', buttons({ items: [{ id: 'a', label: 'Confirm Bartholomew Quillington-Fenn' }] }), 'button_label_too_long'],
+    ['a label with an exclamation mark', buttons({ items: [{ id: 'a', label: 'Confirm now!' }] }), 'button_label_forbidden_token:exclamation'],
+    ['a two-sentence prompt', buttons({ items: [{ id: 'a', label: 'A', prompt: 'Remove her. Are you sure?' }] }), 'button_prompt_multiple_sentences'],
+    ['a prompt over 110 characters', buttons({ items: [{ id: 'a', label: 'A', prompt: `Remove ${'x'.repeat(110)}?` }] }), 'button_prompt_too_long'],
+    ['an empty prompt', buttons({ items: [{ id: 'a', label: 'A', prompt: ' ' }] }), 'button_prompt_invalid'],
+    ['nested args', buttons({ items: [{ id: 'a', label: 'A', args: { who: { id: 1 } } }] }), 'button_args_invalid'],
+    ['an args key that is not a name', buttons({ items: [{ id: 'a', label: 'A', args: { 'referrer-id': 'x' } }] }), 'button_args_invalid'],
+  ])('refused: %s', (_name, value, violation) => {
+    expect(violationsOf(spec({ buttons: value }))).toEqual(expect.arrayContaining([violation]));
+  });
+
+  test('outside tests the fallback keeps valid buttons and drops invalid ones', async () => {
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      NotificationService.notifyAdmin.mockClear();
+      await raiseAdminAlert('customer', spec({ why: 'Came in 2026-10-27.', buttons: buttons() }));
+      await raiseAdminAlert('customer', spec({ buttons: buttons({ kind: 'Bad Kind' }) }));
+    } finally { process.env.NODE_ENV = env; }
+    const [first, second] = NotificationService.notifyAdmin.mock.calls.map((call) => call[3].metadata);
+    expect(first.buttons.kind).toBe('referral_inbound');
+    expect(first.ruleViolations).toEqual(['why_forbidden_token:iso_date']);
+    expect(second).not.toHaveProperty('buttons');
+    expect(second.ruleViolations).toEqual(['buttons_kind_invalid']);
+  });
+});

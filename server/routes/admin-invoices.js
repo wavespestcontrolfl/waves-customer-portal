@@ -9,6 +9,8 @@ const InvoiceAttachments = require('../services/invoice-attachments');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
+const { undoManualPaymentLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -586,7 +588,8 @@ router.get('/', async (req, res, next) => {
       to,
       sort,
     });
-    res.json({ invoices, total, page: pageNum });
+    // The Invoices page shows "Undo payment" only while GATE_UNDO_MANUAL_PAYMENT is on.
+    res.json({ invoices, total, page: pageNum, undoPaymentEnabled: undoManualPaymentLive() });
   } catch (err) { next(err); }
 });
 
@@ -1620,13 +1623,14 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       // the closeout so a queued receipt cannot deliver during it.
       let claim;
       try {
-        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at });
+        // requirePaid: the status read above can be overtaken by an Undo of the payment; the claim re-reads it under the claim lock.
+        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at, requirePaid: true });
       } catch (err) {
         failed.push({ invoiceId, error: `receipt claim failed: ${err.message}` });
         continue;
       }
-      if (claim.inFlight || claim.alreadySent) {
-        skipped.push({ invoiceId, reason: claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
+      if (claim.inFlight || claim.alreadySent || claim.notPaid) {
+        skipped.push({ invoiceId, reason: claim.notPaid ? 'invoice_not_paid' : claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
         continue;
       }
 
@@ -2871,6 +2875,38 @@ const recordPaymentHandler = async (req, res, next) => {
   }
 };
 router.post('/:id/record-payment', requireAdmin, recordPaymentHandler);
+
+// GET /:id/undo-payment — can the manual payment on this invoice be undone? The Invoices page asks before it opens the confirm, so the
+// rules live in one place (services/invoice-manual-payment-undo.js). 404 while GATE_UNDO_MANUAL_PAYMENT is off.
+router.get('/:id/undo-payment', requireAdmin, async (req, res, next) => {
+  try {
+    if (!undoManualPaymentLive()) return res.status(404).json({ error: 'Not found' });
+    res.json(await describeManualPaymentUndo(req.params.id));
+  } catch (err) {
+    if (err.statusCode === 404) return res.status(404).json({ error: err.message });
+    next(err);
+  }
+});
+
+// POST /:id/undo-payment — reverse a manual payment recorded today, before any receipt or reminder went out.
+// Body: { reason: string (required, <=400 chars), paymentId: the payment id GET returned (required; a different payment now → 409) }. The writer is undoManualPayment (also the future Intelligence Bar tool's); refusals
+// arrive as statusCode-shaped errors (400 no reason, 404, 409 not eligible with a plain `error` and a `code`). 404 while the gate is off.
+router.post('/:id/undo-payment', requireAdmin, async (req, res, next) => {
+  try {
+    if (!undoManualPaymentLive()) return res.status(404).json({ error: 'Not found' });
+    const undoneBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    const result = await undoManualPayment(req.params.id, {
+      reason: req.body?.reason, paymentId: req.body?.paymentId, undoneBy, undoneByTechnicianId: req.technicianId || null,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    if ([400, 404, 409].includes(err.statusCode)) {
+      return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
+    logger.error(`[admin-invoices] undo-payment failed: ${err.message}`);
+    next(err);
+  }
+});
 
 
 // GET /:id/credit-context — available account credit + this invoice's

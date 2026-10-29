@@ -10,6 +10,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
+const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const {
   STAFF_WORK_DATE_SQL,
   staffWeekRange,
@@ -817,6 +818,11 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason, reviewToke
       .where({ technician_id: technicianId, week_start: start, status: 'finalized' })
       .first('id');
     if (paid) throw approvalHttpError(409, 'Void the pay run for this week first.');
+    // A paid pay line took its overtime from these hours (GATE_PAYROLL_PAY_LINES), even
+    // when the week had no check of its own. Not behind the gate, like the check above.
+    if (await paidLineCoveringWeeks(trx, technicianId, [start])) {
+      throw approvalHttpError(409, 'A paid pay line took its overtime from this week. Void the pay run that paid it first.');
+    }
 
     await trx('time_entries')
       .where({ technician_id: technicianId })

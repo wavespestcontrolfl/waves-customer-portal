@@ -741,6 +741,24 @@ postgres('payroll pay runs', () => {
         await holder.commit();
       }
     });
+
+    // GATE_PAYROLL_PAY_LINES: a draft's evaluation locks pay lines and earlier weeks'
+    // timesheets, rows drafts for different weeks share, so drafts take the lock too.
+    it('makes draft and recompute wait while GATE_PAYROLL_PAY_LINES is on', async () => {
+      const old = process.env.GATE_PAYROLL_PAY_LINES;
+      process.env.GATE_PAYROLL_PAY_LINES = 'true';
+      const holder = await takeLock();
+      try {
+        const recomputed = await payrollRuns.recomputeRun(randomUUID(), ADMIN_ID, callerWith('300ms')).catch((err) => err);
+        expect(recomputed.code).toBe('55P03');
+        const drafted = await payrollRuns.draftRun({ weekStart: W1 }, ADMIN_ID, callerWith('300ms')).catch((err) => err);
+        expect(drafted.code).toBe('55P03');
+      } finally {
+        await holder.commit();
+        if (old === undefined) delete process.env.GATE_PAYROLL_PAY_LINES; else process.env.GATE_PAYROLL_PAY_LINES = old;
+      }
+      await expect(payrollRuns.recomputeRun(randomUUID(), ADMIN_ID, callerWith('300ms'))).rejects.toMatchObject({ status: 404 });
+    });
   });
 
   describe('admin routes', () => {

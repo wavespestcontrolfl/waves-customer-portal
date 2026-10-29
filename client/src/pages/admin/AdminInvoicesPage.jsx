@@ -1698,6 +1698,9 @@ function InvoiceList({
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [addressModalInvoice, setAddressModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
+  // Undo payment: the list answer says whether GATE_UNDO_MANUAL_PAYMENT is on; the confirm asks the server whether THIS payment can still be undone.
+  const [undoPaymentEnabled, setUndoPaymentEnabled] = useState(false);
+  const [undoPaymentInvoice, setUndoPaymentInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
   // Reverse prepaid moves money, so it carries its own latch: the shared
@@ -1797,6 +1800,7 @@ function InvoiceList({
       );
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
+      setUndoPaymentEnabled(data.undoPaymentEnabled === true);
       if (!append) setSelected(new Set());
     },
     [
@@ -3055,6 +3059,21 @@ function InvoiceList({
                               Reverse prepaid
                             </Button>
                           )}
+                          {isAdminUser && undoPaymentEnabled && offersUndoPayment(inv) && (
+                            <Button
+                              onClick={() => setUndoPaymentInvoice(inv)}
+                              title="Reverse this payment if it was recorded today and no receipt or reminder has gone out"
+                              variant="secondary"
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
+                            >
+                              Undo payment
+                            </Button>
+                          )}
                           {isAdminUser && inv.status === "void" && (
                             <Button
                               onClick={() => handleUnvoid(inv.id)}
@@ -3346,6 +3365,19 @@ function InvoiceList({
             onRefresh();
           }}
           onError={(msg) => showToast(msg, "error")}
+        />
+      )}
+
+      {undoPaymentInvoice && (
+        <UndoPaymentModal
+          invoice={undoPaymentInvoice}
+          onClose={() => setUndoPaymentInvoice(null)}
+          onUndone={(msg) => {
+            setUndoPaymentInvoice(null);
+            showToast(msg);
+            load();
+            onRefresh();
+          }}
         />
       )}
 
@@ -5285,6 +5317,124 @@ function RecordPaymentModal({
                 ? "Record & send receipt"
                 : "Record payment"}
           </Button>{" "}
+        </div>
+      </DialogBody>
+    </Dialog>
+  );
+}
+
+// Undo payment is offered on a paid invoice whose tender was typed in by the office (not a card) and was recorded in the last day and a
+// half. That is only a display filter so old paid rows carry no button; whether the payment CAN be undone is the server's answer,
+// asked when the confirm opens (GET /admin/invoices/:id/undo-payment) and again when it is submitted.
+const UNDO_PAYMENT_TENDERS = ["cash", "check", "zelle", "venmo", "paypal", "other"];
+const UNDO_PAYMENT_WINDOW_MS = 36 * 60 * 60 * 1000;
+function offersUndoPayment(inv) {
+  const recordedAt = inv.payment_recorded_at
+    ? new Date(inv.payment_recorded_at).getTime()
+    : NaN;
+  return (
+    inv.status === "paid" &&
+    UNDO_PAYMENT_TENDERS.includes(inv.payment_method) &&
+    Date.now() - recordedAt < UNDO_PAYMENT_WINDOW_MS
+  );
+}
+
+function UndoPaymentModal({ invoice, onClose, onUndone }) {
+  const savingRef = useRef(false);
+  const [check, setCheck] = useState(null);
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    adminFetch(`/admin/invoices/${invoice.id}/undo-payment`)
+      .then((data) => alive && setCheck(data))
+      .catch((err) =>
+        alive &&
+        setCheck({
+          eligible: false,
+          message: err.message || "Could not check this payment",
+        }),
+      );
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
+  const handleUndo = async () => {
+    if (savingRef.current || !reason.trim()) return;
+    savingRef.current = true;
+    setActionError("");
+    setSaving(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${invoice.id}/undo-payment`, {
+        method: "POST",
+        // The payment the server described when this opened: if another one sits on the invoice now, the server refuses.
+        body: JSON.stringify({ reason: reason.trim(), paymentId: check.payment.id }),
+      });
+      onUndone(
+        res.remindersRearmed === false
+          ? "Payment undone · reminders were not re-armed, check the reminder panel"
+          : "Payment undone · invoice is open again",
+      );
+    } catch (err) {
+      setActionError(err.message);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog open={true} onClose={saving ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Undo payment</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
+        <div className="text-ui-body text-ink-secondary">
+          Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
+          {invoice.last_name}
+        </div>
+        {!check && <div className="text-ui-body text-ink-secondary">Checking this payment…</div>}
+        {check && !check.eligible && (
+          <ActionFeedback error>{check.message}</ActionFeedback>
+        )}
+        {check?.eligible && (
+          <>
+            <div className="text-ui-body">
+              This reverses the ${Number(check.payment.amount).toFixed(2)}{" "}
+              {check.payment.method} payment. The invoice opens again and
+              reminders resume on their normal schedule.
+            </div>
+            <Field label={<>Reason (required)</>} className="min-w-0">
+              <Textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value.slice(0, 400))}
+                placeholder="e.g. Recorded on the wrong invoice"
+                rows={2}
+                style={{ resize: "vertical" }}
+                disabled={saving}
+              />
+            </Field>
+          </>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+          <Button
+            onClick={onClose}
+            disabled={saving}
+            variant="secondary"
+            className="min-w-11"
+          >
+            {check?.eligible ? "Cancel" : "Close"}
+          </Button>
+          {check?.eligible && (
+            <Button
+              onClick={handleUndo}
+              disabled={saving || !reason.trim()}
+              variant="danger"
+              className="min-w-11"
+              loading={saving}
+            >
+              Undo payment
+            </Button>
+          )}
         </div>
       </DialogBody>
     </Dialog>
