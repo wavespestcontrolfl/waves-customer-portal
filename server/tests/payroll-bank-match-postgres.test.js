@@ -364,12 +364,17 @@ postgres('payroll bank match in the bank import', () => {
         expect(r.suggestion.payrollMatch).toBeUndefined();
         expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'calendar_changed', filingId, bankCents: 35000, calendarCents: 70000, matchedCents: 35000 });
         expect(r.suggestion.payrollUnlinked.was).toMatchObject({ expenseId, filingId });
-        expect(r.suggestion.rejectedTaxFilingIds).toEqual([filingId]);
+        // an automatic release is not a rejection
+        expect(r.suggestion.rejectedTaxFilingIds).toBeUndefined();
         expect(await trx('expenses').where({ id: expenseId }).first()).toBeUndefined();
         expect(await trx('bank_transactions').where({ matched_tax_filing_id: filingId }).count('* as n').first()).toMatchObject({ n: '0' });
-        // and it is not re-linked to the row that no longer says its amount
+        // it does not re-link to the row that no longer says its amount ...
         await bankImport.runDeterministicMatching();
         expect((await row(id)).status).toBe('unmatched');
+        // ... and matches again when a correction brings the amount back
+        await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '350.00' });
+        await bankImport.runDeterministicMatching();
+        expect(await row(id)).toMatchObject({ status: 'created_expense', matched_tax_filing_id: filingId });
       });
 
       it('goes back to review when the row is deleted, with the evidence', async () => {
@@ -411,6 +416,17 @@ postgres('payroll bank match in the bank import', () => {
       const r = await row(id);
       expect(r.status).toBe('unmatched');
       expect(r.suggestion.payrollCandidates).toEqual([expect.objectContaining({ kind: 'tax', id: filingId })]);
+    });
+
+    it('a payroll suggestion keeps the line out of the ledger inbox, and a stale one is cleared when the gate is off', async () => {
+      const taxLedgerRules = require('../services/tax-ledger-rules');
+      const near = await line('ONLINE TRANSFER', '770.11', '2026-10-29');
+      await bankImport.runDeterministicMatching();
+      expect(taxLedgerRules.hasLiveCandidates(await row(near))).toBe(true);
+      expect(taxLedgerRules.inboxBlock(await row(near))).toMatch(/Bank Import/);
+      delete process.env[GATE];
+      await bankImport.runDeterministicMatching();
+      expect((await row(near)).suggestion.payrollCandidates).toBeUndefined();
     });
 
     it('is idempotent: a second pass links nothing new', async () => {

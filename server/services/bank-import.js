@@ -1750,8 +1750,6 @@ async function reconcileTaxLinks() {
         // (an owner-approved one-cent difference included), or the amount the bank line carries.
         const recordedCents = pm.amountCents == null ? bankCents : Number(pm.amountCents);
         if (filing && (calendarCents === recordedCents || calendarCents === bankCents)) return; // unchanged, or corrected back since the scan
-        const differs = !!filing;
-        const rejectedIds = differs ? [...new Set([...((live.suggestion && live.suggestion.rejectedTaxFilingIds) || []), filingId])] : null;
         const changed = await trx('bank_transactions').where({ id: live.id, status: live.status }).update({
           status: 'unmatched',
           matched_expense_id: null,
@@ -1759,7 +1757,6 @@ async function reconcileTaxLinks() {
           match_method: null,
           matched_at: null,
           suggestion: suggestionMerge({
-            ...(rejectedIds ? { rejectedTaxFilingIds: rejectedIds } : {}),
             payrollUnlinked: {
               at: new Date().toISOString(), filingId, reason: filing ? 'calendar_changed' : 'calendar_deleted',
               bankCents, calendarCents, matchedCents: pm.amountCents == null ? null : pm.amountCents, was: pm,
@@ -1863,6 +1860,12 @@ async function runDeterministicMatching({ limit } = {}) {
   const reconciliation = await retryPendingReconciliations();
   // after the expense-link heals above: a link they released must lose its payroll provenance before any claim
   if (payrollOn) await healPayrollLinks();
+  else {
+    // Gate off: a suggestion the gate wrote earlier must not keep the line out of the Inbox (it is the
+    // Inbox's own candidate guard) with no way to act on it.
+    await db('bank_transactions').where({ status: 'unmatched' }).whereRaw("jsonb_exists(suggestion, 'payrollCandidates')")
+      .update({ suggestion: suggestionMerge({}, PAYROLL_CANDIDATE_KEYS), updated_at: new Date() });
+  }
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })

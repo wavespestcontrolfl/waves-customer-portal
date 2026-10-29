@@ -75,7 +75,8 @@ const CLASSIFICATION_KEYS = ['categoryId', 'categoryName', 'irsLine', 'categoryS
 // refundCandidates) belongs to Bank Import, where the link workflow lives;
 // the Inbox never shows it and decide() refuses it, so "Business" can never
 // create a second expense for a charge that is already booked.
-const CANDIDATE_KEYS = ['candidates', 'payoutCandidates', 'refundCandidates'];
+// payrollCandidates (GATE_PAYROLL_BANK_MATCH): a paycheck or payroll tax row the line may be, which Business would book twice.
+const CANDIDATE_KEYS = ['candidates', 'payoutCandidates', 'refundCandidates', 'payrollCandidates'];
 const NO_LIVE_CANDIDATES_SQL = CANDIDATE_KEYS
   .map((k) => `(case when jsonb_typeof(suggestion->'${k}') = 'array' then jsonb_array_length(suggestion->'${k}') else 0 end) = 0`)
   .join(' and ');
