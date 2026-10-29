@@ -7049,6 +7049,18 @@ function lockedInvoiceOwedToWonDispute(invoice, disputedPi) {
   return !pi || (!!disputedPi && pi === disputedPi);
 }
 
+// Money the office received by hand on an invoice: part payments still standing in the ledger (not undone). A card settlement folds it
+// into the paid flip and zeroes amount_paid; a reversal of that settlement (a dispute reopen) gives it back, or the customer would be
+// asked again for money already received (partial payments, owner 2026-10-29).
+const HAND_PARTS_PAID_WHERE = "metadata->>'invoice_id' = CAST(? AS text) AND metadata->>'partial_payment' = 'true' AND status = 'paid'";
+function handPartsPaidSql(trx, invoiceId) {
+  return trx.raw(`(SELECT COALESCE(SUM(amount), 0) FROM payments WHERE ${HAND_PARTS_PAID_WHERE})`, [invoiceId]);
+}
+async function handPartsPaidCents(trx, invoiceId) {
+  const result = await trx.raw(`SELECT COALESCE(SUM(ROUND(amount * 100)), 0) AS cents FROM payments WHERE ${HAND_PARTS_PAID_WHERE}`, [invoiceId]);
+  return Number(result?.rows?.[0]?.cents) || 0;
+}
+
 // The facts the remove compares the locked invoice against, or null when this
 // payment carries no card surcharge in an invoice total.
 async function cardSurchargeShape(trx, invoice, payment) {
@@ -7062,7 +7074,8 @@ async function cardSurchargeShape(trx, invoice, payment) {
     totalCents: Math.round((Number(invoice.total) || 0) * 100),
     creditCents: Math.round((Number(invoice.credit_applied) || 0) * 100),
     settledTotalCents: Math.round((Number(paymentRow.amount) || 0) * 100)
-      + Math.round((Number(invoice.credit_applied) || 0) * 100),
+      + Math.round((Number(invoice.credit_applied) || 0) * 100)
+      + await handPartsPaidCents(trx, invoice.id),
   };
 }
 
@@ -7334,6 +7347,7 @@ async function handleDisputeCreated(dispute) {
           await trx('invoices').where({ id: feeInvoice.id }).update({
             status: 'overdue',
             paid_at: null,
+            amount_paid: handPartsPaidSql(trx, feeInvoice.id),
             stripe_payment_intent_id: null,
             stripe_charge_id: null,
             updated_at: trx.fn.now(),
@@ -7578,6 +7592,7 @@ async function handleDisputeCreated(dispute) {
           await trx('invoices').where({ id: reopenInvoiceId }).update({
             status: 'overdue',
             paid_at: null,
+            amount_paid: handPartsPaidSql(trx, reopenInvoiceId),
             stripe_payment_intent_id: null,
             stripe_charge_id: null,
             updated_at: trx.fn.now(),
@@ -7785,6 +7800,8 @@ async function handleDisputeCreated(dispute) {
         await trx('invoices').where({ id: invoice.id }).update({
           status: 'overdue',
           paid_at: null,
+          // Hand part payments the settlement folded in are still received: they come off what is owed again.
+          amount_paid: handPartsPaidSql(trx, invoice.id),
           // Clear the PI linkage: the pay page and card-on-file paths
           // treat a lingering non-canceled intent as "payment already in
           // progress" and would refuse re-collection on the reopened
@@ -8239,6 +8256,7 @@ async function handleDisputeClosed(dispute) {
                 .update({
                   status: 'paid',
                   paid_at: new Date().toISOString(),
+                  amount_paid: 0,
                   stripe_payment_intent_id: row.stripe_payment_intent_id || null,
                   stripe_charge_id: row.stripe_charge_id || null,
                 });
@@ -8538,6 +8556,7 @@ async function handleDisputeClosed(dispute) {
             await trx('invoices').where({ id: wonInvoice.id }).update({
               status: 'paid',
               paid_at: new Date().toISOString(),
+              amount_paid: 0,
               stripe_payment_intent_id: feePi,
               stripe_charge_id: payment.stripe_charge_id || null,
             });
@@ -8643,6 +8662,8 @@ async function handleDisputeClosed(dispute) {
           await trx('invoices').where({ id: invoice.id }).update({
             status: 'paid',
             paid_at: new Date().toISOString(),
+            // The paid state again: the hand parts the reopen gave back are folded into the settled total once more.
+            amount_paid: 0,
             // Restore the linkage the reopen cleared — the disputed PI's
             // funds are what settle this invoice again.
             stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
