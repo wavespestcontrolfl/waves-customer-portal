@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 1 })) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), alertEpisodesLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), alertEpisodesLive: jest.fn(() => true), acceptedPlanRingOnChangeLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   annualPrepayCoversVisit: jest.fn(async () => false),
@@ -61,7 +61,7 @@ const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-sch
 const { runCombinedBookingCheck } = require('../services/combined-booking-check');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
+const { isEnabled, alertEpisodesLive, acceptedPlanRingOnChangeLive } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
 const { anyInvoiceLinkedToVisit } = require('../services/invoice');
 const { siblingInvoiceCoverageVerdict } = require('../services/billing-lane');
@@ -158,6 +158,7 @@ const delegatingRaise = async (...args) => {
 beforeEach(() => {
   jest.clearAllMocks();
   alertEpisodesLive.mockReturnValue(true);
+  acceptedPlanRingOnChangeLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockImplementation(async () => ({ id: 1 }));
   episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(delegatingRaise);
   episodeHelpers.openAdminAlertKeys.mockImplementation(async () => []);
@@ -697,6 +698,31 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3]).toMatchObject({
       dedupeKey: 'accepted-schedule:e-1:pest_control', dedupeVersion: 'evidence-1', refreshOnDedupe: true,
     });
+    // Gate off: no ring rule of its own, so any version change rings, as before.
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3]).not.toHaveProperty('ringOnRefresh');
+  });
+
+  test('GATE_ACCEPTED_PLAN_RING_ON_CHANGE: the accepted-plan version is the finding, and only a different finding rings the standing row', async () => {
+    // Production 10-29: 11 of 18 standing accepted-plan bells rang again in 7 days on routine
+    // visit edits (the evidenceKey hashes each row's xmin), each time unread and no longer Done.
+    acceptedPlanRingOnChangeLive.mockReturnValue(true);
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap({ findingKey: 'f-1' })]);
+    makeDbMock();
+    await runInner({ now: NOW });
+    const opts = episodeHelpers.raiseAdminAlertWithReopen.mock.calls
+      .find((call) => call[3].dedupeKey === 'accepted-schedule:e-1:pest_control')[3];
+    expect(opts).toMatchObject({ dedupeVersion: 'finding:f-1', refreshOnDedupe: true, ringOnRefresh: expect.any(Function) });
+    const rings = (stored) => opts.ringOnRefresh({}, stored === undefined ? {} : { dedupeVersion: stored });
+    // A row still on an evidence version (or none) moves to the finding version quietly: the flip rings nothing.
+    expect(rings('evidence-1')).toBe(false);
+    expect(rings('evidence-1::g2')).toBe(false);
+    expect(rings(undefined)).toBe(false);
+    // The same finding (a text-only refresh) stays quiet at any episode generation.
+    expect(rings('finding:f-1')).toBe(false);
+    expect(rings('finding:f-1::g1')).toBe(false);
+    // A different finding rings.
+    expect(rings('finding:f-0')).toBe(true);
+    expect(rings('finding:f-0::g3')).toBe(true);
   });
 
   test('the cap counts real rings only: silent dedupes onto standing rows never use it up', async () => {

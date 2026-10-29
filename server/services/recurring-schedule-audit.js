@@ -488,8 +488,14 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
       // A correction followed by the SAME bad state must be a new incident.
       row.row_revision, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   })).digest('hex').slice(0, 20);
+  // The finding alone, what the bell says: the issues, the accepted pattern and the planned and
+  // recorded application counts. No row revision or date, so a routine edit to a visit (any UPDATE
+  // moves xmin) leaves it as it was. The watchdog versions its bell with it under
+  // GATE_ACCEPTED_PLAN_RING_ON_CHANGE.
+  const findingKey = createHash('sha256').update(JSON.stringify({ issues, pattern, expectedVisits, recordedVisits: live.length }))
+    .digest('hex').slice(0, 20);
   return { estimateId: estimate.id, customerId: estimate.customer_id, serviceFamily: family,
-    pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey,
+    pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey, findingKey,
     appointmentIds: rows.map((row) => row.id) };
 }
 
