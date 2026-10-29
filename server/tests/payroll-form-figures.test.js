@@ -559,3 +559,60 @@ describe('parseFormPeriod', () => {
     expect(() => parseFormPeriod(query)).toThrow(expect.objectContaining({ status: 400 }));
   });
 });
+
+// GATE_PAYROLL_PAY_LINES (owner 2026-10-29, D5 part 1): code TT and code W, and the
+// employer HSA money in Form 940 lines 3 and 4. Gate off reads as it always did.
+describe('pay lines on the forms', () => {
+  const OLD = process.env.GATE_PAYROLL_PAY_LINES;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_PAYROLL_PAY_LINES; else process.env.GATE_PAYROLL_PAY_LINES = OLD;
+  });
+  const rows = () => [
+    check('2026-10-05', '2026-10-16', {
+      tech: 1, employee_name: 'Sample Covered', overtime_premium_cents: 2300, qualified_overtime_cents: 2481, hsa_employer_cents: 20000,
+    }),
+    check('2026-10-05', '2026-10-16', {
+      tech: 2, employee_name: 'Sample Notcovered', overtime_premium_cents: 2300, qualified_overtime_cents: 0, hsa_employer_cents: 0,
+    }),
+    // A check made with the gate off: no stored figure.
+    check('2026-10-12', '2026-10-23', { tech: 3, employee_name: 'Sample Older', overtime_premium_cents: 1100 }),
+    check('2026-10-12', '2026-10-23', { tech: 4, employee_name: 'Sample Olderunset', overtime_premium_cents: 1100 }),
+  ];
+  const flsaCovered = new Map([['tech-1', true], ['tech-2', false], ['tech-3', true], ['tech-4', false]]);
+  const w2 = (out, name) => out.w2.find((f) => f.name === name);
+
+  test('gate on: code TT is the stored qualified overtime, code W the employer HSA money', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const out = build(rows(), { flsaCovered });
+    expect(w2(out, 'Sample Covered')).toMatchObject({ box12TT: 2481, box12W: 20000, box1: 100000, box3: 100000, box5: 100000 });
+    expect(w2(out, 'Sample Notcovered')).toMatchObject({ box12TT: null, box12W: null });
+    // No stored figure: the overtime premium counts only for an employee marked covered.
+    expect(w2(out, 'Sample Older').box12TT).toBe(1100);
+    expect(w2(out, 'Sample Olderunset').box12TT).toBeNull();
+    // The W-3 carries neither code.
+    expect(out.w3).not.toHaveProperty('box12W');
+  });
+
+  test('gate on: Form 940 line 3 includes the HSA money, line 4 lists it, line 7 stays wages only', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const out = build(rows(), { flsaCovered });
+    expect(line(out.f940, '3').value).toBe(400000 + 20000);
+    expect(line(out.f940, '4')).toMatchObject({ value: 20000 });
+    expect(line(out.f940, '4').note).toMatch(/box 4a/);
+    expect(line(out.f940, '6').value).toBe(20000);
+    expect(line(out.f940, '7').value).toBe(400000);
+    // Form 941 line 2 and RT-6 line 2 are wages: the HSA money is in neither.
+    expect(line(out.f941, '2').value).toBe(400000);
+    expect(line(out.rt6, '2').value).toBe(400000);
+  });
+
+  test('gate off: every overtime premium is reported, there is no code W and line 4 is 0', () => {
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    const out = build(rows(), { flsaCovered });
+    expect(w2(out, 'Sample Covered').box12TT).toBe(2300);
+    expect(w2(out, 'Sample Notcovered').box12TT).toBe(2300);
+    expect(w2(out, 'Sample Covered')).not.toHaveProperty('box12W');
+    expect(line(out.f940, '3').value).toBe(400000);
+    expect(line(out.f940, '4')).toEqual({ line: '4', label: 'Payments exempt from FUTA tax', kind: 'cents', value: 0 });
+  });
+});

@@ -12,6 +12,7 @@ import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../Fi
 import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
 import TimeOffPanel from './TimeOffPanel';
+import PayLinesPanel from './PayLinesPanel';
 import './pay-runs-print.css';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
@@ -87,6 +88,10 @@ export function StubDialog({ call, check, onClose }) {
               <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
               {stub.earnings.ptoPayCents > 0 && <TR><TD>Paid time off ({stub.hours.pto} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.ptoPayCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.holidayPayCents > 0 && <TR><TD>Holiday pay ({stub.hours.holiday} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.holidayPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on bonus, commission and allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
               <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
               <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
               <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
@@ -95,6 +100,13 @@ export function StubDialog({ call, check, onClose }) {
               <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
             </TBody>
           </Table>
+
+          {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
+            <h2 className="field-section-heading">Employer contributions</h2>
+            <div className="pay-stub-meta">
+              <StubLine label="HSA from Waves (not part of gross pay or taxes)" value={centsToDollars(stub.employerContributions.hsaCents)} />
+            </div>
+          </>}
 
           <h2 className="field-section-heading">Payment record</h2>
           <div className="pay-stub-meta">
@@ -159,14 +171,20 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   // Only a pay run drafted with time off turned on carries these figures.
   const showPto = run.checks.some(check => check.ptoPayCents > 0);
   const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
+  // Only a pay run drafted with pay lines turned on carries these figures.
+  const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.lineOvertimePremiumCents > 0);
+  const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
   return <>
     <Table aria-label="Paychecks">
       <THead><TR>
         <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH>
         {showPto && <TH align="right">Paid time off</TH>}
         {showHoliday && <TH align="right">Holiday</TH>}
+        {showLines && <TH align="right">Bonus, commission, allowance</TH>}
+        {showLines && <TH align="right">Overtime on those</TH>}
         <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>
+        {showHsa && <TH align="right">HSA from Waves</TH>}
         {isFinal && <TH>Check</TH>}
       </TR></THead>
       <TBody>
@@ -176,12 +194,15 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
           {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}
           {showHoliday && <TD nums align="right">{hoursWord(check.holidayHours)} · {centsToDollars(check.holidayPayCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>
           <TD nums align="right">{centsToDollars(check.grossCents)}</TD>
           <TD nums align="right">{centsToDollars(check.federalIncomeTaxCents)}</TD>
           <TD nums align="right">{centsToDollars(check.socialSecurityCents)}</TD>
           <TD nums align="right">{centsToDollars(check.medicareCents + check.additionalMedicareCents)}</TD>
           <TD nums align="right">{centsToDollars(check.netCents)}</TD>
+          {showHsa && <TD nums align="right">{centsToDollars(check.hsaEmployerCents)}</TD>}
           {isFinal && <TD>
             <div className="grid gap-2">
               <CheckNumberCell call={call} check={check} onSaved={onSaved} />
@@ -381,6 +402,11 @@ export default function PayRuns({ call, onRunsChanged }) {
     />}
 
     <TimeOffPanel
+      call={call} weekStart={run ? run.weekStart : week}
+      onChanged={() => { if (run) open(run.id); }}
+    />
+
+    <PayLinesPanel
       call={call} weekStart={run ? run.weekStart : week}
       onChanged={() => { if (run) open(run.id); }}
     />
