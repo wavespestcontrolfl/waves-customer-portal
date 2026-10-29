@@ -84,6 +84,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       t.uuid('id').primary();
       t.uuid('customer_id');
       t.string('status');
+      t.decimal('total', 10, 2);
+      t.decimal('credit_applied', 10, 2).defaultTo(0);
       t.timestamp('created_at');
       t.timestamp('sent_at');
       t.timestamp('sms_sent_at');
@@ -131,10 +133,10 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     return id;
   }
   // sentDaysAgo anchors the cadence (sequenceAnchor = invoice sent_at).
-  async function member(customerId, { sentDaysAgo, sentOn = null, step = 0, status = 'active', next = null, last = null, touches = 0, claimedAt = null, invoiceStatus = 'overdue' }) {
+  async function member(customerId, { sentDaysAgo, sentOn = null, step = 0, status = 'active', next = null, last = null, touches = 0, claimedAt = null, invoiceStatus = 'overdue', total = 100 }) {
     const invoiceId = randomUUID();
     const sentAt = sentOn || ago(sentDaysAgo);
-    await app('invoices').insert({ id: invoiceId, customer_id: customerId, status: invoiceStatus, created_at: sentAt, sent_at: sentAt });
+    await app('invoices').insert({ id: invoiceId, customer_id: customerId, status: invoiceStatus, created_at: sentAt, sent_at: sentAt, total });
     const [seq] = await app('invoice_followup_sequences').insert({
       invoice_id: invoiceId, customer_id: customerId, status, step_index: step,
       next_touch_at: next, last_touch_at: last, touches_sent: touches, touch_claimed_at: claimedAt,
@@ -198,7 +200,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(mockNotify).toHaveBeenCalledWith(
         'alert',
         'Billing — combined reminders started for Pat S.',
-        '2 invoices, $200.00 total; first reminder Wed, Oct 7; pause it from the invoice panel if wrong.',
+        '2 invoices, $200.00 total; next step Wed, Oct 7 unless held; pause it from the invoice panel if wrong.',
         expect.objectContaining({
           dedupeKey: `customer-dunning-started:${row.id}`,
           link: `/admin/customers?customerId=${c}`,
@@ -867,6 +869,68 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         expect(new Date((await fresh(s.id)).next_touch_at).getTime()).toBe(Followups.heldTouchFloor(tomorrow).getTime());
       });
     });
+    describe('the Auto Pay hold alert (owner 2026-10-29: the office decides, nothing is sent)', () => {
+      const autopay = () => require('../services/autopay-eligibility').customerOnAutopay;
+      afterEach(() => autopay().mockResolvedValue(false));
+      const holdAlerts = () => mockNotify.mock.calls.filter((call) => /^customer-dunning-autopay-hold:/.test(call[3]?.dedupeKey || ''));
+      // Two overdue invoices promoted to one schedule, due on the later run.
+      async function promoted() {
+        const c = await customer();
+        const a = await member(c, { sentDaysAgo: 60, step: 4 });
+        const b = await member(c, { sentDaysAgo: 30, step: 3 });
+        mockResolve.mockResolvedValue(setFor([a, b]));
+        await Schedule.promoteCustomer(c, NOW, { database: app });
+        const [row] = await schedules(c);
+        return { c, row, later: new Date(new Date(row.next_touch_at).getTime() + 60 * 1000) };
+      }
+
+      test('a promoted Auto Pay customer parks once with one alert; the daily revisit rings nothing; a resume then a new park rings once more', async () => {
+        const { c, row, later } = await promoted();
+        mockNotify.mockClear();
+        autopay().mockResolvedValue(true);
+        expect((await Runner.processSchedule(row.id, later)).outcome).toBe('autopay_hold');
+        expect((await fresh(row.id)).status).toBe('autopay_hold');
+        expect(holdAlerts()).toHaveLength(1);
+        const [title, body, opts] = [holdAlerts()[0][1], holdAlerts()[0][2], holdAlerts()[0][3]];
+        expect(title).toBe('Billing — charge the card on file for Pat S.');
+        expect(body).toBe('Pat S. is on Auto Pay; 2 invoices ($200.00) are not charged, so reminders are on hold.');
+        expect(opts).toMatchObject({ link: `/admin/customers?customerId=${c}`, metadata: expect.objectContaining({ severity: 'needs-you', who: 'person', schedule_id: row.id, invoice_count: 2 }) });
+
+        const tomorrow = new Date(later.getTime() + 2 * DAY);
+        expect((await Runner.processSchedule(row.id, tomorrow)).outcome).toBe('autopay_hold'); // re-armed, same hold
+        expect(holdAlerts()).toHaveLength(1);
+
+        const claim = await Schedule.claim(row.id, new Date(tomorrow.getTime() + 2 * DAY), { database: app });
+        expect(await Schedule.resumeFromAutopay(claim.schedule, { claimStamp: claim.claimStamp, database: app })).toBe(true);
+        await Schedule.releaseClaim(claim, { database: app });
+        const again = new Date(tomorrow.getTime() + 4 * DAY);
+        const claim2 = await Schedule.claim(row.id, again, { database: app });
+        expect(await Schedule.markAutopayHold(claim2.schedule, { claimStamp: claim2.claimStamp, now: again, database: app })).toBe(true);
+        expect(holdAlerts()).toHaveLength(2);
+        expect(new Set(holdAlerts().map((call) => call[3].dedupeKey)).size).toBe(2);
+      });
+
+      test('a customer who is not on Auto Pay raises no hold alert', async () => {
+        const { c, row, later } = await promoted();
+        mockNotify.mockClear();
+        autopay().mockResolvedValue(false);
+        const [only] = await app('invoice_followup_sequences').where({ customer_id: c }).select('invoice_id');
+        mockResolve.mockResolvedValue(setFor([{ invoiceId: only.invoice_id }], { kind: 'hold', reason: 'member_paused' }));
+        await Runner.processSchedule(row.id, later);
+        expect((await fresh(row.id)).status).toBe('held');
+        expect(holdAlerts()).toHaveLength(0);
+      });
+
+      test('the shadow run raises no hold alert and writes nothing', async () => {
+        const { row, later } = await promoted();
+        mockNotify.mockClear();
+        autopay().mockResolvedValue(true);
+        await Runner.shadowRun(later);
+        expect(mockNotify).not.toHaveBeenCalled();
+        expect((await fresh(row.id)).status).toBe('active');
+      });
+    });
+
     test('stage catch-up write moves step_index up and drops the link cache', async () => {
       const { s, claim } = await claimed({ step_index: 2, link_digest: 'a'.repeat(64), link_url: 'u' });
       expect(await Schedule.writeStage(claim.schedule, 4, { claimStamp: claim.claimStamp, database: app })).toBe(true);

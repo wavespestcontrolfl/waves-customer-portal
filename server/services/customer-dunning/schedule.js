@@ -291,7 +291,7 @@ async function alertCombinedStarted(schedule, set, seed) {
     verb: 'combined reminders started',
     generic: 'combined reminders started for a customer',
     short: true,
-    why: `${count} invoices, $${(set.totalCents / 100).toFixed(2)} total; first reminder ${formatETDayDate(seed.next_touch_at)}; pause it from the invoice panel if wrong.`,
+    why: `${count} invoices, $${(set.totalCents / 100).toFixed(2)} total; next step ${formatETDayDate(seed.next_touch_at)} unless held; pause it from the invoice panel if wrong.`,
     doneWhen: 'combined_reminders_reviewed',
     dedupeKey: `customer-dunning-started:${schedule.id}`,
     customerId: schedule.customer_id,
@@ -1050,7 +1050,39 @@ async function markAutopayHold(schedule, { claimStamp, now = new Date(), databas
     .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp })
     .whereIn('status', CLAIMABLE_STATUSES)
     .update({ status: 'autopay_hold', next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now() });
+  // The daily revisit re-arms a hold that already stands and must stay quiet: only a row that was NOT already
+  // parked starts a hold episode, and a schedule that resumes and parks again is a new one.
+  if (Number(changed) === 1 && schedule.status !== 'autopay_hold') await alertAutopayHold(schedule, now);
   return Number(changed) === 1;
+}
+
+// The office decides (owner 2026-10-29): charge the card on file, or take the customer off Auto Pay so the
+// reminders run. Nothing is sent either way. Counts the customer's open invoices with a live per-invoice row.
+async function alertAutopayHold(schedule, now) {
+  try {
+    await raiseAutopayHoldAlert(schedule, now);
+  } catch (err) {
+    logger.warn(`[customer-dunning] autopay hold alert failed for schedule ${schedule.id}: ${redactContact(err.message)}`); // the hold itself stands
+  }
+}
+
+async function raiseAutopayHoldAlert(schedule, now) {
+  const rows = await db('invoice_followup_sequences as s').join('invoices as i', 'i.id', 's.invoice_id')
+    .where('s.customer_id', schedule.customer_id).whereIn('s.status', ['active', 'autopay_hold'])
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES).select('i.total', 'i.credit_applied');
+  const { invoiceAmountDue } = require('../invoice-helpers');
+  const total = rows.reduce((sum, r) => sum + Math.round(invoiceAmountDue(r) * 100), 0) / 100;
+  const who = (await customerName(schedule.customer_id))?.short || 'The customer';
+  await alertStaff({
+    verb: 'charge the card on file',
+    generic: 'charge a customer\'s card on file',
+    short: true,
+    why: `${who} is on Auto Pay; ${rows.length} invoices ($${total.toFixed(2)}) are not charged, so reminders are on hold.`,
+    doneWhen: 'invoice_charged',
+    dedupeKey: `customer-dunning-autopay-hold:${schedule.id}:${schedule.episode}:${now.getTime()}`,
+    customerId: schedule.customer_id,
+    metadata: { schedule_id: schedule.id, invoice_count: rows.length },
+  });
 }
 
 /** The revisit found the customer no longer on autopay: back to active so the ordinary send path owns the step. */
