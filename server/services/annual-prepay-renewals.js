@@ -1379,7 +1379,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // when set), so a gap-fill lands on the dates the series itself would extend to.
   if (coverageCadence === LAWN_ROUNDS_9 && existingRows.length) {
     const parentId = existingRows[0].recurring_parent_id || existingRows[0].id;
-    const parentRow = existingRows.find((row) => String(row.id) === String(parentId));
+    let parentRow = existingRows.find((row) => String(row.id) === String(parentId));
+    // existingRows holds only in-window eligible visits, so a parent that
+    // predates the term window (or is closed) is not among them: read it by id,
+    // scoped to this customer. A failed read keeps the plain anchor.
+    if (!parentRow && cols.recurring_round_anchor_date) {
+      try {
+        parentRow = await conn('scheduled_services')
+          .where({ id: parentId, customer_id: term.customer_id })
+          .first('id', 'recurring_round_anchor_date');
+      } catch (err) {
+        logger.warn(`[annual-prepay] term ${term.id}: series round anchor lookup failed (${err.message}) — placing rounds from the term anchor`);
+      }
+    }
     const storedRoundAnchor = dateOnly(parentRow?.recurring_round_anchor_date);
     if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
   }
@@ -1404,17 +1416,20 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // customer already has at least the sold number of in-window matching visits.
   const availableExisting = existingRows.filter((row) => dateOnly(row.scheduled_date));
   const cadenceMonths = coverageCadenceMonths(coverageCadence);
-  // A rounds series averages 40.5 days a round: tolerance matches the 42-day
-  // plan it replaces. A visit in the SAME round as the slot also fills it
-  // (roundMatchesSlot): a rounds plan owes one visit a round, wherever in
-  // the round the visit was moved.
+  // A rounds plan owes one visit a round: an existing visit fills a slot only
+  // when it sits in the SAME round (wherever in the round it was moved), and a
+  // visit in a neighbouring round never does, however close in days. Every
+  // other cadence matches within half a cadence.
   const coverageIsRounds = coverageCadence === LAWN_ROUNDS_9;
-  const cadenceIntervalDays = coverageIsRounds ? 42 : (cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30));
+  const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
-  const roundMatchesSlot = (existingDate, slotDate) => {
-    if (!coverageIsRounds) return false;
-    const want = roundOrdinal(slotDate);
-    return want != null && roundOrdinal(existingDate) === want;
+  const slotMatchesVisit = (existingDate, slotDate) => {
+    if (coverageIsRounds) {
+      const want = roundOrdinal(slotDate);
+      return want != null && roundOrdinal(existingDate) === want;
+    }
+    const diff = daysUntil(existingDate, slotDate);
+    return diff != null && Math.abs(diff) <= slotToleranceDays;
   };
   const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
   // The first target carries an operator PROMISE when first_visit_date made it
@@ -1440,9 +1455,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     const matchIndex = availableExisting.findIndex((row) => {
       const existingDate = dateOnly(row.scheduled_date);
       if (exactOnly) return existingDate === scheduledDate;
-      if (roundMatchesSlot(existingDate, scheduledDate)) return true;
-      const diff = daysUntil(existingDate, scheduledDate);
-      return diff != null && Math.abs(diff) <= slotToleranceDays;
+      return slotMatchesVisit(existingDate, scheduledDate);
     });
     if (matchIndex !== -1) {
       const [matched] = availableExisting.splice(matchIndex, 1);
@@ -2061,9 +2074,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       if (consumedConcurrentIds.has(String(row.id))) return false;
       const existingDate = dateOnly(row.scheduled_date);
       if (scheduledDate === promisedTarget) return existingDate === scheduledDate;
-      if (roundMatchesSlot(existingDate, scheduledDate)) return true;
-      const diff = daysUntil(existingDate, scheduledDate);
-      return diff != null && Math.abs(diff) <= slotToleranceDays;
+      return slotMatchesVisit(existingDate, scheduledDate);
     });
     if (!filler) return true;
     consumedConcurrentIds.add(String(filler.id));
