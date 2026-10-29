@@ -10,6 +10,10 @@ const visit = { scheduled_service_id: "visit-1", customer: "Queue Customer", ser
 const payloads = {
   leaks: { summary: { leak_dollars: 129, leak_visits: 1, leak_customers: 1, review_dollars: 95, review_visits: 1 }, leaks: [visit], needs_review: [{ ...visit, scheduled_service_id: "visit-2", customer: "Review Customer", monthly_rate: 95 }] },
   aging: { total_outstanding: 80, total_overdue: 80, invoice_count: 1, aging: { current: 0, days_30: 80, days_60: 0, days_90_plus: 0 }, top_balances: [{ invoice_id: "invoice-1", customer: "AR Customer", status: "overdue", due_date: "2026-10-01", amount: 80 }] },
+  drafts: { window_days: 90, summary: { count: 2, total: 184.3 }, drafts: [
+    { invoice_id: "invoice-d1", invoice_number: "WPC-2026-0101", total: 129, customer_id: "customer-d1", first_name: "Draft", last_name: "Customer", scheduled_date: "2026-10-20", completed_at: "2026-10-20T14:00:00Z", service_type: "Lawn care", visit_marked_free: true },
+    { invoice_id: "invoice-d2", invoice_number: "WPC-2026-0102", total: 55.3, customer_id: "customer-d2", first_name: "Second", last_name: "Draft", scheduled_date: "2026-10-22", completed_at: "2026-10-22T14:00:00Z", service_type: "Pest control", visit_marked_free: false },
+  ] },
   risk: { atRisk: 95, count: 1, accounts: [{ id: "customer-1", firstName: "Risk", lastName: "Account", monthlyRate: 95, causes: ["overdue"] }] },
 };
 
@@ -36,7 +40,7 @@ function GateSwitchHarness() {
   return <><button type="button" onClick={() => navigate("/admin/billing-recovery?feedback=1")}>Enable feedback</button><BillingRecoveryPage /></>;
 }
 
-function mockReads({ failLeaksOnce = false } = {}) {
+function mockReads({ failLeaksOnce = false, failDrafts = false, draftsPayload = payloads.drafts } = {}) {
   let leakCalls = 0;
   const fetchMock = vi.fn(async (input, options = {}) => {
     const url = String(input);
@@ -48,6 +52,10 @@ function mockReads({ failLeaksOnce = false } = {}) {
     if (url.endsWith("/aging")) return response(payloads.aging);
     if (url.endsWith("/at-risk-mrr")) return response(payloads.risk);
     if (options.method === "POST") return response({ ok: true });
+    if (url.includes("/unsent-drafts?")) {
+      if (failDrafts) return response({ error: "Failed to load unsent draft invoices" }, false);
+      return response(draftsPayload);
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -110,6 +118,38 @@ describe("completionDeepLink (status-only completions)", () => {
   });
 });
 
+describe("BillingRecoveryPage unsent drafts section", () => {
+  it.each(["", "?feedback=1"])("lists unsent drafts with invoice links and the visit-marked-free tag for %s", async (query) => {
+    const fetchMock = mockReads();
+    renderPage(`/admin/billing-recovery${query}`);
+    expect(await screen.findByText("Bill made, never sent")).toBeInTheDocument();
+    expect(screen.getByText("The portal made these invoices as drafts. Nobody sent them, so the customer never got a bill.")).toBeInTheDocument();
+    expect(await screen.findByText("Draft Customer")).toBeInTheDocument();
+    expect(screen.getByText("Second Draft")).toBeInTheDocument();
+    expect(screen.getByText("2 drafts · $184.30")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "WPC-2026-0101" })).toHaveAttribute("href", "/admin/invoices?invoice=invoice-d1");
+    expect(screen.getAllByText("visit marked free")).toHaveLength(1);
+    expect(screen.queryByText("No unsent drafts.")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/admin/billing-recovery/unsent-drafts?days=90", expect.anything());
+  });
+
+  it("shows the empty line when there are no unsent drafts", async () => {
+    mockReads({ draftsPayload: { window_days: 90, summary: { count: 0, total: 0 }, drafts: [] } });
+    renderPage();
+    expect(await screen.findByText("No unsent drafts.")).toBeInTheDocument();
+  });
+
+  it("keeps the visit queues when the drafts read fails and retries only the drafts", async () => {
+    const fetchMock = mockReads({ failDrafts: true });
+    renderPage("/admin/billing-recovery?feedback=1");
+    expect(await screen.findByText("Queue Customer")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unsent draft invoices couldn't be loaded");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/unsent-drafts?")).length).toBe(2));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/leaks?"))).toHaveLength(1);
+  });
+});
+
 describe("BillingRecoveryPage gated feedback and table controls", () => {
   it.each(["", "?tableControls=0", "?feedback=1"])("keeps queue controls off for %s", async (query) => {
     mockReads();
@@ -162,6 +202,7 @@ describe("BillingRecoveryPage gated feedback and table controls", () => {
       if (url.includes("/leaks?days=30")) return response(leaksFor("Thirty Day Customer"));
       if (url.endsWith("/aging")) return response(payloads.aging);
       if (url.endsWith("/at-risk-mrr")) return response(payloads.risk);
+      if (url.includes("/unsent-drafts?")) return response(payloads.drafts);
       throw new Error(`Unexpected fetch: ${url}`);
     }));
     renderPage("/admin/billing-recovery?feedback=1");
@@ -182,6 +223,7 @@ describe("BillingRecoveryPage gated feedback and table controls", () => {
       }
       if (url.endsWith("/aging")) return response(payloads.aging);
       if (url.endsWith("/at-risk-mrr")) return response(payloads.risk);
+      if (url.includes("/unsent-drafts?")) return response(payloads.drafts);
       throw new Error(`Unexpected fetch: ${url}`);
     }));
     render(<MemoryRouter initialEntries={["/admin/billing-recovery"]}><GateSwitchHarness /></MemoryRouter>);
@@ -217,6 +259,7 @@ describe("BillingRecoveryPage gated feedback and table controls", () => {
       }
       if (url.endsWith("/aging")) return response(payloads.aging);
       if (url.endsWith("/at-risk-mrr")) return response(payloads.risk);
+      if (url.includes("/unsent-drafts?")) return response(payloads.drafts);
       throw new Error(`Unexpected fetch: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);

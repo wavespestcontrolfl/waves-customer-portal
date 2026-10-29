@@ -222,7 +222,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/comms",
-      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-29 (#6959): the chain change is sms-intent.js isCourtesyOnly gaining the dark GATE_SMS_COURTESY_TAIL rule (classifier text only); signals and unresolved unchanged, no new read or write. Re-signed after the Codex P2 refactor on #6959 (the same rule split into helper functions).",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -279,7 +279,7 @@
         "services/sms-media.js#getSignedUrl",
         "services/sms-media.js#new GetObjectCommand"
       ],
-      "hash": "db5181f891f318c75f8ca0d3f7c7368d"
+      "hash": "cb5d2d72debab046452b7117adeb3688"
     },
     {
       "endpoint": "/admin/customers/:id/credits",
