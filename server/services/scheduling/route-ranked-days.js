@@ -72,6 +72,80 @@ function windowFor(start, durationMinutes) {
   return { start, end, display: `${clock12(start)}-${clock12(end)}` };
 }
 
+const UNVERIFIED = 'route_unverified';
+
+/** The one route-check search for every candidate day; null = keep today's list. */
+async function searchDays({ serviceId, service, candidates, durationMinutes, caller }) {
+  const lat = service.lat != null ? Number(service.lat) : NaN;
+  const lng = service.lng != null ? Number(service.lng) : NaN;
+  // Without coordinates or a technician there is no route to check; the
+  // engine would also rank other technicians' routes the commit never uses.
+  const routable = Boolean(service.technician_id) && Number.isFinite(lat) && Number.isFinite(lng);
+  if (!routable || !candidates.length) return null;
+  const dates = candidates.map((c) => c.dateStr).sort();
+  const { findAvailableSlots } = require('./find-time');
+  const result = await findAvailableSlots({
+    techStartPoints: true,
+    lat,
+    lng,
+    durationMinutes,
+    dateFrom: dates[0],
+    dateTo: dates[dates.length - 1],
+    technicianId: service.technician_id,
+    topN: Number.POSITIVE_INFINITY,
+    excludeServiceIds: [String(serviceId)],
+    arrivalWindow: { serviceId, unit: true },
+    slotStepMinutes: 60,
+    // Eligibility (blackout days, work days, season, round) is decided by the
+    // caller before the search; weekends and blackout days stay visible here.
+    includeBlackoutDates: true,
+    includeWeekends: true,
+    ...staffRoadCheckOptions(caller),
+  });
+  return result && !result.error && Array.isArray(result.slots) ? result : null;
+}
+
+function slotsByDate(slots) {
+  const byDate = new Map();
+  for (const slot of slots) byDate.set(slot.date, [...(byDate.get(slot.date) || []), slot]);
+  return byDate;
+}
+
+/** The engine's best start on the day that the commit's overlap probe also clears. */
+async function firstClearSlot(daySlots, { clashesAt, date, durationMinutes }) {
+  for (const slot of daySlots) {
+    const end = slot.end_time || toHHMM(minutesOf(slot.start_time) + durationMinutes);
+    if (!(await clashesAt(date, slot.start_time, end))) return slot;
+  }
+  return null;
+}
+
+/**
+ * Each candidate day is exactly one of:
+ *   checked    - the check found a start the overlap probe clears
+ *   refused    - the check certified the day unusable (no start fits, a
+ *                refusal other than an unreadable route, or every start clashes)
+ *   unverified - the check could not tell (only `route_unverified` refusals,
+ *                or the engine never evaluated the day)
+ */
+async function classifyDay(candidate, { byDate, rejections, clashesAt, durationMinutes }) {
+  const date = candidate.dateStr;
+  const daySlots = byDate.get(date) || [];
+  if (daySlots.length) {
+    const slot = await firstClearSlot(daySlots, { clashesAt, date, durationMinutes });
+    return slot ? { kind: 'checked', candidate, slot } : { kind: 'refused', candidate };
+  }
+  const reasons = Object.entries(rejections[date] || {}).filter(([, count]) => count > 0).map(([reason]) => reason);
+  const onlyUnverified = reasons.every((reason) => reason === UNVERIFIED);
+  return { kind: onlyUnverified ? 'unverified' : 'refused', candidate };
+}
+
+const bySoonest = (a, b) => b.score - a.score || (a.dateStr < b.dateStr ? -1 : 1);
+
+// Least added drive first (the engine's own score), then its detour, then the old score.
+const byEngineRank = (a, b) => finite(a.slot.score) - finite(b.slot.score)
+  || finite(a.slot.detour_minutes) - finite(b.slot.detour_minutes) || bySoonest(a.candidate, b.candidate);
+
 /**
  * Rank candidate days by the route check.
  *
@@ -89,78 +163,27 @@ function windowFor(start, durationMinutes) {
  */
 async function rankRouteCheckedDays({ serviceId, service, candidates, durationMinutes, caller = null, clashesAt }) {
   try {
-    if (!candidates.length) return null;
-    const lat = service.lat != null ? Number(service.lat) : null;
-    const lng = service.lng != null ? Number(service.lng) : null;
-    // Without coordinates or a technician there is no route to check; the
-    // engine would also rank other technicians' routes the commit never uses.
-    if (!service.technician_id || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-
-    const dates = candidates.map((c) => c.dateStr).sort();
-    const { findAvailableSlots } = require('./find-time');
-    const result = await findAvailableSlots({
-      techStartPoints: true,
-      lat,
-      lng,
-      durationMinutes,
-      dateFrom: dates[0],
-      dateTo: dates[dates.length - 1],
-      technicianId: service.technician_id,
-      topN: Number.POSITIVE_INFINITY,
-      excludeServiceIds: [String(serviceId)],
-      arrivalWindow: { serviceId, unit: true },
-      slotStepMinutes: 60,
-      // Eligibility (blackout days, work days, season, round) is decided by the
-      // caller before the search; weekends and blackout days stay visible here.
-      includeBlackoutDates: true,
-      includeWeekends: true,
-      ...staffRoadCheckOptions(caller),
-    });
-    if (!result || result.error || !Array.isArray(result.slots)) return null;
-
-    const slotsByDate = new Map();
-    for (const slot of result.slots) {
-      if (!slotsByDate.has(slot.date)) slotsByDate.set(slot.date, []);
-      slotsByDate.get(slot.date).push(slot);
-    }
-    const rejections = result.rejections_by_date || {};
-
-    const checked = [];
-    const unchecked = [];
-    let decided = 0; // days the check certified as unusable
+    const result = await searchDays({ serviceId, service, candidates, durationMinutes, caller });
+    if (!result) return null;
+    const context = { byDate: slotsByDate(result.slots), rejections: result.rejections_by_date || {}, clashesAt, durationMinutes };
+    const days = { checked: [], refused: [], unverified: [] };
     for (const candidate of candidates) {
-      const daySlots = slotsByDate.get(candidate.dateStr) || [];
-      if (daySlots.length) {
-        let chosen = null;
-        for (const slot of daySlots) {
-          const end = slot.end_time || toHHMM(minutesOf(slot.start_time) + durationMinutes);
-          if (!(await clashesAt(candidate.dateStr, slot.start_time, end))) { chosen = slot; break; }
-        }
-        if (chosen) checked.push({ candidate, slot: chosen, window: windowFor(chosen.start_time, durationMinutes), routeChecked: true });
-        else decided++;
-        continue;
-      }
-      // No feasible start. A day whose only refusal is an unverifiable route
-      // (or that the engine never evaluated) was not checked: it is not
-      // "full". Any other refusal reason is a certified no.
-      const reasons = Object.keys(rejections[candidate.dateStr] || {}).filter((k) => rejections[candidate.dateStr][k] > 0);
-      if (reasons.length && !reasons.every((k) => k === 'route_unverified')) decided++;
-      else unchecked.push(candidate);
+      const day = await classifyDay(candidate, context);
+      days[day.kind].push(day);
     }
     // Every day unverified: nothing was route-checked, so today's list stands.
-    if (!checked.length && !decided) return null;
+    if (!days.checked.length && !days.refused.length) return null;
 
-    const bySoonest = (a, b) => b.score - a.score || (a.dateStr < b.dateStr ? -1 : 1);
-    checked.sort((a, b) => finite(a.slot.score) - finite(b.slot.score)
-      || finite(a.slot.detour_minutes) - finite(b.slot.detour_minutes) || bySoonest(a.candidate, b.candidate));
-    unchecked.sort(bySoonest);
-
-    const ranked = [...checked];
-    // Unchecked days keep today's behavior (the visit's own window, the
+    const ranked = days.checked.sort(byEngineRank)
+      .map(({ candidate, slot }) => ({ candidate, slot, window: windowFor(slot.start_time, durationMinutes), routeChecked: true }));
+    // Unverified days keep today's behavior (the visit's own window, the
     // overlap probe) after every checked day.
-    for (const candidate of unchecked) {
-      if (await clashesAt(candidate.dateStr, candidate.window.start, toHHMM(minutesOf(candidate.window.start) + durationMinutes))) continue;
-      ranked.push({ candidate, slot: null, window: candidate.window, routeChecked: false });
+    const unverified = days.unverified.map((day) => day.candidate).sort(bySoonest);
+    for (const candidate of unverified) {
+      const end = toHHMM(minutesOf(candidate.window.start) + durationMinutes);
+      if (!(await clashesAt(candidate.dateStr, candidate.window.start, end))) {
+        ranked.push({ candidate, slot: null, window: candidate.window, routeChecked: false });
+      }
     }
     return ranked;
   } catch (err) {
@@ -169,4 +192,29 @@ async function rankRouteCheckedDays({ serviceId, service, candidates, durationMi
   }
 }
 
-module.exports = { routeRankedDaysLive, staffRoadCheckOptions, rankRouteCheckedDays, _internals: { windowFor } };
+/**
+ * The find_available_slots (Intelligence Bar) search options for a new stop at
+ * lat/lng, or null when the old gap search should run (gate off, arrival
+ * routing off, or no coordinates). Same road-time rules as the day lists.
+ */
+function newStopRouteOptions({ lat, lng, durationMinutes, caller }) {
+  const point = { lat: Number(lat), lng: Number(lng) };
+  const usable = routeRankedDaysLive() && Number.isFinite(point.lat) && Number.isFinite(point.lng);
+  if (!usable) return null;
+  return {
+    arrivalWindow: { prospective: { ...point, estimated_duration_minutes: durationMinutes } },
+    ...staffRoadCheckOptions(caller),
+  };
+}
+
+/**
+ * The arrival search lists no searched days; give a route-checked result the
+ * days asked about so describeSlotSearch still explains each one.
+ */
+function withSearchedDays(result, routeChecked, dateFrom, dateTo) {
+  const enumerateDates = require('./find-time')._internals?.enumerateDates;
+  if (!routeChecked || result.searched_dates || typeof enumerateDates !== 'function') return result;
+  return { ...result, searched_dates: enumerateDates(dateFrom, dateTo, { includeWeekends: true }) };
+}
+
+module.exports = { routeRankedDaysLive, staffRoadCheckOptions, newStopRouteOptions, withSearchedDays, rankRouteCheckedDays, _internals: { windowFor } };

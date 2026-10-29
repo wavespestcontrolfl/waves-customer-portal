@@ -2221,7 +2221,7 @@ async function getZoneDensity(date) {
 }
 
 
-async function findAvailableSlotsTool(input, actionContext = {}) {
+async function findAvailableSlotsTool(input, actionContext) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, service_name, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
@@ -2274,7 +2274,7 @@ async function findAvailableSlotsTool(input, actionContext = {}) {
   // user's technician id is the spender); anyone else stays on the estimate.
   // Needs the stop's coordinates; without them the old search runs.
   const rankedDays = require('../scheduling/route-ranked-days');
-  const routeChecked = rankedDays.routeRankedDaysLive() && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+  const routeCheck = rankedDays.newStopRouteOptions({ lat, lng, durationMinutes, caller: actionContext });
 
   let result = await findAvailableSlots({
     // Staff tool: tech start points apply (GATE_TECH_START_POINTS).
@@ -2285,10 +2285,7 @@ async function findAvailableSlotsTool(input, actionContext = {}) {
     dateFrom,
     dateTo,
     technicianId: technician_id,
-    ...(routeChecked ? {
-      arrivalWindow: { prospective: { lat: Number(lat), lng: Number(lng), estimated_duration_minutes: durationMinutes } },
-      ...rankedDays.staffRoadCheckOptions(actionContext),
-    } : {}),
+    ...routeCheck,
     // Every feasible slot comes back, so each day's count is real; the
     // operator's top N is cut in describeSlotSearch.
     topN: SLOT_SEARCH_ALL,
@@ -2301,14 +2298,7 @@ async function findAvailableSlotsTool(input, actionContext = {}) {
     includeBlackoutDates: true,
   });
   if (result.error) return result;
-  // The arrival search lists no searched days; the per-day rows still cover
-  // every day asked about, with its refusal reasons.
-  if (routeChecked && !result.searched_dates) {
-    const enumerateDates = require('../scheduling/find-time')._internals?.enumerateDates;
-    if (typeof enumerateDates === 'function') {
-      result = { ...result, searched_dates: enumerateDates(dateFrom, dateTo, { includeWeekends: true }) };
-    }
-  }
+  result = rankedDays.withSearchedDays(result, routeCheck, dateFrom, dateTo);
   return describeSlotSearch(result, {
     dateFrom, dateTo, today, durationMinutes, durationSource, service, technicianId: technician_id,
     topN: top_n || 10,
