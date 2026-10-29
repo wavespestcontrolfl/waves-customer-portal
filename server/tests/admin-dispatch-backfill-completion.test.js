@@ -2771,12 +2771,13 @@ describe('completion route wiring (source contracts)', () => {
 
   test('backfill never credits a referral — no $25 to either party, no referrer SMS/email', () => {
     // creditReferralOnFirstService posts real account credits to BOTH the
-    // referrer and the referee AND messages the referrer, so the quiet path
-    // must not reach it. The guard also protects the reward's single-use
-    // idempotency: firing here would burn it on a visit nobody announced.
-    // The ONE carve-out is the issued-invoice closeout (GitHub r12 P1 #4127):
-    // the invoice event proves the service happened, so the credits post —
-    // with the referrer's SMS / email suppressed (notify: false).
+    // referrer and the referee (and the referrer's thank-you email follows at
+    // the next 9:00 AM ET), so the quiet path must not reach it. The guard also
+    // protects the reward's single-use idempotency: firing here would burn it
+    // on a visit nobody announced. The ONE carve-out is the issued-invoice
+    // closeout (GitHub r12 P1 #4127): the invoice event proves the service
+    // happened, so the credits post, and the referrer gets the 9:00 AM email
+    // like every credit (owner 2026-10-29).
     expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);/);
     const referralBlock = source.match(/if \(referralVisitPerformed && !packetEffects\) \{([\s\S]*?)\n {4}\}/);
     expect(referralBlock).not.toBeNull();

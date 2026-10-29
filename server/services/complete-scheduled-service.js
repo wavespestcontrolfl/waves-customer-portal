@@ -15900,13 +15900,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // #4127): the invoice event is the proof the service happened, and this
     // may be the referred customer's first qualifying visit — withholding
     // the credit here would delay it to a later completion or lose it. The
-    // credits post; the referrer's reward SMS / email stay suppressed so the
-    // closeout remains quiet.
+    // credits post; the closeout itself stays quiet, and the referrer's one
+    // thank-you email goes out at the next 9:00 AM ET as on every credit
+    // (referral-engine sendDueReferralRewardEmails, owner 2026-10-29).
     const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);
     if (referralVisitPerformed && !packetEffects) {
       try {
         const referralEngine = require('../services/referral-engine');
-        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id, notify: !issuedInvoiceCloseout });
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }
