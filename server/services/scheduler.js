@@ -2259,6 +2259,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 06:52 — technician ID-card and training reminders (GATE_TECH_TRAINING_DATES, dark): one admin bell per technician and
+  // deadline (ID card application, 4 classroom hours, renewal training; F.S. 482.091), closed when the date is entered. Admin bell
+  // only; it sends nothing to a technician or a customer. Gate off = returns before any query. The gate is read per tick, so a flip
+  // or an unset needs no restart. runExclusive records the job health and keeps a deploy overlap from running two sweeps.
+  cron.schedule('52 6 * * *', async () => {
+    if (!require('../config/feature-gates').techTrainingDatesLive()) return;
+    try {
+      await runExclusive('technician-training-dates', async () => {
+        await require('./technician-training-reminders').runTechnicianTrainingReminders();
+      });
+    } catch (err) {
+      logger.error(`[technician-training-reminders] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
   // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
   // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
