@@ -290,6 +290,30 @@ postgres('payroll family employee', () => {
     });
   });
 
+  describe('after the gate is turned off', () => {
+    it('keeps earlier exempt pay out of the $7,000 base, and stores nothing for anyone with no exempt pay', async () => {
+      const parent = await readyTech('Sample Parent', { pay_rate: '200.00' });
+      const plain = await readyTech('Sample Plain', { pay_rate: '200.00' });
+      await parentFrom(parent, '2026-09-25');
+      for (const id of [parent, plain]) {
+        await approvedWeek(id, W1);
+        await approvedWeek(id, W2);
+      }
+      const first = await draftAndFinalize(W1);
+      expect(byName(first, 'Sample Parent').futaCents).toBe(0);
+      delete process.env.GATE_PAYROLL_FAMILY_EMPLOYEE;
+      const second = await draftAndFinalize(W2);
+      // No exemption now, but the $8,000 of exempt pay in W1 used none of the base.
+      const check = byName(second, 'Sample Parent');
+      expect(check).toMatchObject({ futaCents: 4200, flReemploymentCents: 18900 });
+      expect(await stored(check.id)).toMatchObject({ unemployment_exempt: false, unemployment_wages_cents: '700000' });
+      // No exempt pay this year: today's math (W1 used up the base) and nothing stored.
+      const other = byName(second, 'Sample Plain');
+      expect(other.futaCents).toBe(0);
+      expect(await stored(other.id)).toMatchObject({ unemployment_exempt: null, unemployment_wages_cents: null });
+    });
+  });
+
   describe('the Tax page calendar and the tax form figures', () => {
     async function paidWeek() {
       const parent = await readyTech('Sample Parent');

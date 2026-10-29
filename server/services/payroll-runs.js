@@ -211,11 +211,10 @@ const hoursText = (minutes) => (Math.round((Number(minutes) || 0) / 60 * 100) / 
  * problem: the message of computePaycheck becomes the reason.
  */
 function buildCheck({
-  tech, payDate, weekStart, w4, ytdGrossCents, ytdUnemploymentWages, familyExempt,
+  tech, payDate, weekStart, w4, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt,
 }) {
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
-  const withFamily = familyEmployeeOn();
   const ptoMinutes = tech.pto_minutes || 0;
   const holidayMinutes = tech.holiday_minutes || 0;
   // Open pay lines for this technician and the extra overtime they cause (evaluate()).
@@ -236,7 +235,8 @@ function buildCheck({
         payLines: { ...totalsOf(lines), lineOvertimePremiumCents: linePremium.extraPremiumCents },
         flsaCovered: tech.flsa_overtime_covered === true,
       } : {}),
-      ...(withFamily ? { unemploymentExempt: familyExempt === true, ytdUnemploymentWages } : {}),
+      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided by evaluate() (undefined = not decided, today's math).
+      ...(unemploymentExempt === undefined ? {} : { unemploymentExempt, ytdUnemploymentWages: centsText(ytdUnemploymentCents) }),
     });
   } catch (err) {
     return { blocked: (err && err.message) || 'The paycheck could not be worked out' };
@@ -257,7 +257,7 @@ function buildCheck({
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
   if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = pay[key];
-  if (withFamily) {
+  if (unemploymentExempt !== undefined) {
     check.unemployment_exempt = pay.unemploymentExempt;
     check.unemployment_wages_cents = pay.taxableWages.futaCents;
   }
@@ -595,6 +595,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const payableIds = payable.map((row) => row.technician_id);
   const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
   // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
+  const familyLive = familyEmployeeOn();
   const familyExempt = await familyExemptIds(conn, payableIds, run.pay_date, { lock });
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
@@ -634,8 +635,11 @@ async function evaluate(conn, run, { lock = false } = {}) {
       weekStart: start,
       w4,
       ytdGrossCents: yearToDate.gross,
-      ytdUnemploymentWages: centsText(yearToDate.unemployment),
-      familyExempt: familyExempt.has(tech.technician_id),
+      ytdUnemploymentCents: yearToDate.unemployment,
+      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
+      // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
+      unemploymentExempt: familyLive || yearToDate.unemployment !== yearToDate.gross
+        ? familyExempt.has(tech.technician_id) : undefined,
     });
     if (built.blocked) blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: built.blocked });
     else checks.push({ ...built.check, run_id: run.id });

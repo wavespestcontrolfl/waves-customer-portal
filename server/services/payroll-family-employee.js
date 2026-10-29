@@ -90,19 +90,20 @@ async function setFamilyEmployment(technicianId, input, actor, conn = db) {
 
 /**
  * The pay run's read: ids of the technicians whose pay on `payDate` is exempt (the
- * setting is complete and starts on or before the pay date; wages are FUTA wages when
- * paid). Gate off: an empty set, no query. With lock, the rows are read FOR SHARE so a
- * setting change waits for the transaction.
+ * setting is set and starts on or before the pay date; wages are FUTA wages when paid;
+ * the table holds all three fields or none). Gate off: an empty set, no query. Every
+ * payable row is read, and with lock read FOR SHARE, before eligibility is judged, so a
+ * setting added or moved while a pay run is finalized waits for it instead of slipping
+ * past the reviewed token.
  */
 async function familyExemptIds(conn, technicianIds, payDate, { lock = false } = {}) {
   if (!familyEmployeeOn() || !technicianIds.length) return new Set();
   const query = conn('technicians')
     .whereIn('id', technicianIds)
-    .whereNotNull('family_relationship')
-    .whereNotNull('family_employer_entity')
-    .where('family_exempt_from', '<=', payDate);
+    .select('id', 'family_relationship', conn.raw("to_char(family_exempt_from, 'YYYY-MM-DD') as family_exempt_from"));
   if (lock) query.forShare();
-  return new Set((await query.select('id')).map((row) => row.id));
+  const rows = await query;
+  return new Set(rows.filter((row) => row.family_relationship && row.family_exempt_from <= payDate).map((row) => row.id));
 }
 
 module.exports = { familyEmployeeOn, setFamilyEmployment, familyExemptIds };
