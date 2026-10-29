@@ -596,36 +596,43 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 }
 
 /** Why an `arrival_window` failure happened, from the same simulation re-run to report
- *  lateness instead of stopping at the first miss (explain: true only).
- *  - targetLate: in some tried order the new visit itself misses its window.
- *  - newlyLateStopIds: OTHER stops that arrive after their window in EVERY tried order
- *    and are not late in the day without the new visit. Empty unless every order shows
+ *  lateness instead of stopping at the first miss (explain: true only). The new visit is
+ *  tried at EVERY position of the day's current order, whatever capacity mode or staff
+ *  insertion do for the real placement, so one cramped order never speaks for the day.
+ *  - targetLate: at some position the new visit itself misses its window.
+ *  - newlyLateStopIds: OTHER stops that arrive after their window at EVERY position and
+ *    are not late in the day without the new visit. Empty unless every position shows
  *    one, so a non-empty list means no place for the visit keeps everyone else on time.
  *  - baselineLateStopIds: stops already late in the day without the new visit.
- *  - dayEndExceeded: in some tried order the route runs past the day end. */
-function explainLateness({ orders, sequencers, groupedPending, simulate, target }) {
+ *  - dayEndExceeded: at some position the route runs past the day end. */
+const EXPLAIN_MAX_STOPS = 30;
+
+function explainLateness({ sequencers, groupedPending, simulate, target }) {
   const lateIds = (order) => {
     const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
     return simulation ? simulation.arrivals.filter(arrival => arrival.lateMinutes > 0).map(arrival => arrival.id) : null;
   };
-  const baselineLate = new Set(sequencers.flatMap(sequence => lateIds(sequence(groupedPending)) || []));
+  const baselines = sequencers.map(sequence => sequence(groupedPending));
+  const baselineLate = new Set(baselines.flatMap(baseline => lateIds(baseline) || []));
+  const orders = baselines.flatMap(baseline => (baseline.length > EXPLAIN_MAX_STOPS ? []
+    : Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])));
   const newlyLate = new Set();
-  let everyOrderCrowdsAnotherStop = orders.length > 0;
+  let everyPositionCrowdsAnotherStop = orders.length > 0;
   let targetLate = false;
   let dayEndExceeded = false;
-  for (const { order } of orders) {
+  for (const order of orders) {
     const late = lateIds(order);
     if (late == null) {
-      everyOrderCrowdsAnotherStop = false;
+      everyPositionCrowdsAnotherStop = false;
       continue;
     }
     if (late.includes(target.id)) targetLate = true;
     const others = late.filter(id => id !== target.id && !baselineLate.has(id));
     if (others.length) others.forEach(id => newlyLate.add(id));
-    else everyOrderCrowdsAnotherStop = false;
+    else everyPositionCrowdsAnotherStop = false;
     if (!simulate(order, [], { reportLate: true })) dayEndExceeded = true;
   }
-  return { targetLate, newlyLateStopIds: everyOrderCrowdsAnotherStop ? [...newlyLate] : [],
+  return { targetLate, newlyLateStopIds: everyPositionCrowdsAnotherStop ? [...newlyLate] : [],
     baselineLateStopIds: [...baselineLate], dayEndExceeded };
 }
 
@@ -778,7 +785,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
   if (!winner) {
-    return explain ? { ...fail, lateness: explainLateness({ orders, sequencers, groupedPending, simulate, target }) } : fail;
+    return explain ? { ...fail, lateness: explainLateness({ sequencers, groupedPending, simulate, target }) } : fail;
   }
   return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ,
     roadTravel: !!context.travel });
