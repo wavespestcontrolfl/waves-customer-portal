@@ -48,10 +48,10 @@
  * the invoice's total over the positive totals of the statement's invoices that are not void, so a sold invoice on a
  * statement gets its own entry (statement_part_cents over statement_total_cents), fixed like the rest of the snapshot.
  *
- * Deposits: an estimate deposit has no payments row. The deposit ledger (estimate_deposits) holds it, with its refunds
- * and disputes, so each collected deposit row counts as a payment (payment_source 'estimate_deposit', payment_id = the
- * deposit id): its face value less what was returned, on the invoice it paid (depositInvoiceId). Like any payment on that
- * invoice, it is shared by every sale with lines on it.
+ * Deposits: an estimate deposit has no payments row. Each application of it, the deposit_credit an invoice carries for
+ * one estimate, counts as a payment on that invoice, shared by every sale with lines on it (payment_source
+ * 'estimate_deposit', payment_id = the deposit's estimate id, invoice_id = the invoice). The deposit ledger
+ * (estimate_deposits) says what part of the applied money a refund or dispute reversed (depositLedgers).
  *
  * Tables (migrations 20261029200000, 20261029203000 and 20261029204000): commission_sales (one per
  * accepted estimate sold by a W-2 technician; insert-only, except a customer merge moves its
@@ -254,7 +254,7 @@ function scopedLines(item, positives) {
  * with, the way the writer itself replays them on every later save (each as a fixed amount of its frozen dollars, in its
  * frozen canonical order). A discount that names a line comes off that line; one whose line is gone is $0 (the writer
  * resolves it to $0); any other discount line is document-wide (scopedLines). A deposit_credit line is a prior payment,
- * not a discount (the deposit row counts as a payment, see depositPayment), and is left out. An invoice-level discount that never
+ * not a discount (its application counts as a payment, see applicationPayment), and is left out. An invoice-level discount that never
  * became a line (a create-time discountIds pick, in discount_amount only) changes no line's share of the invoice.
  */
 function lineNets(lines) {
@@ -326,73 +326,84 @@ async function estimateInvoices(trx, sale, lineage) {
 
 const etDateOf = (value) => etDateString(value instanceof Date ? value : new Date(value));
 
-// ---- 2b. The estimate's deposits
+// ---- 2b. Deposits
 
 // Deposit rows that hold money Waves collected (estimate-deposits.js): pending and failed never collected anything.
 const COLLECTED_DEPOSITS = ['received', 'credited', 'refunding', 'refunded'];
-
-const depositColumns = ['id', 'status', 'amount', 'refunded_amount', 'credited_invoice_id', 'received_at', 'created_at', 'updated_at'];
-
-/**
- * An estimate deposit has no payments row (estimate-deposits.js markDepositReceived): the deposit ledger
- * (estimate_deposits) holds it, and a refund or a dispute of it is recorded there too (refunded_amount, the face value
- * returned; status 'refunded' when all of it went back), while an invoice it was credited on keeps its deposit_credit
- * line for manual reconciliation. So the deposit row itself is the payment (id = the deposit id): its face value
- * (amount, which leaves out the card surcharge) less refunded_amount, dated the day it was received and never before
- * the sale, and refunds judged on the row's last change (countedRefund's 12-month rule).
- */
-function depositPayment(deposit, sale) {
-  const received = etDateOf(deposit.received_at || deposit.created_at);
-  return {
-    id: deposit.id,
-    status: deposit.status === 'refunded' ? 'refunded' : 'paid',
-    refund_amount: deposit.refunded_amount,
-    refunded_surcharge_cents: 0,
-    base_cents: payrollUnits(deposit.amount).toString(),
-    payment_on: received > sale.accepted_on ? received : sale.accepted_on,
-    updated_on: etDateOf(deposit.updated_at || deposit.created_at),
-  };
-}
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VOIDED_INVOICE = ['void', 'canceled', 'cancelled'];
 const invoiceLines = (invoice) => (Array.isArray(invoice.line_items) ? invoice.line_items.filter(Boolean) : []);
+const depositKey = (estimateId, invoiceId) => `${String(estimateId).toLowerCase()}|${invoiceId}`;
 
 /**
- * The invoice a deposit paid, the same for every sale that reads it: the live invoice that absorbed all of it
- * (credited_invoice_id); else the first live invoice that carries a deposit credit for its estimate (the writer stamps
- * the estimate on the deposit_credit line); else its estimate's acceptance mint. A deposit credited on an invoice pays the
- * whole invoice after tax, like a payment, so every sale with lines on that invoice gets its share of it (newFigures).
+ * An estimate deposit has no payments row (estimate-deposits.js). The invoice writer applies it to an invoice as a
+ * deposit_credit line naming the estimate, after tax, as a prior payment (invoice.js create), and one deposit can be
+ * applied in parts to several invoices (consumeDepositCredit). So each application, the deposit credit an invoice
+ * carries for one estimate, is a payment on that invoice, shared by every sale with lines on it like any payment. Its
+ * identity is the pair (the deposit's estimate, the invoice): payment_source 'estimate_deposit', payment_id = the
+ * estimate id, invoice_id = the invoice id. Map estimate id -> cents applied on this invoice; a credit line that names no
+ * estimate counts for the estimate whose acceptance mint the invoice is.
  */
-async function depositInvoiceId(trx, deposit) {
-  const live = () => trx('invoices').whereNotIn('status', VOIDED_INVOICE).orderBy([{ column: 'created_at' }, { column: 'id' }]);
-  if (deposit.credited_invoice_id) {
-    const credited = await live().where({ id: deposit.credited_invoice_id }).first('id');
-    if (credited) return credited.id;
+function depositApplications(invoice) {
+  const minted = namedIn(invoice.notes, AUTO_MINT_RE)[0] || '';
+  const applied = new Map();
+  for (const line of invoiceLines(invoice)) {
+    if (line.category !== 'deposit_credit' || !(Number(line.amount) < 0)) continue;
+    const estimateId = String(line.estimate_id || minted).toLowerCase();
+    if (UUID_RE.test(estimateId)) applied.set(estimateId, (applied.get(estimateId) || 0n) - payrollUnits(line.amount));
   }
-  const carrying = await live()
-    .whereRaw('line_items @> ?::jsonb', [JSON.stringify([{ category: 'deposit_credit', estimate_id: String(deposit.estimate_id) }])]).first('id');
-  if (carrying) return carrying.id;
-  const mint = await live().where('notes', 'ilike', `%Auto-generated from accepted estimate #${deposit.estimate_id}%`).first('id');
-  return mint ? mint.id : null;
+  return applied;
 }
 
 /**
- * The collected deposits that may have paid one of the sale's invoices: its own estimate's, those of every estimate a
- * deposit_credit line or an acceptance mint on one of its invoices names, and any credited on one of them.
+ * What the deposit ledger says about an estimate's applied deposit money, per estimate: applied (credited_amount), the
+ * part a refund or dispute reversed, and the ledger's last change. estimate_deposits records a refund or dispute on the
+ * deposit row (refunded_amount, the face value returned; status 'refunded' when all of it went back) and leaves the
+ * invoice's credit line for manual reconciliation (handleDepositChargeReversed). A refund returns the part never applied
+ * (amount - credited_amount) first; only the rest reverses applied money.
  */
-function loadDeposits(trx, sale, invoices, skip) {
-  const estimateIds = new Set([String(sale.estimate_id).toLowerCase()]);
-  for (const invoice of invoices.values()) {
-    invoiceLines(invoice).filter((line) => line.category === 'deposit_credit' && line.estimate_id)
-      .forEach((line) => estimateIds.add(String(line.estimate_id).toLowerCase()));
-    namedIn(invoice.notes, AUTO_MINT_RE).forEach((id) => estimateIds.add(id));
+async function depositLedgers(trx, estimateIds) {
+  const ids = [...new Set(estimateIds)];
+  const ledgers = new Map(ids.map((id) => [id, { applied: 0n, reversed: 0n, updatedOn: null }]));
+  const rows = ids.length ? await trx('estimate_deposits').whereIn('estimate_id', ids).whereIn('status', COLLECTED_DEPOSITS)
+    .select('estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount', 'created_at', 'updated_at') : [];
+  for (const row of rows) {
+    const ledger = ledgers.get(String(row.estimate_id).toLowerCase());
+    const amount = payrollUnits(row.amount);
+    const credited = payrollUnits(row.credited_amount);
+    const refunded = row.status === 'refunded' && payrollUnits(row.refunded_amount) <= 0n ? amount : payrollUnits(row.refunded_amount);
+    const intoApplied = refunded - (amount - credited);
+    ledger.applied += credited;
+    ledger.reversed += intoApplied <= 0n ? 0n : (intoApplied < credited ? intoApplied : credited);
+    const changed = etDateOf(row.updated_at || row.created_at);
+    if (!ledger.updatedOn || changed > ledger.updatedOn) ledger.updatedOn = changed;
   }
-  return trx('estimate_deposits').whereIn('status', COLLECTED_DEPOSITS).whereNotIn('id', [...skip])
-    .where(function paidOneOfThem() {
-      this.whereIn('estimate_id', [...estimateIds].filter((id) => UUID_RE.test(id))).orWhereIn('credited_invoice_id', [...invoices.keys()]);
-    })
-    .select([...depositColumns, 'estimate_id']);
+  return ledgers;
+}
+
+const dollarsOf = (cents) => (Number(cents) / 100).toFixed(2);
+
+/**
+ * One deposit application as a payment row (refundedNow, countedRefund and commissionOf read it): its cents, less the
+ * same part of it the estimate's ledger shows reversed (reversed / applied, half-up). A voided invoice gave its credit
+ * back to the deposit (restoreDepositCreditForVoidedInvoice), and an application the ledger shows no applied money
+ * behind backs nothing, so either reads as refunded in full. Dated the day the invoice was made, never before the sale;
+ * a refund is judged on the later of the ledger's and the invoice's last change (the 12-month rule).
+ */
+function applicationPayment(estimateId, invoice, cents, ledger, sale) {
+  const backed = ledger && ledger.applied > 0n && !VOIDED_INVOICE.includes(invoice.status);
+  const reversed = backed ? roundDiv(cents * ledger.reversed, ledger.applied) : cents;
+  const made = etDateOf(invoice.created_at);
+  const changed = etDateOf(invoice.updated_at || invoice.created_at);
+  return {
+    id: estimateId,
+    status: 'paid',
+    refund_amount: dollarsOf(reversed < cents ? reversed : cents),
+    refunded_surcharge_cents: 0,
+    base_cents: cents.toString(),
+    payment_on: made > sale.accepted_on ? made : sale.accepted_on,
+    updated_on: ledger && ledger.updatedOn && ledger.updatedOn > changed ? ledger.updatedOn : changed,
+  };
 }
 
 /**
@@ -526,9 +537,10 @@ async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd
 
 /**
  * The entries to write for money seen for the first time, one figure per payment and invoice, with the invoice, its
- * share, its cash figures and its part of the payment as they are NOW: the estimate's collected deposit rows
- * (depositPayment, on the invoice depositInvoiceId names), and every payment inside the sale's window that pays one of the
- * estimate's invoices (a statement payment can pay several). `skip` holds the payment and deposit ids already counted.
+ * share, its cash figures and its part of the payment as they are NOW: every deposit application on one of the
+ * estimate's live invoices (depositApplications, any estimate's deposit), and every payment inside the sale's window that
+ * pays one of the estimate's invoices (a statement payment can pay several). `skip` holds the payment ids and the
+ * deposit keys (depositKey) already counted.
  */
 async function newFigures(trx, sale, weekEnd, skip, today) {
   const lineage = await lineageOf(trx, sale);
@@ -541,10 +553,13 @@ async function newFigures(trx, sale, weekEnd, skip, today) {
     figures.push({ source, paymentId: payment.id, paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
   };
   const to = sale.window_end < weekEnd ? sale.window_end : weekEnd;
-  for (const deposit of await loadDeposits(trx, sale, invoices, skip.deposits)) {
-    const invoice = invoices.get(await depositInvoiceId(trx, deposit));
-    const paid = depositPayment(deposit, sale);
-    if (invoice && paid.payment_on <= to) add(paid, 'estimate_deposit', { invoice, part: null, of: null });
+  const applications = [...invoices.values()].filter((invoice) => !VOIDED_INVOICE.includes(invoice.status))
+    .flatMap((invoice) => [...depositApplications(invoice)].map(([estimateId, cents]) => ({ estimateId, invoice, cents })))
+    .filter(({ estimateId, invoice }) => !skip.deposits.has(depositKey(estimateId, invoice.id)));
+  const ledgers = await depositLedgers(trx, applications.map((application) => application.estimateId));
+  for (const { estimateId, invoice, cents } of applications) {
+    const paid = applicationPayment(estimateId, invoice, cents, ledgers.get(estimateId), sale);
+    if (paid.payment_on <= to) add(paid, 'estimate_deposit', { invoice, part: null, of: null });
   }
   const statementIds = [...new Set([...invoices.values()].map((invoice) => invoice.payer_statement_id).filter(Boolean).map(String))];
   const payments = await loadNewPayments(trx, { customerIds: lineage.customerIds, statementIds }, sale, weekEnd, [...skip.payments]);
@@ -559,19 +574,26 @@ async function newFigures(trx, sale, weekEnd, skip, today) {
 }
 
 const bigOrNull = (value) => (value == null ? null : BigInt(value));
-const moneyKey = (source, id) => `${source}:${id}`;
+const moneyKey = (entry) => (entry.payment_source === 'estimate_deposit'
+  ? `estimate_deposit:${depositKey(entry.payment_id, entry.invoice_id)}` : `payment:${entry.payment_id}`);
 
-/** The payment rows and the deposit rows (depositPayment) the entries follow now. Map moneyKey -> payment-like row. */
+/**
+ * The payment rows and the deposit applications (applicationPayment) the entries follow now. Map moneyKey -> payment-like
+ * row. An application whose invoice is gone backs nothing and is missing here, so it counts 0.
+ */
 async function moneyOf(trx, sale, entries) {
-  const ids = (source) => [...new Set(entries.filter((entry) => entry.payment_source === source).map((entry) => entry.payment_id))];
-  const paymentIds = ids('payment');
-  const depositIds = ids('estimate_deposit');
+  const paymentIds = [...new Set(entries.filter((entry) => entry.payment_source === 'payment').map((entry) => entry.payment_id))];
+  const applied = entries.filter((entry) => entry.payment_source === 'estimate_deposit');
   const payments = paymentIds.length ? await trx('payments as p').whereIn('p.id', paymentIds).select(paymentColumns(trx)) : [];
-  const deposits = depositIds.length ? await trx('estimate_deposits').whereIn('id', depositIds).select(depositColumns) : [];
-  const money = new Map(payments.map((payment) => [moneyKey('payment', payment.id), payment]));
-  for (const deposit of deposits) {
-    // A deposit row whose payment never completed holds no money (COLLECTED_DEPOSITS): it counts 0, like a failed payment.
-    if (COLLECTED_DEPOSITS.includes(deposit.status)) money.set(moneyKey('estimate_deposit', deposit.id), depositPayment(deposit, sale));
+  const invoices = applied.length ? await trx('invoices').whereIn('id', [...new Set(applied.map((entry) => entry.invoice_id))])
+    .select('id', 'status', 'notes', 'line_items', 'created_at', 'updated_at') : [];
+  const ledgers = await depositLedgers(trx, applied.map((entry) => String(entry.payment_id).toLowerCase()));
+  const money = new Map(payments.map((payment) => [moneyKey({ payment_source: 'payment', payment_id: payment.id }), payment]));
+  const byId = new Map(invoices.map((invoice) => [invoice.id, invoice]));
+  for (const entry of applied) {
+    const invoice = byId.get(entry.invoice_id);
+    const estimateId = String(entry.payment_id).toLowerCase();
+    if (invoice) money.set(moneyKey(entry), applicationPayment(estimateId, invoice, depositApplications(invoice).get(estimateId) || 0n, ledgers.get(estimateId), sale));
   }
   return money;
 }
@@ -586,7 +608,7 @@ async function entryFigures(trx, sale, entries, weekEnd, today) {
   const money = due.length ? await moneyOf(trx, sale, due) : new Map();
   return due.map((entry) => {
     const previous = BigInt(entry.refund_counted_cents);
-    const payment = money.get(moneyKey(entry.payment_source, entry.payment_id));
+    const payment = money.get(moneyKey(entry));
     if (!payment || !COUNTED_STATUSES.includes(payment.status)) return { entry, counted: 0n, commission: 0n, refund: previous };
     const snap = {
       preTax: BigInt(entry.pre_tax_cents), tax: BigInt(entry.tax_cents), own: BigInt(entry.share_own_cents), all: BigInt(entry.share_all_cents),
@@ -616,10 +638,13 @@ const entryRow = (sale, figure) => ({
  */
 async function syncEntries(trx, sale, weekEnd, today) {
   const existing = await trx('commission_entries').where({ sale_id: sale.id })
-    .select('id', 'payment_id', 'payment_source', 'counted_cents', 'commission_cents', 'refund_counted_cents', 'share_own_cents', 'share_all_cents',
+    .select('id', 'payment_id', 'payment_source', 'invoice_id', 'counted_cents', 'commission_cents', 'refund_counted_cents', 'share_own_cents', 'share_all_cents',
       'pre_tax_cents', 'tax_cents', 'statement_part_cents', 'statement_total_cents', trx.raw("to_char(payment_on, 'YYYY-MM-DD') as payment_on"));
-  const countedIds = (source) => new Set(existing.filter((entry) => entry.payment_source === source).map((entry) => entry.payment_id));
-  const figures = await newFigures(trx, sale, weekEnd, { payments: countedIds('payment'), deposits: countedIds('estimate_deposit') }, today);
+  const ofSource = (source) => existing.filter((entry) => entry.payment_source === source);
+  const figures = await newFigures(trx, sale, weekEnd, {
+    payments: new Set(ofSource('payment').map((entry) => entry.payment_id)),
+    deposits: new Set(ofSource('estimate_deposit').map((entry) => depositKey(entry.payment_id, entry.invoice_id))),
+  }, today);
   const inserts = figures.filter((figure) => figure.counted > 0n).map((figure) => entryRow(sale, figure));
   if (inserts.length) await trx('commission_entries').insert(inserts);
   let updated = 0;

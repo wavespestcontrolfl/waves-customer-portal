@@ -1023,7 +1023,7 @@ postgres('payroll commission ledger', () => {
       const { tech, cust, est } = await soldWorld();
       await approvedWeek(tech, W2);
       const inv = await mintedInvoice(cust, est, {
-        subtotal: '100.00', total: '80.00',
+        subtotal: '100.00', total: '80.00', created_at: '2026-09-15T15:00:00Z', updated_at: '2026-09-15T15:00:00Z',
         line_items: JSON.stringify([
           { client_id: 'line_sold', description: 'Sample service', amount: 100 },
           { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -20, amount: -20, category: 'deposit_credit', estimate_id: est },
@@ -1038,14 +1038,15 @@ postgres('payroll commission ledger', () => {
     };
 
     it('counts the deposit, never its card surcharge, with the balance payment: $20 + $80 earns $10', async () => {
-      const { cust, inv, deposit } = await depositWorld();
+      const { cust, est, inv } = await depositWorld();
       const paid = await payment(cust, inv, '2026-09-16', '80.00');
       const created = await draft(W1);
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
       const rows = await entries();
       expect(rows.map((e) => [e.payment_source, e.payment_id, e.invoice_id, Number(e.counted_cents)]).sort())
-        .toEqual([['estimate_deposit', deposit, inv, 2000], ['payment', paid, inv, 8000]]);
-      expect(dateOnly(rows.find((e) => e.payment_source === 'estimate_deposit').payment_on)).toBe('2026-09-14');
+        .toEqual([['estimate_deposit', est, inv, 2000], ['payment', paid, inv, 8000]]);
+      // The application is dated the day its invoice was made.
+      expect(dateOnly(rows.find((e) => e.payment_source === 'estimate_deposit').payment_on)).toBe('2026-09-15');
       // A second sync never counts the deposit again.
       expect((await recompute(created.body.run.id)).status).toBe(200);
       expect(await entries()).toHaveLength(2);
@@ -1084,7 +1085,7 @@ postgres('payroll commission ledger', () => {
       }).returning('id');
       // The plan's $20 deposit is credited after tax on the first visit's invoice, which also bills the other sale's add-on.
       const inv = await invoice(cust, {
-        subtotal: '200.00', total: '180.00', scheduled_service_id: first,
+        subtotal: '200.00', total: '180.00', scheduled_service_id: first, created_at: '2026-09-15T15:00:00Z',
         line_items: JSON.stringify([
           { client_id: `scheduled_${first}_primary`, description: 'Sample pest control', amount: 100 },
           { client_id: `scheduled_${first}_addon_${idOf(addon)}`, description: 'Sample add-on', amount: 100 },
@@ -1102,6 +1103,45 @@ postgres('payroll commission ledger', () => {
       // The deposit is counted once, half for each sale.
       const depositEntries = (await entries()).filter((e) => e.payment_source === 'estimate_deposit');
       expect(depositEntries.map((e) => Number(e.counted_cents))).toEqual([1000, 1000]);
+    });
+
+    it('counts each part of a deposit on the invoice it was applied to: $50 + $50 of $100 across two invoices', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      const beta = await readyTech('Sample Beta');
+      await approvedWeek(alpha, W1);
+      await approvedWeek(beta, W1);
+      const cust = await customer('Dana', 'Sample');
+      const plan = await estimate(cust, alpha);
+      const addOnSale = await estimate(cust, beta);
+      const first = await visit(cust, plan);
+      const second = await visit(cust, plan, { scheduled_date: '2026-09-03' });
+      const [addon] = await trx('scheduled_service_addons').insert({
+        scheduled_service_id: second, service_name: 'Sample add-on', area_addon_scope: JSON.stringify({ sourceEstimateId: addOnSale }),
+      }).returning('id');
+      const credit = { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -50, amount: -50, category: 'deposit_credit', estimate_id: plan };
+      // The plan's $100 deposit pays $50 of the first visit's $50 invoice, then the other $50 on the second visit's
+      // invoice, which also bills the other sale's $50 add-on (consumeDepositCredit applies a deposit in parts).
+      await invoice(cust, {
+        subtotal: '50.00', total: '0.00', scheduled_service_id: first, created_at: '2026-09-15T15:00:00Z',
+        line_items: JSON.stringify([{ client_id: `scheduled_${first}_primary`, description: 'Sample pest control', amount: 50 }, credit]),
+      });
+      const shared = await invoice(cust, {
+        subtotal: '100.00', total: '50.00', scheduled_service_id: second, created_at: '2026-09-15T16:00:00Z',
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${second}_primary`, description: 'Sample pest control', amount: 50 },
+          { client_id: `scheduled_${second}_addon_${idOf(addon)}`, description: 'Sample add-on', amount: 50 },
+          credit,
+        ]),
+      });
+      await trx('estimate_deposits').insert({
+        estimate_id: plan, customer_id: cust, amount: '100.00', credited_amount: '100.00', status: 'credited', credited_invoice_id: shared,
+        stripe_payment_intent_id: `pi_sample_${randomUUID()}`, received_at: '2026-09-14T15:00:00Z', updated_at: '2026-09-14T15:00:00Z',
+      });
+      await payment(cust, shared, '2026-09-16', '50.00');
+      const created = await draft(W1);
+      // The plan: $50 + half of $50 + half of the $50 payment = $100, $10. The add-on: $25 + $25 = $50, $5. $150 collected.
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
+      expect(commissionOf(created.body.run, 'Sample Beta')).toBe(500);
     });
 
     it('waits for a deposit that sits on no invoice of the sale, and counts a pending one never', async () => {
