@@ -184,7 +184,8 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     // the accept path. Tax dollars round to cents exactly as InvoiceService
     // does (rate * after-discount subtotal), so preview == minted total.
     const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
-      estimate.customer_id || estimate.customerId || null, {}
+      estimate.customer_id || estimate.customerId || null,
+      { propertyId: estimate.property_id || estimate.propertyId || undefined },
     );
     const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
       prepayDiscountApplied: Number(resolved.discount) > 0,

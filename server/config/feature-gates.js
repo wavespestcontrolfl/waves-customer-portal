@@ -3842,6 +3842,15 @@ const gates = {
   // buildingUseTaxLive(); dark by default. Off = commercial accounts are taxed
   // by property_type exactly as before.
   buildingUseTax: gateEnvValue('GATE_BUILDING_USE_TAX'),
+  // Tax follows the serviced property's county (2026-10-29, fix 4 of the
+  // proposal defaults check): Florida's surtax is due in the county where the
+  // service is delivered (s. 212.054(3)(a); Rule 12A-15.003(5)(a)). On,
+  // TaxCalculator.calculateTax reads the county from the visit's or the
+  // estimate's saved property before the customer's own ZIP, maps DeSoto ZIPs,
+  // and uses the 2026 Lee, Collier and DeSoto rates when no tax_rates row
+  // covers the county. Read at call time via taxServiceCountyLive(); dark by
+  // default. Off = the customer's ZIP and the 7% fallback, as before.
+  taxServiceCounty: gateEnvValue('GATE_TAX_SERVICE_COUNTY'),
 
   // Undo last manual payment (owner 2026-10-29, built before partial payments): the office can reverse a cash,
   // check, Zelle, Venmo, PayPal or other off-Stripe entry recorded by hand, the same Eastern day, before any
@@ -6257,6 +6266,11 @@ function buildingUseTaxLive() {
 // GATE_UNDO_MANUAL_PAYMENT read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
 function undoManualPaymentLive() {
   return process.env.GATE_UNDO_MANUAL_PAYMENT === 'true';
+}
+
+// GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
+function taxServiceCountyLive() {
+  return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -8966,3 +8980,5 @@ module.exports.buildingUseTaxLive = buildingUseTaxLive;
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_STOCK_COUNT_AWARE_USAGE reader, on its own line so gate PRs never conflict.
 module.exports.stockCountAwareUsageLive = stockCountAwareUsageLive;
+// GATE_TAX_SERVICE_COUNTY reader, on its own line so gate PRs never conflict.
+module.exports.taxServiceCountyLive = taxServiceCountyLive;

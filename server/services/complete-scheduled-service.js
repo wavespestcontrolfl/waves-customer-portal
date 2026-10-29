@@ -5279,7 +5279,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             svc.customer_id,
             svc.service_type,
             Number(invoiceAmount) || 0,
-            { database: db, skipCustomerExemption: visitIsPayerBilled },
+            { database: db, skipCustomerExemption: visitIsPayerBilled, propertyId: svc.property_id || undefined },
           );
           const r = Number(taxResult?.rate);
           if (Number.isFinite(r) && r >= 0 && r < 1) return r;
@@ -12738,7 +12738,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   svc.customer_id,
                   svc.service_type,
                   Number(mintInvoiceAmount) || 0,
-                  currentPayerBilled ? { skipCustomerExemption: true } : {},
+                  { ...(currentPayerBilled ? { skipCustomerExemption: true } : {}), propertyId: svc.property_id || undefined },
                 );
                 const r = Number(rr?.rate);
                 if (!(Number.isFinite(r) && r >= 0 && r < 1)) {

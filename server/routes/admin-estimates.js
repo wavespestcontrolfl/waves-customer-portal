@@ -4469,7 +4469,7 @@ router.get('/:id/proposal', async (req, res, next) => {
     let suggestedTaxSource = null;
     try {
       const { rate, source } = await require('../services/estimate-converter')
-        .resolveCommercialPrepayTax(estimate.customer_id ?? null, { database: db, strict: true });
+        .resolveCommercialPrepayTax(estimate.customer_id ?? null, { database: db, strict: true, propertyId: estimate.property_id || undefined });
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
       suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
     } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }

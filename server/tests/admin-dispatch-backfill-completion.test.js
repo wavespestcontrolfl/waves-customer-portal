@@ -1974,8 +1974,9 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // county at flat 7%. The single derivation still feeds both the
       // frozen backfillMintTaxRate and the live mint (round-10 contract),
       // and the returned rate is bounded to what the resume validator
-      // accepts (finite, 0 <= rate < 1).
-      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled \},\s*\n\s*\);/);
+      // accepts (finite, 0 <= rate < 1). The visit's saved property names the
+      // county (GATE_TAX_SERVICE_COUNTY: the surtax is due where the work is done).
+      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled, propertyId: svc\.property_id \|\| undefined \},\s*\n\s*\);/);
       // Payer authority at the freeze (pre-push P0): the payer resolves
       // BEFORE the rate derivation; an exempt payer freezes 0, a non-exempt
       // payer's rate excludes the service customer's certificate.
