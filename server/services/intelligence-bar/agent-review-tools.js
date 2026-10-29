@@ -222,8 +222,12 @@ function finalTextFor(action, text, input) {
 
 async function sendRefusal(text, target) {
   try {
-    const { sendSmsProposalRefusal } = require('./comms-tools');
-    const blocked = await sendSmsProposalRefusal({ message: text, phone: target.to, customer_id: target.customerId || undefined });
+    // A customer's text gets the consent and suppression verdict the sender will reach. A number with no customer on it is sent as a
+    // lead (the composer posts no customerId): the sender's own validators decide there, so only the link check runs in the preview.
+    const { sendSmsProposalRefusal, customerLinkSendRefusal } = require('./comms-tools');
+    const blocked = target.customerId
+      ? await sendSmsProposalRefusal({ message: text, phone: target.to, customer_id: target.customerId })
+      : await customerLinkSendRefusal(text, target.to, null, { phase: 'proposal', recipientSelected: false });
     if (blocked) return refusal(blocked.error || 'This text cannot go out', blocked.code || 'send_blocked', { blocked: true });
   } catch (err) {
     logger.warn(`[intelligence-bar:agent-review] proposal check unavailable (${err?.code || err?.name || 'error'})`);
@@ -280,7 +284,10 @@ async function buildPlan(toolName, input = {}) {
   const linkNotes = action === 'ignore' ? []
     : await deliveryLinkNotes(finalText, { audience: target.customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: 'manual' });
   const snap = snapshotOf(d);
-  const name = fullName(d);
+  // The card names the identity the send uses (the customer only when the number is theirs: sendTarget), as the confirm pins it. The
+  // decision's filing customer is display only, never pinned.
+  const name = target.customerId ? fullName(d) : null;
+  const filedUnder = !target.customerId && d.customer_id ? fullName(d) : null;
   const latestId = await suggest().newestInboundIdForThread(last10(target.to));
   const newerInbound = Boolean(latestId && d.sms_log_id && latestId !== String(d.sms_log_id));
   const inbound = d.inbound_message || snap?.sms?.body || null;
@@ -289,8 +296,9 @@ async function buildPlan(toolName, input = {}) {
     tool: toolName,
     action,
     decision_id: d.id,
-    customer_id: d.customer_id || null,
+    customer_id: target.customerId,
     customer_name: name,
+    filed_under: filedUnder,
     recipient: `${name || 'Unknown sender'} (${maskPhone(target.to)})`,
     inbound_message: inbound,
     suggested_text: text,
@@ -459,6 +467,7 @@ function cardLines(toolName, preview) {
     if (preview.action === 'revise') lines.push({ kind: 'comms', text: `Edited from the draft: "${preview.suggested_text}"` });
   }
   lines.push({ kind: 'comms', text: preview.inbound_message ? `Answers their message: "${preview.inbound_message}"` : 'Answers no inbound text.' });
+  if (preview.filed_under) lines.push({ kind: 'comms', text: `This draft is filed under ${preview.filed_under}, but its number is not theirs: it goes to the number shown, not to their account.` });
   if (preview.newer_inbound) lines.push({ kind: 'comms', text: 'The customer has sent a newer text since this draft was written. Read the conversation before sending.' });
   if (preview.action !== 'ignore' && preview.lint_failures?.length) lines.push({ kind: 'comms', text: `The drafter flagged: ${preview.lint_failures.map((f) => (typeof f === 'string' ? f : f?.rule || f?.code || JSON.stringify(f))).join('; ')}` });
   if (preview.action !== 'ignore' && preview.promised_actions?.length) lines.push({ kind: 'comms', text: `The draft promises: ${preview.promised_actions.join('; ')}` });

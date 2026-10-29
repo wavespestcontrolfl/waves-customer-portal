@@ -19,10 +19,12 @@ const mockSuggest = {
 };
 jest.mock('../services/sms-suggest-mode', () => mockSuggest);
 const mockProposalRefusal = jest.fn();
+const mockLinkRefusal = jest.fn();
 const mockRecruiting = jest.fn();
 jest.mock('../utils/recruiting-thread-scope', () => ({ isRecruitingPhone: (...a) => mockRecruiting(...a) }));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   sendSmsProposalRefusal: (...a) => mockProposalRefusal(...a),
+  customerLinkSendRefusal: (...a) => mockLinkRefusal(...a),
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
 }));
 
@@ -97,6 +99,7 @@ beforeEach(() => {
   mockSuggest.newestInboundIdForThread.mockResolvedValue(LOG);
   mockSuggest.ignorePendingSuggestion.mockResolvedValue(true);
   mockProposalRefusal.mockResolvedValue(null);
+  mockLinkRefusal.mockResolvedValue(null);
   mockRecruiting.mockResolvedValue(false);
   mockComms.sendSmsFromBar.mockResolvedValue({ status: 200, json: { sent: true, providerMessageId: 'SM_synthetic', deliveryOutcome: 'accepted' } });
 });
@@ -362,6 +365,37 @@ describe('links the sender rewrites at delivery', () => {
   test('the bar\'s own send purposes are the refuse policy: the estimate rewrite never applies, so no estimate note', async () => {
     const Annual = require('../services/estimate-annual-guard');
     expect(Annual.withheldLinkPolicyForSmsPurpose('conversational', 'manual')).toBe('refuse');
+  });
+});
+
+// A thread number that is not the filing customer's is sent as a lead (no customerId): the card names no customer for it and pins none.
+describe('a thread number that is not the filing customer\'s', () => {
+  beforeEach(() => { state.decision.customer_phone = '+19415550177'; });
+
+  test('the card shows the number without the customer\'s name and says whose draft it is; the pin carries no customer', async () => {
+    const card = await run('approve_agent_review_draft', { decision_id: ID });
+    expect(card).toMatchObject({ preview: true, customer_id: null, customer_name: null, recipient: 'Unknown sender (\u20260142)', filed_under: 'Robin Sample' });
+    expect(card._version).toMatchObject({ to: PHONE, customer_id: null, customer_name: null });
+    const lines = cardLines('approve_agent_review_draft', card).map((l) => l.text);
+    expect(lines[0]).toBe(`Text to Unknown sender (\u20260142): "${TEXT}"`);
+    expect(lines.join(' ')).toContain('filed under Robin Sample, but its number is not theirs');
+    const out = await confirm('approve_agent_review_draft', card);
+    expect(out.success).toBe(true);
+    expect(mockComms.sendSmsFromBar.mock.calls[0][0].body).not.toHaveProperty('customerId');
+  });
+
+  test('the consent verdict is the sender\'s for a lead number: only the link check runs in the preview', async () => {
+    mockProposalRefusal.mockResolvedValue({ success: false, error: 'No notification_prefs record', code: 'NO_CONSENT_RECORD', blocked: true });
+    expect((await run('approve_agent_review_draft', { decision_id: ID })).preview).toBe(true);
+    expect(mockProposalRefusal).not.toHaveBeenCalled();
+    expect(mockLinkRefusal).toHaveBeenCalledWith(TEXT, PHONE, null, expect.objectContaining({ phase: 'proposal' }));
+    mockLinkRefusal.mockResolvedValue({ success: false, error: 'Composer-only link', code: 'composer_only_link', blocked: true });
+    expect(await run('approve_agent_review_draft', { decision_id: ID })).toMatchObject({ code: 'composer_only_link', blocked: true });
+  });
+
+  test('a number that IS the customer\'s keeps naming and pinning the customer', async () => {
+    state.decision.customer_phone = PHONE;
+    expect(await run('approve_agent_review_draft', { decision_id: ID })).toMatchObject({ customer_id: CUST, customer_name: 'Robin Sample', recipient: 'Robin Sample (\u20260142)', filed_under: null });
   });
 });
 

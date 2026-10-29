@@ -122,6 +122,20 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(await row(id)).toMatchObject({ status: 'corrected', human_verdict: 'corrected' });
   });
 
+  test('a thread number that is not the customer\'s: the card shows the number without the name; Confirm posts no customer id and nothing drifts', async () => {
+    const c = randomUUID();
+    await db('customers').insert({ id: c, first_name: 'Fixture', last_name: 'Review', phone: `+1941555${String(1000 + Math.floor(Math.random() * 9000))}`, email: `${c}@example.invalid`, property_type: 'residential' });
+    created.customers.push(c);
+    const id = await decision(c, await inbound(c));
+    const preview = await card('approve_agent_review_draft', id);
+    expect(preview).toMatchObject({ customer_id: null, customer_name: null, recipient: `Unknown sender (…${LAST4})`, filed_under: 'Fixture Review' });
+    expect(await confirm('approve_agent_review_draft', preview, id)).toMatchObject({ success: true, sent_to_customer: true });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: PHONE });
+    expect(sendCustomerMessage.mock.calls[0][0].customerId).toBeUndefined();
+    expect(await row(id)).toMatchObject({ status: 'accepted' });
+  });
+
   test('a double Confirm sends once: the second is refused and nothing more goes out', async () => {
     const c = await customer();
     const id = await decision(c, await inbound(c));
