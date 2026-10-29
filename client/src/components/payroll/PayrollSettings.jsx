@@ -250,6 +250,41 @@ function AllowanceCell({ technician, onSaved }) {
   </form>;
 }
 
+// GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee. W-2 box 12
+// code TT is filled only when it does. 'unset' = not set yet = no code TT.
+const COVERAGE_VALUES = { true: 'yes', false: 'no' };
+const coverageOf = technician => COVERAGE_VALUES[String(technician.flsaOvertimeCovered)] || 'unset';
+
+function CoverageCell({ technician, onSaved }) {
+  const current = coverageOf(technician);
+  const [value, setValue] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await call(`/technicians/${technician.id}/flsa-coverage`, {
+        method: 'PUT',
+        body: { covered: value === 'unset' ? null : value === 'yes' },
+      });
+      onSaved(`Overtime coverage saved for ${technician.name}.`);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+    <Select aria-label={`Federal overtime law covers ${technician.name}`} value={value} onChange={event => setValue(event.target.value)}>
+      <option value="unset">Not set</option>
+      <option value="yes">Covered</option>
+      <option value="no">Not covered</option>
+    </Select>
+    <Button type="submit" variant="secondary" disabled={busy || value === current}>Save</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 function payMethodLabel(technician) {
   if (technician.payMethod === 'bank_transfer') {
     return <span>Bank transfer<span className="block text-ui-caption text-ink-secondary">Written OK {dayLabel(technician.payMethodConsentOn)}</span></span>;
@@ -277,6 +312,8 @@ export default function PayrollSettings() {
   const saved = text => { setDialog(null); setMessage(text); load(); };
   // Present only when the server has GATE_PAYROLL_TIME_OFF on.
   const showAllowance = Boolean(technicians) && technicians.some(tech => 'ptoHoursPerYear' in tech);
+  // Present only when the server has GATE_PAYROLL_PAY_LINES on.
+  const showCoverage = Boolean(technicians) && technicians.some(tech => 'flsaOvertimeCovered' in tech);
 
   return <UiSurface density="touch" className="grid gap-4">
     <header>
@@ -292,6 +329,7 @@ export default function PayrollSettings() {
         <THead><TR>
           <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH>
           {showAllowance && <TH>Paid time off hours per year</TH>}
+          {showCoverage && <TH>Federal overtime law covers</TH>}
           <TH><span className="sr-only">Actions</span></TH>
         </TR></THead>
         <TBody>
@@ -301,6 +339,7 @@ export default function PayrollSettings() {
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
             {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
+            {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
             <TD>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>

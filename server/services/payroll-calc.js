@@ -29,6 +29,16 @@
  *   at the rate Florida assigns the employer (Florida DOR: "The initial tax
  *   rate for new employers is .0270 (2.7%)").
  *
+ * Pay lines (GATE_PAYROLL_PAY_LINES, owner 2026-10-29, D5 part 1): a caller may
+ * pass `payLines` (review bonus, commission, health allowance, employer HSA and
+ * the extra overtime those cause, from payroll-regular-rate.js) and
+ * `flsaCovered`. The bonus, commission, allowance and line overtime are taxable
+ * wages: they add to gross and so to every tax base. The employer HSA money is
+ * Section 125 cafeteria-plan pay: not gross, not net pay and in no tax base, but
+ * it is reported (W-2 box 12 code W) and it counts in the regular rate. Code TT
+ * (qualified overtime) is filled only when the technician is covered by federal
+ * overtime law. Without `payLines` the output is exactly what it was before.
+ *
  * The tax year is the pay date's calendar year, because wages are taxed when
  * paid. A pay date in a year without tables throws: the calculator never
  * falls back to an older year's tables. Money is integer cents; each tax line
@@ -179,6 +189,13 @@ function taxYearOf(payDate) {
   return Number(date.slice(0, 4));
 }
 
+// A pay line figure: omitted is zero; a supplied one must be a whole number of cents.
+function wholeCents(value, label) {
+  if (value == null) return 0n;
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative whole number of cents`);
+  return BigInt(value);
+}
+
 const toNumbers = (obj) => Object.fromEntries(
   Object.entries(obj).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]),
 );
@@ -201,6 +218,8 @@ function computePaycheck({
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
+  payLines,
+  flsaCovered,
 }) {
   const taxYear = taxYearOf(payDate);
   const tables = schedulesForYear(taxYear);
@@ -225,7 +244,15 @@ function computePaycheck({
   const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
-  const gross = regularPay + overtimePay + ptoPay + holidayPay;
+  // Pay lines ride on the check only when the caller passes them.
+  const withPayLines = payLines != null;
+  const reviewBonus = withPayLines ? wholeCents(payLines.reviewBonusCents, 'Review bonus') : 0n;
+  const commission = withPayLines ? wholeCents(payLines.commissionCents, 'Commission') : 0n;
+  const healthAllowance = withPayLines ? wholeCents(payLines.healthAllowanceCents, 'Health allowance') : 0n;
+  const hsaEmployer = withPayLines ? wholeCents(payLines.hsaEmployerCents, 'Employer HSA') : 0n;
+  const lineOvertimePremium = withPayLines ? wholeCents(payLines.lineOvertimePremiumCents, 'Overtime on pay lines') : 0n;
+  const gross = regularPay + overtimePay + ptoPay + holidayPay
+    + reviewBonus + commission + healthAllowance + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
   const socialSecurityWages = min(gross, max0(tables.socialSecurityWageBase - ytd));
@@ -256,6 +283,12 @@ function computePaycheck({
       overtimePayCents: overtimePay,
       overtimePremiumCents: overtimePremium,
       ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
+      ...(withPayLines ? {
+        reviewBonusCents: reviewBonus,
+        commissionCents: commission,
+        healthAllowanceCents: healthAllowance,
+        lineOvertimePremiumCents: lineOvertimePremium,
+      } : {}),
       grossPayCents: gross,
       federalIncomeTaxCents: federalIncomeTax,
       federalIncomeTaxShortfallCents: withheld - federalIncomeTax,
@@ -268,6 +301,17 @@ function computePaycheck({
       futaCents: futa,
       floridaReemploymentCents: floridaReemployment,
     }),
+    // Separate bases for the tax forms. Federal income tax wages and SIMPLE IRA
+    // compensation equal gross (Section 125 HSA money is in neither); Social
+    // Security, Medicare, FUTA and RT-6 wages are the taxableWages block below.
+    // Qualified overtime (W-2 box 12 code TT) counts only for a technician the
+    // federal overtime law covers. The employer HSA money is box 12 code W.
+    ...(withPayLines ? toNumbers({
+      incomeTaxWagesCents: gross,
+      simpleCompensationCents: gross,
+      qualifiedOvertimeCents: flsaCovered === true ? overtimePremium + lineOvertimePremium : 0n,
+      hsaEmployerCents: hsaEmployer,
+    }) : {}),
     taxableWages: toNumbers({
       socialSecurityCents: socialSecurityWages,
       medicareCents: gross,
@@ -292,4 +336,4 @@ const RATES = {
   floridaNewEmployerBp: FLORIDA_NEW_EMPLOYER_RATE_BP,
 };
 
-module.exports = { computePaycheck, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };
+module.exports = { computePaycheck, roundDiv, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };

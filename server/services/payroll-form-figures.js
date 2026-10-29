@@ -38,6 +38,10 @@ const { rt6CheckInputs, rt6Tax, pct } = require('./payroll-rt6');
 // The pay week's last day, as payroll-runs.js works it out (Codex #6770 r1).
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
+const { payrollPayLinesLive } = require('../config/feature-gates');
+
+// GATE_PAYROLL_PAY_LINES, read at call time (the typeof guard keeps a feature-gates mock without it off).
+const payLinesOn = () => typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
 
 const FROM_RECORDS = 'Enter from your records';
 const DEPOSIT_LABEL = 'deposits recorded as paid on the Tax page';
@@ -95,6 +99,10 @@ function normalize(row, wageBaseCents) {
     medicareEmployer: num(row.employer_medicare_cents),
     futa: num(row.futa_cents),
     flReemployment,
+    // GATE_PAYROLL_PAY_LINES: the employer HSA money (not wages) and the qualified overtime
+    // the check stored (null on a check made with the gate off).
+    hsaEmployer: num(row.hsa_employer_cents),
+    qualifiedOvertime: row.qualified_overtime_cents == null ? null : num(row.qualified_overtime_cents),
     ssWages: Math.min(gross, max0(wageBaseCents - ytd)),
     addlMedicareWages: max0(ytd + gross - threshold) - max0(ytd - threshold),
     capWages,
@@ -347,11 +355,16 @@ function floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid) {
 }
 
 function form940(year, yearChecks, depositsCents, rt6Paid = []) {
-  const total = sum(yearChecks, 'gross');
+  // Employer HSA contributions through the cafeteria plan are payments to the employee that
+  // are exempt from FUTA (line 4, box 4a fringe benefits). Read from the checks whatever the
+  // gate says now, so turning GATE_PAYROLL_PAY_LINES off never changes a paid year; zero when
+  // no check holds any.
+  const exempt = sum(yearChecks, 'hsaEmployer');
+  const total = sum(yearChecks, 'gross') + exempt;
   const byEmployee = new Map();
   for (const c of yearChecks) byEmployee.set(c.technicianId, (byEmployee.get(c.technicianId) || 0) + c.gross);
   const line5 = [...byEmployee.values()].reduce((acc, gross) => acc + max0(gross - RATES.futaAndStateWageBaseCents), 0);
-  const line6 = line5;
+  const line6 = exempt + line5;
   const line7 = total - line6;
   const line8 = pct(line7, RATES.futaBp);
   const line12 = line8;
@@ -373,7 +386,9 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
   const rows = [
     text('1a', 'State where you paid wages', 'FL'),
     cents('3', 'Total payments to all employees', total),
-    cents('4', 'Payments exempt from FUTA tax', 0),
+    cents('4', 'Payments exempt from FUTA tax', exempt, exempt > 0
+      ? { note: 'Employer HSA contributions through the cafeteria plan: check box 4a, fringe benefits. They are also in line 3.' }
+      : undefined),
     cents('5', 'Payments of more than $7,000 to each employee', line5),
     cents('6', 'Subtotal (lines 4 + 5)', line6),
     cents('7', 'Total taxable FUTA wages (line 3 minus line 6)', line7),
@@ -414,7 +429,8 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
   return { form: '940', year, rows, notes };
 }
 
-function w2Figures(yearChecks, addresses) {
+function w2Figures(yearChecks, addresses, flsaCovered = new Map()) {
+  const withLines = payLinesOn();
   const grouped = new Map();
   for (const c of yearChecks) {
     const list = grouped.get(c.technicianId) || [];
@@ -423,7 +439,15 @@ function w2Figures(yearChecks, addresses) {
   }
   const forms = [...grouped.entries()].map(([technicianId, checks]) => {
     const latest = checks.reduce((a, b) => (b.payDate >= a.payDate ? b : a));
-    const tt = sum(checks, 'overtimePremium');
+    // Code TT sums the qualified overtime each check stored (GATE_PAYROLL_PAY_LINES on when it was
+    // drafted), which is zero unless federal overtime law covers the employee, whatever the gate
+    // says now. A check that stored none counts its overtime premium: with the gate on only when
+    // the employee is marked covered now, with it off always (today's rule).
+    const covered = flsaCovered.get(technicianId) === true;
+    const legacyPremium = (c) => (!withLines || covered ? c.overtimePremium : 0);
+    const tt = checks.reduce((total, c) => total + (c.qualifiedOvertime == null ? legacyPremium(c) : c.qualifiedOvertime), 0);
+    // Code W: the employer HSA money the checks hold, also after the gate is turned off.
+    const hsa = sum(checks, 'hsaEmployer');
     return {
       technicianId,
       name: latest.name,
@@ -436,6 +460,7 @@ function w2Figures(yearChecks, addresses) {
       box5: sum(checks, 'gross'),
       box6: sum(checks, 'medicareEmployee') + sum(checks, 'addlMedicare'),
       box12TT: tt > 0 ? tt : null,
+      ...(withLines || hsa > 0 ? { box12W: hsa > 0 ? hsa : null } : {}),
       state: 'Florida has no state income tax: boxes 15 to 17 stay empty.',
     };
   });
@@ -462,7 +487,7 @@ function w3Totals(forms) {
  * `year`, dates as YYYY-MM-DD text); deposits are paid calendar rows as
  * { source_key, amount_paid, amount_due }.
  */
-function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows = null, deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
+function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows = null, deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map(), flsaCovered = new Map() }) {
   // Each check takes its own pay year's Social Security wage base.
   const normalizeYear = (list, y) => {
     const wageBase = list.length ? socialSecurityWageBaseCents(y) : 0;
@@ -491,7 +516,7 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
     dayCents,
   };
   const depositTotal = (list) => list.reduce((acc, d) => acc + Math.round(num(d.amount_paid ?? d.amount_due) * 100), 0);
-  const w2 = w2Figures(yearChecks, addresses);
+  const w2 = w2Figures(yearChecks, addresses, flsaCovered);
   return {
     year,
     quarter,
@@ -503,6 +528,10 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
     w3: w3Totals(w2),
   };
 }
+
+// The employer HSA money and the stored qualified overtime: null on a check drafted with
+// GATE_PAYROLL_PAY_LINES off, read whatever the gate says now so a paid year never changes.
+const PAY_LINE_CHECK_COLUMNS = ['hsa_employer_cents', 'qualified_overtime_cents'];
 
 const CHECK_COLUMNS = [
   'technician_id', 'employee_name', 'gross_cents', 'overtime_premium_cents', 'federal_income_tax_cents',
@@ -537,6 +566,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
     .where('pay_date', '<=', `${year}-12-31`)
     .select(
       ...CHECK_COLUMNS,
+      ...PAY_LINE_CHECK_COLUMNS,
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );
@@ -566,14 +596,16 @@ async function readFormFigures({ year, quarter, conn = db }) {
   const rt6Paid = await paidRt6Rows(conn, year);
   const ids = [...new Set(rows.map((r) => r.technician_id))];
   const addresses = new Map();
+  const flsaCovered = new Map();
   if (ids.length) {
-    const techs = await conn('technicians').whereIn('id', ids).select('id', 'address');
+    const techs = await conn('technicians').whereIn('id', ids).select('id', 'address', ...(payLinesOn() ? ['flsa_overtime_covered'] : []));
     for (const t of techs) {
       const address = String(t.address || '').trim();
       if (address) addresses.set(t.id, address);
+      flsaCovered.set(t.id, t.flsa_overtime_covered === true);
     }
   }
-  return buildFormFigures({ year, quarter, rows, priorRows, periodRows, deposits941, deposits940, rt6Paid, addresses });
+  return buildFormFigures({ year, quarter, rows, priorRows, periodRows, deposits941, deposits940, rt6Paid, addresses, flsaCovered });
 }
 
 /** Query-string check: a 4-digit year from 2020 on and a quarter 1 to 4. */
