@@ -305,10 +305,10 @@ describe('MobileServiceEditModal save payload', () => {
     });
   });
 
+  const tierRow = (name) => screen.getAllByRole('button').find((b) => within(b).queryByText(name, { exact: true }));
+
   // Owner ruling 2026-09-01: never bill monthly — "Monthly" is a cadence.
   describe('the Monthly tier', () => {
-    const tierRow = (name) => screen.getAllByRole('button').find((b) => within(b).queryByText(name, { exact: true }));
-
     it('reads "Monthly", and a visit stamped by the old "Billed Monthly" label still opens on it and keeps its type on an untouched save', async () => {
       const onSaved = vi.fn();
       render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType: 'Pest Control — Billed Monthly' }} onClose={vi.fn()} onSaved={onSaved} />);
@@ -328,6 +328,59 @@ describe('MobileServiceEditModal save payload', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(onSaved).toHaveBeenCalled());
       expect(lastPutBody().serviceType).toBe('Pest Control — Monthly');
+    });
+  });
+
+  describe('the tier the sheet opens on', () => {
+    // The selected tier is the one row that shows the price.
+    const selectedTiers = () => ['Monthly', 'Bi-Monthly', 'Quarterly', 'Semiannual', 'One-Time Service']
+      .filter((name) => within(tierRow(name)).queryByText('$99.00'));
+
+    it('a Bi-Monthly label opens on Bi-Monthly, not Monthly', () => {
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType: 'Pest Control — Bi-Monthly' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(selectedTiers()).toEqual(['Bi-Monthly']);
+    });
+
+    it("a label with no cadence (the day feed's \"Pest Control\") opens on the visit's repeat, and an untouched save keeps its type", async () => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType: 'Pest Control', isRecurring: true, recurringPattern: 'quarterly' }} onClose={vi.fn()} onSaved={onSaved} />);
+      expect(selectedTiers()).toEqual(['Quarterly']);
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(lastPutBody()).not.toHaveProperty('serviceType');
+    });
+
+    it('a repeat with no row (every 4 months) selects none, and an untouched save keeps its type', async () => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType: 'Pest Control', isRecurring: true, recurringPattern: 'triannual' }} onClose={vi.fn()} onSaved={onSaved} />);
+      expect(selectedTiers()).toEqual([]);
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(lastPutBody()).not.toHaveProperty('serviceType');
+    });
+
+    it('from no row selected, a pick stamps "<base> — <tier>"', async () => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType: 'Pest Control', isRecurring: true, recurringPattern: 'triannual' }} onClose={vi.fn()} onSaved={onSaved} />);
+      fireEvent.click(tierRow('Quarterly'));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(lastPutBody().serviceType).toBe('Pest Control — Quarterly');
+    });
+
+    it('a visit with no series and no cadence opens on One-Time', () => {
+      render(<MobileServiceEditModal desktopVisible service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(selectedTiers()).toEqual(['One-Time Service']);
+    });
+
+    it.each(['Pest Control — Monthly', 'Pest Control — Billed Monthly'])('a new pick on "%s" stamps "Pest Control — Quarterly": no doubled dash, no "Billed"', async (serviceType) => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, serviceType }} onClose={vi.fn()} onSaved={onSaved} />);
+      expect(screen.getByText('PEST CONTROL: CHOOSE ONE')).toBeInTheDocument();
+      fireEvent.click(tierRow('Quarterly'));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(lastPutBody().serviceType).toBe('Pest Control — Quarterly');
     });
   });
 });

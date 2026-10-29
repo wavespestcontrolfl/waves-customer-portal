@@ -40,7 +40,9 @@ function composeEmailLive() {
 }
 
 const SUBJECT_MAX = 200;
-const BODY_MAX = 5000;
+// Owner ruling 2026-10-26 (customer emails are a few short lines) and approval 2026-10-29: the bar's body stops at about 500
+// characters. The Email page's own composer keeps its larger limit; this cap is the bar's tool only.
+const BODY_MAX = 500;
 const CARD_LINE_CHARS = 190;
 
 const COMPOSE_EMAIL_TOOLS = [
@@ -49,7 +51,7 @@ const COMPOSE_EMAIL_TOOLS = [
     description: `Send ONE new email (not a reply) to ONE person: the Email page's Compose and Send, from the office mailbox. The first call returns a PREVIEW and sends nothing: To (name and address), From, the subject, the exact body, and what the send does. The operator approves on the confirmation card; the confirmed run re-checks the recipient, subject and body and refuses if anything changed, then sends exactly what the card showed.
 Effects: one email goes to the recipient as a new thread from the office address. It is plain text, sent as written: no signature, attachment, tracking link or unsubscribe link is added. It cannot be unsent. No copy is saved or linked to the customer; it appears in the Gmail Sent folder. No opt-out or suppression check runs (the Email page's Send runs none either). Portal links to a customer's account (appointment, report, receipt, payment, estimate links) are refused in the body.
 One recipient, plain text only: no CC or BCC, no attachments, no lists or bulk sends. To answer an existing email use draft_email_reply and send_email_reply; to text a customer use send_sms. Every send needs the operator's approval on the card, the owner's included.
-Give customer_id (the customer's email on file is used) OR email_address (any address the operator named), plus subject and body. Find a customer with query_customers first. Write the body as the operator asked; do not add a signature or invent facts. Refused with the reason: customer not found or no email on file, an invalid address, an empty subject or body, a body or subject that is too long, a portal link in the body.
+Give customer_id (the customer's email on file is used) OR email_address (any address the operator named), plus subject and body. Find a customer with query_customers first. Write the body as the operator asked; do not add a signature or invent facts. Keep it SHORT, the owner's rule for customer emails: a greeting, the answer in one or two sentences, any ask as one question. No recap of the history, no apology paragraph. The body is at most ${BODY_MAX} characters; a longer one is refused and no card is offered. Refused with the reason: customer not found or no email on file, an invalid address, an empty subject or body, a body or subject that is too long, a portal link in the body.
 Use for: "email Sam Sample about tomorrow's visit", "send an email to office@vendor.example asking for a quote", "write a new email to this customer", "email the property manager".`,
     input_schema: {
       type: 'object',
@@ -57,7 +59,7 @@ Use for: "email Sam Sample about tomorrow's visit", "send an email to office@ven
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to email at their email on file (use instead of email_address)' },
         email_address: { type: 'string', description: 'The one address to email, e.g. office@vendor.example (use instead of customer_id)' },
         subject: { type: 'string', description: `The subject line, plain text, up to ${SUBJECT_MAX} characters` },
-        body: { type: 'string', description: `The email body, plain text, up to ${BODY_MAX} characters, exactly as it should be sent` },
+        body: { type: 'string', description: `The email body, plain text, at most ${BODY_MAX} characters (a few short lines: a greeting, the answer in one or two sentences, any ask as one question), exactly as it should be sent` },
       },
       required: ['subject', 'body'],
     },
@@ -103,7 +105,8 @@ function normalizedContent(input) {
   if (subject.length > SUBJECT_MAX || CONTROL_RE.test(subject)) return refusal(`The subject must be one line of at most ${SUBJECT_MAX} characters`, 'invalid_subject');
   if (!body) return refusal('The body is empty, so nothing was proposed', 'invalid_body');
    
-  if (body.length > BODY_MAX || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) return refusal(`The body must be plain text of at most ${BODY_MAX} characters`, 'invalid_body');
+  if (body.length > BODY_MAX) return refusal(`The body is ${body.length} characters; the limit is ${BODY_MAX}. Shorten it to a few short lines: a greeting, the answer in one or two sentences, and any ask as one question. No recap of the history and no apology paragraph. Nothing was proposed.`, 'invalid_body');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) return refusal('The body must be plain text without control characters', 'invalid_body');
   return { subject, body };
 }
 

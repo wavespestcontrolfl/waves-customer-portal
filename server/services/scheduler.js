@@ -2259,6 +2259,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 06:52 — technician ID-card and training reminders (GATE_TECH_TRAINING_DATES, dark): one admin bell per technician and
+  // deadline (ID card application, 4 classroom hours, renewal training; F.S. 482.091), closed when the date is entered. Admin bell
+  // only; it sends nothing to a technician or a customer. Gate off = returns before any query. The gate is read per tick, so a flip
+  // or an unset needs no restart. runExclusive records the job health and keeps a deploy overlap from running two sweeps.
+  cron.schedule('52 6 * * *', async () => {
+    if (!require('../config/feature-gates').techTrainingDatesLive()) return;
+    try {
+      await runExclusive('technician-training-dates', async () => {
+        await require('./technician-training-reminders').runTechnicianTrainingReminders();
+      });
+    } catch (err) {
+      logger.error(`[technician-training-reminders] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
   // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
   // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
@@ -6329,7 +6344,9 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
-                if (smsResult.code === 'LINKED_VISIT_ENDED') {
+                // So does the pre-send customer-link check (scheduled-sms-delivery.js scheduledLinkRefusal): its reason is the
+                // check's own refusal code, and that function has already raised the office alert.
+                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED'].includes(smsResult.code)) {
                   await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
                     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
                   });

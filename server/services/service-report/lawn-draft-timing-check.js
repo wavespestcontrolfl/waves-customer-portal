@@ -146,4 +146,4 @@ async function lawnDraftTimingRejection(text, deps = {}) {
   return null;
 }
 
-module.exports = { lawnDraftTimingRejection, lawnDraftTimingCheckLive, _test: { sentencesOf, SYSTEM, SCHEMA } };
+module.exports = { lawnDraftTimingRejection, lawnDraftTimingCheckLive, sentencesOf, MAX_SENTENCES, _test: { sentencesOf, SYSTEM, SCHEMA } };
