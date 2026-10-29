@@ -12,8 +12,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { techTrainingDatesLive } = require('../config/feature-gates');
-const { raiseAdminAlert } = require('./admin-alert-compose');
-const { closeAdminAlertKeys, openAdminAlertKeys } = require('./admin-alert-episodes');
+const { composeAdminAlert } = require('./admin-alert-compose');
+const { closeAdminAlertKeys, openAdminAlertKeys, raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
 const { fitAction, shortDateET } = require('./admin-alert-names');
 const { etDateString } = require('../utils/datetime-et');
 const { daysBetween, idCardDeadline, classroomDeadline, renewalTrainingDeadline } = require('./technician-training-dates');
@@ -131,12 +131,17 @@ async function runTechnicianTrainingReminders({ conn = db, today = etDateString(
   let raised = 0;
   if (!closeOnly) {
     for (const { tech, reminder } of reminders) {
-      const posted = await raiseAdminAlert(CATEGORY, alertSpec(tech, reminder, today), {
+      // With reopen: a reminder that closed because a date was entered rings again if that date is
+      // later cleared (closeAdminAlertKeys marks the row auto-cleared; a plain notifyAdmin would
+      // dedupe onto that closed row forever).
+      const composed = composeAdminAlert(alertSpec(tech, reminder, today));
+      const posted = await raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
         bell: true,
         dedupeKey: reminder.key,
-        metadata: { technicianId: tech.id, deadline: reminder.deadline, stage: reminder.stage, dueOn: reminder.dueOn },
+        link: composed.link,
+        metadata: { technicianId: tech.id, deadline: reminder.deadline, stage: reminder.stage, dueOn: reminder.dueOn, ...composed.metadata },
       });
-      if (posted?.id && !posted.deduped) raised += 1;
+      if (posted?.rang) raised += 1;
     }
   }
   if (raised || closed) logger.info(`${LOG} raised=${raised} closed=${closed}`);

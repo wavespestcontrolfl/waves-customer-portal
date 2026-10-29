@@ -6,7 +6,15 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1', deduped: false })) }));
-jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: jest.fn(async (_c, keys) => keys.length), openAdminAlertKeys: jest.fn(async () => []) }));
+jest.mock('../services/admin-alert-episodes', () => ({
+  closeAdminAlertKeys: jest.fn(async (_c, keys) => keys.length),
+  openAdminAlertKeys: jest.fn(async () => []),
+  // The real helper reads the standing row and passes through to notifyAdmin; here it passes straight through.
+  raiseAdminAlertWithReopen: jest.fn(async (category, headline, why, opts) => {
+    const result = await require('../services/notification-service').notifyAdmin(category, headline, why, opts);
+    return { ...result, rang: !result.deduped };
+  }),
+}));
 
 const NotificationService = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');

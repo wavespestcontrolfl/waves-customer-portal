@@ -157,6 +157,11 @@ describe('gate on', () => {
     expect(bad.status).toBe(400);
     expect(bad.json.error).toMatch(/id_card_issued_on must be a valid YYYY-MM-DD/);
     expect(db).not.toHaveBeenCalled();
+    // A completion date records something that happened: a date after today would read as done.
+    const future = await call('PUT', `/licenses/${TECH}`, { classroom_hours_done_on: '2999-01-01' });
+    expect(future.status).toBe(400);
+    expect(future.json.error).toMatch(/classroom_hours_done_on cannot be in the future/);
+    expect(db).not.toHaveBeenCalled();
 
     table('technicians', [{
       id: TECH, fl_applicator_license: 'JE1', license_expiry: '2027-06-30', license_categories: ['core'],

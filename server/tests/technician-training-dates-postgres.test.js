@@ -137,16 +137,16 @@ describeDb('Technician training dates (PostgreSQL)', () => {
       const owner = await employee({ name: 'Fixture owner', hire_date: null });
       for (const d of ['02', '03', '04', '05', '06']) await call('POST', `/licenses/${id}/training-days`, day({ training_date: `2026-10-${d}` }));
 
-      const saved = await call('PUT', `/licenses/${id}`, { id_card_applied_on: '2026-10-20', id_card_issued_on: '2026-11-10', classroom_hours_done_on: null, renewal_training_done_on: '2027-03-01' });
+      const saved = await call('PUT', `/licenses/${id}`, { id_card_applied_on: '2026-10-20', id_card_issued_on: '2026-10-27', classroom_hours_done_on: null, renewal_training_done_on: '2026-10-28' });
       expect(saved.status).toBe(200);
-      expect(saved.body.technician).toMatchObject({ idCardAppliedOn: '2026-10-20', idCardIssuedOn: '2026-11-10', classroomHoursDoneOn: null, renewalTrainingDoneOn: '2027-03-01' });
+      expect(saved.body.technician).toMatchObject({ idCardAppliedOn: '2026-10-20', idCardIssuedOn: '2026-10-27', classroomHoursDoneOn: null, renewalTrainingDoneOn: '2026-10-28' });
 
       const { body } = await call('GET', '/licenses');
       const row = body.technicians.find((t) => t.id === id);
       expect(row.training).toEqual({ days: 5, hours: 40, categories: ['GHP'], fiveDaysDone: true, fortyHoursDone: true });
-      expect(row.idCard).toMatchObject({ appliedOn: '2026-10-20', applicationDueOn: '2026-10-31', issuedOn: '2026-11-10', status: 'done' });
-      expect(row.classroom).toMatchObject({ dueOn: '2027-05-10', doneOn: null });
-      expect(row.renewalTraining).toMatchObject({ dueBy: '2027-06-30', doneOn: '2027-03-01' });
+      expect(row.idCard).toMatchObject({ appliedOn: '2026-10-20', applicationDueOn: '2026-10-31', issuedOn: '2026-10-27', status: 'done' });
+      expect(row.classroom).toMatchObject({ dueOn: '2027-04-27', doneOn: null });
+      expect(row.renewalTraining).toMatchObject({ dueBy: '2027-06-30', doneOn: '2026-10-28' });
       const ownerRow = body.technicians.find((t) => t.id === owner);
       expect(ownerRow).not.toHaveProperty('idCard');
       expect(ownerRow).not.toHaveProperty('training');
@@ -188,6 +188,19 @@ describeDb('Technician training dates (PostgreSQL)', () => {
       expect(await run('2026-10-29', { technicianId: id, closeOnly: true })).toMatchObject({ raised: 0, closed: 1 });
       expect((await bells(id)).every((b) => b.done_at)).toBe(true);
       expect(await run('2026-11-05')).toMatchObject({ raised: 0 });
+    });
+
+    test('a date cleared after its reminder closed rings that reminder again on the next sweep', async () => {
+      const id = await employee({ hire_date: '2026-10-01' });
+      const run = (today, extra = {}) => reminders.runTechnicianTrainingReminders({ today, ...extra });
+      expect(await run('2026-10-29')).toMatchObject({ raised: 1 });
+      await mockPg('technicians').where({ id }).update({ id_card_applied_on: '2026-10-28' });
+      expect(await run('2026-10-29', { technicianId: id, closeOnly: true })).toMatchObject({ raised: 0, closed: 1 });
+      expect((await bells(id)).every((b) => b.done_at)).toBe(true);
+      // The date was a mistake and is cleared: the same reminder (same day, same stage) comes back.
+      await mockPg('technicians').where({ id }).update({ id_card_applied_on: null });
+      expect(await run('2026-10-29')).toMatchObject({ raised: 1 });
+      expect((await bells(id)).filter((b) => !b.done_at).map((b) => b.metadata.stage)).toEqual(['d3']);
     });
 
     test('gate off writes nothing, and an inactive employee, a row with no hire date and a far-off deadline raise nothing', async () => {

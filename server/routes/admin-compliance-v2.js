@@ -158,12 +158,15 @@ router.get('/licenses', async (req, res, next) => {
 });
 
 // GATE_TECH_TRAINING_DATES: the four dates on a license update (YYYY-MM-DD, or null / '' to clear).
-function parseTrainingDates(body) {
+// Each records something that already happened (applied, issued, completed), so a date after today
+// (Eastern) is refused: a planned date would read as done and close its reminder.
+function parseTrainingDates(body, today = etDateString()) {
   const updates = {};
   for (const field of TRAINING_DATE_FIELDS) {
     if (body[field] === undefined) continue;
     const day = body[field];
     if (day !== null && day !== '' && !validDateOnly(day)) return { error: `${field} must be a valid YYYY-MM-DD date or null` };
+    if (day && day > today) return { error: `${field} cannot be in the future: enter it on the day it happens` };
     updates[field] = day || null;
   }
   return { updates };
