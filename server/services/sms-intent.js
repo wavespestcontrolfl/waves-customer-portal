@@ -170,7 +170,7 @@ function isQuietSmsReaction(body) {
  * content, non-acknowledgement emoji (❓ 🚨 🐜). Fail-safe direction: doubt →
  * false.
  */
-function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
+function isCourtesyOnlyStrict(body, { awaitingAnswer = true } = {}) {
   const raw = String(body || '').trim();
   if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
   if (/[?]/.test(raw)) return false;
@@ -187,6 +187,120 @@ function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
   // someone will be home" did not answer it (hook P1). The tiers differ only
   // in what the grammar accepts; the context decides for all of them.
   return !awaitingAnswer;
+}
+
+// ── GATE_SMS_COURTESY_TAIL (owner 2026-10-29, fix F2 "Stuck Alert Fixes") ──
+// A closer with a short sign-off ("Perfect. Go browns") is still a closing
+// text. The strict grammar above needs the WHOLE text to be courtesy tokens,
+// so these threads stayed "needs reply" and the alert never closed. The new
+// rule splits HEAD and TAIL at the first sentence break: the HEAD must pass
+// the strict grammar and the TAIL must be a few plain words with no request,
+// contrast, problem, service, money or access word. Doubt → false.
+// Three states, read at CALL time: off (anything else) = byte-identical;
+// 'shadow' = results unchanged, the webhook only stamps courtesyTailWould;
+// 'true' = isCourtesyOnly applies the new rule.
+const COURTESY_TAIL_MAX_CHARS = 80;
+const COURTESY_TAIL_MAX_WORDS = 6;
+const COURTESY_TAIL_BREAK_RE = /[.!,\n\r]|\s-\s/;
+// One character test for the tail rule: anything outside printable ASCII (emoji,
+// other symbols), a question mark, an @ or a digit.
+const COURTESY_TAIL_REJECT_CHARS_RE = /[^\x20-\x7e\n\r]|[?@\d]/;
+const COURTESY_TAIL_URL_RE = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|info|biz|app|ly)\b/i;
+const COURTESY_TAIL_BLOCK_WORDS = [
+  // request words
+  'can you', 'could you', 'would you', 'will you', 'please', 'pls', 'need', 'needs', 'want', 'wants', 'when', 'what', 'where', 'how', 'why', 'help', 'call', 'text me', 'send', 'come', 'check', 'let me know',
+  // contrast or new-info words
+  'but', 'however', 'also', 'except', 'still', 'again', 'not', "don't", 'dont', "didn't", 'didnt', "isn't", 'isnt', "can't", 'cant', "won't", 'wont',
+  // problem words
+  'problem', 'issue', 'broken', 'leak', 'damage', 'bite', 'bites', 'bug', 'bugs', 'roach', 'roaches', 'ant', 'ants', 'rat', 'rats', 'mouse', 'mice', 'termite', 'termites', 'wasp', 'wasps', 'spider', 'spiders', 'flea', 'fleas', 'mosquito', 'mosquitoes',
+  // service and money words
+  'spray', 'treat', 'treatment', 'invoice', 'bill', 'charge', 'pay', 'paid', 'payment', 'refund', 'cancel', 'quote', 'estimate',
+  // access words
+  'gate', 'code', 'door', 'dog', 'dogs', 'key', 'lock', 'locked',
+];
+const COURTESY_TAIL_BLOCK_RE = new RegExp(
+  `(?<![a-z'])(?:${COURTESY_TAIL_BLOCK_WORDS.map((w) => w.split(' ').map(escapeRe).join('\\s+')).join('|')})(?![a-z'])`,
+  'i'
+);
+
+const COURTESY_TEAMS = ['browns', 'bucs', 'buccaneers', 'bolts', 'lightning', 'rays', 'gators', 'noles', 'seminoles', 'canes', 'hurricanes', 'dolphins', 'fins', 'jaguars', 'jags', 'magic', 'heat', 'panthers', 'knights', 'bills', 'chiefs', 'eagles', 'packers', 'bears', 'lions', 'steelers', 'ravens', 'bengals', 'cowboys', 'giants', 'jets', 'patriots', 'pats', 'yankees', 'mets', 'cubs', 'braves', 'dawgs', 'vols', 'buckeyes', 'team'];
+const COURTESY_SIGNOFF_AGAIN_RE = /^(?:thanks|thank\s+you)\s+again$/i;
+// One TAIL part must match one of these in full (case-insensitive).
+const COURTESY_SIGNOFF_RE = new RegExp(
+  '^(?:'
+  + [
+    `go\\s+(?:${COURTESY_TEAMS.join('|')})`,
+    'roll\\s+tide', 'war\\s+eagle', 'fins\\s+up',
+    'have\\s+a\\s+(?:good|great|nice|wonderful|blessed|safe)\\s+(?:one|day|night|evening|weekend|week|morning|afternoon|trip|holiday)',
+    'enjoy\\s+(?:the|your)\\s+(?:day|evening|weekend|week|game|holiday|trip)',
+    '(?:much\\s+)?appreciated',
+    'appreciate\\s+(?:it|you|ya|that|you\\s+guys)',
+    'take\\s+care', 'talk\\s+soon', 'see\\s+ya', 'see\\s+you\\s+(?:soon|later)', 'you\\s+too', 'same\\s+to\\s+you', 'likewise', 'god\\s+bless', 'cheers',
+    'stay\\s+(?:safe|dry|cool)', 'be\\s+safe', 'have\\s+fun', 'good\\s+luck', 'good\\s+night',
+    'happy\\s+(?:thanksgiving|halloween|holidays|friday|weekend)', 'merry\\s+christmas', 'happy\\s+new\\s+year',
+    'thanks\\s+again', 'thank\\s+you\\s+again', 'thanks\\s+so\\s+much',
+  ].join('|')
+  + ')$',
+  'i'
+);
+
+function courtesyTailMode() {
+  try {
+    const reader = require('../config/feature-gates').courtesyTailMode;
+    return typeof reader === 'function' ? reader() : 'off';
+  } catch {
+    return 'off';
+  }
+}
+
+// Strict grammar on a HEAD alone: the same tests isCourtesyOnlyStrict uses on a
+// whole text. A bare "ok" head is too weak to carry a tail, so it fails here.
+function headIsCourtesyGrammar(head) {
+  const stripped = String(head || '').replace(/\s+/g, ' ').trim();
+  if (!stripped || /\d/.test(stripped) || WEAK_ONLY_RE.test(stripped)) return false;
+  const named = COURTESY_WITH_NAME_RE.exec(stripped);
+  const grammar = COURTESY_ONLY_RE.test(stripped)
+    || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
+  return grammar && CLOSER_ANCHOR_RE.test(stripped);
+}
+
+/**
+ * Would the NEW courtesy-tail rule newly call this text courtesy-only? Gate
+ * independent (the webhook's shadow stamp and the tests use it). True only when
+ * the strict rule says false, our last text asked nothing, and rules 2-6 hold.
+ */
+function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
+  // Every guard fails closed (doubt → false). An empty text has no break, and a
+  // TAIL with no sign-off part fails the allowlist, so neither needs its own check.
+  const raw = String(body ?? '').replace(/[‘’]/g, "'").trim();
+  if (awaitingAnswer || raw.length > COURTESY_TAIL_MAX_CHARS) return false;
+  if (isCourtesyOnlyStrict(raw, { awaitingAnswer: false })) return false;
+  // Emoji and other symbols, "?", "@" and digits in one test; then a URL.
+  if (COURTESY_TAIL_REJECT_CHARS_RE.test(raw) || COURTESY_TAIL_URL_RE.test(raw)) return false;
+  if (hasSchedulingIntent(raw) || hasRescheduleOrAwayIntent(raw)) return false;
+  const m = COURTESY_TAIL_BREAK_RE.exec(raw);
+  if (!m || !headIsCourtesyGrammar(raw.slice(0, m.index))) return false;
+  const tail = raw.slice(m.index + m[0].length);
+  if (tail.split(/[^a-z']+/i).filter((w) => /[a-z]/i.test(w)).length > COURTESY_TAIL_MAX_WORDS) return false;
+  // Allowlist (structural): one or two TAIL parts, each a recognized sign-off.
+  // Unknown prose ("You missed the backyard") stays actionable. The denylist is
+  // an extra guard on top; "thanks again" is a sign-off although "again" is
+  // listed as a contrast word.
+  const parts = tail.split(/[,.!]+/).map((x) => x.trim()).filter(Boolean);
+  return [1, 2].includes(parts.length) && parts.every((part) => COURTESY_SIGNOFF_RE.test(part)
+    && (COURTESY_SIGNOFF_AGAIN_RE.test(part) || !COURTESY_TAIL_BLOCK_RE.test(part)));
+}
+
+// The webhook's metadata decision, pure so it is testable: stamp only in shadow
+// mode and only when the new rule would newly say true. Off and 'true' stamp nothing.
+function courtesyTailShadowMetadata(mode, would) {
+  return mode === 'shadow' && would === true ? { courtesyTailWould: true } : {};
+}
+
+function isCourtesyOnly(body, opts = {}) {
+  if (isCourtesyOnlyStrict(body, opts)) return true;
+  if (courtesyTailMode() !== 'true') return false;
+  return courtesyTailWould(body, { awaitingAnswer: opts.awaitingAnswer === undefined ? true : opts.awaitingAnswer });
 }
 
 function hasSchedulingIntent(body) {
@@ -394,5 +508,8 @@ module.exports = {
   reactionQuotedTarget,
   outboundAsksForReply,
   isCourtesyOnly,
+  courtesyTailWould,
+  courtesyTailMode,
+  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
 };
