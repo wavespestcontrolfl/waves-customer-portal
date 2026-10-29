@@ -1375,8 +1375,9 @@ const SHADOW_FULFILLMENT_ACTION = 'sms_commitment.fulfillment.shadow';
 const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
 // Extra model calls per refresh run in shadow mode.
 const SHADOW_MODEL_CALLS_PER_RUN = 10;
-// Rule 3: a waves promise of these kinds that is booked onto a visit is on
-// track until that visit's window ends.
+// Rule 3: a waves row of these kinds (a promise Waves made or a customer's
+// request, whatever its basis) that is booked onto a visit is on track until
+// that visit's window ends.
 const ON_TRACK_KINDS = ['other', 'callback', 'technician_follow_up'];
 // A visit that did not run is no visit still to come. (A completed visit is
 // kept: R1 closes the ask it answers, and a promise it left open is held only
@@ -1393,15 +1394,14 @@ const onTrackWindowEnd = (visit) => {
     : (start ? new Date(parseETDateTime(`${day}T${start}`).getTime() + 3600000) : null);
   return at && !Number.isNaN(at.getTime()) ? at : null;
 };
-// The nearest visit that keeps an overdue waves promise on track: live (not
+// The nearest visit that keeps an overdue waves row (promise or request) on track: live (not
 // cancelled, no-show or skipped), not a recurring-series child, at the
 // promise's property when it names one, created after the promise text, with
 // its window end still ahead. Null when the gate is off, the row is not such a
 // promise, nothing qualifies, or the read fails (the ring then stands).
 async function findOnTrackVisit(conn, commitment, message, now) {
   const mode = promiseRecordMode();
-  if (mode === 'off' || commitment.party !== 'waves' || commitment.sms_context?.basis !== 'promise'
-    || !ON_TRACK_KINDS.includes(commitment.kind)) return null;
+  if (mode === 'off' || commitment.party !== 'waves' || !ON_TRACK_KINDS.includes(commitment.kind)) return null;
   try {
     const sourceAt = new Date(commitment.sms_context?.source_at || message.created_at);
     if (Number.isNaN(sourceAt.getTime())) return null;

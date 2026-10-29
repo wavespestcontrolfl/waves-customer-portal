@@ -4297,8 +4297,18 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(rings()).toBe(1);
       });
 
-      test('gate true: a customer ask (not a promise) is not held', async () => {
+      test('gate true: a customer request (basis request, the spilled-product case) is held until the window ends, then rings', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise({ basis: 'request' });
+        expect((await mockPg('call_commitments').where({ id: row.id }).first()).sms_context.basis).toBe('request');
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        await tick(5 * 3600000);
+        expect(rings()).toBe(1);
+      });
+
+      test('gate off: the same customer request rings although a visit is booked (old behavior)', async () => {
         await staffPromise({ basis: 'request' });
         await mockPg('scheduled_services').insert(visitRow());
         await tick();

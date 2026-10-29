@@ -2003,12 +2003,15 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
       }
     });
 
-    test('only a waves promise of kind other, callback or technician_follow_up qualifies', async () => {
+    test('only a waves row of kind other, callback or technician_follow_up qualifies, whatever its basis', async () => {
       process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
       const conn = fakeConn([visit()]);
       for (const kind of ['other', 'callback', 'technician_follow_up']) expect(await findOnTrackVisit(conn, { ...promise, kind }, message, NOW)).not.toBeNull();
       for (const kind of ['send_estimate', 'schedule_visit', 'send_report']) expect(await findOnTrackVisit(conn, { ...promise, kind }, message, NOW)).toBeNull();
-      expect(await findOnTrackVisit(conn, { ...promise, sms_context: { ...promise.sms_context, basis: 'request' } }, message, NOW)).toBeNull();
+      // Whatever the basis: a customer's request is held the same way as a promise.
+      for (const basis of ['promise', 'request']) {
+        expect(await findOnTrackVisit(conn, { ...promise, sms_context: { ...promise.sms_context, basis } }, message, NOW)).not.toBeNull();
+      }
       expect(await findOnTrackVisit(conn, { ...promise, party: 'customer' }, message, NOW)).toBeNull();
     });
 
