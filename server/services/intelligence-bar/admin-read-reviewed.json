@@ -492,6 +492,7 @@
       "endpoint": "/admin/dispatch/alerts",
       "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
+      "office": true,
       "query": [
         "limit",
         "unresolved"
@@ -708,6 +709,7 @@
       "endpoint": "/admin/email-templates",
       "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
       "scope": "broad",
+      "office": true,
       "query": [
         "mode",
         "purpose",
@@ -747,6 +749,7 @@
       "endpoint": "/admin/email-templates/automations",
       "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
       "scope": "broad",
+      "office": true,
       "keywords": [
         "email automations",
         "automatic emails",
@@ -1725,6 +1728,7 @@
       "endpoint": "/admin/schedule/blackout-dates",
       "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note.",
       "scope": "broad",
+      "office": true,
       "keywords": [
         "blackout dates",
         "days we are closed",
