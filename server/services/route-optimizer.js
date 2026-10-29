@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
+const driveClock = require('./scheduling/drive-clock');
 
 // Start/end of every modeled day — the van's home base (13649 Luxe Ave,
 // Bradenton 34211; owner ruling 2026-09-07). Geocoded through the app's
@@ -97,12 +98,18 @@ function createSchedulingTravel({
     // is off; an API outage must not increase the capacity of a new booking.
     const minutes = miles < SAME_PLACE_MILES ? 0 : Math.ceil(Math.max(
       fallbackLegMetrics(miles).minutes,
-      CALIBRATED_FIXED_MINUTES + miles * CALIBRATED_MINUTES_PER_MILE,
+      calibratedMinutes(miles),
     ));
     return { minutes, source: 'conservative_model', reason };
   }
-  function lookup(leg) {
+  // `lookupRaw` = the stored answer; a caller that caches it (the pickers'
+  // road caches) keeps Google's own minutes, never the drive clock's.
+  function lookupRaw(leg) {
     return results.get(keyFor(leg)) || fallback(leg, apiKey ? 'request_budget' : 'provider_unconfigured');
+  }
+  // GATE_DRIVE_CLOCK: a Google leg carries the park minutes, added at read time.
+  function lookup(leg) {
+    return driveClock.withDriveClockPark(lookupRaw(leg));
   }
   async function preload(legs) {
     if (!apiKey) return;
@@ -193,7 +200,7 @@ function createSchedulingTravel({
     }
     await Promise.all(Array.from({ length: Math.min(workers, work.length) }, worker));
   }
-  return { lookup, preload, diagnostics: () => ({ requests, elements }) };
+  return { lookup, lookupRaw, preload, diagnostics: () => ({ requests, elements }) };
 }
 
 /**
@@ -273,6 +280,13 @@ const CALIBRATED_MINUTES_PER_MILE = 2.35;
 // slots with no parking time at all.
 const SAME_PLACE_MILES = 1e-6;
 
+// The calibrated model's minutes for a leg (unrounded). GATE_DRIVE_CLOCK swaps
+// in the GPS-fitted pair (scheduling/drive-clock.js); off = the constants above.
+function calibratedMinutes(miles) {
+  if (driveClock.driveClockLive()) return driveClock.driveClockMinutes(miles);
+  return CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE);
+}
+
 /**
  * Convert straight-line miles to estimated drive minutes.
  */
@@ -281,7 +295,7 @@ function milesToDriveMinutes(miles) {
   // Read at CALL time (not the baked gates map) so a flip needs no redeploy.
   if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
     if (miles < SAME_PLACE_MILES) return 0;
-    return Math.round(CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE));
+    return Math.round(calibratedMinutes(miles));
   }
   return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
 }
