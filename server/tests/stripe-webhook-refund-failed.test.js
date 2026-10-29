@@ -787,6 +787,79 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     expect(meta(row('payments', 'pay_1'))).toMatchObject({ dispute_invoice_id: 'inv_1' });
   });
 
+  // $100 bill: $40 cash entered by hand (a part payment, still standing), then $60 by credit card with a $1.74 surcharge. The settle
+  // wrote total = 61.74 + 40 and zeroed amount_paid (partial payments). Returns the dispute on that card payment.
+  function seedPartPaidCardBill() {
+      tables = {
+        invoices: [{
+          id: 'inv_1', status: 'paid', paid_at: '2026-10-01T00:00:00Z', stripe_payment_intent_id: 'pi_card', stripe_charge_id: 'ch_card',
+          subtotal: '100.00', discount_amount: '0.00', tax_amount: '0.00', credit_applied: '0', amount_paid: '0', total: '101.74',
+        }],
+        payments: [
+          { id: 'pay_part', status: 'paid', amount: '40', metadata: JSON.stringify({ invoice_id: 'inv_1', partial_payment: true }) },
+          { id: 'pay_card', status: 'paid', amount: '61.74', surcharge_amount_cents: 174, stripe_payment_intent_id: 'pi_card', stripe_charge_id: 'ch_card',
+            metadata: JSON.stringify({ invoice_id: 'inv_1' }) },
+        ],
+      };
+      const handPartsCents = () => tables.payments
+        .filter((p) => { const m = JSON.parse(p.metadata || '{}'); return m.invoice_id === 'inv_1' && m.partial_payment === true && p.status === 'paid'; })
+        .reduce((sum, p) => sum + Math.round(Number(p.amount) * 100), 0);
+      // The hand-parts subquery the reopen writes into amount_paid, evaluated against the fake ledger.
+      db.transaction.mockImplementation(async (cb) => {
+        const trx = (table) => {
+          const q = query(table);
+          const update = q.update;
+          q.update = (patch) => update(Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, v && v.handParts ? handPartsCents() / 100 : v])));
+          return q;
+        };
+        trx.raw = jest.fn((sql) => (/^\(SELECT/.test(String(sql)) && /partial_payment/.test(String(sql))
+          ? { handParts: true }
+          : Promise.resolve({ rows: [{ cents: /partial_payment/.test(String(sql)) ? handPartsCents() : 0 }] })));
+        trx.fn = { now: () => 'NOW' };
+        return cb(trx);
+      });
+    return { id: 'dp_part', charge: 'ch_card', payment_intent: 'pi_card', amount: 6174, reason: 'fraudulent', status: 'needs_response' };
+  }
+
+  test('a chargeback on the card payment that finished a part-paid bill gives the hand part back; a won dispute folds it in again', async () => {
+    // $100 bill: $40 cash entered by hand (a part payment, still standing), then $60 by credit card with a $1.74 surcharge. The settle
+    // wrote total = 61.74 + 40 and zeroed amount_paid (partial payments, pre-push P0).
+    const cardDispute = seedPartPaidCardBill();
+
+    await handleDisputeCreated(cardDispute);
+
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null });
+    expect(Number(row('invoices', 'inv_1').amount_paid)).toBe(40); // the $40 cash still counts
+    expect(total()).toBe(100); // the surcharge came out of the reopened total
+    // The row shape the part-payment guard keys on (invoice-manual-payment.js partPaymentRefusal): disputed, bound to the invoice,
+    // no outcome yet, and no dispute_id (markPaymentDisputed does not write one).
+    const disputedRow = row('payments', 'pay_card');
+    expect(disputedRow.status).toBe('disputed');
+    expect(meta(disputedRow)).toMatchObject({ dispute_invoice_id: 'inv_1' });
+    expect(meta(disputedRow).dispute_final).toBeUndefined();
+    expect(invoiceAmountDue(row('invoices', 'inv_1'))).toBe(60); // the customer owes the card part only
+
+    await handleDisputeClosed({ ...cardDispute, status: 'won' });
+
+    expect(row('invoices', 'inv_1').status).toBe('paid');
+    expect(Number(row('invoices', 'inv_1').amount_paid)).toBe(0);
+  });
+
+  test('a lost closure that arrives before the created event also gives the hand part back; the late created event changes nothing', async () => {
+    const cardDispute = seedPartPaidCardBill();
+
+    await handleDisputeClosed({ ...cardDispute, status: 'lost' });
+
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(Number(row('invoices', 'inv_1').amount_paid)).toBe(40);
+    expect(invoiceAmountDue(row('invoices', 'inv_1'))).toBeLessThanOrEqual(61.74);
+
+    await handleDisputeCreated(cardDispute);
+
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(Number(row('invoices', 'inv_1').amount_paid)).toBe(40);
+  });
+
   test('a replay of the created event, or the lost closure after it, subtracts nothing more', async () => {
     seed();
     await handleDisputeCreated(dispute);

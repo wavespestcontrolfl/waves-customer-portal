@@ -3495,15 +3495,6 @@ const gates = {
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
 
-  // Slide offers (owner rulings 2026-10-22) — a new customer-facing booking
-  // may take an occupied hour when sliding one or two existing same-day
-  // stops (earlier or later, ≤2h) cuts the day's drive by ≥6 min AND ≥0.5
-  // mi versus the best plain slot (services/scheduling/slide-offer.js).
-  // PHASE 1 = shadow only: find-time logs `[slot-slide] shadow` lines and
-  // offers nothing new. Read at CALL time by find-time.js; kill switch:
-  // unset GATE_SLOT_SLIDE_OFFER.
-  slotSlideOffer: gateEnvValue('GATE_SLOT_SLIDE_OFFER'),
-
   // JOB CARD tab in the Service Protocol drawer (Tech Resource Drawer PR 2):
   // one GET assembles the customer strip, a 1–3 sentence paragraph written
   // from portal fields (FAST tier, deterministic template fallback, cached
@@ -3933,6 +3924,12 @@ const gates = {
   // Read at CALL time via undoManualPaymentLive(); strict `true`, dark by default. Off = the route answers 404
   // and the Invoices page hides the button. Kill switch: unset.
   undoManualPayment: process.env.GATE_UNDO_MANUAL_PAYMENT === 'true',
+
+  // Partial payments (owner 2026-10-29): the Invoices page can record PART of a bill paid by a manual tender (cash, check, Zelle,
+  // Venmo, PayPal, other) for a customer who is not on Auto Pay (recordManualPayment in services/invoice-manual-payment.js, POST
+  // /admin/invoices/:id/record-payment with an explicit amount). Read at CALL time via partialPaymentsLive(); strict `true`, dark
+  // by default. Off = the amount field stays locked to the full amount due and the writer refuses a smaller amount. Kill switch: unset.
+  partialPayments: process.env.GATE_PARTIAL_PAYMENTS === 'true',
 
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
@@ -6374,6 +6371,11 @@ function undoManualPaymentLive() {
   return process.env.GATE_UNDO_MANUAL_PAYMENT === 'true';
 }
 
+// GATE_PARTIAL_PAYMENTS read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
+function partialPaymentsLive() {
+  return process.env.GATE_PARTIAL_PAYMENTS === 'true';
+}
+
 // GATE_TAX_SERVICE_COUNTY read at CALL time (so a flip needs no redeploy).
 function taxServiceCountyLive() {
   return gateEnvValue('GATE_TAX_SERVICE_COUNTY');
@@ -8452,6 +8454,8 @@ module.exports.lawnNoSeasonBoostLive = lawnNoSeasonBoostLive;
 module.exports.knownGateCatalog = knownGateCatalog;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
+// GATE_PARTIAL_PAYMENTS reader, on its own line so gate PRs never conflict.
+module.exports.partialPaymentsLive = partialPaymentsLive;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;

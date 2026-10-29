@@ -91,10 +91,11 @@ postgres('every reader of the amount owed subtracts amount_paid', () => {
     expect(rows.map((r) => String(r.id))).toEqual([String(inv.id)]);
     expect(await openBalanceExists(customerId, { database: trx })).toBe(true);
 
-    // The Zelle candidate list prices by amount due: $100 finds it, the gross $200 does not.
+    // The Zelle whole-balance match prices by amount due but never matches an invoice that already holds a part payment (the writer PR:
+    // the office records what is left by hand): neither the $100 remainder nor the gross $200 finds it.
     const at100 = await openSelfPayInvoicesByAmountDue(10000, { database: trx });
     const at200 = await openSelfPayInvoicesByAmountDue(20000, { database: trx });
-    expect(at100.map((r) => String(r.id))).toContain(String(inv.id));
+    expect(at100.map((r) => String(r.id))).not.toContain(String(inv.id));
     expect(at200.map((r) => String(r.id))).not.toContain(String(inv.id));
   });
 
