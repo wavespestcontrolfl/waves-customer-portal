@@ -595,9 +595,10 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
 const { lawn9xRoundsLive } = require('../config/feature-gates');
-const { lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
+// GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
+const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
 const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
@@ -685,7 +686,7 @@ async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
 // reads as lawn. Gate off, or any other series: the input comes back
 // unchanged and no query runs.
 async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null }) {
-  if (!lawn9xRoundsLive()) return { pattern, intervalDays };
+  if (!lawnRoundsGateOn()) return { pattern, intervalDays };
   let service = null;
   if (serviceId) {
     try {
@@ -14516,7 +14517,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // and every spawned child below carry the rounds pattern and no interval.
     // A visit already in a series keeps the pattern its rows already carry,
     // so a series never mixes the two.
-    if (isRecurring && spawnRecurringChildren !== false && recurringPattern && lawn9xRoundsLive()) {
+    if (isRecurring && spawnRecurringChildren !== false && recurringPattern && lawnRoundsGateOn()) {
       const seriesCurrent = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
