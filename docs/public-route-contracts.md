@@ -6211,6 +6211,58 @@ the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
 start grid is the shared 09:00–17:00 customer grid with 12:00 present.
 `GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
 unchanged by it.
+
+Customer route check (`GATE_CUSTOMER_ROUTE_CHECK`, dark, owner 2026-10-29).
+Read at call time (`customerRouteCheckMode()`): unset or any other value =
+`off`, `shadow`, `true`. It is an OFFER-LIST filter only. It changes which
+start times these LIST responses contain, and nothing else: no field, status
+code, error code, message text, limiter, signature or token changes.
+- Filtered lists (mode `true`): `GET /api/booking/availability` and
+  `POST /api/booking/find-slots` (and the texting assistant's open times built
+  from the same builder); `GET /api/public/reschedule/:token` and
+  `POST /:token/find-slots`; `GET /api/public/reservice/:token` and
+  `POST /:token/find-slots`; `GET /api/public/inspection/:token`,
+  `POST /:token/availability` and `POST /:token/find-slots`;
+  `GET /api/public/estimate-assessment/:token` and `POST /:token/find-slots`;
+  `GET /api/public/estimates/:token/available-slots` and
+  `POST /:token/find-slots` (primary and expander lists, plus the ASAP
+  windows); `POST /api/public/estimates/:token/first-visit/availability`
+  (commercial first visit).
+- Phone agent (voice): its availability searches are never filtered. With the
+  gate set, each search runs the check in shadow only, after the answer is
+  built and without waiting for it (the call's tool timeout is 3 seconds).
+- `off`: byte-identical to before; the check code is never loaded.
+- `shadow`: the check runs and logs one `[customer-route-check]` line; the
+  list is today's list.
+- `true`: a start is removed only when the arrival-window route check says it
+  would make ANOTHER customer arrive after their 2-hour window
+  (`arrival_window`). Unverified routes, return-time, margin or overcommitted
+  results, errors, and starts not checked in time stay. Each start is checked
+  at its own minute and technician. Order, slot shapes and signed offers
+  (`slot_sig`) of the kept starts are unchanged.
+- Floor: if the removals would leave no offered start dated today through
+  today+6 (Eastern), the whole list is served unchanged.
+- Fail-open: any error, a missing pin, `GATE_ADMIN_ARRIVAL_WINDOWS` (and
+  capacity mode) both off, or a check that passes its time budget (about
+  1.5 seconds a request) serves the unfiltered list. The check never throws
+  into the route.
+- Cost: no Google call. Drive times are the default route-optimizer estimate
+  (the GPS-fitted clock while `GATE_DRIVE_CLOCK` is on).
+- Commits and confirmations are unchanged and are NOT filtered. Every
+  confirmation, commit, reserve or recheck path rebuilds its anti-forgery list
+  WITHOUT the check: `POST /api/public/reschedule/:token` (and its SLOT_TAKEN
+  refresh and the move-limit full-range build), `POST /api/public/reservice/:token`,
+  `POST /api/public/inspection/:token` and its revalidation,
+  `POST /api/public/estimate-assessment/:token`, the commercial first-visit
+  booking (`POST /api/public/estimates/:token/first-visit`), `/api/booking/confirm` and the capture-intent revalidation, the
+  estimate reserve (`POST /api/public/estimates/:token/reserve` and its
+  SLOT_UNAVAILABLE refresh), the voice booking-time recheck, and the text-link
+  and one-tap rebuilds. So a time a list offered is still accepted when
+  confirmed, with the gate in any mode. A time the check removed from a list
+  can still be confirmed by a client that already holds it.
+- Estimate page cache: the five-minute slot cache is keyed by the route check
+  mode (and by whether the caller asked for the check), so changing the gate
+  never serves the other mode's list.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

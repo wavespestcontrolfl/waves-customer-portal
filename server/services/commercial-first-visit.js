@@ -278,7 +278,7 @@ function bookingRange(config, now = new Date()) {
   };
 }
 
-function availabilityFor(context, { rangeFrom, rangeTo, config }) {
+function availabilityFor(context, { rangeFrom, rangeTo, config, offer = false }) {
   const { booking, plan, location } = context;
   return booking.buildBookingAvailability({
     lat: location.lat,
@@ -289,7 +289,8 @@ function availabilityFor(context, { rangeFrom, rangeTo, config }) {
     rangeTo,
     config,
     today: new Date(),
-    surface: 'commercial_first_visit',
+    // The offer list only (GATE_CUSTOMER_ROUTE_CHECK); bookFirstVisit's rebuild omits `offer`.
+    ...(offer ? { surface: 'commercial_first_visit' } : {}),
     selfServeNotice: true,
     // The commit is createSelfBooking, which re-verifies with traffic and persists the certified route order while
     // bookInsertionOffersLive() is live (the inspection page's contract, see inspection-public.js).
@@ -305,7 +306,7 @@ async function firstVisitAvailability(estimate, { conn = db } = {}) {
   if (context.refusal) return context.refusal;
   const config = await context.booking.loadBookingConfig();
   const range = bookingRange(config);
-  const availability = await availabilityFor(context, { ...range, config });
+  const availability = await availabilityFor(context, { ...range, config, offer: true });
   return {
     ok: true,
     days: availability.days,

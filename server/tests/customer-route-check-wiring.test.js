@@ -141,18 +141,20 @@ describe('buildBookingAvailability — route check wiring', () => {
 
 describe('callers pass their surface', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+  // The page builders name the surface only for an offer list (`offer: true`);
+  // customer-route-check-offer-only.test.js classifies every call site.
   test.each([
-    ['../routes/reschedule-public.js', "surface: 'reschedule'"],
-    ['../routes/reservice-public.js', "surface: 'reservice'"],
-    ['../routes/inspection-public.js', "surface: 'inspection'"],
-    ['../services/commercial-first-visit.js', "surface: 'commercial_first_visit'"],
-    ['../services/voice-agent/relay-booking.js', "surface: 'voice'"],
+    ['../routes/reschedule-public.js', "...(offer ? { surface: 'reschedule' } : {})"],
+    ['../routes/reservice-public.js', "...(offer ? { surface: 'reservice' } : {})"],
+    ['../routes/inspection-public.js', "...(offer ? { surface: 'inspection' } : {})"],
+    ['../services/commercial-first-visit.js', "...(offer ? { surface: 'commercial_first_visit' } : {})"],
   ])('%s', (file, needle) => {
     expect(read(file)).toContain(needle);
   });
 
-  test('the voice tools pass voice on both builds, and /book defaults to book', () => {
+  test('the phone agent names voice on its two availability searches, not on the booking-time recheck; /book names no default surface', () => {
     expect(read('../services/voice-agent/relay-tools.js').match(/surface: 'voice'/g)).toHaveLength(2);
-    expect(read('../routes/booking.js')).toContain("buildBookingAvailability({ surface: 'book', ...args");
+    expect(read('../services/voice-agent/relay-booking.js')).not.toContain("surface: 'voice'");
+    expect(read('../routes/booking.js')).toContain('return buildBookingAvailability({ ...args, selfServeNotice: true');
   });
 });

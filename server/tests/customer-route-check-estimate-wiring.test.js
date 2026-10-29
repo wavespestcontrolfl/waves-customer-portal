@@ -112,6 +112,8 @@ function mockDb() {
 
 
 const OPTS = { dateFrom: '2027-05-20', dateTo: '2027-05-20' };
+// Only the page's list routes opt in; everything else (reserve refresh, one-tap, text rechecks) omits `offer`.
+const OFFER = { ...OPTS, offer: true };
 const saved = process.env.GATE_SCHEDULING_CAPACITY;
 afterAll(() => {
   if (saved === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
@@ -135,12 +137,12 @@ describe('getAvailableSlots — route check wiring (GATE_CUSTOMER_ROUTE_CHECK)',
   const keys = (result) => [...result.primary, ...result.expander].map((s) => `${s.date} ${s.windowStart}`);
 
   test('gate off: the helper is never called', async () => {
-    await getAvailableSlots('est-rain-1', OPTS);
+    await getAvailableSlots('est-rain-1', OFFER);
     expect(routeCheck.filterOfferedSlots).not.toHaveBeenCalled();
   });
 
   test('on: both lists go through the helper with the estimate pin, hold and duration; its answer is served', async () => {
-    const baseline = keys(await getAvailableSlots('est-rain-1', OPTS));
+    const baseline = keys(await getAvailableSlots('est-rain-1', OFFER));
     expect(baseline.length).toBeGreaterThan(1);
     estimateSlotAvailability._internals.clearCaches();
     routeCheck.customerRouteCheckMode.mockReturnValue('on');
@@ -148,7 +150,7 @@ describe('getAvailableSlots — route check wiring (GATE_CUSTOMER_ROUTE_CHECK)',
     routeCheck.filterOfferedSlots.mockImplementation(async ({ slots }) => ({
       slots: slots.filter((s) => `${s.date} ${s.windowStart}` !== dropped), report: {},
     }));
-    const served = keys(await getAvailableSlots('est-rain-1', OPTS));
+    const served = keys(await getAvailableSlots('est-rain-1', OFFER));
     expect(served).not.toContain(dropped);
     const surfaces = routeCheck.filterOfferedSlots.mock.calls.map(([a]) => a.surface);
     expect(surfaces).toContain('estimate');
@@ -162,30 +164,93 @@ describe('getAvailableSlots — route check wiring (GATE_CUSTOMER_ROUTE_CHECK)',
   });
 
   test('shadow serves today\'s list', async () => {
-    const baseline = keys(await getAvailableSlots('est-rain-1', OPTS));
+    const baseline = keys(await getAvailableSlots('est-rain-1', OFFER));
     estimateSlotAvailability._internals.clearCaches();
     routeCheck.customerRouteCheckMode.mockReturnValue('shadow');
-    const shadow = keys(await getAvailableSlots('est-rain-1', OPTS));
+    const shadow = keys(await getAvailableSlots('est-rain-1', OFFER));
     expect(routeCheck.filterOfferedSlots).toHaveBeenCalled();
     expect(shadow).toEqual(baseline);
   });
 
   test('a cache hit neither recomputes nor re-logs', async () => {
     routeCheck.customerRouteCheckMode.mockReturnValue('on');
-    const first = await getAvailableSlots('est-rain-1', OPTS);
+    const first = await getAvailableSlots('est-rain-1', OFFER);
     const calls = routeCheck.filterOfferedSlots.mock.calls.length;
     expect(calls).toBeGreaterThan(0);
-    const second = await getAvailableSlots('est-rain-1', OPTS);
+    const second = await getAvailableSlots('est-rain-1', OFFER);
     expect(second.metadata.cacheHit).toBe(true);
     expect(routeCheck.filterOfferedSlots).toHaveBeenCalledTimes(calls);
     expect(keys(second)).toEqual(keys(first));
   });
 
   test('a helper failure serves the unfiltered list', async () => {
-    const baseline = keys(await getAvailableSlots('est-rain-1', OPTS));
+    const baseline = keys(await getAvailableSlots('est-rain-1', OFFER));
     estimateSlotAvailability._internals.clearCaches();
     routeCheck.customerRouteCheckMode.mockReturnValue('on');
     routeCheck.filterOfferedSlots.mockRejectedValue(new Error('boom'));
-    expect(keys(await getAvailableSlots('est-rain-1', OPTS))).toEqual(baseline);
+    expect(keys(await getAvailableSlots('est-rain-1', OFFER))).toEqual(baseline);
+  });
+});
+
+describe('getAvailableSlots — route check is offer-only and its mode is part of the cache key', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    mockDb();
+    db.raw = jest.fn((sql) => sql);
+    estimateSlotAvailability._internals.clearCaches();
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+    routeCheck.customerRouteCheckMode.mockReturnValue('off');
+    // Like the real helper: only 'on' serves the filtered list; shadow serves today's.
+    routeCheck.filterOfferedSlots.mockImplementation(async ({ slots, mode }) => ({
+      slots: mode === 'on' ? slots.filter((s) => s.windowStart !== '09:00') : slots, report: {},
+    }));
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const all = (result) => [...result.primary, ...result.expander];
+  const has9 = (result) => all(result).some((s) => s.windowStart === '09:00');
+
+  test('a caller that did not ask for the check gets the unfiltered list even with the gate on', async () => {
+    routeCheck.customerRouteCheckMode.mockReturnValue('on');
+    const plain = await getAvailableSlots('est-rain-1', OPTS);
+    expect(routeCheck.filterOfferedSlots).not.toHaveBeenCalled();
+    expect(has9(plain)).toBe(true);
+  });
+
+  test('off -> true -> off without clearing caches never serves the other mode\'s list', async () => {
+    const off1 = await getAvailableSlots('est-rain-1', OFFER);
+    expect(off1.metadata.cacheHit).toBe(false);
+    expect(has9(off1)).toBe(true);
+
+    routeCheck.customerRouteCheckMode.mockReturnValue('on');
+    const on1 = await getAvailableSlots('est-rain-1', OFFER);
+    expect(on1.metadata.cacheHit).toBe(false);
+    expect(has9(on1)).toBe(false);
+    expect((await getAvailableSlots('est-rain-1', OFFER)).metadata.cacheHit).toBe(true);
+
+    routeCheck.customerRouteCheckMode.mockReturnValue('off');
+    const off2 = await getAvailableSlots('est-rain-1', OFFER);
+    expect(off2.metadata.cacheHit).toBe(true); // the 'off' entry is still warm
+    expect(has9(off2)).toBe(true);
+
+    routeCheck.customerRouteCheckMode.mockReturnValue('shadow');
+    const shadow = await getAvailableSlots('est-rain-1', OFFER);
+    expect(shadow.metadata.cacheHit).toBe(false); // its own entry
+    expect(has9(shadow)).toBe(true);
+
+    routeCheck.customerRouteCheckMode.mockReturnValue('on');
+    const on2 = await getAvailableSlots('est-rain-1', OFFER);
+    expect(on2.metadata.cacheHit).toBe(true);
+    expect(has9(on2)).toBe(false);
+  });
+
+  test('a plain caller and an offer caller never share an entry while the gate is on', async () => {
+    routeCheck.customerRouteCheckMode.mockReturnValue('on');
+    const offer = await getAvailableSlots('est-rain-1', OFFER);
+    const plain = await getAvailableSlots('est-rain-1', OPTS);
+    expect(has9(offer)).toBe(false);
+    expect(has9(plain)).toBe(true);
   });
 });

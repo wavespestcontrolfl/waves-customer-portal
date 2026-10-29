@@ -1933,13 +1933,24 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
 }
 
 // Route check for the estimate page's lists (GATE_CUSTOMER_ROUTE_CHECK,
-// scheduling/customer-route-check.js). Gate off: returns the list untouched
-// and the module is never loaded. Fail-open: any error serves the list as is.
-async function routeCheckedSlots(surface, slots, { coords, estimateId, durationMinutes }) {
+// scheduling/customer-route-check.js). OFFER LISTS ONLY: a caller opts in with
+// `offer: true` (the page's available-slots and find-slots routes); every other
+// caller (reserve refresh, one-tap purchase, text-offer rechecks) gets 'off' and the
+// unfiltered list. Gate off: returns the list untouched and the module is never
+// loaded. Fail-open: any error serves the list as is.
+function routeCheckModeFor(userOpts) {
+  if (userOpts.offer !== true) return 'off';
   try {
-    const routeCheck = require('./scheduling/customer-route-check');
-    const mode = routeCheck.customerRouteCheckMode();
+    return require('./scheduling/customer-route-check').customerRouteCheckMode();
+  } catch {
+    return 'off';
+  }
+}
+
+async function routeCheckedSlots(surface, slots, { coords, estimateId, durationMinutes, mode }) {
+  try {
     if (mode === 'off' || !slots.length) return slots;
+    const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
       surface, mode, slots, durationMinutes, today: new Date(),
       target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
@@ -2008,6 +2019,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // serve — or hide — offers built under the old detour cap for the TTL.
   // null = config unreadable this request: neither read nor write the cache.
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
+  const routeCheckMode = routeCheckModeFor(userOpts);
   const cacheKey = [
     estimateId,
     `route-days:${routeDayPolicyKey}`,
@@ -2052,6 +2064,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // built — a flip or buffer change must not serve now-prohibited slots
     // until TTL (GH codex #3803 r1 P1).
     travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
+    // Route check mode (GATE_CUSTOMER_ROUTE_CHECK) in the key: an off / shadow / true
+    // switch must not serve the other mode's list for the TTL. An entry built for a
+    // caller that did not ask for the check (offer unset) is always 'off'.
+    `route-check:${routeCheckMode}`,
   ].join(':');
   // opts.bypassCache (explicit, off by default): a caller that must act on
   // the CURRENT calendar — the texting AI's send-time recheck of a quoted
@@ -2315,7 +2331,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another
   // customer late. Inside this uncached builder, so a wrapper cache hit
   // neither recomputes nor logs.
-  const routeCheckInput = { coords, estimateId, durationMinutes: serviceProfile.durationMinutes };
+  const routeCheckInput = { coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode };
   const classified = await routeCheckedSlots('estimate', collisionFree, routeCheckInput);
 
   // Target: always show the soonest upcoming customer-facing windows first,
@@ -2463,6 +2479,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
     dateFrom: when.dateFrom,
     dateTo: when.dateTo,
     timeOfDay: when.timeOfDay,
+    offer: userOpts.offer === true,
     // Widen the result set for a search — the window may span several days.
     maxResults: 8,
     expanderMaxResults: 4,

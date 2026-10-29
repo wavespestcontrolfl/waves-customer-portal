@@ -2139,7 +2139,7 @@ function bookingOfferWindow(config, today) {
 // tag either way, so a gate flip between this mint and /confirm can't be
 // redeemed under the wrong policy.
 function buildFunnelAvailability(args) {
-  return buildBookingAvailability({ surface: 'book', ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
 }
 
 // The customer a /book offer may be made to, or null. The ONE eligibility
@@ -2202,6 +2202,8 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
   const today = new Date();
   const { minDate, defaultTo } = bookingOfferWindow(config, today);
   return buildFunnelAvailability({
+    // Customer-facing text offers only; a staff-side pick (`internal`) is never filtered.
+    ...(internal ? {} : { surface: 'book' }),
     lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
@@ -2274,6 +2276,9 @@ router.get('/availability', async (req, res, next) => {
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). /confirm and the
+      // capture-intent revalidation rebuild without a surface and see the unfiltered list.
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
@@ -2382,6 +2387,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,

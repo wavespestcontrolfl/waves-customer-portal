@@ -602,7 +602,7 @@ function searchParseOpts(config, now = new Date()) {
   };
 }
 
-async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
+async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
 
@@ -640,7 +640,9 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
-    surface: 'reschedule',
+    // Offer lists only (GATE_CUSTOMER_ROUTE_CHECK): the GET list and find-slots pass
+    // `offer: true`. Every confirmation rebuild omits it, so it serves the unfiltered list.
+    ...(offer ? { surface: 'reschedule' } : {}),
     serviceKey,
     serviceIdentity,
     // Self-serve surface — a new target starting within the notice window
@@ -749,7 +751,7 @@ router.get('/:token', async (req, res, next) => {
         return null;
       });
     try {
-      availability = await buildAvailabilityForService(svc, { ...range, config });
+      availability = await buildAvailabilityForService(svc, { ...range, config, offer: true });
     } catch (err) {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
@@ -820,6 +822,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
         rangeTo: when.dateTo,
         config,
         timeOfDay: when.timeOfDay,
+        offer: true,
       });
     } catch (err) {
       logger.error(`[reschedule-public] find-slots availability failed for ${svc.id}: ${err.message}`);
