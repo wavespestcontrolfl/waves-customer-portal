@@ -274,7 +274,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const correctiveWork = Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [];
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
-  const termRows = commercialTermRows(proposal?.commercialTerms);
+  const termRows = commercialTermRows(proposal?.commercialTerms, { recurring: Number(totals.annualRecurring) > 0 });
   // Document mode classifies the normalized proposal rows it actually prints.
   // An explicit false matters too: the ordinary page may classify a different
   // current service mix than a retained proposal itemization. Older payloads
