@@ -23,7 +23,11 @@
  *   - a visit booked: the new-lead class's live top-level visit predicate,
  *     passed in as `bookedVisits`;
  *   - an email a person answered: a Gmail SENT row in the customer's thread
- *     (personSentFilter + resolveEmailCustomerLink, email-customer-link.js).
+ *     (personSentFilter + resolveEmailCustomerLink, email-customer-link.js);
+ *   - a visit that ran after a voicemail (GATE_VOICEMAIL_VISIT_UNDERWAY, voice items
+ *     only): the voicemail's customer, by customer id and never by phone, has a visit
+ *     in a status that ran with completed_at after the call's start on the same
+ *     Eastern day. Loaded only when the caller asks (`visitRan`).
  * read_at is never evidence. Read-only: nothing here writes, locks or sends.
  *
  * Each item is judged only by events AFTER its own anchor: the text, call or
@@ -33,6 +37,8 @@
 
 const { phoneIdentityKey } = require('../utils/phone');
 const { callStartedAt } = require('../utils/call-timeline');
+const { etDateString } = require('../utils/datetime-et');
+const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -245,6 +251,33 @@ async function quoteHandedOff(conn, ident, bundle) {
   return !!(await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), anchor), customerId).first('estimates.id'));
 }
 
+// A visit that ran after a voicemail: the call customer's own visit (by customer id
+// only) that completed after the call started, on the same Eastern day, in a status
+// that is not one that never ran. Not the missed-call lane's invoice-paid clause, and
+// not a top-level booking test: a tech who completed any of their visits that day came.
+// Newest qualifying completion per voice item, by notification id.
+async function visitsThatRan(conn, voiceIdents) {
+  const ran = new Map();
+  const withCustomer = voiceIdents.filter((i) => i.customerId);
+  if (!withCustomer.length) return ran;
+  const since = new Date(Math.min(...withCustomer.map((i) => i.anchor.getTime())));
+  const rows = await conn('scheduled_services as ss')
+    .whereIn('ss.customer_id', unique(withCustomer.map((i) => i.customerId)))
+    .whereNotNull('ss.completed_at').where('ss.completed_at', '>', since)
+    .where((w) => w.whereNull('ss.status').orWhereNotIn('ss.status', VISIT_NEVER_RAN_STATUSES))
+    .select('ss.customer_id', 'ss.completed_at');
+  for (const ident of withCustomer) {
+    const day = etDateString(ident.anchor);
+    let best = null;
+    for (const row of rows) {
+      const at = asDate(row.completed_at);
+      if (String(row.customer_id) === ident.customerId && at && at.getTime() > ident.anchor.getTime() && etDateString(at) === day) best = later(best, at);
+    }
+    if (best) ran.set(String(ident.item.id), best);
+  }
+  return ran;
+}
+
 // An email a person answered: a Gmail SENT row in its thread that reaches the customer.
 async function attachEmailReplies(conn, idents, bundles) {
   const emailIdents = idents.filter((i) => i.item.kind === 'email' && i.customerId && i.email?.gmail_thread_id);
@@ -268,12 +301,12 @@ async function attachEmailReplies(conn, idents, bundles) {
  * @param {Array<{id, kind: 'sms'|'voice'|'email'|'lead', bellAt: Date|null, refs: object}>} items
  *   refs by kind: sms {sid, customerId}; voice {callLogId, customerId, phone};
  *   email {emailId, customerId}; lead {customerId, phone}.
- * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>}} deps
+ * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
- *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt };
+ *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt };
  *   an item whose subject cannot be identified is absent (never judged).
  */
-async function loadContactBundles(items, { conn, bookedVisits }) {
+async function loadContactBundles(items, { conn, bookedVisits, visitRan = false }) {
   const bundles = new Map();
   if (!items.length) return bundles;
 
@@ -312,6 +345,7 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const shared = smsIdents.length ? await sharedPhoneItems(conn, smsIdents, since) : new Set();
   const replyRows = shared.size ? await ownReplyRows(conn, { customerIds, peers, since }) : [];
   const visits = await bookedVisits(customerIds);
+  const ranVisits = visitRan ? await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice')) : new Map();
   for (const ident of idents) {
     const { item, customerId } = ident;
     // A shared phone: this customer's own evidence by customer id only (ownMatch).
@@ -326,6 +360,7 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
       visitAt: customerId ? asDate(visits.get(customerId)) : null,
       quote: false,
       replyAt: null,
+      visitRanAt: ranVisits.get(String(item.id)) || null,
     };
     bundle.quote = await quoteHandedOff(conn, ident, bundle);
     bundles.set(String(item.id), bundle);

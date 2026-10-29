@@ -96,6 +96,7 @@
  *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_TECH_COST_RATES=true (L11a, owner 2026-10-26: "we need real actual calculation, this ($35) was a number I just thought". Job costing charges each visit for its own on-site minutes plus its drive minutes at its technician's worked-hour cost, and for its miles and vehicle time, when a cost card is in effect for that technician on the visit date (technician_cost_cards, vehicle_cost_cards; admin API /api/admin/cost-cards; Cost cards section on Settings > Operating costs). Read at call time via techCostRatesLive(), dark by default; exactly `true`. Off, or no card in effect = job_costs and service_records values are byte for byte today's loaded_labor_rate x on-job hours and drive_cost_per_stop. Customer prices never change. Kill switch: unset.)
  *   GATE_TECH_OPEN_TIME=true (L11b, owner 2026-10-26 "BOTH", build B: each visit carries only its own minutes and miles; the unbooked part of the paid day shows as one open time cost for each technician and day. Needs GATE_TECH_COST_RATES. On: the 01:40 ET job re-costs the visits the trip link just linked (so GPS drive legs reach job costs), GET /api/admin/cost-cards/open-time and the Open time panel in the Cost cards section answer, and the dashboard adjusted-EBITDA bridge adds one open time row. Read at call time via techOpenTimeLive(), dark by default; exactly `true`. Off = every one of those is exactly today's. Customer prices never change. Kill switch: unset.)
+ *   GATE_TECH_TRAINING_DATES=true (owner 2026-10-28, Tech 2 and 3 Roadmap question 3: ID-card and training due dates on the Compliance page Licenses tab, with a reminder before each date. F.S. 482.091: ID card applied within 30 days after hire, 5 days (40 hours) of field training with a written record (rule 5E-14.1421), 4 classroom hours within 6 months after the card is issued, 2 hours of continuing training before each yearly renewal. On: GET /licenses adds the dates and statuses for each technician with a hire date, PUT /licenses/:techId takes the four new dates, the admin-only training-days and training-record routes work, and a daily 6:52 AM ET sweep raises one admin bell for each technician and deadline and closes it when the date is entered. Admin bell only: nothing goes to a technician or a customer, and the Team tab's "Can be assigned field work" stays the owner's manual gate. Strict opt-in (exactly 'true'), read at call time via techTrainingDatesLive(); dark in every environment; off = the Licenses tab, routes and responses are as before and nothing is written or raised.)
  *   GATE_TAX_PACKAGE_W2_LABOR=true (census A8, owner 2026-10-25: the CPA tax package stops calling every technician's tracked time the owner's own non-deductible time. labor-timetracking-informational.csv keeps only technicians who are NOT W-2 employees (technicians.employment_type not 'w2'), and a new w2-payroll.csv lists one row per FINALIZED pay check (payroll_checks.status 'finalized') whose pay date falls in the package window: employee, week, pay date, regular and overtime hours, gross wages, the taxes withheld, the employer taxes and net pay, with a totals row; the README lists it (wages are Schedule C line 26, employer taxes line 23). Read at call time via taxPackageW2LaborLive(), strict 'true', dark by default; off = the package is byte for byte today's; rollback = unset. Changes a file for the CPA only; sends, files and pays nothing.)
  *   GATE_MISTING_LAYOUT_DESIGNER=true (mosquito misting satellite-map layout designer, step 1, owner 2026-10-26 "build staff version": the staff estimator shows a Design on map button beside the misting Nozzles input; it opens a modal over the property's satellite photo where staff draw eave and fence lines, nozzles are placed at every corner and about every 10 ft, and Use counts writes the nozzle total into the Nozzles input. Step 3 saves the layout per estimate (admin-estimate-misting-layout routes, misting_layouts) and adds a Proposed misting layout section to the estimate document. Staff drawing screen; no customer message, no price changes beyond the nozzle count staff already type. Needs GATE_MOSQUITO_MISTING also on. Ships DARK: strict true only. Off = the misting block of GET /admin/pricing-config/mosquito_misting_pricing, the layout routes (404), the estimate document and the estimator are byte-identical.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
@@ -126,6 +127,8 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
+ *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card") = charge the customer's saved Auto Pay card or bank for the held invoice first (the same charge staff run from Charge Card), keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe), and release the hold only when the charge was declined or refused or there is no Auto Pay method (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
@@ -4520,6 +4523,9 @@ const gates = {
   // bridge row. This entry is for logGateStatus; job-cost-recost.js, open-time routes and admin-dashboard.js read
   // techOpenTimeLive() at CALL time. Ships DARK: exactly 'true' only. Needs GATE_TECH_COST_RATES.
   techOpenTime: process.env.GATE_TECH_OPEN_TIME === 'true',
+  // Tech training dates (owner 2026-10-28): ID-card and training due dates on the Licenses tab and their daily admin reminders. This entry is for
+  // logGateStatus; admin-compliance-v2.js and technician-training-reminders.js read techTrainingDatesLive() at CALL time. Ships DARK: exactly 'true' only.
+  techTrainingDates: process.env.GATE_TECH_TRAINING_DATES === 'true',
   // Misting layout designer (step 1, owner 2026-10-26): the staff estimator's Design on map button. This
   // entry is for logGateStatus; admin-pricing-config reads mistingLayoutDesignerLive() at CALL time.
   // Ships DARK: exactly 'true' only.
@@ -4797,6 +4803,16 @@ const gates = {
   // approved 2026-10-26). Tri-state: 'shadow' records what would close, 'true' closes. Registered
   // for logGateStatus only; consumers read alertContactCloseMode() at CALL time. Kill switch: unset.
   alertContactClose: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase()),
+
+  // A voicemail bell closes once the customer's own visit ran later that day (owner 2026-10-29,
+  // "Stuck Alert Fixes" F3). Tri-state; rides on GATE_ALERT_CONTACT_CLOSE. Registered for
+  // logGateStatus only; consumers read voicemailVisitUnderwayMode() at CALL time. Kill switch: unset.
+  voicemailVisitUnderway: ['shadow', 'true'].includes(String(process.env.GATE_VOICEMAIL_VISIT_UNDERWAY || '').trim().toLowerCase()),
+
+  // A "lead_contacted" Leads bell closes once the lead was reached, booked or quoted (owner 2026-10-29,
+  // "Stuck Alert Fixes" F5). Tri-state, its own gate. Registered for logGateStatus only; consumers
+  // read leadContactedCloseMode() at CALL time. Kill switch: unset.
+  leadContactedClose: ['shadow', 'true'].includes(String(process.env.GATE_LEAD_CONTACTED_CLOSE || '').trim().toLowerCase()),
 
   // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
   // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
@@ -7245,6 +7261,27 @@ function alertContactCloseMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_VOICEMAIL_VISIT_UNDERWAY read at CALL time: 'shadow', 'true' or 'off'. One extra close reason
+// of the voicemail-callback class in admin-alert-relevance.js: the voicemail's customer has a visit
+// that completed after the voicemail, on the same Eastern day. It runs inside GATE_ALERT_CONTACT_CLOSE
+// (that gate off = the class is not judged at all) and never closes more than that gate allows:
+// 'shadow' records the would-close in audit_log and changes no bell, 'true' closes. Anything else,
+// unset included, is off: the reason is not offered, and a bell it closed is put back.
+function voicemailVisitUnderwayMode() {
+  const value = String(process.env.GATE_VOICEMAIL_VISIT_UNDERWAY || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
+// GATE_LEAD_CONTACTED_CLOSE read at CALL time: 'shadow', 'true' or 'off'. The "lead_contacted" Leads
+// bells (call/reply to a lead) as a class of admin-alert-relevance.js: closed once a person's text or
+// call reached the lead, a visit was booked, or an estimate was handed off, each after the bell.
+// 'shadow' records the would-close in audit_log and changes no bell; 'true' closes. Anything else,
+// unset included, is off: the class is not judged, and a bell it closed is put back.
+function leadContactedCloseMode() {
+  const value = String(process.env.GATE_LEAD_CONTACTED_CLOSE || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // ALERT_EPISODES read at CALL time — ships LIVE: on unless set to exactly
 // 'off', 'false' or '0' (case-insensitive), so an unset env is the live state
 // and the env is a pure kill switch (owner-approved scope 2026-09-29, rule
@@ -7501,6 +7538,12 @@ function techCostRatesLive() {
 // time. Strict `=== 'true'`, dark in every environment; unsetting it is the kill switch. Needs GATE_TECH_COST_RATES.
 function techOpenTimeLive() {
   return process.env.GATE_TECH_OPEN_TIME === 'true';
+}
+
+// Tech training dates (routes/admin-compliance-v2.js, services/technician-training-reminders.js), read at CALL time. Strict `=== 'true'`, dark in
+// every environment; unsetting it is the kill switch.
+function techTrainingDatesLive() {
+  return process.env.GATE_TECH_TRAINING_DATES === 'true';
 }
 
 // Misting layout designer (routes/admin-pricing-config.js misting block), read at CALL time. Strict
@@ -8393,6 +8436,10 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.sprayRainRulesMode = sprayRainRulesMode;
 // GATE_ALERT_CONTACT_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.alertContactCloseMode = alertContactCloseMode;
+// GATE_VOICEMAIL_VISIT_UNDERWAY reader, on its own line so gate PRs never conflict.
+module.exports.voicemailVisitUnderwayMode = voicemailVisitUnderwayMode;
+// GATE_LEAD_CONTACTED_CLOSE reader, on its own line so gate PRs never conflict.
+module.exports.leadContactedCloseMode = leadContactedCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
@@ -8860,6 +8907,8 @@ module.exports.autopayHoldTimeoutMode = autopayHoldTimeoutMode;
 module.exports.techCostRatesLive = techCostRatesLive;
 // GATE_TECH_OPEN_TIME reader, on its own line so gate PRs never conflict.
 module.exports.techOpenTimeLive = techOpenTimeLive;
+// GATE_TECH_TRAINING_DATES reader, on its own line so gate PRs never conflict.
+module.exports.techTrainingDatesLive = techTrainingDatesLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE reader, on its own line so gate PRs never conflict.
 module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNoticeReconcileLive;
 // GATE_SETUP_FEE_APPLICATION_SETTLED reader, on its own line so gate PRs never conflict.
