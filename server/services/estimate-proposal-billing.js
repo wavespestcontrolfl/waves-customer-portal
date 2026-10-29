@@ -154,7 +154,9 @@ function documentCarriesRateReviewTerms(estimate, acceptance = null) {
 // authored terms. Canonical payment tokens → labels (same map as
 // proposal-sections.js). Lives here, beside the predicates that key on it,
 // so the renderers and the served-disclosure evidence read ONE definition.
-function commercialTermLines(commercialTerms) {
+// { recurring: false } (a one-time-only proposal) drops the four fixed agreement terms; no second argument = as stored.
+const FIXED_TERM_LABELS = new Set(['Initial term', 'Renewal', 'Price adjustment', 'Cancellation']);
+function commercialTermLines(commercialTerms, { recurring } = {}) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
   const paymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
   return [
@@ -166,7 +168,8 @@ function commercialTermLines(commercialTerms) {
     ['Price adjustment', commercialTerms.priceAdjustment],
     ['Cancellation', commercialTerms.cancellation],
     ['Property access', commercialTerms.accessRequirements],
-  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
+  ].filter(([label, value]) => value != null && !(recurring === false && FIXED_TERM_LABELS.has(label)))
+    .map(([label, value]) => `${label}: ${value}`);
 }
 
 // The renderers print the canned plan sentences (the callback guarantee, the
