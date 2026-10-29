@@ -52,8 +52,8 @@ const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/m
 // documents the ruling): when the Gemini read misses for any reason, the lawn photo lane's
 // OpenAI model reads the same photos with the same prompt. It runs through the adapter, so
 // it is recorded under lawn_diag_vision and carries its own deadline; the Gemini primary
-// stays a raw fetch.
-const LAWN_PERCEPTION_BACKUP = MODELS.ROUTES.lawnDiagnosisPerceptionBackup;
+// stays a raw fetch. The route is read at call time (perceiveWithOpenAI): many suites mock
+// config/models without ROUTES and still load this module through other services.
 const PERCEPTION_BACKUP_TIMEOUT_MS = 120 * 1000;
 // Reasoning tokens count against the Responses cap; leave room for the observations JSON.
 const PERCEPTION_BACKUP_MAX_TOKENS = 4096;
@@ -577,9 +577,11 @@ async function perceiveWithGemini(photos, season) {
 // deadline). A reply with no observations flips its recorded row. Never throws, even if
 // dispatch() does.
 async function perceiveWithOpenAI(photos, season) {
+  const route = MODELS.ROUTES && MODELS.ROUTES.lawnDiagnosisPerceptionBackup;
+  if (!route) return { ok: false, reason: 'no_route' };
   let result;
   try {
-    result = await dispatch(LAWN_PERCEPTION_BACKUP, {
+    result = await dispatch(route, {
       text: `${PERCEPTION_PROMPT}\n\nReport observations for the ${photos.length} attached photo(s). Season: ${season || 'unknown'}.`,
       images: photos.map((photo) => ({ data: photo.data, mimeType: photo.mimeType || 'image/jpeg' })),
       jsonMode: true,
@@ -601,7 +603,7 @@ async function perceiveWithOpenAI(photos, season) {
     ok: true,
     observations,
     overall_notes: typeof result.json.overall_notes === 'string' ? result.json.overall_notes : '',
-    model: LAWN_PERCEPTION_BACKUP.model,
+    model: route.model,
   };
 }
 

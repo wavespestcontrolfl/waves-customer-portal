@@ -149,3 +149,19 @@ describe('runPerception without a Gemini key', () => {
     }
   });
 });
+
+describe('loading under a partial config/models mock', () => {
+  // CI 2026-10-29: 35 suites mock config/models without ROUTES and load this module
+  // through the Intelligence Bar and the Twilio webhook; a load-time ROUTES read threw
+  // "Cannot read properties of undefined (reading 'lawnDiagnosisPerceptionBackup')".
+  test('the module loads, and a Gemini miss without the route is a missed read, not a throw', async () => {
+    let isolated;
+    jest.isolateModules(() => {
+      jest.doMock('../config/models', () => ({ GEMINI_VISION_BEST: 'gemini-test', LAWN_CHALLENGE: 'challenge-test' }));
+      isolated = require('../services/lawn-diagnostic-prompt');
+    });
+    global.fetch.mockResolvedValue({ ok: false, status: 429, json: async () => ({}) });
+    await expect(isolated.runPerception({ photos })).resolves.toEqual({ ok: false, reason: 'gemini_429', backupReason: 'no_route' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+});
