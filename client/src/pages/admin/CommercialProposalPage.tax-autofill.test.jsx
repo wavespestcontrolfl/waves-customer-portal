@@ -13,17 +13,19 @@ import CommercialProposalPage from './CommercialProposalPage';
 // service's rule (the served family registry); a residential community, or no pick yet, starts them not taxable.
 const line = (taxable) => ({ description: 'Monthly service', quantity: 1, unitPrice: 116.3, frequency: 'monthly', taxable });
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
-const makeFixture = ({ taxable = false, taxRate = 0, suggestedTaxRate = 0.07, suggestedTaxSource = 'Manatee County', status = 'draft', programs, buildings, buildingUse = 'nonresidential' } = {}) => ({
+const makeFixture = ({ taxable = false, taxRate = 0, suggestedTaxRate = 0.07, suggestedTaxSource = 'Manatee County', status = 'draft', programs, buildings, correctiveWork, businessTaxRules, buildingUse = 'nonresidential' } = {}) => ({
   bidToolsEnabled: true,
   suggestedTaxRate,
   suggestedTaxSource,
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
+  ...(businessTaxRules ? { businessTaxRules } : {}),
   estimate: { id: 'synthetic-proposal', status, editVersion: 'loaded-version', customerName: 'Synthetic Office' },
   proposal: {
     enabled: true, title: 'Synthetic proposal', taxRate,
     ...(buildingUse ? { buildingUse } : {}),
     buildings: buildings || (programs ? [] : [{ name: 'Office', lineItems: [line(taxable)] }]),
     ...(programs ? { programs } : {}),
+    ...(correctiveWork ? { correctiveWork } : {}),
   },
 });
 let fixture; let puts; let generatedDraft;
@@ -220,4 +222,20 @@ it('a program switched to Lawn while residential stays off when Business is pick
   fireEvent.change(screen.getByLabelText('Service family'), { target: { value: 'lawn' } });
   fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
   expect(screen.getByRole('switch', { name: 'Taxable program' })).toHaveAttribute('aria-checked', 'false');
+});
+
+// Codex #6945 r3: a saved generated one-time row keeps its own service rule (served per row), not its family's.
+it('a residential proposal switched to Business restores generated one-time rows to their own service rule', async () => {
+  await mount({
+    buildingUse: 'residential', buildings: [],
+    correctiveWork: [
+      { id: 'bed-bug', service: 'bed_bug', label: 'Bed bug treatment', amount: 500, taxable: false },
+      { id: 'wdo', service: 'wdo_inspection', label: 'WDO inspection', amount: 125, taxable: false },
+    ],
+    businessTaxRules: { 'bed-bug': true, wdo: false },
+  });
+  const work = () => screen.getAllByRole('switch', { name: 'Taxable work', hidden: true }).map((s) => s.getAttribute('aria-checked'));
+  expect(work()).toEqual(['false', 'false']);
+  fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
+  expect(work()).toEqual(['true', 'false']);
 });

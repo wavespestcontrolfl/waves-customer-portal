@@ -421,9 +421,13 @@ function CommercialProposalEditor() {
     const loadedUse = p.buildingUse === 'residential' || p.buildingUse === 'nonresidential' ? p.buildingUse : '';
     setBuildingUse(loadedUse);
     // A proposal saved as residential has its rows off; keep each row's business rule so a later Business pick
-    // can turn the right ones back on.
+    // can turn the right ones back on: the server's rule for a row that names a service (its own key, so a
+    // canonical one-time service keeps its own rule), else the family registry's.
     const registry = data.familyRegistry || familyRegistryRef.current;
-    const keptRule = (service) => (loadedUse === 'residential' ? { bizTaxable: serviceTaxRule(registry, service) } : {});
+    const businessRules = data.businessTaxRules || {};
+    const keptRule = (row) => (loadedUse === 'residential'
+      ? { bizTaxable: (row.id && typeof businessRules[row.id] === 'boolean') ? businessRules[row.id] : serviceTaxRule(registry, row.service) }
+      : {});
     // The empty starter line follows the pick like any new row.
     const starterTax = loadedUse === 'nonresidential'
       ? { taxable: serviceTaxRule(registry, 'other') === true }
@@ -461,7 +465,7 @@ function CommercialProposalEditor() {
               unitPrice: li.unitPrice ?? 0,
               frequency: li.frequency || 'monthly',
               taxable: li.taxable === true,
-              ...keptRule(li.service),
+              ...keptRule(li),
               // Server-owned identity of the mosquito misting system: kept through the editor so a save cannot drop it.
               ...(li.service ? { service: li.service } : {}),
               ...(li.originalRequestedService ? { originalRequestedService: li.originalRequestedService } : {}),
@@ -482,7 +486,7 @@ function CommercialProposalEditor() {
       pricePerApplication: program.pricePerApplication ?? 0,
       visitMinutes: program.visitMinutes ?? '',
       taxable: program.taxable === true,
-      ...keptRule(program.service),
+      ...keptRule(program),
       note: program.note || '',
       inclusionsText: (program.inclusions || []).join('\n'),
       exclusionsText: (program.exclusions || []).join('\n'),
@@ -505,7 +509,7 @@ function CommercialProposalEditor() {
       label: w.label || '',
       amount: w.amount ?? 0,
       taxable: w.taxable === true,
-      ...keptRule(w.service),
+      ...keptRule(w),
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));

@@ -4473,6 +4473,9 @@ router.get('/:id/proposal', async (req, res, next) => {
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
       suggestedTaxSource = suggestedTaxRate === null ? null : (source || null);
     } catch (_) { suggestedTaxRate = null; suggestedTaxSource = null; }
+    const proposalGenerate = require('../services/estimate-proposal-generate');
+    // Never throws: a failed read is null, and the family defaults apply.
+    const taxabilityMap = await proposalGenerate.loadTaxabilityMap(db);
     // A failed read leaves the line off; it never fails the builder's load.
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
@@ -4504,9 +4507,11 @@ router.get('/:id/proposal', async (req, res, next) => {
       // never catalog membership (codex 1A-ii r15 — a hand-authored line
       // matching a stock sentence must survive), so reopened proposals
       // prune exactly what their generation installed.
-      familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
-        await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
-      ),
+      familyRegistry: proposalGenerate.buildFamilyRegistry(taxabilityMap),
+      // Business-building Taxable rule per saved row that names a service (row id ->
+      // boolean): a residential proposal switched to Business building restores each
+      // such row to it, keeping service-specific rules (owner 2026-10-28, building use).
+      businessTaxRules: proposalGenerate.businessTaxRulesFor(proposal, taxabilityMap),
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
