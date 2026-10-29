@@ -4100,6 +4100,46 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       });
 
+      test('gate true: a promise about one property takes only that property\'s invoice, through its visit or its prepay estimate', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        const home = context.properties[0].id;
+        const otherProperty = randomUUID();
+        await mockPg('customer_properties').insert({ id: otherProperty, customer_id: message.customer_id, address_line1: '9 Other Lane', city: 'Sarasota', zip: '34236', active: true });
+        const visitAt = async (propertyId) => (await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: propertyId,
+          service_type: 'Quarterly Pest', scheduled_date: etDateString(at(86400000)), window_start: '09:00:00', status: 'confirmed' }).returning('id'))[0].id;
+        const prepayFrom = async (propertyId) => {
+          const invoice = await prepayInvoice(at(60000));
+          const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId, status: 'accepted',
+            service_interest: 'Quarterly pest control', accepted_at: at(-86400000) }).returning('id');
+          await mockPg('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).update({ source_estimate_id: estimate.id });
+          return invoice;
+        };
+        const visitHome = await prepayInvoice(at(60000), { scheduled_service_id: await visitAt(home) });
+        const visitElsewhere = await prepayInvoice(at(60000), { scheduled_service_id: await visitAt(otherProperty) });
+        const prepayHome = await prepayFrom(home);
+        const prepayElsewhere = await prepayFrom(otherProperty);
+        // Two properties now: an invoice nothing ties to a property is not this one's.
+        const unlinked = await prepayInvoice(at(60000));
+        const current = await currentOf(row);
+        expect(current.sms_context.property_id).toBe(home);
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        const admitted = evidence.records.filter((r) => r.type === 'invoice' && admissibleWitness(r, current, evidence.records)).map((r) => r.id);
+        expect(admitted.sort()).toEqual([visitHome.id, prepayHome.id].sort());
+        const propertyOf = (invoice) => evidence.records.find((r) => r.type === 'invoice' && r.id === invoice.id)?.property_id;
+        expect([propertyOf(visitElsewhere), propertyOf(prepayElsewhere), propertyOf(unlinked)]).toEqual([otherProperty, otherProperty, null]);
+      });
+
+      test('gate true: with one property, an invoice nothing ties to a property is that property\'s', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        const invoice = await prepayInvoice(at(60000));
+        const current = await currentOf(row);
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, current, message, at(3600000));
+        expect(evidence.records.find((r) => r.type === 'invoice' && r.id === invoice.id)).toMatchObject({ property_id: context.properties[0].id });
+        expect(admissibleWitness(evidence.records.find((r) => r.id === invoice.id), current, evidence.records)).toBe(true);
+      });
+
       test('a customer ask (basis request) never admits an invoice, with the gate true', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         const row = await staffPromise({ basis: 'request' });

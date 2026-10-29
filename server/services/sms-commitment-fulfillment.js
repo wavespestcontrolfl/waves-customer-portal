@@ -297,12 +297,32 @@ function invoiceText(row) {
     + `${row.total != null ? ` for $${Number(row.total).toFixed(2)}` : ''} sent ${etDateString(new Date(row.sent_at))}`
     + `${row.annual_prepay ? '; annual prepay invoice' : ''}${lines.length ? `; lines: ${lines.join('; ')}` : ''}`;
 }
-const invoiceRecords = (conn, customerId, after, now) => conn('invoices').where({ customer_id: customerId })
-  .where('sent_at', '>', after).where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
-  .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id', 'invoice_number', 'total', 'line_items',
-    conn.raw('EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id) AS annual_prepay'))
-  .then((rows) => rows.map(({ line_items: lineItems, annual_prepay: annualPrepay, ...row }) => ({ ...row,
-    text: invoiceText({ ...row, line_items: lineItems, annual_prepay: annualPrepay }) })));
+// An invoice's property, through the same links a payment toward it uses
+// (the payment leg below, holdsPaymentProperty): its own visit, else the
+// visit or estimate its setup-fee claim names, else the estimate its
+// annual-prepay term came from. A promise about one property admits only an
+// invoice of that property (scopedToProperty); an invoice none of these tie
+// to a property is that property's only when the customer has no other one.
+const INVOICE_PROPERTY_SQL = `COALESCE(
+  (SELECT ss.property_id FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id),
+  (SELECT COALESCE(sv.property_id, se.property_id) FROM setup_fee_claims sfc
+    LEFT JOIN scheduled_services sv ON sv.id = sfc.scheduled_service_id
+    LEFT JOIN estimates se ON se.id = sfc.estimate_id WHERE sfc.invoice_id = invoices.id LIMIT 1),
+  (SELECT pe.property_id FROM annual_prepay_terms apt JOIN estimates pe ON pe.id = apt.source_estimate_id
+    WHERE apt.prepay_invoice_id = invoices.id LIMIT 1))`;
+const invoiceRecords = (conn, customerId, after, now, scopedProperty) => Promise.all([
+  conn('invoices').where({ customer_id: customerId })
+    .where('sent_at', '>', after).where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
+    .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id', 'invoice_number', 'total', 'line_items',
+      conn.raw('EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id) AS annual_prepay'),
+      conn.raw(`${INVOICE_PROPERTY_SQL} AS property_id`)),
+  scopedProperty
+    ? conn('customer_properties').where({ customer_id: customerId }).limit(2).pluck('id')
+      .then((ids) => (ids.length === 1 && ids[0] === scopedProperty ? scopedProperty : null))
+    : null,
+]).then(([rows, soleProperty]) => rows.map(({ line_items: lineItems, annual_prepay: annualPrepay, ...row }) => ({ ...row,
+  property_id: row.property_id || soleProperty,
+  text: invoiceText({ ...row, line_items: lineItems, annual_prepay: annualPrepay }) })));
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -438,7 +458,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         : handedOffWithin(q, after, now))).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
       .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address'),
     invoice: extendedEvidence(commitment) && staffPromise(commitment)
-      ? invoiceRecords(conn, customerId, after, now)
+      ? invoiceRecords(conn, customerId, after, now, commitment.sms_context?.property_id || null)
       : conn('invoices').where({ customer_id: customerId }).where('sent_at', '>', after)
         .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
         .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
@@ -827,6 +847,10 @@ function scopedToProperty(record, commitment) {
   // property — an office invoice, autopay, a staff-recorded payment (owner
   // ruling 2026-09-27: count it unless it is clearly for another property).
   if (record.type === 'payment') return !propertyId || !witnessProperty || witnessProperty === propertyId;
+  // GATE_PROMISE_RECORD_EVIDENCE rule 1: a promise about one property takes
+  // only an invoice of that property (INVOICE_PROPERTY_SQL, or the customer's
+  // only property); one naming no property takes any of the customer's own.
+  if (record.type === 'invoice') return !propertyId || (!!witnessProperty && String(witnessProperty) === String(propertyId));
   // GATE_SMS_FOLLOWUP_WITNESS_FIX: a request that names no property (the
   // customer has two or more) is answered by any estimate sent to that
   // customer after it; the evidence query is customer-scoped and the model
@@ -844,7 +868,7 @@ function admissibleWitness(record, commitment, records = []) {
   // estimate, and that estimate must itself be an admissible handoff.
   const estimateDelivery = recipientSpecificEstimate(commitment) && record.type === 'email_delivery';
   if (!witnessTypes(commitment).includes(record.type)) return false;
-  if (['estimate', 'visit', 'payment'].includes(record.type) && !scopedToProperty(record, commitment)) return false;
+  if (['estimate', 'visit', 'payment', 'invoice'].includes(record.type) && !scopedToProperty(record, commitment)) return false;
   // A general ask can name an address without asking for delivery to it
   // ("is jane@… the email on my account?"); a person's reply or call back
   // answers it whatever the address (Codex #5169 r1 P2, owner ruling
@@ -1152,6 +1176,15 @@ async function holdsPaymentProperty(trx, invoiceId) {
   return true;
 }
 
+// The invoices whose property links a property-scoped close must hold: the
+// invoice a payment settles, or an invoice witness itself
+// (GATE_PROMISE_RECORD_EVIDENCE rule 1), which rests on the same links.
+function propertyScopedInvoices(commitment, verdict) {
+  if (!commitment.sms_context?.property_id) return [];
+  if (verdict.record_type === 'payment' && verdict.linked_record_type === 'invoice') return [verdict.linked_record_id];
+  return verdict.record_type === 'invoice' ? [verdict.record_id] : [];
+}
+
 // Lock the witness rows a fulfilled verdict rests on, without waiting. False
 // when any is gone or busy (the verdict is then retried on a later tick).
 async function lockWitnessRows(trx, commitment, message, verdict) {
@@ -1185,8 +1218,7 @@ async function lockWitnessRows(trx, commitment, message, verdict) {
     const linkedLock = linkedTable && await trx(linkedTable).where({ id: verdict.linked_record_id }).forUpdate().skipLocked().first('id');
     if (!linkedLock) return false;
   }
-  if (verdict.record_type === 'payment' && verdict.linked_record_type === 'invoice' && commitment.sms_context?.property_id
-    && !await holdsPaymentProperty(trx, verdict.linked_record_id)) return false;
+  for (const invoiceId of propertyScopedInvoices(commitment, verdict)) if (!await holdsPaymentProperty(trx, invoiceId)) return false;
   // The lead that admitted an unowned estimate is a third row this witness
   // depends on: locking it here, after the estimate and under the same no-wait
   // rule, means a racing soft delete either loses the row to us or leaves us

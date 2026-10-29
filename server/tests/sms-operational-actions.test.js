@@ -1888,6 +1888,18 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
     for (const status of ['sent', 'viewed', 'paid', 'overdue']) expect(admissibleWitness({ ...invoice, status }, staff, [invoice])).toBe(true);
   });
 
+  test('rule 1: a promise about one property takes only an invoice of that property; one naming no property takes any', () => {
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    const OTHER_PROPERTY = '00000000-0000-4000-8000-000000000199';
+    const scoped = { ...staff, sms_context: { ...staff.sms_context, property_id: PROPERTY_ID } };
+    expect(admissibleWitness({ ...invoice, property_id: PROPERTY_ID }, scoped, [invoice])).toBe(true);
+    expect(admissibleWitness({ ...invoice, property_id: OTHER_PROPERTY }, scoped, [invoice])).toBe(false);
+    // Tied to no property (the loader gives it the customer's only property; with two it stays null).
+    expect(admissibleWitness({ ...invoice, property_id: null }, scoped, [invoice])).toBe(false);
+    expect(admissibleWitness({ ...invoice, property_id: OTHER_PROPERTY }, staff, [invoice])).toBe(true);
+    expect(admissibleWitness({ ...invoice, property_id: null }, staff, [invoice])).toBe(true);
+  });
+
   test('rule 1: the model must cite the invoice; it grounds only with the gate true, and a person-text shortcut never closes it', () => {
     const verdict = { verdict: 'fulfilled', record_ref: invoice.ref, quote: 'annual prepay invoice' };
     expect(groundFulfillment(verdict, { records: [invoice], failures: [] }, staff)).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
@@ -2013,6 +2025,11 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
         expect(await findOnTrackVisit(conn, { ...promise, sms_context: { ...promise.sms_context, basis } }, message, NOW)).not.toBeNull();
       }
       expect(await findOnTrackVisit(conn, { ...promise, party: 'customer' }, message, NOW)).toBeNull();
+      // Only an overdue row: one not yet due, or with no deadline, has no ring to hold and reads nothing.
+      const quiet = fakeConn([visit()]);
+      expect(await findOnTrackVisit(quiet, { ...promise, due_at: '2040-03-11T16:30:00Z' }, message, NOW)).toBeNull();
+      expect(await findOnTrackVisit(quiet, { ...promise, due_at: null }, message, NOW)).toBeNull();
+      expect(quiet.calls).toEqual([]);
     });
 
     test('no visit still ahead, or a failed read, leaves the ring as it was', async () => {

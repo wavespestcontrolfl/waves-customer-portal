@@ -1402,6 +1402,8 @@ const onTrackWindowEnd = (visit) => {
 async function findOnTrackVisit(conn, commitment, message, now) {
   const mode = promiseRecordMode();
   if (mode === 'off' || commitment.party !== 'waves' || !ON_TRACK_KINDS.includes(commitment.kind)) return null;
+  // Only an overdue ring is held: a row not yet due rings nothing to hold.
+  if (commitment.due_at == null || new Date(commitment.due_at) > now) return null;
   try {
     const sourceAt = new Date(commitment.sms_context?.source_at || message.created_at);
     if (Number.isNaN(sourceAt.getTime())) return null;
@@ -1480,21 +1482,14 @@ async function recordFulfillmentShadow(conn, { current, message, evidence, baseV
   }
 }
 
-// Rule 3, read before the transaction so a failed read can never abort it.
-// onTrack is null with the gate off, inside the window, or with no visit
-// ahead; only 'true' mode holds the bell.
-async function onTrackHold(conn, commitment, message, now, deadlinePassed) {
-  const onTrack = deadlinePassed ? await findOnTrackVisit(conn, commitment, message, now) : null;
-  return { onTrack, holdBell: onTrack?.mode === 'true' };
-}
-
 // The shadow rows of one refresh, written after its transaction so an audit
 // write can never undo a persisted verdict. Shadow mode only; both writers
 // never throw.
-async function recordPromiseRecordShadows(conn, { persisted, rang, closed, onTrack, current, message, evidence, verdict, inWindow, threadOnly, now, verify, budget }) {
+async function recordPromiseRecordShadows(conn, { persisted, rang, onTrack, current, message, evidence, verdict, inWindow, threadOnly, now, verify, budget }) {
   if (!persisted) return;
   if (rang && onTrack?.mode === 'shadow') await recordOnTrackShadow(conn, current, onTrack, now);
-  if (closed || verdict.verdict === 'fulfilled' || inWindow || threadOnly || promiseRecordMode() !== 'shadow') return;
+  // Only a promise the normal check left open (a closed one had a fulfilled verdict).
+  if (verdict.verdict === 'fulfilled' || inWindow || threadOnly || promiseRecordMode() !== 'shadow') return;
   await recordFulfillmentShadow(conn, { current, message, evidence, baseVerdict: verdict, now, verify, eventOnly: false, budget });
 }
 
@@ -1542,8 +1537,10 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
   if (threadOnly && verdict.verdict !== 'fulfilled') return { outcome: settle('no_witness') };
   let closed = false;
   // GATE_PROMISE_RECORD_EVIDENCE rule 3: an overdue promise with a visit still
-  // to come does not ring until that visit's window ends.
-  const { onTrack, holdBell } = await onTrackHold(conn, current, message, now, deadlinePassed);
+  // to come does not ring until that visit's window ends. Read before the
+  // transaction so a failed read can never abort it; null with the gate off.
+  const onTrack = await findOnTrackVisit(conn, current, message, now);
+  const holdBell = onTrack?.mode === 'true';
   let rang = false;
   // Only a verdict this transaction actually persisted counts as handled.
   // Every early exit — a relinked or changed source, the gate turning off, a
@@ -1597,7 +1594,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       rang = true;
     }
   });
-  await recordPromiseRecordShadows(conn, { persisted, rang, closed, onTrack, current, message, evidence, verdict,
+  await recordPromiseRecordShadows(conn, { persisted, rang, onTrack, current, message, evidence, verdict,
     inWindow, threadOnly, now, verify, budget: shadowBudget });
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
