@@ -222,6 +222,26 @@ function finalTextFor(action, text, input) {
   return { finalText, rawText: finalText };
 }
 
+// Links the sender rewrites at delivery (send-customer-message.js): the portal-link wrap to tracked short links, and for receipt-type
+// purposes the estimate-link rewrite. Decided by the sender's own read-only predicates (wrappableSpans, withheldLinkPolicyForSmsPurpose,
+// rewriteWithheldEstimateLinks), on the delivered text; nothing is minted or written. No link that qualifies, no note.
+async function deliveryLinkNotes(text, { audience, purpose, messageType }) {
+  const notes = [];
+  try {
+    if (require('../messaging/sms-link-wrap').wrappableSpans({ body: text, channel: 'sms', audience, purpose }).length) {
+      notes.push('The portal link goes out as a tracked short link.');
+    }
+    const Annual = require('../estimate-annual-guard');
+    if (Annual.withheldLinkPolicyForSmsPurpose(purpose, messageType) === 'rewrite') {
+      const rewritten = await Annual.rewriteWithheldEstimateLinks({ db, text });
+      if (rewritten.rewrittenIds.length) notes.push('An estimate link that is no longer offered goes out as the portal home link.');
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar:message-drafts] link note unavailable (${err?.code || err?.name || 'error'})`);
+  }
+  return notes;
+}
+
 async function buildPlan(toolName, input = {}) {
   const action = TOOL_ACTION[toolName];
   const loaded = await loadPlannableDraft(input);
@@ -242,6 +262,8 @@ async function buildPlan(toolName, input = {}) {
   }
 
   const customerId = recipient.customerId || draft.customer_id || null;
+  const linkNotes = action === 'ignore' ? []
+    : await deliveryLinkNotes(finalText, { audience: customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: action === 'revise' ? 'ai_revised' : 'ai_approved' });
   const customer = customerId ? await db('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
   const name = fullName(customer);
   const toPhone = recipient.toPhone || null;
@@ -262,6 +284,7 @@ async function buildPlan(toolName, input = {}) {
     final_text: finalText,
     char_count: finalText.length,
     newer_inbound: newerInbound,
+    link_notes: linkNotes,
     sends_to_customer: action !== 'ignore',
     // What the confirm re-checks: every fact the card showed. The exact texts and the full number ride here only.
     _version: {
@@ -275,6 +298,7 @@ async function buildPlan(toolName, input = {}) {
       customer_name: name,
       inbound_message: inbound,
       latest_inbound_id: latest ? latest.id : null,
+      link_notes: linkNotes,
     },
     note: action === 'ignore'
       ? 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this suggested reply and sends nothing.'
@@ -382,6 +406,7 @@ function cardLines(toolName, preview) {
     lines.push({ kind: 'comms', text: 'Nothing is sent: no text, email or call goes to anyone. The draft is marked rejected and no page restores it.' });
   } else {
     lines.push({ kind: 'comms', text: 'Goes out through the office texting path. Quiet hours, opt-outs and rental-property checks still apply; if one blocks it, nothing is sent and the reply stays waiting.' });
+    for (const note of preview.link_notes || []) lines.push({ kind: 'comms', text: note });
     lines.push({ kind: 'comms', text: 'The text cannot be unsent.' });
   }
   return lines;

@@ -288,6 +288,65 @@ describe('the card shows what the sender delivers', () => {
   });
 });
 
+// The sender shortens owned portal links at delivery (sms-link-wrap.js, GATE_SMS_LINK_WRAP) and, for receipt-type purposes, rewrites withheld
+// estimate links. The card says so, judged by the sender's own read-only predicates; no link that qualifies, no note.
+describe('links the sender rewrites at delivery', () => {
+  const NOTE = 'The portal link goes out as a tracked short link.';
+  const PORTAL = 'Pay here: https://portal.wavespestcontrol.com/pay/abc123def';
+  afterEach(() => { delete process.env.GATE_SMS_LINK_WRAP; jest.restoreAllMocks(); });
+
+  test('wrap gate on and an owned portal link in the text: one plain line on the card, pinned, nothing minted', async () => {
+    process.env.GATE_SMS_LINK_WRAP = 'true';
+    const shortUrl = require('../services/short-url');
+    const mint = jest.spyOn(shortUrl, 'createShortCode');
+    state.draft.draft_response = PORTAL;
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card.link_notes).toEqual([NOTE]);
+    expect(card._version.link_notes).toEqual([NOTE]);
+    expect(cardLines('approve_suggested_reply', card).map((l) => l.text)).toContain(NOTE);
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  test('a revision with a portal link carries the note too', async () => {
+    process.env.GATE_SMS_LINK_WRAP = 'true';
+    const card = await run('revise_suggested_reply', { draft_id: ID, revised_text: 'Pay here: https://portal.wavespestcontrol.com/pay/abc123def' });
+    expect(card.link_notes).toEqual([NOTE]);
+  });
+
+  test.each([
+    ['the wrap gate is off', false, 'Pay here: https://portal.wavespestcontrol.com/pay/abc123def'],
+    ['a plain website link (not an owned portal link)', true, 'See https://wavespestcontrol.com/pest-control/ for more.'],
+    ['a review link (the sender leaves it)', true, 'Rate us: https://portal.wavespestcontrol.com/rate/abc123def'],
+    ['no link at all', true, 'Yes, Thursday works. See you then!'],
+  ])('no note when %s', async (_label, gateOn, text) => {
+    if (gateOn) process.env.GATE_SMS_LINK_WRAP = 'true';
+    state.draft.draft_response = text;
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card.link_notes).toEqual([]);
+    expect(cardLines('approve_suggested_reply', card).map((l) => l.text).join(' ')).not.toMatch(/short link|portal home/);
+  });
+
+  test('ignore has no note', async () => {
+    process.env.GATE_SMS_LINK_WRAP = 'true';
+    state.draft.draft_response = PORTAL;
+    expect((await run('ignore_suggested_reply', { draft_id: ID })).link_notes).toEqual([]);
+  });
+
+  test('an estimate link the sender would rewrite (receipt-type purpose, link no longer offered) is named; otherwise not', async () => {
+    const Annual = require('../services/estimate-annual-guard');
+    jest.spyOn(Annual, 'withheldLinkPolicyForSmsPurpose').mockReturnValue('rewrite');
+    const rewrite = jest.spyOn(Annual, 'rewriteWithheldEstimateLinks').mockResolvedValue({ text: 'x', rewrittenIds: ['est-1'] });
+    expect((await run('approve_suggested_reply', { draft_id: ID })).link_notes).toEqual(['An estimate link that is no longer offered goes out as the portal home link.']);
+    rewrite.mockResolvedValue({ text: 'x', rewrittenIds: [] });
+    expect((await run('approve_suggested_reply', { draft_id: ID })).link_notes).toEqual([]);
+  });
+
+  test('the bar\'s own send purposes are the refuse policy: the estimate rewrite never applies, so no estimate note', async () => {
+    const Annual = require('../services/estimate-annual-guard');
+    expect(Annual.withheldLinkPolicyForSmsPurpose('conversational', 'ai_approved')).toBe('refuse');
+  });
+});
+
 describe('revise_suggested_reply preview', () => {
   const REVISED = 'Thursday at 10 works. See you then!';
   test('the card shows the final text and the original suggestion', async () => {

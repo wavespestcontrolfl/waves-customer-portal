@@ -116,6 +116,21 @@ function errLabel(err) {
   return String((err && (err.code || err.name)) || 'error').slice(0, 40);
 }
 
+// The portal-link spans wrapPortalLinks would shorten in `body` (read only: no code is minted, nothing is written). Empty when the gate is
+// off, the send is ineligible or reconciles its own body, or no owned portal link qualifies. Shared by the send and by read-only
+// previews (the Intelligence Bar card), so both judge a link the same way.
+function wrappableSpans({ body, channel, audience, purpose = null, hasMedia = false }) {
+  if (!eligible({ body, channel, audience, hasMedia }) || BODY_RECONCILED_PURPOSES.has(purpose) || !wrapGateLive()) return [];
+  let spans;
+  try {
+    spans = require('../composer-customer-links').ownedPortalLinkSpans(body);
+  } catch (err) {
+    logger.warn(`[sms-link-wrap] link recognition failed, body unchanged: ${errLabel(err)}`);
+    return [];
+  }
+  return spans.filter((span) => !EVIDENCE_LINKED_FAMILIES.has(String(span.family)) && !REVIEW_LINK_RE.test(span.url));
+}
+
 /**
  * Rewrite eligible portal links in `body`. Returns { body, codes } — `codes`
  * are the short codes minted for THIS body, to stamp after an accepted send.
@@ -124,16 +139,7 @@ function errLabel(err) {
  */
 async function wrapPortalLinks({ body, channel, audience, purpose = null, hasMedia = false, customerId = null, leadId = null }) {
   const unchanged = { body, codes: [] };
-  if (!eligible({ body, channel, audience, hasMedia }) || BODY_RECONCILED_PURPOSES.has(purpose) || !wrapGateLive()) return unchanged;
-
-  let spans;
-  try {
-    spans = require('../composer-customer-links').ownedPortalLinkSpans(body);
-  } catch (err) {
-    logger.warn(`[sms-link-wrap] link recognition failed, body unchanged: ${errLabel(err)}`);
-    return unchanged;
-  }
-  spans = spans.filter((span) => !EVIDENCE_LINKED_FAMILIES.has(String(span.family)) && !REVIEW_LINK_RE.test(span.url));
+  const spans = wrappableSpans({ body, channel, audience, purpose, hasMedia });
   if (!spans.length) return unchanged;
 
   const { createShortCode } = require('../short-url');
@@ -225,4 +231,4 @@ async function settleWrappedLinks(codes, outcome = {}) {
   }
 }
 
-module.exports = { wrapPortalLinks, settleWrappedLinks, _internals: { eligible, familyLabel, bodyCarriesCode } };
+module.exports = { wrapPortalLinks, wrappableSpans, settleWrappedLinks, _internals: { eligible, familyLabel, bodyCarriesCode } };
