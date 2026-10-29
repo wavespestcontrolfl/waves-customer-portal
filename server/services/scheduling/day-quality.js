@@ -399,7 +399,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   }
   const result = { range: { from, to }, units: 'minutes', days,
     basis: 'planned_schedule_not_actual_field_time',
-    driveModel: require('../../config/feature-gates').gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
+    driveModel: require('./drive-clock').driveModelLabel(),
     note: 'Gross gaps and remaining minute budgets are not bookable slots. Insertion needs the candidate location, duration and scheduling constraints.' };
   return result;
 }

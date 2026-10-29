@@ -113,11 +113,19 @@ const METRICS = [
     m?.spanCoverage?.unit === 'rows' ? 'rows timed' : 'stops timed') },
 ];
 
+// The footer's note for the current drive model (GATE_DRIVE_CLOCK adds drive_clock).
+const DRIVE_MODEL_NOTE = {
+  drive_clock: 'drive clock (fitted from our own GPS, parking time added to Google road times)',
+  calibrated: 'calibrated (fitted from real trips)',
+  legacy: 'legacy (straight-line estimate)',
+};
+
 // row.driveModel is THIS row's own saved/current drive model, not the
 // footer's single global value — a past row's snapshot can have been
 // captured under a different drive-time model than the one live today.
 function modelLabel(value) {
   if (value === 'calibrated') return 'calibrated';
+  if (value === 'drive_clock') return 'drive clock';
   if (value === 'legacy') return 'legacy';
   return 'unknown';
 }
@@ -273,7 +281,7 @@ export default function DayScorecardPanel() {
         </div>
       )}
       <div className={cn('text-14 text-ink-tertiary mt-3')}>
-        Future/today drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
+        Future/today drive model: {DRIVE_MODEL_NOTE[request.data?.driveModel] || DRIVE_MODEL_NOTE.legacy}.
         {' '}Past rows label their own saved model instead. Actual drive minutes exclude personal and commute trips; unclassified trips are counted as day driving.
       </div>
       {plannedOnSiteNote && <div className="text-14 text-ink-tertiary mt-3">{plannedOnSiteNote}</div>}

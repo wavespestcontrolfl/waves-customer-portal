@@ -145,3 +145,78 @@ test('an aborted signal sends no queued request', async () => {
   expect(none).not.toHaveBeenCalled();
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
+
+// GATE_DRIVE_CLOCK (owner 2026-10-28): the model fallback uses the GPS-fitted
+// pair, and a Google leg carries the park minutes at READ time, once. Off =
+// today's numbers.
+describe('GATE_DRIVE_CLOCK', () => {
+  const CLOCK = 'GATE_DRIVE_CLOCK';
+  const to = { lat: 27.5, lng: -82.4 }; // 4.64 straight-line miles from HQ
+  const answerWith = (duration) => jest.fn(async () => ({ ok: true, json: async () => [
+    { originIndex: 0, destinationIndex: 0, status: {}, condition: 'ROUTE_EXISTS', duration },
+  ] }));
+  beforeEach(() => { process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key'; });
+  afterEach(() => {
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    delete process.env[CLOCK];
+    delete process.env.DRIVE_CLOCK_PARK_MINUTES;
+    delete process.env.DRIVE_CLOCK_FIXED_MINUTES;
+    delete process.env.DRIVE_CLOCK_MINUTES_PER_MILE;
+  });
+
+  test('the model fallback: calibrated pair off, fitted pair on, same-place 0', () => {
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    const provider = RouteOptimizer.createSchedulingTravel({ now: () => now.getTime() });
+    const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
+    expect(provider.lookup(leg)).toMatchObject({ minutes: 16, source: 'conservative_model' }); // ceil(4.25 + 2.35 x 4.64)
+    process.env[CLOCK] = 'true';
+    expect(provider.lookup(leg)).toMatchObject({ minutes: 19, source: 'conservative_model' }); // ceil(7.9 + 2.2 x 4.64)
+    process.env.DRIVE_CLOCK_FIXED_MINUTES = '10';
+    expect(provider.lookup(leg).minutes).toBe(21);
+    expect(provider.lookup({ ...leg, to: RouteOptimizer.HQ }).minutes).toBe(0);
+  });
+
+  test('a Google answer: raw off, +4 on, and never stored with the 4', async () => {
+    const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('601s'), now: () => now.getTime() });
+    const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
+    await provider.preload([leg]);
+    expect(provider.lookup(leg)).toEqual({ minutes: 11, source: 'google_traffic', reason: null });
+    process.env[CLOCK] = 'true';
+    expect(provider.lookup(leg)).toEqual({ minutes: 15, source: 'google_traffic', reason: null });
+    expect(provider.lookup(leg).minutes).toBe(15); // a second read adds nothing more
+    expect(provider.lookupRaw(leg).minutes).toBe(11);
+    process.env.DRIVE_CLOCK_PARK_MINUTES = '6';
+    expect(provider.lookup(leg).minutes).toBe(17);
+    process.env.DRIVE_CLOCK_PARK_MINUTES = '25'; // out of bounds: the default
+    expect(provider.lookup(leg).minutes).toBe(15);
+    delete process.env[CLOCK];
+    expect(provider.lookup(leg).minutes).toBe(11);
+  });
+
+  test('the road time without traffic gets it too', async () => {
+    const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('541s'), now: () => now.getTime(), traffic: false });
+    const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
+    await provider.preload([leg]);
+    process.env[CLOCK] = 'true';
+    expect(provider.lookup(leg)).toMatchObject({ minutes: 14, source: 'google_road' });
+  });
+
+  test('a same-place Google leg stays 0', async () => {
+    const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('0s'), now: () => now.getTime() });
+    const leg = { date, from: RouteOptimizer.HQ, to: RouteOptimizer.HQ, departureMin: 480 };
+    await provider.preload([leg]);
+    process.env[CLOCK] = 'true';
+    expect(provider.lookup(leg)).toMatchObject({ minutes: 0, source: 'google_traffic' });
+  });
+
+  test('a leg Google did not answer never gets the park minutes', async () => {
+    const fetchImpl = jest.fn(async () => { throw Object.assign(new Error('boom'), { name: 'TimeoutError' }); });
+    const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl, now: () => now.getTime() });
+    const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
+    process.env[CLOCK] = 'true'; // preload stores the model's answer for the leg
+    await provider.preload([leg]);
+    // The model's 19 (fitted pair), not 19 + 4.
+    expect(provider.lookup(leg)).toMatchObject({ minutes: 19, source: 'conservative_model' });
+    expect(provider.lookup({ ...leg, to: { lat: 0, lng: 0 } })).toMatchObject({ minutes: Infinity, source: 'unverified' });
+  });
+});

@@ -287,3 +287,83 @@ describe('drive-time estimator', () => {
     expect(reverted).toBe(legacy);
   });
 });
+
+// GATE_DRIVE_CLOCK (owner 2026-10-28, "add drive clock if its free"): the
+// calibrated branch swaps its pair for the one fitted on our own GPS. Off =
+// the calibrated numbers above, byte for byte; the legacy branch never moves.
+describe('GATE_DRIVE_CLOCK estimate legs', () => {
+  const CLOCK = 'GATE_DRIVE_CLOCK';
+  const SETTINGS = ['DRIVE_CLOCK_FIXED_MINUTES', 'DRIVE_CLOCK_MINUTES_PER_MILE', 'DRIVE_CLOCK_PARK_MINUTES'];
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  afterEach(() => {
+    delete process.env[CLOCK];
+    for (const name of SETTINGS) delete process.env[name];
+  });
+
+  test('on: 7.9 + 2.2 per straight-line mile, same rounding', () => {
+    process.env[CLOCK] = 'true';
+    expect(milesToDriveMinutes(10)).toBe(30); // 29.9
+    expect(milesToDriveMinutes(5)).toBe(19); // 18.9
+    expect(milesToDriveMinutes(0.5)).toBe(9); // 9.0
+  });
+
+  test('off (or unset): the calibrated pair, as before', () => {
+    expect(milesToDriveMinutes(10)).toBe(28);
+    process.env[CLOCK] = 'false';
+    expect(milesToDriveMinutes(5)).toBe(16);
+  });
+
+  test('a same-place or missing leg stays 0', () => {
+    process.env[CLOCK] = 'true';
+    expect(milesToDriveMinutes(0)).toBe(0);
+    expect(milesToDriveMinutes(1e-7)).toBe(0);
+    expect(milesToDriveMinutes(NaN)).toBe(0);
+  });
+
+  test('the legacy branch (calibration off) does not move', () => {
+    process.env[CLOCK] = 'true';
+    delete process.env[GATE];
+    expect(milesToDriveMinutes(10)).toBe(28);
+    expect(milesToDriveMinutes(5)).toBe(14);
+  });
+
+  test('settings are read at call time', () => {
+    process.env[CLOCK] = 'true';
+    process.env.DRIVE_CLOCK_FIXED_MINUTES = '10';
+    process.env.DRIVE_CLOCK_MINUTES_PER_MILE = '3';
+    expect(milesToDriveMinutes(10)).toBe(40);
+    delete process.env.DRIVE_CLOCK_FIXED_MINUTES;
+    expect(milesToDriveMinutes(10)).toBe(38); // fixed back to 7.9, rate 3
+  });
+
+  test.each([
+    ['DRIVE_CLOCK_FIXED_MINUTES', ['abc', '', ' ', '-1', '31', 'Infinity', 'NaN']],
+    ['DRIVE_CLOCK_MINUTES_PER_MILE', ['abc', '', '0.4', '6.1', '-2', 'Infinity']],
+  ])('%s outside its bounds or not a number uses the default', (name, values) => {
+    process.env[CLOCK] = 'true';
+    for (const value of values) {
+      process.env[name] = value;
+      expect(milesToDriveMinutes(10)).toBe(30);
+    }
+  });
+
+  test('the bounds themselves are allowed', () => {
+    process.env[CLOCK] = 'true';
+    process.env.DRIVE_CLOCK_FIXED_MINUTES = '0';
+    process.env.DRIVE_CLOCK_MINUTES_PER_MILE = '0.5';
+    expect(milesToDriveMinutes(10)).toBe(5);
+    process.env.DRIVE_CLOCK_FIXED_MINUTES = '30';
+    process.env.DRIVE_CLOCK_MINUTES_PER_MILE = '6';
+    expect(milesToDriveMinutes(10)).toBe(90);
+  });
+
+  test('the saved drive_model label reads drive_clock only while the gate is on', () => {
+    const { driveModelLabel } = require('../services/scheduling/drive-clock');
+    expect(driveModelLabel()).toBe('calibrated');
+    process.env[CLOCK] = 'true';
+    expect(driveModelLabel()).toBe('drive_clock');
+    delete process.env[CLOCK];
+    delete process.env[GATE];
+    expect(driveModelLabel()).toBe('legacy');
+  });
+});

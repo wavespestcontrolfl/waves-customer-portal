@@ -3430,6 +3430,14 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // DRIVE CLOCK (owner 2026-10-28, "add drive clock if its free"): every drive
+  // leg in the scheduling math carries what our own GPS measured (estimate legs
+  // 7.9 + 2.2 per straight-line mile, Google legs +4 minutes of parking). Read
+  // at CALL time via gateEnvValue (scheduling/drive-clock.js); this entry is for
+  // logGateStatus only. Moves scheduling numbers only; sends nothing. Dark.
+  // Kill switch: unset GATE_DRIVE_CLOCK.
+  driveClock: gateEnvValue('GATE_DRIVE_CLOCK'),
+
   // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
   // stops on a tech's day start within 30 minutes of each other, the one
   // closer to the previous stop shows first, instead of falling back to
