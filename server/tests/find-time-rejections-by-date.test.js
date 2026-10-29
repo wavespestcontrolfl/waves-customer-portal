@@ -105,6 +105,20 @@ test('the capacity finder splits its refusal counts by date', async () => {
   expect(summed).toEqual(result.rejections);
 });
 
+// Codex #6932 r3: the capacity finder forwards the Quick Move's current-stop
+// continuation too; any other capacity caller keeps it off.
+test('the capacity finder forwards fromActiveStop only when asked', async () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots({ ...BASE, fromActiveStop: true });
+  expect(loadArrivalRouteContext.mock.calls.length).toBeGreaterThan(0);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+  loadArrivalRouteContext.mockClear();
+  await findAvailableSlots(BASE);
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === false)).toBe(true);
+});
+
 test('an advisory caller spends none of the shared Google drive-time allowance', async () => {
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   const { createSchedulingTravel } = require('../services/route-optimizer');
@@ -186,6 +200,27 @@ test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', a
   } finally {
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;
+    spy.mockRestore();
+  }
+});
+
+// The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES) continues today's route
+// from the current stop on the model: no Google travel source, no re-check.
+test('fromActiveStop without the picker road check: the current stop, no Google', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '09:00', windowEnd: '10:00', fit: { ...fit, travelSource: undefined } }], evaluated: 1, rejections: {} });
+  try {
+    await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(3), fromActiveStop: true });
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
+  } finally {
     spy.mockRestore();
   }
 });

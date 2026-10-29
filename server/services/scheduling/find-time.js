@@ -189,8 +189,9 @@ async function findArrivalWindowSlots(opts) {
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
         // GATE_PICKER_ROAD_CHECK: today's route under way continues from
-        // the tech's current stop.
-        fromActiveStop: roadCheck,
+        // the tech's current stop. `fromActiveStop` asks for that alone, on
+        // the model (the tech Quick Move, GATE_TECH_MOVE_ROUTE_TIMES).
+        fromActiveStop: roadCheck || opts.fromActiveStop === true,
       });
       if (!context) continue;
       // A whole visit: the technician must be able to do every service on it
@@ -295,6 +296,9 @@ async function findCapacitySlots(opts) {
         // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): the night tool
         // passes the Settings time; every other caller keeps 08:00.
         vanDepartureMin: opts.arrivalSearch === true ? opts.departureMinutes : undefined,
+        // The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES): today's route
+        // continues from the current stop, as on the non-capacity path above.
+        fromActiveStop: opts.fromActiveStop === true,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
           // Same as the non-capacity path above.
