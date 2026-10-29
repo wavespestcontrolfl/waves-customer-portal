@@ -548,7 +548,9 @@ postgres('payroll commission ledger', () => {
       await payment(cust, inv, '2026-09-15', '100.00', { status: 'paid' });
       const created = await draft(W1);
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
-      expect(await entries()).toHaveLength(1);
+      // The disputed and the refunded payment are written at 0 with their refund, so no later sync takes them for new money.
+      expect((await entries()).map((e) => [Number(e.counted_cents), Number(e.refund_counted_cents)]).sort((a, b) => a[0] - b[0]))
+        .toEqual([[0, 10000], [0, 10000], [10000, 0]]);
     });
   });
 
@@ -759,15 +761,32 @@ postgres('payroll commission ledger', () => {
       expect(await entryOf(oldPayment)).toEqual([100000, 10000]);
     });
 
-    it('keeps the full commission of a payment first seen after the 12 months when its refund was recorded after them', async () => {
+    it('counts a payment first seen after the 12 months net of what is refunded then: nothing was paid to take back', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, W1);
       const cust = await customer();
       const oldPayment = await oldSale(tech, cust);
       await refund(oldPayment, '1000.00', { updated_at: '2026-03-01T15:00:00Z' });
       const run1 = await draft(W1);
-      expect(commissionOf(run1.body.run, 'Sample Alpha')).toBe(10000);
-      expect(await entryOf(oldPayment)).toEqual([100000, 10000]);
+      expect(commissionOf(run1.body.run, 'Sample Alpha')).toBe(0);
+      expect(await entryOf(oldPayment)).toEqual([0, 0]);
+    });
+
+    it('never pays a payment refunded in full when first seen inside the 12 months, in any later sync', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, W1);
+      await approvedWeek(tech, W2);
+      const cust = await customer();
+      const paid = await payment(cust, await soldAgain(cust, tech, ACCEPTED), '2026-09-16', '1000.00');
+      await refund(paid, '1000.00');
+      const run1 = await draft(W1);
+      expect(commissionOf(run1.body.run, 'Sample Alpha')).toBe(0);
+      expect((await finalize(run1.body.run.id)).status).toBe(200);
+      // A later sync after the 12 months (the tests' today moved past 2027-08-09) still reads the stored refund.
+      nowSpy.mockReturnValue(Date.parse('2027-09-01T16:00:00Z'));
+      const run2 = await draft(W2);
+      expect(commissionOf(run2.body.run, 'Sample Alpha')).toBe(0);
+      expect(await entryOf(paid)).toEqual([0, 0]);
     });
 
     it('counts a payment again when a dispute that took it off is won', async () => {
@@ -792,7 +811,7 @@ postgres('payroll commission ledger', () => {
       const disputed = await payment(cust, await mintedInvoice(cust, est, { subtotal: '1000.00' }), '2026-09-16', '1000.00', { status: 'disputed' });
       const created = await draft(W1);
       expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(0);
-      expect(await entries()).toHaveLength(0);
+      expect((await entries()).map((e) => [Number(e.counted_cents), Number(e.refund_counted_cents)])).toEqual([[0, 100000]]);
       await trx('payments').where({ id: disputed }).update({ status: 'paid' });
       const won = await recompute(created.body.run.id);
       expect(commissionOf(won.body.run, 'Sample Alpha')).toBe(10000);
@@ -1199,6 +1218,24 @@ postgres('payroll commission ledger', () => {
       // A second sync never adds the same payment and invoice again.
       expect((await recompute(created.body.run.id)).status).toBe(200);
       expect(await entries()).toHaveLength(2);
+    });
+
+    it('counts only the settlement row of a statement, never a webhook marker written before it', async () => {
+      const { cust, est } = await soldWorld();
+      const { statementId, child, settle } = await statementWorld();
+      await child(cust, await visit(cust, est), '400.00');
+      // stripe-webhook.js writes these on a statement before a validated settlement: no money was collected on them.
+      await settle('400.00', { status: 'disputed', base_amount_cents: null, description: `Payer statement S-${statementId} disputed charge (pre-settlement)` });
+      await settle('400.00', { status: 'disputed', base_amount_cents: null, description: `Payer statement S-${statementId} dispute won before settlement (marker)` });
+      await settle('400.00', { status: 'refunded', base_amount_cents: null, refund_amount: '400.00', description: `Payer statement S-${statementId} fully refunded` });
+      // First seen after the 12 months (2027-08-09), when a refund seen later is never taken back.
+      nowSpy.mockReturnValue(Date.parse('2027-09-01T16:00:00Z'));
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(0);
+      expect(await entries()).toHaveLength(0);
+      // The office's offline reconcile settles it (settleStatementPaid with no base amount): that row counts.
+      await settle('400.00', { base_amount_cents: null, description: `Payer statement S-${statementId} settlement (check)` });
+      const [run] = await trx('payroll_runs').select('id');
+      expect(commissionOf((await recompute(run.id)).body.run, 'Sample Alpha')).toBe(4000);
     });
 
     it('spreads the statement payment over the invoices that are not void, and follows a refund of it', async () => {

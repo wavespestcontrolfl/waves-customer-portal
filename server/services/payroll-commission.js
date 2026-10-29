@@ -466,6 +466,13 @@ const COUNTED_STATUSES = ['paid', 'refunded', 'disputed'];
 // the selling technician could earn on money only they attest. It is not counted; the owner adds a manual commission
 // pay line once the cash is confirmed. Office-recorded payments (record-payment, admin only) and processor payments count.
 const SELF_ATTESTED_SOURCE = 'scheduled_service_prepaid';
+// A payer statement's settlement row is the one settleStatementPaid writes, "Payer statement S-<id> settlement (<method>)",
+// for the card webhook and the office's offline reconcile alike (it takes over a marker row on the same PaymentIntent).
+// Any other row on a statement is a webhook marker written before a validated settlement (a refund or a dispute that
+// arrived first, stripe-webhook.js) and holds no collected money.
+const STATEMENT_SETTLEMENT_LIKE = "'Payer statement S-' || p.statement_id::text || ' settlement (%'";
+const settledStatementRow = (payment) => !payment.statement_id
+  || String(payment.description || '').startsWith(`Payer statement S-${payment.statement_id} settlement (`);
 
 /**
  * The base of a payment (the card surcharge is not in base) the row shows as refunded, in cents: the refunded cash
@@ -522,7 +529,11 @@ async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd
   return trx('payments as p')
     .where(function paidForSale() {
       this.whereIn('p.customer_id', customerIds);
-      if (statementIds.length) this.orWhereIn('p.statement_id', statementIds);
+      if (statementIds.length) {
+        this.orWhere(function settledStatement() {
+          this.whereIn('p.statement_id', statementIds).whereRaw(`p.description LIKE ${STATEMENT_SETTLEMENT_LIKE}`);
+        });
+      }
     })
     .whereBetween('p.payment_date', [sale.accepted_on, to])
     .whereIn('p.status', COUNTED_STATUSES)
@@ -538,14 +549,16 @@ async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd
  * pays one of the estimate's invoices (a statement payment can pay several). `skip` holds the payment ids and the
  * deposit keys (depositKey) already counted.
  */
-async function newFigures(trx, sale, weekEnd, skip, today) {
+async function newFigures(trx, sale, weekEnd, skip) {
   const lineage = await lineageOf(trx, sale);
   const invoices = await estimateInvoices(trx, sale, lineage);
   if (!invoices.size) return [];
   const figures = [];
+  // The first sight of a payment always counts it net of what is refunded then: the 12-month rule only keeps a refund
+  // seen later from taking back what was already counted (countedRefund).
   const add = (payment, source, { invoice, part, of }) => {
     const snap = { preTax: invoice.preTax, tax: invoice.tax, own: invoice.share.own, all: invoice.share.all, part, of };
-    const refund = countedRefund(payment, 0n, sale, today);
+    const refund = refundedNow(payment);
     figures.push({ source, paymentId: payment.id, paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
   };
   const to = sale.window_end < weekEnd ? sale.window_end : weekEnd;
@@ -605,7 +618,9 @@ async function entryFigures(trx, sale, entries, weekEnd, today) {
   return due.map((entry) => {
     const previous = BigInt(entry.refund_counted_cents);
     const payment = money.get(moneyKey(entry));
-    if (!payment || !COUNTED_STATUSES.includes(payment.status)) return { entry, counted: 0n, commission: 0n, refund: previous };
+    if (!payment || !COUNTED_STATUSES.includes(payment.status) || !settledStatementRow(payment)) {
+      return { entry, counted: 0n, commission: 0n, refund: previous };
+    }
     const snap = {
       preTax: BigInt(entry.pre_tax_cents), tax: BigInt(entry.tax_cents), own: BigInt(entry.share_own_cents), all: BigInt(entry.share_all_cents),
       part: bigOrNull(entry.statement_part_cents), of: bigOrNull(entry.statement_total_cents),
@@ -640,8 +655,10 @@ async function syncEntries(trx, sale, weekEnd, today) {
   const figures = await newFigures(trx, sale, weekEnd, {
     payments: new Set(ofSource('payment').map((entry) => entry.payment_id)),
     deposits: new Set(ofSource('estimate_deposit').map((entry) => depositKey(entry.payment_id, entry.invoice_id))),
-  }, today);
-  const inserts = figures.filter((figure) => figure.counted > 0n).map((figure) => entryRow(sale, figure));
+  });
+  // A payment counted 0 (refunded in full when first seen) is written too, with its refund, so a later sync never takes
+  // it for new money; if the refund is later reversed, the money kept counts again.
+  const inserts = figures.map((figure) => entryRow(sale, figure));
   if (inserts.length) await trx('commission_entries').insert(inserts);
   let updated = 0;
   for (const { entry, counted, commission, refund } of await entryFigures(trx, sale, existing, weekEnd, today)) {
