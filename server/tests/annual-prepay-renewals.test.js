@@ -659,6 +659,7 @@ describe('annual prepay renewal helpers', () => {
 
   describe('lawn_rounds_9 coverage (lawn 9x rounds)', () => {
     const { lawnRoundDate, lawnRoundDateFrom, roundOf } = require('../services/lawn-rounds');
+    const { coverageScheduleDates } = _private;
     const ROUNDS_COLS = {
       scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, is_recurring: {},
       recurring_pattern: {}, recurring_interval_days: {}, recurring_parent_id: {},
@@ -877,6 +878,105 @@ describe('annual prepay renewal helpers', () => {
       }, undefined, { today: '2026-08-01', gapFillOnly: true, seedNotBefore: '2026-08-01' });
       expect(result.targetDates).toEqual(expected);
       expect(inserts.map((q) => q.insert.mock.calls[0][0].scheduled_date)).toEqual(expected.slice(1));
+    });
+
+    describe('a NEW rounds series parent stores the round anchor the dates were placed from', () => {
+      const seedInserts = (dates) => dates.map((d, i) => query({ returning: [{ id: `svc-i${i}`, scheduled_date: d }] }));
+      const insertedRows = (inserts) => inserts.map((q) => q.insert.mock.calls[0][0]);
+
+      test('an activated term whose rows were all cancelled: the new parent carries the term anchor, so later renders keep the seeded dates', async () => {
+        const anchor = '2027-06-15';
+        const dates = Array.from({ length: 9 }, (_, i) => lawnRoundDate(anchor, i));
+        // Past targets (before today) are not seeded; the first future target becomes the parent.
+        const inserts = seedInserts(dates.slice(1));
+        setDbQueues({ scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [] }), ...inserts] });
+        const termRow = {
+          id: 'term-r7', customer_id: 'customer-r', term_start: anchor, term_end: '2028-06-14',
+          coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9',
+        };
+        const result = await _private.ensureCoverageRowsForTerm(termRow, undefined, { today: '2027-07-01', gapFillOnly: true, seedNotBefore: '2027-07-01' });
+        expect(result.unseededPastDates).toEqual([dates[0]]);
+        const rows = insertedRows(inserts);
+        expect(rows[0].scheduled_date).toBe(dates[1]);
+        expect(rows[0].recurring_round_anchor_date).toBe(anchor);
+        expect(rows[0].recurring_parent_id).toBeUndefined();
+        expect(rows[1].scheduled_date).toBe(dates[2]);
+        expect(rows[1].recurring_parent_id).toBe('svc-i0');
+        expect(rows.slice(1).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
+
+        // A later refresh over the new rows reads the stored anchor and lists the SEEDED dates.
+        const created = rows.map((r, i) => ({ ...r, id: `svc-i${i}` }));
+        setDbQueues({ scheduled_services: [query({ first: { id: 'svc-i0', scheduled_date: dates[1], recurring_round_anchor_date: rows[0].recurring_round_anchor_date } })] });
+        const roundAnchor = await _private.seriesRoundAnchorForTerm({
+          term: termRow, coverageCadence: 'lawn_rounds_9', existingRows: created, cols: ROUNDS_COLS,
+        });
+        expect(roundAnchor).toBe(anchor);
+        const listed = coverageScheduleDates(anchor, 9, 'lawn_rounds_9', null, { roundAnchor });
+        expect(listed.slice(1)).toEqual(rows.map((r) => r.scheduled_date));
+        // Without the stored anchor the parent's own date (a later target) would shift the rounds.
+        const drifted = coverageScheduleDates(anchor, 9, 'lawn_rounds_9', null, { roundAnchor: dates[1] });
+        expect(drifted).not.toEqual(listed);
+      });
+
+      test('a first activation that seeds a new parent stamps the paid anchor on it only', async () => {
+        const anchor = '2026-06-16';
+        const dates = Array.from({ length: 9 }, (_, i) => lawnRoundDate(anchor, i));
+        const inserts = seedInserts(dates);
+        setDbQueues({ scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts] });
+        await _private.ensureCoverageRowsForTerm({
+          id: 'term-r8', customer_id: 'customer-r', term_start: '2026-06-01', term_end: '2027-06-15',
+          coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9', first_visit_date: anchor,
+        }, undefined, { today: '2026-01-01' });
+        const rows = insertedRows(inserts);
+        expect(rows[0].scheduled_date).toBe(anchor);
+        expect(rows[0].recurring_round_anchor_date).toBe(anchor);
+        expect(rows.slice(1).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
+      });
+
+      test('rows that join an existing series parent get no stamp', async () => {
+        const anchor = '2026-06-16';
+        const dates = Array.from({ length: 9 }, (_, i) => lawnRoundDate(anchor, i));
+        const parent = {
+          id: 'svc-p', customer_id: 'customer-r', scheduled_date: anchor, service_type: 'Lawn Care', status: 'pending',
+          is_recurring: true, recurring_pattern: 'lawn_rounds_9',
+        };
+        const inserts = seedInserts(dates.slice(1));
+        setDbQueues({
+          scheduled_services: [
+            query({ columnInfo: ROUNDS_COLS }), query({ rows: [parent] }),
+            query({ first: { id: 'svc-p', scheduled_date: anchor, recurring_round_anchor_date: null } }), ...inserts,
+          ],
+        });
+        await _private.ensureCoverageRowsForTerm({
+          id: 'term-r9', customer_id: 'customer-r', term_start: anchor, term_end: '2027-06-15',
+          coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9',
+        }, undefined, { today: '2026-06-17', gapFillOnly: true, seedNotBefore: '2026-06-17' });
+        const rows = insertedRows(inserts);
+        expect(rows).toHaveLength(8);
+        expect(rows.every((r) => !('recurring_round_anchor_date' in r) && r.recurring_parent_id === 'svc-p')).toBe(true);
+      });
+
+      test('a non-rounds term never gets the key, even when the column exists', async () => {
+        const inserts = seedInserts(['2026-06-15', '2026-09-15', '2026-12-15', '2027-03-15']);
+        setDbQueues({ scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts] });
+        await _private.ensureCoverageRowsForTerm({
+          id: 'term-q', customer_id: 'customer-q', term_start: '2026-06-15', term_end: '2027-06-15',
+          coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+        }, undefined, { today: '2026-01-01' });
+        expect(insertedRows(inserts).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
+      });
+
+      test('the column missing: no stamp', async () => {
+        const { recurring_round_anchor_date: _gone, ...withoutColumn } = ROUNDS_COLS;
+        const anchor = '2026-06-16';
+        const inserts = seedInserts(Array.from({ length: 9 }, (_, i) => lawnRoundDate(anchor, i)));
+        setDbQueues({ scheduled_services: [query({ columnInfo: withoutColumn }), query({ rows: [] }), query({ first: undefined }), ...inserts] });
+        await _private.ensureCoverageRowsForTerm({
+          id: 'term-r10', customer_id: 'customer-r', term_start: anchor, term_end: '2027-06-15',
+          coverage_service_type: 'Lawn Care', coverage_visit_count: 9, coverage_cadence: 'lawn_rounds_9',
+        }, undefined, { today: '2026-01-01' });
+        expect(insertedRows(inserts).every((r) => !('recurring_round_anchor_date' in r))).toBe(true);
+      });
     });
 
     test('a 9-visit term with no stored cadence still seeds the 42-day series (infer keeps every_6_weeks)', async () => {

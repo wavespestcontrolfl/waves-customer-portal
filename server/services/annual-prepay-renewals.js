@@ -1412,6 +1412,14 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   const storedRoundAnchor = await seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, conn, cols });
   if (storedRoundAnchor) anchorOptions.roundAnchor = storedRoundAnchor;
   const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
+  // The anchor the rounds target dates were placed from (paidAnchor and
+  // coverageScheduleDates read the same anchorOptions). A NEW rounds series parent
+  // stores it, so the series' own extension, a later refresh and the invoice
+  // schedule keep the seeded dates (seriesRoundAnchor falls back to the parent's
+  // own date otherwise, which can be a later target than the anchor).
+  const newParentRoundAnchor = coverageCadence === LAWN_ROUNDS_9
+    ? (anchorOptions.roundAnchor || paidAnchor)
+    : null;
   if (!targetDates.length) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
@@ -1772,6 +1780,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       if (createdParentId) {
         insertData.recurring_parent_id = createdParentId;
       }
+    }
+    // This row becomes the new rounds series parent: store the round anchor.
+    if (newParentRoundAnchor && !createdParentId && cols.recurring_round_anchor_date) {
+      insertData.recurring_round_anchor_date = newParentRoundAnchor;
     }
     if (cols.time_window) insertData.time_window = null;
     if (cols.window_start) insertData.window_start = windowStart;
