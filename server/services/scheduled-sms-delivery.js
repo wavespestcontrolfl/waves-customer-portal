@@ -81,7 +81,86 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   });
 }
 
+// What each refusal code from the shared link check says to the office (the codes customerLinkSendRefusal
+// returns in its 'commit' phase). Any other code reads as the generic safety check.
+const LINK_REFUSAL_PHRASE = {
+  customer_link_owner_mismatch: 'A link in the text belongs to another customer',
+  customer_link_recipient: 'A link in the text does not fit the person it was addressed to',
+  customer_link_composer_only: 'The text has a link only the Communications composer can send',
+  customer_link_unverified: 'A link in the text could not be checked',
+  customer_link_phone_changed: 'The customer\'s phone no longer matches the number this text was queued for',
+};
+const LINK_REFUSAL_PHRASE_DEFAULT = 'A link in the text failed the link safety check';
+
+// One office alert per refused row, plain words, never the text or a phone number. The dedupe key is the row id,
+// so a re-run or a crash-recovered claim raises no second one.
+async function raiseScheduledLinkAlert(msg, refusalCode) {
+  try {
+    const names = require('./admin-alert-names');
+    const [first = '', ...rest] = (await names.lookupCustomerName(db, msg.customer_id)).split(' ');
+    const who = first ? `${first}${rest.length ? ` ${rest[rest.length - 1][0]}` : ''}` : 'a customer';
+    const phrase = LINK_REFUSAL_PHRASE[refusalCode] || LINK_REFUSAL_PHRASE_DEFAULT;
+    await require('./admin-alert-compose').raiseAdminAlert('alert', {
+      area: 'Comms',
+      action: names.fitAction('Comms', who, [(name) => `rewrite the scheduled text to ${name}`]),
+      why: `${phrase}, so it was not sent.`,
+      severity: 'needs-you',
+      link: msg.customer_id ? `/admin/communications?thread=${msg.customer_id}` : '/admin/communications',
+      subject: msg.customer_id ? { type: 'customer', id: String(msg.customer_id) } : { type: 'check', id: String(msg.id) },
+      doneWhen: 'scheduled_text_rewritten',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `scheduled-sms-link-refused:${msg.id}`,
+      detail: `A scheduled text to ${who} was not sent: ${phrase.charAt(0).toLowerCase()}${phrase.slice(1)}. Open Communications to rewrite it.`,
+      metadata: { smsLogId: msg.id, refusalCode, customerId: msg.customer_id || null },
+    });
+  } catch (err) {
+    logger.error(`[scheduled-sms] link-refusal alert failed for ${msg.id}: ${err.message}`);
+  }
+}
+
+// The same link check the writer (scheduled-sms-queue.js LOCKED_GUARDS) runs when an operator queues a text,
+// run again right before the send: a row queued before that guard shipped, or whose customer's phone changed
+// after queueing, can still carry another customer's bearer link. Returns a not-sent result for the scheduler's
+// existing rails, or null to go on with the send.
+//
+// Scope: rows with no metadata.entry_point, which is every row the writer queues (it never sets one). Every
+// system deferral (quiet-hours holds and the other replays that write status 'scheduled') is registered under an
+// entry_point, builds its own links (card request, contract, prep guide, statement, pay) and may carry links the
+// composer is not allowed to insert, so the composer's link rules do not fit them; each already has its own
+// recheck in the deferred-replay registry. Their recipient may also be rewritten at send time
+// (resolveScheduledRecipient), which the row's own to_phone does not reflect.
+//   - A definite refusal is terminal: the scheduler blocks the row and stamps blocked_code / blocked_reason.
+//   - "Could not read the check" (the check's own "try again" refusal, the writer's 503) goes back on the bounded
+//     retry rail; when the attempts run out the row ends blocked and alerts like any other refusal.
+// The link check judges the link's owner against the row's customer_id, not against the number: it cannot see that
+// the customer's phone changed after queueing, so their own link would still pass and go to the old number. For a
+// text that carries an owned link, the number is also re-checked against the customer's live phone. That is the only
+// number the writer ever accepts for a customer (trustedCustomerForScheduledSms: `to` must equal the selected
+// customer's phone, or be the one customer found on it), so a household member's number is never valid here.
+// A text with no owned link goes to its to_phone as before.
+async function scheduledLinkRefusal(msg, meta, maxAttempts) {
+  if (meta.entry_point) return null;
+  let refusal = await require('./intelligence-bar/comms-tools').customerLinkSendRefusal(
+    msg.message_body, msg.to_phone, msg.customer_id, { phase: 'commit', recipientSelected: Boolean(msg.customer_id) },
+  );
+  if (!refusal && msg.customer_id && require('./composer-customer-links').nestedOwnedLinkRuns(msg.message_body).length) {
+    const live = await db('customers').where({ id: msg.customer_id }).whereNull('deleted_at').first('phone')
+      .catch(() => ({ unread: true }));
+    const { normalizePhone } = require('../utils/phone');
+    if (live?.unread) refusal = { code: 'customer_link_unverified', error: 'Could not verify the customer\'s phone for a link in this message. Try again in a moment.' };
+    else if (!normalizePhone(live?.phone) || normalizePhone(live.phone) !== normalizePhone(msg.to_phone)) refusal = { code: 'customer_link_phone_changed', error: 'The customer\'s phone no longer matches the number this text was queued for.' };
+  }
+  if (!refusal) return null;
+  const retryable = /try again/i.test(refusal.error) && (Number(meta.scheduled_sms_attempts) || 1) < maxAttempts;
+  if (!retryable) await raiseScheduledLinkAlert(msg, refusal.code);
+  return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable, code: 'CUSTOMER_LINK_REFUSED', reason: refusal.code };
+}
+
 async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
+  const linkStop = await scheduledLinkRefusal(msg, meta, maxAttempts);
+  if (linkStop) return linkStop;
   let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id
     || meta.review_delivery_uncertain_exhausted === true || looksLikeReviewAsk(msg.message_body);
   const attemptsExhausted = (Number(meta.scheduled_sms_attempts) || 1) >= maxAttempts;
@@ -314,4 +393,4 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   return { ...result, scheduledHold: true };
 }
 
-module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, COMPLETION_REVIEW_INVITE, stripCompletionReviewLine };
+module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, scheduledLinkRefusal, COMPLETION_REVIEW_INVITE, stripCompletionReviewLine };

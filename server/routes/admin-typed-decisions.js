@@ -25,7 +25,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
-const { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash, lawnDiagnosisSubjectHash, lawnDiagnosisSummaryText } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -40,6 +40,7 @@ const CALL_SUBJECT = 'call_log';
 const SOCIAL_POST_SUBJECT = 'social_post';
 const VISIT_SUBJECT = 'scheduled_services';
 const CHAT_SUBJECT = 'agent_messages';
+const LAWN_DIAGNOSIS_SUBJECT = 'lawn_diagnostics';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
 const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
@@ -141,6 +142,21 @@ async function readChatTurns(ids) {
   return turns;
 }
 
+// A lawn diagnosis's customer summary as stored in its report contract: what
+// lawn_result_timing.v1 judged (enforce may have dropped sentences before the
+// row was stored, so the stored text is the judged text). Keyed by digest, so a
+// summary edited afterwards no longer matches the row's stored digest.
+async function lawnDiagnosisSummaries(ids) {
+  const found = await db('lawn_diagnostics').whereIn('id', ids).select('id', 'report_contract', 'created_at');
+  const out = [];
+  for (const row of found) {
+    const summary = parse(row.report_contract)?.customer_summary;
+    if (typeof summary !== 'string' || !summary.trim()) continue;
+    out.push({ id: row.id, text: lawnDiagnosisSummaryText(summary), at: row.created_at, hash: lawnDiagnosisSubjectHash(summary) });
+  }
+  return out;
+}
+
 // Display text for a page of rows, read live. Failures leave a row without
 // its text rather than failing the page.
 async function loadSubjects(rows) {
@@ -191,6 +207,17 @@ async function loadSubjects(rows) {
     if (chatIds.length) {
       for (const [id, turn] of await readChatTurns(chatIds)) {
         subjects.set(`${CHAT_SUBJECT}:${id}`, { type: CHAT_SUBJECT, text: turn.reply || null, visitorMessage: turn.visitorMessage, at: turn.at, hash: turn.hash });
+      }
+    }
+    // A lawn diagnosis (lawn_result_timing): its stored customer summary. Keyed by id
+    // AND digest like a visit; the id-only key also shows the current text of a
+    // summary that no longer matches (flagged as changed).
+    const diagnosisIds = subjectIds(LAWN_DIAGNOSIS_SUBJECT);
+    if (diagnosisIds.length) {
+      for (const d of await lawnDiagnosisSummaries(diagnosisIds)) {
+        const subject = { type: LAWN_DIAGNOSIS_SUBJECT, text: d.text, at: d.at, hash: d.hash };
+        subjects.set(`${LAWN_DIAGNOSIS_SUBJECT}:${d.id}`, subject);
+        subjects.set(`${LAWN_DIAGNOSIS_SUBJECT}:${d.id}:${d.hash}`, subject);
       }
     }
     // A visit (visit_access): the stored state each row was judged on, already
@@ -301,6 +328,12 @@ async function liveSubjectHash(target) {
     const stored = await require('../services/typed-decisions/visit-access-shadow')
       .storedVisitAccess([{ subjectId: target.subject_id, subjectHash: target.subject_hash }], db);
     return stored.has(`${target.subject_id}:${target.subject_hash}`) ? target.subject_hash : null;
+  }
+  if (target.subject_type === LAWN_DIAGNOSIS_SUBJECT) {
+    // The stored summary's digest, when it is still the one that was judged;
+    // no summary left (or a different one) = no live digest.
+    const [current] = await lawnDiagnosisSummaries([target.subject_id]);
+    return current ? current.hash : null;
   }
   if (target.subject_type === SOCIAL_POST_SUBJECT) {
     const post = await db('social_media_posts').where({ id: target.subject_id }).first('image_url', 'published_content');

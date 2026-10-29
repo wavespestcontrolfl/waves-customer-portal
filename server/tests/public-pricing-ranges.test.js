@@ -36,7 +36,7 @@ const EXPECTED_KEYS = [
   'dethatching',
   'foam_drill',
   'lawn_plugging',
-  'top_dressing',
+  // No top_dressing: quote-only since 2026-10-29 (owner), never published.
   'tree_shrub_care',
   'palm_injection',
 ];

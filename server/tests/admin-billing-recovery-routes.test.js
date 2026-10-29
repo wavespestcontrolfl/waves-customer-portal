@@ -54,8 +54,9 @@ const router = require('../routes/admin-billing-recovery');
 // to `rows` (the `.orderBy(...)` terminal in GET /leaks).
 function makeQB({ rows = [], first = null, insert = undefined } = {}) {
   const qb = {};
-  ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy', 'forUpdate']
+  ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy', 'orderByRaw', 'forUpdate']
     .forEach((m) => { qb[m] = jest.fn(() => qb); });
+  qb.modify = jest.fn((fn) => { fn(qb); return qb; });
   qb.first = jest.fn(() => Promise.resolve(first));
   qb.insert = jest.fn(() => Promise.resolve(insert));
   qb.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
@@ -428,6 +429,44 @@ describe('admin billing-recovery routes', () => {
         body: JSON.stringify({ reason: 'x' }),
       });
       expect(res.status).toBe(409);
+    });
+  });
+
+  test('GET /unsent-drafts shapes rows, sums the total and filters never-sent drafts only', async () => {
+    const rows = [
+      { invoice_id: 'inv-1', invoice_number: 'WPC-2026-0001', total: '129.00', created_at: '2026-05-02T15:00:00Z', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', scheduled_date: '2026-05-01', completed_at: '2026-05-01T15:00:00Z', service_type: 'Pest Control', visit_marked_free: true },
+      { invoice_id: 'inv-2', invoice_number: 'WPC-2026-0002', total: '55.30', created_at: '2026-06-02T15:00:00Z', customer_id: 'cust-2', first_name: 'Jane', last_name: 'Doe', scheduled_date: new Date('2026-06-01T00:00:00Z'), completed_at: '2026-06-01T15:00:00Z', service_type: null, visit_marked_free: false },
+    ];
+    const qb = makeQB({ rows });
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.i) return qb;
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/unsent-drafts?days=999`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.window_days).toBe(365); // clampDays
+      expect(body.summary).toEqual({ count: 2, total: 184.3 });
+      expect(body.drafts[0]).toMatchObject({ invoice_id: 'inv-1', total: 129, first_name: 'Tyler', scheduled_date: '2026-05-01', visit_marked_free: true });
+      expect(body.drafts[1].visit_marked_free).toBe(false);
+    });
+    // Never sent, no pending scheduled send, not payer-billed, older than 24 h.
+    expect(qb.where).toHaveBeenCalledWith('i.status', 'draft');
+    expect(qb.whereNull.mock.calls.map(([c]) => c)).toEqual(['i.sent_at', 'i.sms_sent_at', 'i.email_sent_at', 'i.payer_id']);
+    const raws = qb.whereRaw.mock.calls.map(([sql]) => sql);
+    expect(raws).toEqual(expect.arrayContaining([
+      "i.created_at < now() - interval '24 hours'",
+      '(i.scheduled_send_at IS NULL OR i.scheduled_send_at <= now())',
+      "(ss.status = 'completed' OR sr.status = 'completed')",
+    ]));
+  });
+
+  test('GET /unsent-drafts is admin-only and answers 500 on a query failure', async () => {
+    db.mockImplementation(() => { throw new Error('boom'); });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/admin/billing-recovery/unsent-drafts`, { headers: { Authorization: 'Bearer tech' } })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/admin/billing-recovery/unsent-drafts`, { headers: { Authorization: 'Bearer admin' } })).status).toBe(500);
     });
   });
 

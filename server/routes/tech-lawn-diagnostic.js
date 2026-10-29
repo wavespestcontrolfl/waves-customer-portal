@@ -24,6 +24,7 @@ const {
   deriveOverallScore,
 } = require('../services/lawn-diagnostic-analyze');
 const { etParts } = require('../utils/datetime-et');
+const { checkDiagnosisSummary } = require('../services/service-report/lawn-jev-timing-check');
 
 const MAX_ANALYZE_PHOTOS = 5;
 const DIAGNOSTIC_MODES = ['internal', 'prospect'];
@@ -483,8 +484,18 @@ router.post('/', async (req, res, next) => {
         logger.warn(`[lawn-diagnostic] run-record lookup failed (non-blocking): ${err.message}`);
       }
     }
-    const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
-    const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
+    // GATE_LAWN_JEV_TIMING_CHECK: only a summary a MODEL wrote (restored from the
+    // verified run record) is checked. body.aiSummary is a person's typed text: it
+    // goes only to ai_summary and is never asked about or changed.
+    const repairedContract = applyAutoReleaseRepair(contract, releaseMode);
+    const jevCheck = await checkDiagnosisSummary(repairedContract, { modelWritten: restoredFromRun });
+    const sanitizedContract = jevCheck.contract;
+    // A typed aiSummary is kept as typed, except a verbatim copy of the model's own
+    // summary: that copy must hold the same final text as report_contract.
+    const typedSummary = cleanString(body.aiSummary, 2000);
+    const aiSummary = (typedSummary && typedSummary !== cleanString(repairedContract.customer_summary, 2000))
+      ? typedSummary
+      : cleanString(sanitizedContract.customer_summary, 2000);
 
     const [row] = await db('lawn_diagnostics').insert({
       mode,
@@ -502,6 +513,7 @@ router.post('/', async (req, res, next) => {
       overall_score: deriveOverallScore(sanitizedContract, overallScore),
       ai_summary: aiSummary,
     }).returning(['id', 'mode', 'status']);
+    jevCheck.afterInsert(row.id);
 
     return res.status(201).json({ success: true, id: row.id, mode: row.mode, status: row.status });
   } catch (err) {
