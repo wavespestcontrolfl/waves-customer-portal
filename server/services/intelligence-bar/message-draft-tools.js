@@ -246,8 +246,17 @@ async function deliveryLinkNotes(text, { audience, purpose, messageType }) {
   return notes;
 }
 
-async function buildPlan(toolName, input = {}) {
+const PREVIEW_NOTES = {
+  ignore: 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this suggested reply and sends nothing.',
+  approve: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly the text shown, to the number shown; if anything changed it refuses and sends nothing.',
+};
+PREVIEW_NOTES.revise = PREVIEW_NOTES.approve;
+const AUDIENCE = { true: 'customer', false: 'lead' };
+const MESSAGE_TYPE = { approve: 'ai_approved', revise: 'ai_revised' };
+
+async function buildPlan(toolName, input) {
   const action = TOOL_ACTION[toolName];
+  const sends = action !== 'ignore';
   const loaded = await loadPlannableDraft(input);
   if (loaded.error) return loaded;
   const { draft } = loaded;
@@ -255,26 +264,22 @@ async function buildPlan(toolName, input = {}) {
 
   const { resolveDraftRecipient, latestInboundFrom } = drafts()._internals;
   const recipient = await resolveDraftRecipient(draft);
-  if (action !== 'ignore' && !recipient.toPhone) return refusal('The recipient\'s number cannot be determined, so nothing can be sent. Handle it from the Communications page.', 'no_recipient');
+  if (sends && !recipient.toPhone) return refusal('The recipient\'s number cannot be determined, so nothing can be sent. Handle it from the Communications page.', 'no_recipient');
 
   const texted = finalTextFor(action, text, input);
   if (texted.error) return texted;
   const { finalText, rawText } = texted;
-  if (action !== 'ignore') {
-    const blocked = await sendRefusal({ rawText, text: finalText }, recipient, recipient.customerId);
-    if (blocked) return blocked;
-  }
+  const blocked = sends && await sendRefusal({ rawText, text: finalText }, recipient, recipient.customerId);
+  if (blocked) return blocked;
 
   // The identity the send uses, exactly as the page resolves it (resolveDraftRecipient deliberately returns no customer when the
   // draft's own number is not that customer's): this is what the card names and the confirm pins. The draft's filing customer is
   // display only and never pinned.
   const customerId = recipient.customerId || null;
-  const linkNotes = action === 'ignore' ? []
-    : await deliveryLinkNotes(finalText, { audience: customerId ? 'customer' : 'lead', purpose: 'conversational', messageType: action === 'revise' ? 'ai_revised' : 'ai_approved' });
-  const customer = customerId ? await db('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
-  const name = fullName(customer);
-  const filedUnder = !customerId && draft.customer_id
-    ? fullName(await db('customers').where({ id: draft.customer_id }).first('first_name', 'last_name')) : null;
+  const linkNotes = sends ? await deliveryLinkNotes(finalText, { audience: AUDIENCE[Boolean(customerId)], purpose: 'conversational', messageType: MESSAGE_TYPE[action] }) : [];
+  // One lookup serves both names: the sending customer's when there is one, else the filing customer's (display only).
+  const named = fullName(await db('customers').where({ id: customerId || draft.customer_id || null }).first('first_name', 'last_name'));
+  const [name, filedUnder] = customerId ? [named, null] : [null, named];
   const toPhone = recipient.toPhone || null;
   const latest = toPhone ? await latestInboundFrom(toPhone) : null;
   const newerInbound = Boolean(latest && draft.sms_log_id && String(latest.id) !== String(draft.sms_log_id));
@@ -295,7 +300,7 @@ async function buildPlan(toolName, input = {}) {
     char_count: finalText.length,
     newer_inbound: newerInbound,
     link_notes: linkNotes,
-    sends_to_customer: action !== 'ignore',
+    sends_to_customer: sends,
     // What the confirm re-checks: every fact the card showed. The exact texts and the full number ride here only.
     _version: {
       action,
@@ -310,9 +315,7 @@ async function buildPlan(toolName, input = {}) {
       latest_inbound_id: latest ? latest.id : null,
       link_notes: linkNotes,
     },
-    note: action === 'ignore'
-      ? 'PREVIEW ONLY — nothing was changed. Confirm dismisses exactly this suggested reply and sends nothing.'
-      : 'PREVIEW ONLY — nothing was sent. Confirm sends exactly the text shown, to the number shown; if anything changed it refuses and sends nothing.',
+    note: PREVIEW_NOTES[action],
   };
 }
 
