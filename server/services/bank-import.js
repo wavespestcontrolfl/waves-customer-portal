@@ -1079,8 +1079,8 @@ async function healEditedExpenseLinks() {
         });
       if (changed) {
         reverted++;
-        // a payroll-matched link released here loses its payroll provenance in the same transaction
-        if (payrollBankMatchOn()) await clearPayrollLinks(trx, link.id);
+        // a payroll-matched link released here loses its payroll provenance in the same transaction, gate on or off
+        await clearPayrollLinks(trx, link.id);
       }
     });
   }
@@ -1586,6 +1586,7 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
               by,
               ...(check ? { checkId: target.id } : { filingId: target.id, tax: taxKind, amountCents: payrollMatch.filingCents(target) }),
               expenseId: expense.id,
+              ...(reused ? {} : { createdSnapshot: { amount: expense.amount, categoryId: expense.category_id || null } }),
               ...(reused ? { reusedExpense: true, prevAmount: reused.amount, prevCategoryId: reused.category_id || null, prevDeductible: reused.tax_deductible_amount == null ? null : reused.tax_deductible_amount } : {}),
             },
           }, [...PAYROLL_CANDIDATE_KEYS, 'noMatch']),
@@ -1684,7 +1685,21 @@ async function releasePayrollExpense(trx, live) {
     }
     return;
   }
-  await trx('expenses').where({ id: live.matched_expense_id }).where('notes', 'like', `%${PAYROLL_NOTE_MARK}%`).del();
+  // An expense the match CREATED goes only if it is still what the match made: the owner may have corrected
+  // its amount or category since. A changed one stays (flagged on the line for review) so no ledger edit is lost.
+  const made = await trx('expenses').where({ id: live.matched_expense_id }).where('notes', 'like', `%${PAYROLL_NOTE_MARK}%`).forUpdate()
+    .first('id', 'amount', 'category_id', 'description');
+  if (!made) return;
+  const snap = pm && pm.createdSnapshot;
+  const unchanged = !snap || (Math.round(Number(made.amount) * 100) === Math.round(Number(snap.amount) * 100)
+    && (made.category_id || null) === (snap.categoryId || null));
+  if (unchanged) { await trx('expenses').where({ id: made.id }).del(); return; }
+  if (live.id) {
+    await trx('bank_transactions').where({ id: live.id }).update({
+      suggestion: suggestionMerge({ payrollExpenseKept: { expenseId: made.id, reason: 'the owner changed the expense after the match; review it' } }),
+      updated_at: new Date(),
+    });
+  }
 }
 
 // A voided pay run unlinks the lines matched to its checks: the line returns to review, the
@@ -1781,7 +1796,7 @@ async function reconcileTaxLinks() {
           updated_at: new Date(),
         });
         if (!changed) return;
-        await releasePayrollExpense(trx, { matched_expense_id: live.matched_expense_id, suggestion: live.suggestion });
+        await releasePayrollExpense(trx, { id: live.id, matched_expense_id: live.matched_expense_id, suggestion: live.suggestion });
         released++;
       });
     } catch (err) {
@@ -1837,7 +1852,7 @@ async function clearPayrollLinks(trx, id) {
   if (!o.matched_payroll_check_id && !o.matched_tax_filing_id && !sug.payrollMatch) return false;
   const pm = sug.payrollMatch || null;
   // an expense the match reused and another path (an edit heal, a generic unlink) released
-  if (pm && pm.reusedExpense && pm.expenseId) await releasePayrollExpense(trx, { matched_expense_id: pm.expenseId, suggestion: sug });
+  if (pm && pm.reusedExpense && pm.expenseId) await releasePayrollExpense(trx, { id: o.id, matched_expense_id: pm.expenseId, suggestion: sug });
   const patch = {};
   const checkId = o.matched_payroll_check_id || (pm && pm.checkId) || null;
   const filingId = o.matched_tax_filing_id || (pm && pm.filingId) || null;

@@ -446,6 +446,30 @@ postgres('payroll bank match in the bank import', () => {
       expect((await row(near)).suggestion.payrollCandidates).toBeUndefined();
     });
 
+    it('a void keeps an expense the owner corrected after the match, and flags the line', async () => {
+      const id = await line('CHECK 1042', '812.63', '2026-10-28');
+      await bankImport.runDeterministicMatching();
+      const { matched_expense_id: expenseId } = await row(id);
+      await trx('expenses').where({ id: expenseId }).update({ amount: '800.00' });
+      await trx('payroll_checks').where({ run_id: runId }).update({ status: 'voided' });
+      await trx('payroll_runs').where({ id: runId }).update({ status: 'voided', voided_at: trx.fn.now(), void_reason: 'redo' });
+      expect(await bankImport.releaseVoidedPayrollLinks()).toBe(1);
+      expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ amount: '800.00' });
+      expect((await row(id)).suggestion.payrollExpenseKept).toMatchObject({ expenseId });
+    });
+
+    it('with the gate off, an edit heal still restores a reused expense and clears the payroll links', async () => {
+      const expenseId = randomUUID();
+      await trx('expenses').insert({ id: expenseId, description: 'Sample', vendor_name: 'CHECK 1042 sample', amount: '812.63', expense_date: '2026-10-28', tax_year: '2026', tax_deductible_amount: '812.63' });
+      const id = await line('CHECK 1042', '812.63', '2026-10-28');
+      await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner', expenseId });
+      delete process.env[GATE];
+      await trx('expenses').where({ id: expenseId }).update({ expense_date: '2026-09-01' });
+      expect(await bankImport.healEditedExpenseLinks()).toBe(1);
+      expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ category_id: null, tax_deductible_amount: '812.63' });
+      expect(await row(id)).toMatchObject({ matched_payroll_check_id: null, status: 'unmatched' });
+    });
+
     it('is idempotent: a second pass links nothing new', async () => {
       await seedLines();
       await bankImport.runDeterministicMatching();
