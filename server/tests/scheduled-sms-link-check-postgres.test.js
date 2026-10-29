@@ -58,6 +58,7 @@ postgres('scheduled text link check at send time (real PostgreSQL)', () => {
     const ids = (await database('sms_log').whereIn('customer_id', customerIds).select('id')).map((r) => String(r.id));
     await database('notifications').whereIn(database.raw("metadata->>'dedupeKey'"), ids.map((id) => `scheduled-sms-link-refused:${id}`)).del();
     await database('sms_log').whereIn('customer_id', customerIds).del();
+    await database('invoices').whereIn('customer_id', customerIds).del();
     await database('customers').whereIn('id', customerIds).del();
     customerIds.length = 0;
   });
@@ -70,6 +71,12 @@ postgres('scheduled text link check at send time (real PostgreSQL)', () => {
     await database('customers').insert({ id, first_name: 'Fixture', last_name: 'Scheduled', phone, email: `${id}@example.invalid`, property_type: 'residential', ...over });
     customerIds.push(id);
     return { id, phone };
+  }
+  // The customer's own pay link: an invoice token owned by that customer.
+  async function payLink(c) {
+    const token = randomUUID();
+    await database('invoices').insert({ customer_id: c.id, token, invoice_number: `INV-${tag()}`, status: 'sent', total: '150.00' });
+    return `${HOST}/pay/${token}`;
   }
   // A row in the shape the writer queues: no entry_point, operator-authored, due now.
   async function queue(c, body, metadata = { human_authored: true }) {
@@ -120,21 +127,44 @@ postgres('scheduled text link check at send time (real PostgreSQL)', () => {
     expect(await alertsFor(id)).toHaveLength(1);
   });
 
-  test('the recipient\'s own link, and a text with no link, are sent unchanged with no alert', async () => {
+  test('the recipient\'s own links (reservice, pay), and a text with no link, are sent unchanged with no alert', async () => {
     const t = tag();
     const mine = await customer({ reservice_token: `own${t}` });
-    const ownBody = `Synthetic booking note ${HOST}/reservice/own${t}`;
-    const ownId = await queue(mine, ownBody);
-    const plainId = await queue(mine, 'Synthetic note with no link.');
+    const bodies = [`Synthetic booking note ${HOST}/reservice/own${t}`, `Synthetic balance note ${await payLink(mine)}`, 'Synthetic note with no link.'];
+    const ids = [];
+    for (const body of bodies) ids.push(await queue(mine, body));
 
     await tick();
 
-    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
-    expect(mockSendCustomerMessage.mock.calls.map(([input]) => input.body).sort()).toEqual([ownBody, 'Synthetic note with no link.'].sort());
-    expect((await rowOf(ownId)).status).toBe('sent');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(3);
+    expect(mockSendCustomerMessage.mock.calls.map(([input]) => input.body).sort()).toEqual([...bodies].sort());
+    for (const id of ids) {
+      expect((await rowOf(id)).status).toBe('sent');
+      expect(await alertsFor(id)).toHaveLength(0);
+    }
+  });
+
+  test('the customer\'s phone changed after queueing: their own pay link is not sent to the old number; a text with no link still is', async () => {
+    const mine = await customer();
+    const oldPhone = mine.phone;
+    const linkBody = `Synthetic balance note ${await payLink(mine)}`;
+    const linkId = await queue(mine, linkBody);
+    const plainId = await queue(mine, 'Synthetic note with no link.');
+    await database('customers').where({ id: mine.id }).update({ phone: '+12025550142' });
+
+    await tick();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0]).toMatchObject({ body: 'Synthetic note with no link.', to: oldPhone });
     expect((await rowOf(plainId)).status).toBe('sent');
-    expect(await alertsFor(ownId)).toHaveLength(0);
-    expect(await alertsFor(plainId)).toHaveLength(0);
+    const row = await rowOf(linkId);
+    expect(row.status).toBe('blocked');
+    expect(row.metadata).toMatchObject({ blocked_code: 'CUSTOMER_LINK_REFUSED', blocked_reason: 'customer_link_phone_changed' });
+    const alerts = await alertsFor(linkId);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body).toBe('The customer\'s phone no longer matches the number this text was queued for, so it was not sent.');
+    expect(JSON.stringify(alerts[0])).not.toContain(oldPhone.slice(-7));
+    expect(JSON.stringify(alerts[0])).not.toContain('5550142');
   });
 
   test('a check that cannot be read: back on the retry rail, not sent, no alert; the last attempt ends blocked with one alert', async () => {
