@@ -21,11 +21,13 @@ export function attachedVisitInvoice(service) {
   // them — never treat them as collectible; the sheet falls back to the
   // normal mint/edit flow instead of colliding with a dead invoice.
   const uncollectible = ['refunded', 'canceled', 'cancelled'].includes(status);
-  // Account credit rides credit_applied while invoices.total stays gross —
-  // the charge paths collect total − credit_applied, so every promised
-  // amount here is the amount DUE, never the gross.
+  // Account credit rides credit_applied and part payments ride amount_paid
+  // while invoices.total stays gross — the charge paths collect
+  // total − credit_applied − amount_paid, so every promised amount here is
+  // the amount DUE, never the gross.
   const creditApplied = Math.max(0, Number(service.checkoutInvoiceCreditApplied) || 0);
-  const amountDue = Math.max(0, round2(total - creditApplied));
+  const amountPaid = Math.max(0, Number(service.checkoutInvoiceAmountPaid) || 0);
+  const amountDue = Math.max(0, round2(total - creditApplied - amountPaid));
   const lines = (Array.isArray(service.checkoutInvoiceLines) ? service.checkoutInvoiceLines : [])
     .map((li) => ({ description: String(li?.description || ''), amount: Number(li?.amount) }))
     .filter((li) => li.description && Number.isFinite(li.amount));
@@ -39,6 +41,7 @@ export function attachedVisitInvoice(service) {
     status,
     total,
     creditApplied,
+    amountPaid,
     amountDue,
     // The visit's recorded prepayment has already been consumed by this
     // invoice (server reduced its total) — don't net it a second time.

@@ -1158,7 +1158,7 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
     .whereRaw(`status NOT IN (${placeholders})`, [...INVOICE_UNCOLLECTIBLE_STATUSES])
     .whereRaw('payer_id IS NULL');
   // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
-  // every collection path prices from (total less credit_applied), not the gross total.
+  // every collection path prices from (total less credit_applied and amount_paid), not the gross total.
   const { invoiceAmountDue } = require('./invoice-helpers');
   // dues_month: the month the stamp names, for wording ('YYYY-MM', null when unreadable).
   const duesMonthOf = (raw) => {
@@ -1168,13 +1168,13 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
       return item ? String(item[MEMBERSHIP_DUES_LINE_KEY]) : null;
     } catch { return null; }
   };
-  const shape = ({ id, total, status, credit_applied: creditApplied, line_items: lineItems }) => ({
-    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }), dues_month: duesMonthOf(lineItems),
+  const shape = ({ id, total, status, credit_applied: creditApplied, amount_paid: amountPaid, line_items: lineItems }) => ({
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied, amount_paid: amountPaid }), dues_month: duesMonthOf(lineItems),
   });
-  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'line_items');
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'amount_paid', 'line_items');
   if (!lock || !rows.length) return rows.map(shape);
   const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
-    .select('id', 'total', 'status', 'credit_applied', 'line_items', 'customer_id', 'payer_id');
+    .select('id', 'total', 'status', 'credit_applied', 'amount_paid', 'line_items', 'customer_id', 'payer_id');
   return locked
     .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
     .map(shape);

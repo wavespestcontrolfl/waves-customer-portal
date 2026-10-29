@@ -5802,9 +5802,7 @@ const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cance
 
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
-  const amount = invoice.total != null
-    ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
-    : null;
+  const amount = invoice.total != null ? invoiceAmountDue(invoice) : null;
   if (['paid', 'prepaid'].includes(invoice.status)) {
     return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
   }
@@ -6703,7 +6701,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'amount_paid', 'payer_id', 'title', 'notes');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -6938,6 +6936,7 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
         checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
         checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+        checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
         checkoutInvoicePrepaidApplied,
         // The INVOICE's own Bill-To: a payer-billed invoice survives the
         // visit's payer being cleared/deactivated, and the Charge-now reuse
@@ -7397,7 +7396,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'amount_paid', 'payer_id', 'title', 'notes');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
@@ -7465,7 +7464,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'amount_paid', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
         const billingLane = {
           mode: lane.mode,
@@ -7620,6 +7619,7 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
           checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
           checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+          checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
           checkoutInvoicePrepaidApplied,
           // Same invoice-level Bill-To flag as the day payload (see there).
           checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
@@ -19306,7 +19306,8 @@ router.post('/:id/invoice', async (req, res, next) => {
         // $50 account credit, $164 prepayment — fully settled, never marked
         // paid).
         const creditAppliedCents = toCents(lockedInvoice.credit_applied);
-        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents);
+        const amountPaidCents = toCents(lockedInvoice.amount_paid);
+        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents - amountPaidCents);
         if (!(dueCents > 0)) {
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }

@@ -184,6 +184,7 @@ async function recordManualPayment(id, {
   // session is retired below — never cancel a valid checkout for a
   // settlement that then records nothing. The under-lock re-checks below
   // remain the race fences.
+  // Whole-balance match only: a partially paid invoice (amount_paid > 0) must not auto-match a notice (the partial-payment writer enforces it).
   if (expectedAmountCents != null) {
     const actualCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (actualCents !== expectedAmountCents) {
@@ -268,6 +269,7 @@ async function recordManualPayment(id, {
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
+    // Whole-balance match only: a partially paid invoice (amount_paid > 0) must not auto-match a notice (the partial-payment writer enforces it).
     if (expectedAmountCents != null) {
       const actualCents = Math.round(invoiceAmountDue(locked) * 100);
       if (actualCents !== expectedAmountCents) return { amountMismatch: { expectedCents: expectedAmountCents, actualCents } };

@@ -13823,7 +13823,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           //    invoice to 'prepaid' — the post-commit block must run the
           //    credit-coverage settlement instead of a charge call that
           //    would refuse the settled status as a decline.
-          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied');
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied', 'amount_paid');
           prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
           // 4) Verify the applied result still matches the ACKNOWLEDGED
           //    quote BEFORE commit (hook P1 r20): applyAccountCreditToInvoice
@@ -16451,7 +16451,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
         const prepayTierKey = membershipTierKey(prepayTier);
-        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'amount_paid', 'payer_id');
         const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
         if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
           logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);

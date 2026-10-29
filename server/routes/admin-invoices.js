@@ -2878,10 +2878,10 @@ router.post('/:id/record-payment', requireAdmin, recordPaymentHandler);
 router.get('/:id/credit-context', async (req, res, next) => {
   try {
     const invoice = await db('invoices').where({ id: req.params.id })
-      .first('id', 'customer_id', 'total', 'credit_applied', 'status', 'invoice_number');
+      .first('id', 'customer_id', 'total', 'credit_applied', 'amount_paid', 'status', 'invoice_number');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     const total = CustomerCredit.round2(invoice.total || 0);
-    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const amountDue = invoiceAmountDue(invoice);
     const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
     res.json({
       customer_id: invoice.customer_id,
@@ -2948,7 +2948,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     if (total <= 0) {
       return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
     }
-    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const amountDue = invoiceAmountDue(invoice);
     if (amountDue <= 0) {
       return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
     }
@@ -3040,8 +3040,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('A new payment session started for this invoice — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
         }
-        const lockedTotal = CustomerCredit.round2(locked.total || 0);
-        const lockedDue = CustomerCredit.round2(lockedTotal - CustomerCredit.round2(locked.credit_applied || 0));
+        const lockedDue = invoiceAmountDue(locked);
         if (lockedDue <= 0) {
           const err = new Error('Invoice is already fully covered by credit'); err.statusCode = 400; err.isOperational = true; throw err;
         }
