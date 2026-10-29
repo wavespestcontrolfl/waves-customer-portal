@@ -303,6 +303,24 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(payerMock).not.toHaveBeenCalled();
   });
 
+  test('visit turned recurring in the eligibility→charge gap → re-checked under the lock, released, never charged', async () => {
+    mockTableHandlers = handlersWith({
+      trx: {
+        customers: { first: () => ({ id: 'cust-1' }) },
+        scheduled_services: { first: () => ({ id: 'svc-1', customer_id: 'cust-1', is_recurring: true }) },
+      },
+    });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'recurring_visit' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
   test('payer assigned in the eligibility→claim gap → claim closes released, homeowner never charged (Codex #3153 r8)', async () => {
     const payerMock = require('../services/payer').resolveForInvoice;
     payerMock.mockResolvedValueOnce(null); // eligibility pass

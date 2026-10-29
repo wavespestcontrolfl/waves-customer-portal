@@ -2957,10 +2957,17 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       const lockedSvc = await trx('scheduled_services')
         .where({ id: scheduledServiceId })
         .forUpdate()
-        .first('id', 'customer_id');
+        .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
       if (!lockedSvc) {
         const e = new Error('scheduled service missing at fee charge');
         e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      // One-time visits only, re-checked under the lock: a visit turned
+      // recurring after the eligibility read must not be charged.
+      if (!visitCarriesCancelFee(lockedSvc)) {
+        const e = new Error('visit is recurring');
+        e.apptFeeSkip = 'recurring_visit';
         throw e;
       }
       // The consent must belong to the visit's CURRENT customer (Codex
@@ -3018,8 +3025,8 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       logger.error(`[appt-card-request] fee charged but lock txn commit failed for visit ${scheduledServiceId} — proceeding as charged: ${err.message}`);
       paymentIntent = submittedFeePi;
     } else {
-    if (err.apptFeeSkip === 'payer_billed') {
-      // The appointment became payer-billed — close the fee event
+    if (err.apptFeeSkip === 'payer_billed' || err.apptFeeSkip === 'recurring_visit') {
+      // The appointment became payer-billed or recurring — close the fee event
       // terminally. Exactly one row or canonical review (Codex #3153 r15
       // P1): a swallowed stamp would report a benign outcome while the row
       // stays 'charging' with no review signal.
@@ -3027,15 +3034,15 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
         const stamped = await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
           .update({ fee_status: 'released', updated_at: new Date() });
         if (stamped !== 1) {
-          logger.error(`[appt-card-request] post-claim payer release stamp lost for visit ${scheduledServiceId} — reporting charge_review`);
+          logger.error(`[appt-card-request] post-claim ${err.apptFeeSkip} release stamp lost for visit ${scheduledServiceId} — reporting charge_review`);
           return { charged: false, reason: 'charge_review' };
         }
       } catch (stampErr) {
-        logger.error(`[appt-card-request] post-claim payer release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${stampErr.message}`);
+        logger.error(`[appt-card-request] post-claim ${err.apptFeeSkip} release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${stampErr.message}`);
         return { charged: false, reason: 'charge_review' };
       }
-      logger.info(`[appt-card-request] fee released (payer assigned) for visit ${scheduledServiceId}`);
-      return { charged: false, reason: 'payer_billed' };
+      logger.info(`[appt-card-request] fee released (${err.apptFeeSkip}) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: err.apptFeeSkip };
     }
     if (err.apptFeeSkip === 'charge_review') {
       logger.error(`[appt-card-request] fee payer serialization failed for visit ${scheduledServiceId} — reverting claim, parking review: ${err.message}`);
