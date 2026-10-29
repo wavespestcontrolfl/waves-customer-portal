@@ -1082,3 +1082,93 @@ describe("Undo payment (GATE_UNDO_MANUAL_PAYMENT)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Undo payment" })).not.toBeInTheDocument());
   });
 });
+
+describe("Part payments (GATE_PARTIAL_PAYMENTS)", () => {
+  const key = `POST /api/admin/invoices/${invoice.id}/record-payment`;
+  const listWith = (partialPaymentsEnabled) => overrides.set("GET /api/admin/invoices", () => response({ invoices: rows, total: rows.length, page: 1, partialPaymentsEnabled }));
+
+  it("shows no amount field while the gate is off, and the request carries no amount", async () => {
+    listWith(false);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.queryByLabelText("Amount received")).not.toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: null }));
+    fireEvent.click(dialog.getByRole("button", { name: /Record/, exact: false }));
+    await waitFor(() => expect(requests.find(request => request.key === key)).toBeTruthy());
+    expect(requests.find(request => request.key === key).body).not.toHaveProperty("amount");
+  });
+
+  it("starts at the amount still owed; the whole amount keeps the receipt choice and sends the amount as the figure to check", async () => {
+    rows = [{ ...invoice, amount_paid: 0 }]; listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("120.00");
+    expect(dialog.getByRole("checkbox", { name: /Send receipt now/ })).toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: { email: { ok: true } } }));
+    await dialog.findByText(/billing@example.invalid/);
+    fireEvent.click(dialog.getByRole("button", { name: "Record & send receipt", exact: true }));
+    await waitFor(() => expect(requests.find(request => request.key === key)).toBeTruthy());
+    expect(requests.find(request => request.key === key).body).toMatchObject({ method: "cash", amount: 120, sendReceipt: true });
+  });
+
+  it("a smaller amount is a part payment: no receipt choice, its own button and words, the amount sent, and the answer reports what is still owed", async () => {
+    listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: "45.50" } });
+    expect(dialog.queryByRole("checkbox", { name: /Send receipt now/ })).not.toBeInTheDocument();
+    expect(dialog.getByText(/The invoice stays open, reminders continue for what is still owed, and no receipt is sent/)).toBeInTheDocument();
+    overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: null, partial: { amount: 45.5, remaining: 74.5 } }));
+    fireEvent.click(dialog.getByRole("button", { name: "Record part payment", exact: true }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add payment" })).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ method: "cash", amount: 45.5, sendReceipt: false });
+    expect(await screen.findByText("Part payment recorded · $74.50 still owed")).toBeInTheDocument();
+  });
+
+  it("blocks an amount of zero, over the amount owed, or not money, and shows the server's refusal inline", async () => {
+    listWith(true);
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    for (const bad of ["0", "120.01", "12.345", "abc", ""]) {
+      fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: bad } });
+      expect(dialog.getByRole("button", { name: /Record/, exact: false })).toBeDisabled();
+      expect(dialog.getByText("Enter an amount above $0.00, up to $120.00")).toBeInTheDocument();
+    }
+    fireEvent.change(dialog.getByLabelText("Amount received"), { target: { value: "20" } });
+    overrides.set(key, () => response({ error: "This customer is on Auto Pay, so a part payment cannot be recorded on this invoice yet. Nothing was recorded." }, 409));
+    fireEvent.click(dialog.getByRole("button", { name: "Record part payment", exact: true }));
+    await dialog.findByText(/Record payment failed: This customer is on Auto Pay/);
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("20");
+  });
+
+  it("shows Paid so far beside the amount still owed on an open invoice, and starts the amount at what is left", async () => {
+    rows = [{ ...invoice, amount_paid: "45.50" }]; listWith(true);
+    await openPage();
+    expect(screen.getByText("Paid so far $45.50 · $74.50 owed")).toBeInTheDocument();
+    await expand();
+    const dialog = await dialogFrom("Add payment", "Add payment");
+    expect(dialog.getByText(/Paid so far \$45\.50 · \$74\.50 still owed/)).toBeInTheDocument();
+    expect(dialog.getByLabelText("Amount received")).toHaveValue("74.50");
+  });
+
+  it("a paid invoice shows no Paid so far line", async () => {
+    rows = [{ ...invoice, status: "paid", amount_paid: 0 }]; listWith(true);
+    await openPage();
+    expect(screen.queryByText(/Paid so far/)).not.toBeInTheDocument();
+  });
+
+  it("offers Undo on an open invoice with a part payment recorded today, and says what it reverses", async () => {
+    rows = [{ ...invoice, amount_paid: "40.00", payment_recorded_at: new Date().toISOString() }];
+    overrides.set("GET /api/admin/invoices", () => response({ invoices: rows, total: 1, page: 1, undoPaymentEnabled: true, partialPaymentsEnabled: true }));
+    const undoKey = `/api/admin/invoices/${invoice.id}/undo-payment`;
+    overrides.set(`GET ${undoKey}`, () => response({ eligible: true, payment: { id: "payment-part", amount: 40, method: "cash", part: true } }));
+    overrides.set(`POST ${undoKey}`, () => response({ ok: true, remindersRearmed: true }));
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Undo payment", "Undo payment");
+    expect(await dialog.findByText("This reverses the $40.00 cash part payment. The invoice stays open and reminders are not changed.")).toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText(/Reason/), { target: { value: "Typed the wrong amount" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Undo payment", exact: true }));
+    await waitFor(() => expect(requests.find(request => request.key === `POST ${undoKey}`)?.body).toEqual({ reason: "Typed the wrong amount", paymentId: "payment-part" }));
+    expect(await screen.findByText("Part payment undone")).toBeInTheDocument();
+  });
+});
