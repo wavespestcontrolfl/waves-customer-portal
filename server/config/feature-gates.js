@@ -9026,7 +9026,8 @@ function bidChecklistLive() {
 }
 // GATE_BID_DESK_AUTO_DATES read at CALL time, strict `=== 'true'`, dark by default. It also needs the Bid Desk itself on.
 // Off: every bid is filed with an unconfirmed date and nothing closes itself, exactly as before. On: a template or SAM.gov
-// date counts as confirmed when the bid is first filed, and an open bid whose due date has passed closes as no bid.
+// date counts as confirmed when the bid is first filed, and a bid still marked new closes as no bid one day after its
+// due date (30 days when the date is flagged for confirmation). A bid marked bid never closes by itself.
 // Admin bell only (no new bell); nothing goes to a buyer, contractor, agency or customer. Kill: unset.
 function bidDeskAutoDatesLive() {
   return bidDeskLive() && process.env.GATE_BID_DESK_AUTO_DATES === 'true';
