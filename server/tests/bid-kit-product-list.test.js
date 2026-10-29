@@ -397,10 +397,31 @@ describe('runBidKitProductListSync', () => {
     expect(store.replaceFile).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
-  test('an empty list leaves the file alone', async () => {
+  test('an empty read with no stored list leaves the file alone', async () => {
+    store.listItems.mockResolvedValue([itemRow({ details: null })]);
     setList([]);
     expect(await run()).toEqual({ skipped: 'no_products' });
     expect(files.putFile).not.toHaveBeenCalled();
+  });
+  test('an empty read after a stored list rebuilds it, unsigned, and asks once (every product reads as removed)', async () => {
+    setList([]);
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('removed');
+    expect(store.replaceFile.mock.calls[0][3].attestBySystem).toBe(false);
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.rows).toEqual([]);
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+  });
+  test('unticking the last product of a bid-only list rebuilds it and asks', async () => {
+    const bidOnly = [lib.snapshotOf(product(7, { name: 'Termidor SC', uses: 0 }), { bid: true })];
+    store.listItems.mockResolvedValue([itemRow({ details: { product_list_sync: { fingerprint: lib.fingerprintOf(bidOnly), file_ref: refOf(KEY), rows: bidOnly } } })]);
+    setList([]);
+    mockTables.bid_products = [];
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('bid_products');
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.rows).toEqual([]);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toContain('Removed from bid work: Termidor SC');
   });
   test('a list with only bid products (no applied products) still rebuilds', async () => {
     setList([]);

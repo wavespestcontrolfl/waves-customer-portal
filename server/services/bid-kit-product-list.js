@@ -526,13 +526,16 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
     }
     item = await settlePending(item);
     const { rows, unmatched, bidRows } = await readProductList();
-    if (!rows.length && !bidRows.length) {
-      logger.warn('[bid-kit] product list sync found no applied or bid products; the file was left alone');
+    const prior = item.details && item.details.product_list_sync;
+    // Nothing to print and no stored list (a new or empty database): leave the file alone. When the stored list had products, an
+    // empty read is processed like any other change: each product reads as removed, and a removal always asks for a sign-off.
+    if (!rows.length && !bidRows.length && !(prior && Array.isArray(prior.rows) && prior.rows.length)) {
+      logger.warn('[bid-kit] product list sync found no applied or bid products and no stored list; the file was left alone');
       return { skipped: 'no_products' };
     }
+    if (!rows.length) logger.warn(`[bid-kit] product list sync found no applied products (${bidRows.length} bid); the list is rebuilt and needs a sign-off`);
     const snapshots = [...rows.map((row) => snapshotOf(row)), ...bidRows.map((row) => snapshotOf(row, { bid: true }))];
     const fingerprint = fingerprintOf(snapshots, unmatched);
-    const prior = item.details && item.details.product_list_sync;
     const info = await store.fileInfo(item.id);
     // Unchanged only while the file on the row is still the one this job stored: a file replaced by hand is rebuilt and flagged.
     if (prior && prior.fingerprint === fingerprint && fileIsOurs(prior, info)) return { changed: false };
