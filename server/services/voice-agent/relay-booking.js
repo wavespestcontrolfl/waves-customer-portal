@@ -192,6 +192,7 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     today: new Date(),
     timeOfDay: offer.timeOfDay || 'any',
     expandOpenDays: offer.expandOpenDays === true,
+    surface: 'voice',
     // No serviceIdentity — see this function's doc comment (Codex r6 P2):
     // the offer never had one, so the recheck must not manufacture one.
   });

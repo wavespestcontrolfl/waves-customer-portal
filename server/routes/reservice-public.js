@@ -274,6 +274,7 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     rangeTo,
     config,
     today: new Date(),
+    surface: 'reservice',
     // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
     selfServeNotice: true,
     // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW, owner ruling

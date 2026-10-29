@@ -1932,6 +1932,25 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
   };
 }
 
+// Route check for the estimate page's lists (GATE_CUSTOMER_ROUTE_CHECK,
+// scheduling/customer-route-check.js). Gate off: returns the list untouched
+// and the module is never loaded. Fail-open: any error serves the list as is.
+async function routeCheckedSlots(surface, slots, { coords, estimateId, durationMinutes }) {
+  try {
+    const routeCheck = require('./scheduling/customer-route-check');
+    const mode = routeCheck.customerRouteCheckMode();
+    if (mode === 'off' || !slots.length) return slots;
+    const checked = await routeCheck.filterOfferedSlots({
+      surface, mode, slots, durationMinutes, today: new Date(),
+      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+    });
+    return checked.slots || slots;
+  } catch (err) {
+    logger.warn(`[customer-route-check] ${surface} check failed, serving the unfiltered list: ${err.message}`);
+    return slots;
+  }
+}
+
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
@@ -2292,12 +2311,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const collisionFree = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another
+  // customer late. Inside this uncached builder, so a wrapper cache hit
+  // neither recomputes nor logs.
+  const routeCheckInput = { coords, estimateId, durationMinutes: serviceProfile.durationMinutes };
+  const classified = await routeCheckedSlots('estimate', collisionFree, routeCheckInput);
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const asapCollisionFree = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const asap = await routeCheckedSlots('estimate_asap', asapCollisionFree, routeCheckInput);
   const sortedPool = applyOnePerHour(dedupeSlots([...asap, ...classified])).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(

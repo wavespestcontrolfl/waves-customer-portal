@@ -785,6 +785,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     rangeTo,
     config,
     today: new Date(),
+    surface: 'inspection',
     selfServeNotice: true,
     // This route's commit (phase 2, createSelfBooking below) re-verifies
     // with traffic and persists the certified route order while

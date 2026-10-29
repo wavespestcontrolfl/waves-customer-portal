@@ -640,6 +640,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
+    surface: 'reschedule',
     serviceKey,
     serviceIdentity,
     // Self-serve surface — a new target starting within the notice window

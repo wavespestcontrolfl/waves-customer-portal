@@ -289,6 +289,7 @@ function availabilityFor(context, { rangeFrom, rangeTo, config }) {
     rangeTo,
     config,
     today: new Date(),
+    surface: 'commercial_first_visit',
     selfServeNotice: true,
     // The commit is createSelfBooking, which re-verifies with traffic and persists the certified route order while
     // bookInsertionOffersLive() is live (the inspection page's contract, see inspection-public.js).
