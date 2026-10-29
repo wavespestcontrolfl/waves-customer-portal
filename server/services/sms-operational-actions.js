@@ -1480,6 +1480,24 @@ async function recordFulfillmentShadow(conn, { current, message, evidence, baseV
   }
 }
 
+// Rule 3, read before the transaction so a failed read can never abort it.
+// onTrack is null with the gate off, inside the window, or with no visit
+// ahead; only 'true' mode holds the bell.
+async function onTrackHold(conn, commitment, message, now, deadlinePassed) {
+  const onTrack = deadlinePassed ? await findOnTrackVisit(conn, commitment, message, now) : null;
+  return { onTrack, holdBell: onTrack?.mode === 'true' };
+}
+
+// The shadow rows of one refresh, written after its transaction so an audit
+// write can never undo a persisted verdict. Shadow mode only; both writers
+// never throw.
+async function recordPromiseRecordShadows(conn, { persisted, rang, closed, onTrack, current, message, evidence, verdict, inWindow, threadOnly, now, verify, budget }) {
+  if (!persisted) return;
+  if (rang && onTrack?.mode === 'shadow') await recordOnTrackShadow(conn, current, onTrack, now);
+  if (closed || verdict.verdict === 'fulfilled' || inWindow || threadOnly || promiseRecordMode() !== 'shadow') return;
+  await recordFulfillmentShadow(conn, { current, message, evidence, baseVerdict: verdict, now, verify, eventOnly: false, budget });
+}
+
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
 async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verifyThreadCompletion, shadowBudget = { left: SHADOW_MODEL_CALLS_PER_RUN }) {
@@ -1524,10 +1542,8 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
   if (threadOnly && verdict.verdict !== 'fulfilled') return { outcome: settle('no_witness') };
   let closed = false;
   // GATE_PROMISE_RECORD_EVIDENCE rule 3: an overdue promise with a visit still
-  // to come does not ring until that visit's window ends. Read before the
-  // transaction so a failed read can never abort it; null with the gate off.
-  const onTrack = deadlinePassed ? await findOnTrackVisit(conn, current, message, now) : null;
-  const holdBell = onTrack?.mode === 'true';
+  // to come does not ring until that visit's window ends.
+  const { onTrack, holdBell } = await onTrackHold(conn, current, message, now, deadlinePassed);
   let rang = false;
   // Only a verdict this transaction actually persisted counts as handled.
   // Every early exit — a relinked or changed source, the gate turning off, a
@@ -1581,10 +1597,8 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       rang = true;
     }
   });
-  if (persisted && rang && onTrack?.mode === 'shadow') await recordOnTrackShadow(conn, current, onTrack, now);
-  if (persisted && !closed && verdict.verdict !== 'fulfilled' && !inWindow && !threadOnly && promiseRecordMode() === 'shadow') {
-    await recordFulfillmentShadow(conn, { current, message, evidence, baseVerdict: verdict, now, verify, eventOnly: false, budget: shadowBudget });
-  }
+  await recordPromiseRecordShadows(conn, { persisted, rang, closed, onTrack, current, message, evidence, verdict,
+    inWindow, threadOnly, now, verify, budget: shadowBudget });
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
   // retry_after, so this costs no extra provider calls).
