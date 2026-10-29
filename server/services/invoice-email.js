@@ -288,12 +288,14 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // A customer under a collections DISPUTE hold was told all billing
   // follow-up is on hold (owner ruling 2026-09-30). An operator or customer
   // exemption still sends THIS invoice, but it never names the rest of the
-  // balance; a hold read that fails is treated the same way.
+  // balance: the shared messaging predicate is asked WITHOUT the exemption,
+  // so any hold, or a hold read that fails, leaves the balance out.
   let previousBalance = null;
   if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
     try {
-      const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
-      if (!(await customerHasActiveCollectionHold(invoice.customer_id))) {
+      const { messagingHeldByCollectionHold } = require('./collections/collection-hold');
+      const hold = await messagingHeldByCollectionHold(invoice.customer_id);
+      if (!hold.held) {
         const { openBalanceSummary } = require('./open-balance');
         previousBalance = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id, displayLimit: 10 });
       }

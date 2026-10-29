@@ -58,11 +58,11 @@ jest.mock('../routes/pay-v2', () => ({ payPageCombinedBalance: jest.fn(async () 
 jest.mock('../services/open-balance', () => ({
   openBalanceSummary: jest.fn(async () => ({ total: 0, count: 0, invoices: [] })),
 }));
-// Only the dispute-hold read behind the balance is stubbed; the rest of the
-// module stays real.
+// Only the shared messaging-hold predicate is stubbed (no hold); the rest of
+// the module stays real.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  customerHasActiveCollectionHold: jest.fn(async () => false),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 
 const db = require('../models/db');
@@ -72,7 +72,7 @@ const { openBalanceSummary } = require('../services/open-balance');
 const { sendInvoiceEmail } = require('../services/invoice-email');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const { payPageCombinedBalance } = require('../routes/pay-v2');
-const { customerHasActiveCollectionHold } = require('../services/collections/collection-hold');
+const { messagingHeldByCollectionHold } = require('../services/collections/collection-hold');
 
 function chain({ first, result } = {}) {
   const q = {};
@@ -120,7 +120,7 @@ describe('sendInvoiceEmail previous-balance note', () => {
     jest.clearAllMocks();
     isEnabled.mockImplementation(() => false);
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, invoices: [] });
-    customerHasActiveCollectionHold.mockResolvedValue(false);
+    messagingHeldByCollectionHold.mockImplementation(async () => ({ held: false }));
     EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
   });
 
@@ -238,8 +238,10 @@ describe('sendInvoiceEmail previous-balance note', () => {
   });
 
   test.each([
-    ['an active dispute hold', () => customerHasActiveCollectionHold.mockResolvedValue(true)],
-    ['a dispute-hold read that fails', () => customerHasActiveCollectionHold.mockRejectedValue(new Error('db down'))],
+    // The operator exemption skips a plain dispute hold (ignoreDisputeHold),
+    // so the send itself goes out; the balance read asks without it.
+    ['an active dispute hold', () => messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => ({ held: !opts.ignoreDisputeHold }))],
+    ['a hold read that fails (the predicate fails closed)', () => messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (opts.ignoreDisputeHold ? { held: false } : { held: true, reason: 'lookup_failed' }))],
   ])('%s: neither the note nor the PDF block, even on an operator send', async (_label, arrange) => {
     // An operator send passes a plain dispute hold (holdExempt 'operator'),
     // but the customer was told billing follow-up is on hold.
@@ -251,7 +253,8 @@ describe('sendInvoiceEmail previous-balance note', () => {
     const result = await sendInvoiceEmail('inv-1', { operatorInitiated: true, holdExempt: 'operator' });
 
     expect(result.ok).toBe(true);
-    expect(customerHasActiveCollectionHold).toHaveBeenCalledWith('cust-1');
+    // Asked WITHOUT the exemption, so a dispute hold keeps the balance out.
+    expect(messagingHeldByCollectionHold).toHaveBeenCalledWith('cust-1');
     expect(openBalanceSummary).not.toHaveBeenCalled();
     expect(payPageCombinedBalance).not.toHaveBeenCalled();
     expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toBeUndefined();
