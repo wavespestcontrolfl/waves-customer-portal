@@ -10,7 +10,11 @@
  *      and starts labeling the data.
  *   2. Show AR aging (30/60/90+) for invoiced-but-unpaid invoices so receivables
  *      get chased.
- *   3. List the recurring accounts behind the dashboard's "MRR at risk" action
+ *   3. List draft invoices for finished visits that nobody ever sent ("Bill made,
+ *      never sent"). The leak queue counts any non-void invoice as billed, so a
+ *      forgotten draft is on no other list. Read-only: Send and Charge live on
+ *      the invoice page.
+ *   4. List the recurring accounts behind the dashboard's "MRR at risk" action
  *      item (service paused / autopay paused / overdue / prepay invoice unpaid)
  *      — the item deep-links here, so the number has to be actionable here.
  *
@@ -303,6 +307,56 @@ function VisitQueues({ feedbackEnabled, controlsEnabled, loading, error, onRetry
   );
 }
 
+function UnsentDraftsSection({ feedbackEnabled, loading, error, onRetry, unsentDrafts }) {
+  const drafts = unsentDrafts?.drafts || [];
+  let body;
+  if (loading) body = feedbackEnabled
+    ? <ActionFeedback className="min-h-20">Loading unsent draft invoices…</ActionFeedback>
+    : <div role="status" className="text-ui-body text-ink-secondary py-4 text-center">Loading…</div>;
+  else if (error) body = (
+    <ActionFeedback error onRetry={onRetry}>Unsent draft invoices couldn't be loaded. Other billing recovery sections are still available.</ActionFeedback>
+  );
+  else if (drafts.length) body = (
+    <>
+      <p className="text-ui-label font-medium text-ink-secondary mb-3 u-nums">
+        {drafts.length} draft{drafts.length === 1 ? "" : "s"} · {formatMoney(unsentDrafts.summary?.total)}
+      </p>
+      <Table layout="records">
+        <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Amount</TH><TH align="right">Invoice</TH></TR></THead>
+        <TBody>{drafts.map((draft) => (
+          <TR key={draft.invoice_id}>
+            <TD>{`${draft.first_name || ""} ${draft.last_name || ""}`.trim() || "—"}</TD>
+            <TD data-label="Visit" className="text-ink-secondary u-nums">{draft.scheduled_date ? formatDateOnly(draft.scheduled_date) : formatETDate(draft.completed_at)}</TD>
+            <TD data-label="Service">
+              <div>
+                {draft.service_type || "—"}
+                {draft.visit_marked_free && <div className="mt-1"><Badge tone="neutral">visit marked free</Badge></div>}
+              </div>
+            </TD>
+            <TD data-label="Amount" nums>{formatMoney(draft.total)}</TD>
+            <TD data-label="Invoice" align="right">
+              <a href={`/admin/invoices?invoice=${encodeURIComponent(draft.invoice_id)}`} className="inline-flex items-center text-zinc-900 underline-offset-2 hover:underline u-focus-ring" data-ui-text-action>
+                {draft.invoice_number}
+              </a>
+            </TD>
+          </TR>
+        ))}</TBody>
+      </Table>
+    </>
+  );
+  else body = <EmptyFeedback feedbackEnabled={feedbackEnabled} className="justify-center py-4 text-center">No unsent drafts.</EmptyFeedback>;
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle>Bill made, never sent</CardTitle>
+        <p className="text-ui-caption text-ink-secondary mt-1">The portal made these invoices as drafts. Nobody sent them, so the customer never got a bill.</p>
+      </CardHeader>
+      <CardBody>{body}</CardBody>
+    </Card>
+  );
+}
+
 function AgingSection({ feedbackEnabled, loading, error, onRetry, aging }) {
   const buckets = aging?.aging || {};
   let body;
@@ -382,6 +436,9 @@ export default function BillingRecoveryPage() {
   const [data, setData] = useState(null);
   const [aging, setAging] = useState(null);
   const [atRiskMrr, setAtRiskMrr] = useState(null);
+  const [unsentDrafts, setUnsentDrafts] = useState(null);
+  const [draftsLoading, setDraftsLoading] = useState(true);
+  const [draftsError, setDraftsError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [leaksLoading, setLeaksLoading] = useState(true);
@@ -407,7 +464,7 @@ export default function BillingRecoveryPage() {
   if (priorScope.days !== days || priorScope.feedbackEnabled !== feedbackEnabled) {
     readScopeRef.current = { days, feedbackEnabled, version: priorScope.version + 1 };
   }
-  const readRequestsRef = useRef({ legacy: 0, leaks: 0, aging: 0, atRisk: 0 });
+  const readRequestsRef = useRef({ legacy: 0, leaks: 0, aging: 0, atRisk: 0, drafts: 0 });
   const isCurrentRead = useCallback((source, requestId, scopeVersion) => (
     readRequestsRef.current[source] === requestId && readScopeRef.current.version === scopeVersion
   ), []);
@@ -488,10 +545,30 @@ export default function BillingRecoveryPage() {
     }
   }, [isCurrentRead]);
 
+  // Read-only and independent of the visit queues in both modes, so a failed
+  // draft read never blanks the leak list.
+  const loadDrafts = useCallback(async () => {
+    const scope = readScopeRef.current;
+    const requestId = ++readRequestsRef.current.drafts;
+    setDraftsLoading(true);
+    setDraftsError(null);
+    setUnsentDrafts(null);
+    try {
+      const result = await adminFetch(`/admin/billing-recovery/unsent-drafts?days=${scope.days}`);
+      if (isCurrentRead("drafts", requestId, scope.version)) setUnsentDrafts(result);
+    } catch (e) {
+      if (isCurrentRead("drafts", requestId, scope.version)) setDraftsError(e.message || "Failed to load unsent draft invoices");
+    } finally {
+      if (isCurrentRead("drafts", requestId, scope.version)) setDraftsLoading(false);
+    }
+  }, [isCurrentRead]);
+
   const refreshAll = useCallback(async () => {
     if (!readScopeRef.current.feedbackEnabled) return loadLegacy();
     await Promise.all([loadLeaks(), loadAging(), loadAtRisk()]);
   }, [loadAging, loadAtRisk, loadLeaks, loadLegacy]);
+
+  useEffect(() => { void loadDrafts(); }, [days, feedbackEnabled, loadDrafts]);
 
   useEffect(() => {
     if (feedbackEnabled) {
@@ -637,6 +714,8 @@ export default function BillingRecoveryPage() {
             controlsEnabled={tableControlsEnabled} onRetry={loadLeaks} data={data}
             busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
             onBill={bill} onFree={showFree} onElsewhere={showElsewhere} />
+          <UnsentDraftsSection feedbackEnabled={feedbackEnabled} loading={draftsLoading} error={draftsError}
+            onRetry={loadDrafts} unsentDrafts={unsentDrafts} />
           <AgingSection feedbackEnabled={feedbackEnabled} loading={agingLoading} error={agingError}
             onRetry={loadAging} aging={aging} />
           <AtRiskSection feedbackEnabled={feedbackEnabled} loading={atRiskLoading} error={atRiskError}

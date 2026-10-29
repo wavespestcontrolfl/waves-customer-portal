@@ -15,6 +15,8 @@
  *  - social post photo: the hosted photo's URL (an unguessable key minted per
  *    upload, so it names exactly one image) plus the caption the model was
  *    given; photo-privacy-shadow.js builds the state the same way.
+ *  - lawn diagnosis summary: the stored contract's customer_summary, trimmed,
+ *    whose sentences lawn-jev-timing-check.js put to Jev one by one.
  */
 const crypto = require('crypto');
 const { CALL_TRANSCRIPT_CHARS } = require('./packages');
@@ -64,4 +66,14 @@ function askWavesSubjectHash({ visitorMessage, reply }) {
   return crypto.createHash('sha256').update(JSON.stringify([String(visitorMessage ?? ''), String(reply ?? '')])).digest('hex');
 }
 
-module.exports = { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, smsCustomerText, socialPostCaption, socialPostSubjectHash };
+const LAWN_SUMMARY_CHARS = 4000;
+
+function lawnDiagnosisSummaryText(text) {
+  return (typeof text === 'string' ? text.trim() : '').slice(0, LAWN_SUMMARY_CHARS);
+}
+
+function lawnDiagnosisSubjectHash(text) {
+  return crypto.createHash('sha256').update(JSON.stringify([lawnDiagnosisSummaryText(text)])).digest('hex');
+}
+
+module.exports = { askWavesSubjectHash, lawnDiagnosisSubjectHash, lawnDiagnosisSummaryText, callSubjectHash, callTranscriptSpan, smsSubjectHash, smsCustomerText, socialPostCaption, socialPostSubjectHash };

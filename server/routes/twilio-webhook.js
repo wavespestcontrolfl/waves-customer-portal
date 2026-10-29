@@ -17,6 +17,9 @@ const {
   isAffirmativeSmsReaction,
   reactionQuotedTarget,
   isCourtesyOnly,
+  courtesyTailWould,
+  courtesyTailMode,
+  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
 } = require('../services/sms-intent');
@@ -352,6 +355,15 @@ router.post('/sms', async (req, res) => {
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
+    // GATE_SMS_COURTESY_TAIL=shadow: the results above are unchanged; record on the row
+    // when the courtesy-tail rule WOULD have closed this text ("Perfect. Go browns"), so
+    // the owner can read the real hit rate before flipping. The DB read only runs for
+    // texts the new rule matches while our last text is assumed to ask nothing.
+    let courtesyTailMetadata = {};
+    if (typeof courtesyTailMode === 'function' && courtesyTailMode() === 'shadow' && !courtesyOnly && !smsReaction && inboundMedia.length === 0
+      && courtesyTailWould(Body, { awaitingAnswer: false })) {
+      courtesyTailMetadata = courtesyTailShadowMetadata('shadow', courtesyTailWould(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) }));
+    }
     // Quiet tapback = explicitly affirmative (Liked/Loved/👍/undo) AND its
     // quoted target asked nothing. "Reacted 👍 to \"Does 9am work?\"" is the
     // ANSWER; "Disliked …" / "Questioned …" / ❓ express concern — all loud
@@ -491,7 +503,7 @@ router.post('/sms', async (req, res) => {
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: recruitingReply ? 'job_applicant_reply' : (quietReaction ? 'sms_reaction' : undefined),
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...courtesyTailMetadata, ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
     }).catch(() => {});
 
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
@@ -986,6 +998,7 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
+        ...courtesyTailMetadata,
       }),
     }).returning(['id', 'created_at']).catch(() => {
       sourcePersistenceFailed = true;

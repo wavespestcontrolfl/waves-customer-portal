@@ -333,6 +333,85 @@ router.get('/leaks', async (req, res) => {
 });
 
 /**
+ * Draft invoices for finished visits that nobody ever sent. HAS_INVOICE_SQL
+ * counts any non-void invoice as billed (so Bill never double-mints), which
+ * hides a forgotten draft from the leak queue; this separate read-only list
+ * names them. Never sent = no sent_at / sms_sent_at / email_sent_at; a draft
+ * with a future scheduled_send_at is waiting on its send, and one under 24 h
+ * old is still inside the normal send window. Payer-billed invoices ride the
+ * payer's statement. The visit comes from scheduled_service_id, or from the
+ * service record's visit when only service_record_id is set.
+ */
+async function listUnsentDrafts(days) {
+  const rows = await db({ i: 'invoices' })
+    .join({ c: 'customers' }, 'c.id', 'i.customer_id')
+    .leftJoin({ sr: 'service_records' }, 'sr.id', 'i.service_record_id')
+    .leftJoin({ ss: 'scheduled_services' }, function visitOnInvoice() {
+      this.on(db.raw('ss.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)'));
+    })
+    .where('i.status', 'draft')
+    .whereNull('i.sent_at')
+    .whereNull('i.sms_sent_at')
+    .whereNull('i.email_sent_at')
+    .whereNull('i.payer_id')
+    .whereRaw("i.created_at < now() - interval '24 hours'")
+    .whereRaw('(i.scheduled_send_at IS NULL OR i.scheduled_send_at <= now())')
+    .whereRaw("(ss.status = 'completed' OR sr.status = 'completed')")
+    .whereRaw("COALESCE(ss.completed_at, sr.created_at) >= now() - (? * interval '1 day')", [days])
+    .modify((q) => {
+      if (INTERNAL_TEST_CUSTOMERS.length) q.whereNotIn(db.raw(INTERNAL_NAME_SQL), INTERNAL_TEST_CUSTOMERS);
+    })
+    .select(
+      'i.id as invoice_id',
+      'i.invoice_number',
+      'i.total',
+      'i.created_at',
+      'c.id as customer_id',
+      'c.first_name',
+      'c.last_name',
+      db.raw('COALESCE(ss.scheduled_date, sr.service_date) AS scheduled_date'),
+      db.raw('COALESCE(ss.completed_at, sr.created_at) AS completed_at'),
+      db.raw('COALESCE(ss.service_type, sr.service_type, i.service_type) AS service_type'),
+      // A draft made AFTER its visit was marked free is a conflict the operator must see.
+      db.raw(`EXISTS (SELECT 1 FROM visit_billing_dispositions d
+        WHERE d.scheduled_service_id = ss.id AND d.disposition = 'intentionally_free') AS visit_marked_free`),
+    )
+    .orderByRaw('COALESCE(ss.completed_at, sr.created_at) ASC');
+
+  const drafts = rows.map((r) => ({
+    invoice_id: r.invoice_id,
+    invoice_number: r.invoice_number,
+    total: parseFloat(r.total || 0),
+    created_at: r.created_at,
+    customer_id: r.customer_id,
+    first_name: r.first_name,
+    last_name: r.last_name,
+    scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
+    completed_at: r.completed_at,
+    service_type: r.service_type,
+    visit_marked_free: !!r.visit_marked_free,
+  }));
+  return {
+    window_days: days,
+    summary: { count: drafts.length, total: Math.round(drafts.reduce((s, r) => s + r.total, 0) * 100) / 100 },
+    drafts,
+  };
+}
+
+/**
+ * GET /api/admin/billing-recovery/unsent-drafts?days=90
+ * "Bill made, never sent" for the Billing recovery page. Read-only.
+ */
+router.get('/unsent-drafts', async (req, res) => {
+  try {
+    res.json(await listUnsentDrafts(clampDays(req.query.days)));
+  } catch (err) {
+    logger.error(`[billing-recovery] unsent drafts query failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load unsent draft invoices' });
+  }
+});
+
+/**
  * GET /api/admin/billing-recovery/aging?min_amount=0
  * AR aging for invoiced-but-unpaid invoices. Reuses the dashboard
  * get_outstanding_balances tool (ET-anchored 30/60/90 buckets) — single

@@ -323,3 +323,14 @@ it('never renders a social post image from a non-https address', async () => {
   expect(await screen.findByText('Fixture caption')).toBeInTheDocument();
   expect(screen.queryByAltText('The photo this post published')).toBeNull();
 });
+
+it('shows a lawn diagnosis subject as its summary, not as a customer text', async () => {
+  mockList([yesNoRow({
+    capability: 'lawn_result_timing', subjectType: 'lawn_diagnostics',
+    subject: { type: 'lawn_diagnostics', text: 'Fixture lawn summary.', at: '2026-10-28T14:00:00Z' },
+  })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Fixture lawn summary.')).toBeInTheDocument();
+  expect(screen.getByText(/Lawn diagnosis summary, read sentence by sentence/)).toBeInTheDocument();
+  expect(screen.queryByText(/Customer text/)).toBeNull();
+});

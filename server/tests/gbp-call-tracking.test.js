@@ -54,6 +54,33 @@ describe('GBP call tracking numbers', () => {
   });
 });
 
+describe('website tracking numbers carry an office label', () => {
+  // The voice/SMS webhooks stamp call_log.location = label || 'unknown'. Website
+  // entries had no label, so every website call was logged 'unknown'.
+  test('every pest and lawn website number resolves to a real label', () => {
+    for (const entry of [...TWILIO_NUMBERS.domainTracking, ...TWILIO_NUMBERS.lawnDomainTracking]) {
+      const label = TWILIO_NUMBERS.findByNumber(entry.number).label;
+      expect(label).toBeTruthy();
+      expect(label).not.toMatch(/unknown/i);
+    }
+  });
+
+  test('a website number names the office it routes to; the domain stays separate', () => {
+    expect(TWILIO_NUMBERS.findByNumber('+19412998937')).toEqual(expect.objectContaining({
+      label: 'Venice website (Pest)', type: 'domain_tracking', locationId: 'venice', domain: 'veniceexterminator.com',
+    }));
+    expect(TWILIO_NUMBERS.findByNumber('+19414131227').label).toBe('Venice website (Lawn)'); // venicelawncare.com
+    expect(TWILIO_NUMBERS.findByNumber('+19412838194').label).toBe('Lakewood Ranch website (Pest)'); // bradentonflexterminator.com
+    expect(TWILIO_NUMBERS.findByNumber('+19412402066').label).toBe('Venice website (Pest)'); // hub North Port page
+  });
+
+  test('the main line keeps its own name and stays a domain_tracking number', () => {
+    expect(TWILIO_NUMBERS.findByNumber('+19412975749')).toEqual(expect.objectContaining({
+      label: 'Waves Main Line', type: 'domain_tracking', domain: 'wavespestcontrol.com',
+    }));
+  });
+});
+
 describe('getLeadSourceFromNumber — canonical channel keys', () => {
   // The resolver emits the SAME keys the card/web use, so a call-sourced
   // customers.lead_source matches a web-sourced one for the same channel.
