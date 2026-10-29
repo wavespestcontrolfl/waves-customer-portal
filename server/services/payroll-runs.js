@@ -394,6 +394,25 @@ async function workedTechnicianIds(conn, start, end) {
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
 }
 
+// GATE_PAYROLL_PAY_LINES: a line's overtime is priced from the approved hours of every
+// week it covers. A covered week that holds worked time but no approved timesheet would
+// price as no hours, and the line would be paid without that week's overtime for good.
+// Map of technician id -> the oldest such week; that technician waits until it is approved.
+async function lineWeeksWaiting(conn, priced) {
+  const techsByWeek = new Map();
+  for (const [technicianId, { missingWeeks = [] }] of priced) {
+    for (const week of missingWeeks) techsByWeek.set(week, [...(techsByWeek.get(week) || []), technicianId]);
+  }
+  const waitingOn = new Map();
+  for (const week of [...techsByWeek.keys()].sort()) {
+    const worked = new Set(await workedTechnicianIds(conn, week, addStaffWorkDays(week, 6)));
+    for (const technicianId of techsByWeek.get(week)) {
+      if (worked.has(technicianId) && !waitingOn.has(technicianId)) waitingOn.set(technicianId, week);
+    }
+  }
+  return waitingOn;
+}
+
 // GATE_PAYROLL_TIME_OFF: paid time off and holiday minutes of W-2 technicians
 // dated inside the week, summed per technician. Map of id -> { pto, holiday }.
 async function timeOffByTechnician(conn, start, end) {
@@ -494,6 +513,18 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const priced = lineMap.size ? await priceLines(conn, lineMap, { lock }) : new Map();
   const haveCheck = new Set([...withHours, ...timeOffOnlyRows].map((row) => row.technician_id));
   const waitingTechIds = new Set(worked);
+  // A line that covers an earlier week whose worked time is not approved yet cannot be
+  // priced: the technician waits, and gets no check on this run until that week is approved.
+  const lineWait = priced.size ? await lineWeeksWaiting(conn, priced) : new Map();
+  for (const [technicianId, week] of lineWait) {
+    if (waitingTechIds.has(technicianId)) continue;
+    waitingTechIds.add(technicianId);
+    waiting.push({
+      technicianId,
+      name: lineMap.get(technicianId).tech.name,
+      reason: `Timesheet for the week of ${week} is not approved yet, and a pay line covers that week`,
+    });
+  }
   const linesOnlyRows = [...lineMap.values()]
     .filter(({ tech }) => !haveCheck.has(tech.technician_id) && !waitingTechIds.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
@@ -514,6 +545,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const checks = [];
   const blocked = [];
   for (const row of [...withHours, ...timeOffOnlyRows, ...linesOnlyRows]) {
+    if (lineWait.has(row.technician_id)) continue;
     const held = lineMap.get(row.technician_id);
     const tech = held ? { ...row, pay_lines: held.lines, line_premium: priced.get(row.technician_id) } : row;
     if (unreviewed.has(tech.technician_id)) {

@@ -263,7 +263,10 @@ const lineSpan = (line) => (line.coversFrom ? { coversFrom: line.coversFrom, cov
  * The extra overtime the lines cause, for every technician in `byTech` (the map
  * openLinesFor returns). Each line's weeks are read from the APPROVED weekly
  * timesheets; a week with none counts as no hours worked. Returns a Map of
- * technician id -> { extraPremiumCents, weeks } (payroll-regular-rate.js).
+ * technician id -> { extraPremiumCents, weeks } (payroll-regular-rate.js), plus
+ * missingWeeks: the covered weeks with no approved timesheet, oldest first. The
+ * pay run makes the technician wait when one of those weeks holds worked time, so
+ * a line is never paid without that week's overtime.
  */
 async function priceLines(conn, byTech, { lock = false } = {}) {
   const priced = new Map();
@@ -283,9 +286,14 @@ async function priceLines(conn, byTech, { lock = false } = {}) {
   if (lock) query.forUpdate();
   const summaries = await query;
   for (const [technicianId, lines] of spansByTech) {
-    const weeks = summaries.filter((row) => row.technician_id === technicianId)
-      .map((row) => ({ weekStart: row.week_start, regularMinutes: row.regular_minutes, overtimeMinutes: row.overtime_minutes }));
-    priced.set(technicianId, lineOvertimePremium({ weeks, lines }));
+    const rows = summaries.filter((row) => row.technician_id === technicianId);
+    const weeks = rows.map((row) => ({ weekStart: row.week_start, regularMinutes: row.regular_minutes, overtimeMinutes: row.overtime_minutes }));
+    const approvedWeeks = new Set(rows.map((row) => row.week_start));
+    const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
+    priced.set(technicianId, {
+      ...lineOvertimePremium({ weeks, lines }),
+      missingWeeks: covered.filter((week) => !approvedWeeks.has(week)),
+    });
   }
   return priced;
 }

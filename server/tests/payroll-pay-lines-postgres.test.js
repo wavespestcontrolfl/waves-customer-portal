@@ -350,6 +350,43 @@ postgres('payroll pay lines', () => {
       ]);
     });
 
+    it('make a technician wait while a covered week holds worked time that is not approved, then pay its overtime', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W2, '2400.00', '0.00');
+      // W1 holds worked time, but its weekly timesheet is not approved yet.
+      await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: W1, total_shift_minutes: 480 });
+      const line = await addLine(id, { kind: 'commission', amountCents: 40000, coversFrom: W1, coversTo: addDays(W2, 6), earnedWeekStart: W2 });
+      const created = await draft(W2);
+      expect(created.status).toBe(201);
+      expect(created.body.run.checks).toEqual([]);
+      expect(created.body.run.waiting).toEqual([expect.objectContaining({
+        technicianId: id,
+        name: 'Sample Alpha',
+        reason: `Timesheet for the week of ${W1} is not approved yet, and a pay line covers that week`,
+      })]);
+      const refused = await finalize(created.body.run.id);
+      expect(refused.status).toBe(409);
+      expect(refused.body.error).toMatch(/Sample Alpha: Timesheet for the week of 2026-09-14 is not approved yet/);
+      expect((await lineRow(line.id)).status).toBe('open');
+
+      // W1 approved with 4 overtime hours of 44: 1/2 x (200.00 / 44) x 4 = 9.09 on top of the commission.
+      await approvedWeek(id, W1, '2400.00', '240.00');
+      const recomputed = (await api('POST', `/runs/${created.body.run.id}/recompute`)).body.run;
+      expect(recomputed.waiting).toEqual([]);
+      expect(byName(recomputed, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 909 });
+      expect((await finalize(recomputed.id)).status).toBe(200);
+      expect((await lineRow(line.id)).status).toBe('paid');
+    });
+
+    it('treat a covered week with no worked time and no timesheet as no hours, without waiting', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W2, '2400.00', '0.00');
+      await addLine(id, { kind: 'commission', amountCents: 40000, coversFrom: W1, coversTo: addDays(W2, 6), earnedWeekStart: W2 });
+      const run = (await draft(W2)).body.run;
+      expect(run.waiting).toEqual([]);
+      expect(byName(run, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 0 });
+    });
+
     it('pay a line added after its week was final on the next run, with the premium from its own week', async () => {
       const id = await readyTech('Sample Alpha', { pay_rate: '23.00' });
       await approvedWeek(id, W1, '2400.00', '120.00');
