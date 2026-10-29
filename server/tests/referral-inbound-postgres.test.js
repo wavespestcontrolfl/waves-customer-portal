@@ -526,6 +526,34 @@ jest.mock('../services/customer-credit', () => ({
       expect(postCreditMovement).not.toHaveBeenCalled();
     });
 
+    test('a referrer who is not the card\'s one sure referrer is refused and saves nothing', async () => {
+      await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const other = await customer({ first_name: 'Rae', last_name: 'Other' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await expect(inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: other.id, deferredOnly: true }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'REFERRER_CHANGED' });
+      expect(await saved()).toEqual({ referrals: '0', answers: '0' });
+    });
+
+    test('a plan visit that completes while the confirm runs is credited after it, so that visit\'s credit is not lost', async () => {
+      const engine = require('../services/referral-engine');
+      const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      const realConvert = engine.convertReferral;
+      // The visit commits on another connection after the confirm's own visit check passed.
+      const spy = jest.spyOn(engine, 'convertReferral').mockImplementationOnce(async (...args) => {
+        await recurringVisit(friend.id);
+        return realConvert(...args);
+      });
+      try {
+        await expect(inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id, deferredOnly: true }))
+          .resolves.toMatchObject({ converted: true, creditsNow: true, credited: expect.anything(), error: null });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(postCreditMovement).toHaveBeenCalledTimes(2);
+    });
+
     test('two confirms for one referrer at the same moment: the one that would be the 3rd conversion is refused', async () => {
       const referrer = await customer({ referral_code: 'WAVES-JANE' });
       await promoterFor(referrer, 1);

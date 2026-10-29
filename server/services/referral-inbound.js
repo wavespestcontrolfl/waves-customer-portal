@@ -186,6 +186,29 @@ function performedRecurringVisits(conn) {
     )`, [NOT_PERFORMED_OUTCOMES]);
 }
 
+// The likely referrers for one referee's evidence, as the Queue shows them, and
+// whether the link code belongs to the referee's own household.
+async function suggestionsFor(conn, customer, evidence) {
+  if (evidence.source === 'link') {
+    const owner = await customerForCode(evidence.code, conn);
+    if (owner && sameHousehold(owner, customer)) return { suggestions: [], selfReferral: true };
+    return { suggestions: owner ? [suggestionView(owner, { exact: true, viaCode: true })] : [], selfReferral: false };
+  }
+  if (!evidence.spokenName) return { suggestions: [], selfReferral: false };
+  const matches = await customersForSpokenName(evidence.spokenName, customer, conn);
+  return { suggestions: matches.map(({ match, exact }) => suggestionView(match, { exact, viaCode: false })), selfReferral: false };
+}
+
+// The one referrer the new-referral bell may offer (referral-inbound-bell.js),
+// or null: the owner of the link code, or the one customer whose first and last
+// name match the name the caller gave. None for a household's own code, a code
+// nobody holds, or a name that matches nobody or several people.
+function sureReferrerOf({ suggestions = [], selfReferral = false } = {}) {
+  if (selfReferral) return null;
+  const sure = suggestions.filter((s) => s.viaCode || s.exact);
+  return sure.length === 1 ? sure[0] : null;
+}
+
 function suggestionView(c, extra = {}) {
   return {
     customerId: c.id,
@@ -246,16 +269,7 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
 
   const items = [];
   for (const { customer, evidence } of open) {
-    let suggestions = [];
-    let selfReferral = false;
-    if (evidence.source === 'link') {
-      const owner = await customerForCode(evidence.code, conn);
-      if (owner && sameHousehold(owner, customer)) selfReferral = true;
-      else if (owner) suggestions = [suggestionView(owner, { exact: true, viaCode: true })];
-    } else if (evidence.spokenName) {
-      suggestions = (await customersForSpokenName(evidence.spokenName, customer, conn))
-        .map(({ match, exact }) => suggestionView(match, { exact, viaCode: false }));
-    }
+    const { suggestions, selfReferral } = await suggestionsFor(conn, customer, evidence);
     items.push({
       customerId: customer.id,
       name: fullName(customer),
@@ -312,10 +326,11 @@ async function closeBell(customerId, outcome) {
  * `customerId`. Makes the referral row, converts it, and posts both credits
  * now (quietly) when a performed recurring visit is on record.
  * `deferredOnly` (the new-referral bell's Confirm, referral-inbound-bell.js):
- * the confirm may neither send nor pay anything now. It refuses a customer
- * with a performed plan visit, converts inside its own transaction (the
- * conversion refuses an at-once reward or a milestone under the promoter
- * lock), and never credits, so any refusal saves nothing.
+ * the confirm may neither send nor pay anything now. Under the referee lock it
+ * refuses a referrer that is no longer the card's one sure referrer and a
+ * customer with a performed plan visit, then converts inside the same
+ * transaction (the conversion refuses an at-once reward or a milestone under
+ * the promoter lock), so any refusal saves nothing.
  */
 async function confirmInboundReferral({ customerId, referrerCustomerId, reviewedBy = null, deferredOnly = false }) {
   // Unlocked first pass: refuse early, before the referrer is enrolled.
@@ -356,9 +371,16 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     if (await trx('referrals').whereRaw(sql, bindings).first('id')) {
       throw inboundError(409, 'ALREADY_REFERRED', 'A referral already names this customer');
     }
-    // deferredOnly: a plan visit already on record would post both credits at once, so the Queue answers it.
-    if (deferredOnly && await performedRecurringVisits(trx).where('ss.customer_id', customerId).first('ss.id')) {
-      throw inboundError(409, 'FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue.");
+    if (deferredOnly) {
+      // The referrer must still be the card's one sure referrer, judged on the locked row: evidence edited while
+      // this waited never confirms the old one.
+      if (sureReferrerOf(await suggestionsFor(trx, locked.referee, locked.evidence))?.customerId !== referrerCustomerId) {
+        throw inboundError(409, 'REFERRER_CHANGED', 'The likely referrer changed. Pick the referrer in Referrals → Queue.');
+      }
+      // A plan visit already on record would post both credits at once, so the Queue answers it.
+      if (await performedRecurringVisits(trx).where('ss.customer_id', customerId).first('ss.id')) {
+        throw inboundError(409, 'FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue.");
+      }
     }
     const [row] = await trx('referrals').insert({
       referrer_customer_id: promoter.customer_id,
@@ -391,28 +413,27 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     return { referral: row, current: locked };
   });
   await closeBell(customerId, 'confirmed');
-  if (deferredOnly) {
-    // Converted above, and no credit runs now: the first performed plan visit pays both $25 credits. A visit that
-    // completed while this ran is paid at the next one.
-    logger.info(`[referral-inbound] referral ${referral.id} confirmed (${current.evidence.source}, deferred); converted=true`);
-    return { referralId: referral.id, converted: true, creditsNow: false, credited: null, error: null };
-  }
 
   // Post-commit, the existing steps. Each is idempotent and re-checks its own
   // guards under a row lock, so a failure here leaves a pending referral the
-  // queue's Convert button can finish.
-  const result = { referralId: referral.id, converted: false, creditsNow: false, credited: null, error: null };
-  try {
-    const conversion = await engine.convertReferral(referral.id, {
-      customerId,
-      tier: current.referee.waveguard_tier,
-      monthlyValue: Number(current.referee.monthly_rate) || null,
-    });
-    result.converted = !conversion.alreadyConverted;
-  } catch (err) {
-    logger.warn(`[referral-inbound] convert failed for referral ${referral.id}: ${err.code || err.message}`);
-    result.error = 'convert_failed';
-    return result;
+  // queue's Convert button can finish. deferredOnly converted in the
+  // transaction; its credit step below can find only a plan visit that
+  // completed while the confirm ran (that visit's own credit found no referral
+  // yet), so the visit's credit is not lost.
+  const result = { referralId: referral.id, converted: deferredOnly, creditsNow: false, credited: null, error: null };
+  if (!deferredOnly) {
+    try {
+      const conversion = await engine.convertReferral(referral.id, {
+        customerId,
+        tier: current.referee.waveguard_tier,
+        monthlyValue: Number(current.referee.monthly_rate) || null,
+      });
+      result.converted = !conversion.alreadyConverted;
+    } catch (err) {
+      logger.warn(`[referral-inbound] convert failed for referral ${referral.id}: ${err.code || err.message}`);
+      result.error = 'convert_failed';
+      return result;
+    }
   }
 
   const firstVisit = await performedRecurringVisits(db)
@@ -452,6 +473,7 @@ async function dismissInboundReferral({ customerId, reviewedBy = null }) {
 
 module.exports = {
   listInboundReferrals,
+  sureReferrerOf,
   confirmInboundReferral,
   dismissInboundReferral,
 };

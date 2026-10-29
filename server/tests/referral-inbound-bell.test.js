@@ -7,6 +7,8 @@ jest.mock('../config/feature-gates', () => ({
   referralInboundConfirmLive: jest.fn(() => true),
 }));
 jest.mock('../services/referral-inbound', () => ({
+  // The service's own rule for the one sure referrer (the Postgres suite runs it on real rows).
+  sureReferrerOf: (...args) => jest.requireActual('../services/referral-inbound').sureReferrerOf(...args),
   listInboundReferrals: jest.fn(async () => []),
   confirmInboundReferral: jest.fn(),
   dismissInboundReferral: jest.fn(),
@@ -320,7 +322,15 @@ describe('a tap', () => {
     expect(inbound.confirmInboundReferral).not.toHaveBeenCalled();
   });
 
+  test('a plan visit that finished while the confirm ran is credited, and the message says so', async () => {
+    inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: true, creditsNow: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
+    await expect(run(CONFIRM)).resolves.toMatchObject({
+      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. Both $25 credits posted for the plan visit that just finished.",
+    });
+  });
+
   test.each([
+    ['REFERRER_CHANGED', 'The likely referrer changed. Pick the referrer in Referrals → Queue.'],
     ['FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue."],
     ['MILESTONE_DUE', 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.'],
     ['REWARD_NOT_DEFERRED', 'Referral rewards are paid at once now. Confirm it in Referrals → Queue.'],

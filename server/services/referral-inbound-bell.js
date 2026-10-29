@@ -46,13 +46,9 @@ const CLOSE_RESOLUTIONS = {
 const keyFor = (customerId) => `${KEY_PREFIX}${customerId}`;
 const firstName = (name) => tidyName(name).split(' ')[0] || 'This customer';
 
-// The one referrer the bell may offer, or null: none for a household's own link code, a code nobody holds, a
-// name that matches nobody or several people (the Queue picks those).
-function sureReferrer(card) {
-  if (!card || card.selfReferral) return null;
-  const sure = (card.suggestions || []).filter((s) => s.viaCode || s.exact);
-  return sure.length === 1 ? sure[0] : null;
-}
+// The one referrer the bell may offer, or null (referral-inbound.js sureReferrerOf; the confirm checks it again
+// under its lock).
+const sureReferrer = (card) => (card ? inbound.sureReferrerOf(card) : null);
 
 // Would confirming this referrer award a milestone (a bonus and a text at once)? Read-only: the promoter
 // confirmInboundReferral would use (the referrer's own, else the household's; none yet = no conversions),
@@ -293,12 +289,10 @@ const STEPS = {
     if (!sure || String(sure.customerId) !== String(item.args?.referrerCustomerId || '')) {
       return { ok: false, code: 'referrer_changed', message: 'The likely referrer changed. Pick the referrer in Referrals → Queue.' };
     }
-    await inbound.confirmInboundReferral({ customerId, referrerCustomerId: String(sure.customerId), reviewedBy, deferredOnly: true });
-    return {
-      ok: true,
-      message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. $25 each after the first plan visit.`,
-      resolution: CLOSE_RESOLUTIONS.confirmed,
-    };
+    const result = await inbound.confirmInboundReferral({ customerId, referrerCustomerId: String(sure.customerId), reviewedBy, deferredOnly: true });
+    // credited: a plan visit finished while the confirm ran, and its credit (owed by that visit) posted.
+    const after = result.credited ? 'Both $25 credits posted for the plan visit that just finished.' : '$25 each after the first plan visit.';
+    return { ok: true, message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. ${after}`, resolution: CLOSE_RESOLUTIONS.confirmed };
   },
 };
 
