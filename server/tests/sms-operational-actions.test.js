@@ -1857,3 +1857,180 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     expect(why('durable')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
   });
 });
+
+describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the old check refused', () => {
+  const { findOnTrackVisit, onTrackWindowEnd } = require('../services/sms-operational-actions');
+  const SOURCE_AT = '2040-03-10T15:00:00Z';
+  const staff = { kind: 'other', party: 'waves', sms_context: { basis: 'promise', property_id: null, source_at: SOURCE_AT, customer_id: CUSTOMER_ID } };
+  const ask = { ...staff, sms_context: { ...staff.sms_context, basis: 'request' } };
+  const invoice = { id: 'inv-1', ref: 'invoice:inv-1', type: 'invoice', status: 'sent', sent_at: '2040-03-10T18:49:00Z',
+    title: 'Annual prepay', text: 'Invoice WPC-2026-0911 (Annual prepay) for $480.00 sent 2040-03-10; annual prepay invoice' };
+  const estimateRequest = { kind: 'send_estimate', party: 'waves', sms_context: { basis: 'request', property_id: PROPERTY_ID, source_at: SOURCE_AT } };
+  const estimate = (extra = {}) => ({ id: 'est-1', ref: 'estimate:est-1', type: 'estimate', property_id: PROPERTY_ID, status: 'accepted',
+    text: 'Mosquito and biting midge treatment', sent_at: '2040-03-01T15:00:00Z', handed_off_at: '2040-03-01T15:00:00Z',
+    accepted_at: '2040-03-12T16:44:00Z', ...extra });
+  afterEach(() => { delete process.env.GATE_PROMISE_RECORD_EVIDENCE; });
+
+  test.each([[undefined, false], ['', false], ['false', false], ['shadow', false], ['SHADOW ', false], ['true', true]])(
+    'rule 1: a staff promise admits an invoice sent after it only when the gate is true (gate %p -> %p)', (value, admitted) => {
+      if (value !== undefined) process.env.GATE_PROMISE_RECORD_EVIDENCE = value;
+      expect(admissibleWitness(invoice, staff, [invoice])).toBe(admitted);
+    });
+
+  test('rule 1: an invoice is a witness for a staff promise only, and only a live one sent after the promise', () => {
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    expect(admissibleWitness(invoice, ask, [invoice])).toBe(false);
+    expect(admissibleWitness(invoice, { ...staff, kind: 'callback' }, [invoice])).toBe(false);
+    expect(admissibleWitness(invoice, { ...staff, kind: 'send_estimate' }, [invoice])).toBe(false);
+    expect(admissibleWitness({ ...invoice, sent_at: '2040-03-09T18:49:00Z' }, staff, [invoice])).toBe(false);
+    expect(admissibleWitness({ ...invoice, sent_at: null }, staff, [invoice])).toBe(false);
+    for (const status of ['void', 'draft', 'cancelled', 'refunded']) expect(admissibleWitness({ ...invoice, status }, staff, [invoice])).toBe(false);
+    for (const status of ['sent', 'viewed', 'paid', 'overdue']) expect(admissibleWitness({ ...invoice, status }, staff, [invoice])).toBe(true);
+  });
+
+  test('rule 1: the model must cite the invoice; it grounds only with the gate true, and a person-text shortcut never closes it', () => {
+    const verdict = { verdict: 'fulfilled', record_ref: invoice.ref, quote: 'annual prepay invoice' };
+    expect(groundFulfillment(verdict, { records: [invoice], failures: [] }, staff)).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    expect(groundFulfillment(verdict, { records: [invoice], failures: [] }, staff))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'invoice', record_id: 'inv-1' });
+    // No model, no close: the person-reply shortcut reads text records only.
+    expect(require('../services/sms-commitment-fulfillment').replyFulfillment({ records: [invoice], failures: [] }, staff)).toBeNull();
+  });
+
+  test('rule 2: an estimate accepted after the ask counts when the gate is true; a handoff after the ask counts in every mode; accepted before the ask never does', () => {
+    // A customer's own acceptance is already a handoff witness (accept_witness_at); a manual accept is not.
+    const sentBeforeAcceptedAfter = estimate({ accept_witness_at: '2040-03-12T16:44:00Z' });
+    const sentAfter = estimate({ sent_at: '2040-03-11T15:00:00Z', handed_off_at: '2040-03-11T15:00:00Z', accepted_at: null });
+    const acceptedBefore = estimate({ accepted_at: '2040-03-09T16:44:00Z' });
+    const manualAccept = estimate({ handed_off_at: null, sent_at: null });
+    for (const value of [undefined, 'shadow', 'true']) {
+      if (value === undefined) delete process.env.GATE_PROMISE_RECORD_EVIDENCE; else process.env.GATE_PROMISE_RECORD_EVIDENCE = value;
+      expect(admissibleWitness(sentAfter, estimateRequest, [sentAfter])).toBe(true);
+      expect(admissibleWitness(acceptedBefore, estimateRequest, [acceptedBefore])).toBe(false);
+      // Sent before the ask and handed off before it: only the customer's acceptance after the ask can count.
+      expect(admissibleWitness(manualAccept, estimateRequest, [manualAccept])).toBe(value === 'true');
+      expect(admissibleWitness(sentBeforeAcceptedAfter, estimateRequest, [sentBeforeAcceptedAfter])).toBe(true);
+    }
+  });
+
+  test('rule 2: acceptance keeps the property rule, the kind rule, and is not a witness for anything but send_estimate', () => {
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    const accepted = estimate({ handed_off_at: null, sent_at: null });
+    expect(admissibleWitness({ ...accepted, property_id: 'another-property' }, estimateRequest, [accepted])).toBe(false);
+    expect(admissibleWitness(accepted, { ...estimateRequest, kind: 'schedule_visit' }, [accepted])).toBe(false);
+    expect(admissibleWitness(accepted, { ...estimateRequest, kind: 'other' }, [accepted])).toBe(false);
+    const verdict = { verdict: 'fulfilled', record_ref: accepted.ref, quote: 'biting midge' };
+    expect(groundFulfillment(verdict, { records: [accepted], failures: [] }, estimateRequest))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: 'est-1', matched_at: new Date('2040-03-12T16:44:00Z') });
+    delete process.env.GATE_PROMISE_RECORD_EVIDENCE;
+    expect(groundFulfillment(verdict, { records: [accepted], failures: [] }, estimateRequest)).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+  });
+
+  test('cached verdicts: off and shadow keep today\'s fingerprint exactly; only true changes it (one recheck per open row)', () => {
+    const evidence = { records: [invoice], failures: [] };
+    const hash = () => fulfillmentFingerprint(staff, evidence).evidenceHash;
+    delete process.env.GATE_PROMISE_RECORD_EVIDENCE;
+    const off = hash();
+    const offObligation = JSON.stringify(fulfillmentFingerprint(staff, evidence).obligation);
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+    expect(hash()).toBe(off);
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    expect(hash()).not.toBe(off);
+    expect(JSON.stringify(fulfillmentFingerprint(staff, evidence).obligation)).toBe(offObligation);
+    // The shadow run's tagged commitment hashes like the gate-true one, never like off.
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+    const { withExtendedEvidence } = require('../services/sms-commitment-fulfillment');
+    const tagged = fulfillmentFingerprint(withExtendedEvidence(staff), evidence);
+    expect(tagged.evidenceHash).not.toBe(off);
+    expect(JSON.stringify(tagged.obligation)).toBe(offObligation);
+  });
+
+  test('the model is told about the new records only when the gate is true (or the shadow run)', async () => {
+    const prompt = async (commitment) => {
+      dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+      await verifySmsFulfillment(commitment, { records: [invoice, estimate()], failures: [] }, { now: new Date('2040-03-13T00:00:00Z') });
+      return dispatchWithFallback.mock.calls[0][1].text;
+    };
+    const { withExtendedEvidence } = require('../services/sms-commitment-fulfillment');
+    const off = await prompt(staff);
+    expect(off).not.toContain('Waves sent the customer after the promise');
+    expect(off).toContain('"witness_refs":[]');
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
+    expect(await prompt(staff)).toBe(off);
+    const shadowRun = await prompt(withExtendedEvidence(staff));
+    expect(shadowRun).toContain('Waves sent the customer after the promise');
+    expect(shadowRun).toContain('"witness_refs":["invoice:inv-1"]');
+    process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+    expect(await prompt(estimateRequest)).toContain('accepted after the request');
+    expect(await prompt(ask)).not.toContain('accepted after the request');
+    expect(await prompt(ask)).not.toContain('Waves sent the customer after the promise');
+  });
+
+  describe('rule 3: on track until the visit', () => {
+    const NOW = new Date('2040-03-11T16:00:00Z'); // 12:00 ET
+    const promise = { id: 'c-1', party: 'waves', kind: 'other', due_at: '2040-03-11T15:57:00Z',
+      sms_context: { basis: 'promise', property_id: null, source_at: SOURCE_AT } };
+    const message = { id: 'm-1', customer_id: CUSTOMER_ID, created_at: SOURCE_AT };
+    // A chain that records its calls and resolves the select with `rows`.
+    const fakeConn = (rows) => {
+      const calls = [];
+      const chain = new Proxy({}, { get: (_t, name) => (...args) => {
+        calls.push([name, args]);
+        if (name === 'select') return Promise.resolve(rows);
+        if (name === 'modify' || (name === 'where' && typeof args[0] === 'function')) args[0](chain);
+        return chain;
+      } });
+      const conn = Object.assign(() => chain, { raw: (text) => text, calls });
+      return conn;
+    };
+    const visit = (extra = {}) => ({ id: 'v-1', status: 'confirmed', scheduled_date: '2040-03-11', window_start: '13:00:00', window_end: '15:00:00', ...extra });
+
+    test('window end is Eastern; a start with no end is one hour; neither is null', () => {
+      expect(onTrackWindowEnd(visit()).toISOString()).toBe('2040-03-11T19:00:00.000Z');
+      expect(onTrackWindowEnd(visit({ window_end: null })).toISOString()).toBe('2040-03-11T18:00:00.000Z');
+      expect(onTrackWindowEnd(visit({ window_end: null, window_start: null }))).toBeNull();
+      expect(onTrackWindowEnd(visit({ scheduled_date: null }))).toBeNull();
+    });
+
+    test('off reads nothing; shadow and true find the nearest window still ahead', async () => {
+      const conn = fakeConn([visit({ id: 'ended', window_start: '09:00:00', window_end: '10:00:00' }), visit({ id: 'later', scheduled_date: '2040-03-12' }), visit()]);
+      expect(await findOnTrackVisit(conn, promise, message, NOW)).toBeNull();
+      expect(conn.calls).toEqual([]);
+      for (const mode of ['shadow', 'true']) {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = mode;
+        expect(await findOnTrackVisit(conn, promise, message, NOW)).toEqual({ mode, visit_id: 'v-1', window_end: '2040-03-11T19:00:00.000Z' });
+      }
+    });
+
+    test('only a waves promise of kind other, callback or technician_follow_up qualifies', async () => {
+      process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+      const conn = fakeConn([visit()]);
+      for (const kind of ['other', 'callback', 'technician_follow_up']) expect(await findOnTrackVisit(conn, { ...promise, kind }, message, NOW)).not.toBeNull();
+      for (const kind of ['send_estimate', 'schedule_visit', 'send_report']) expect(await findOnTrackVisit(conn, { ...promise, kind }, message, NOW)).toBeNull();
+      expect(await findOnTrackVisit(conn, { ...promise, sms_context: { ...promise.sms_context, basis: 'request' } }, message, NOW)).toBeNull();
+      expect(await findOnTrackVisit(conn, { ...promise, party: 'customer' }, message, NOW)).toBeNull();
+    });
+
+    test('no visit still ahead, or a failed read, leaves the ring as it was', async () => {
+      process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+      expect(await findOnTrackVisit(fakeConn([visit({ window_start: '09:00:00', window_end: '10:00:00' })]), promise, message, NOW)).toBeNull();
+      expect(await findOnTrackVisit(fakeConn([]), promise, message, NOW)).toBeNull();
+      const broken = Object.assign(() => { throw new Error('db down'); }, { raw: (t) => t });
+      expect(await findOnTrackVisit(broken, promise, message, NOW)).toBeNull();
+    });
+
+    test('the query is customer-scoped, skips series children and visits that did not run, and follows the promise\'s property', async () => {
+      process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+      const conn = fakeConn([visit()]);
+      await findOnTrackVisit(conn, { ...promise, sms_context: { ...promise.sms_context, property_id: PROPERTY_ID } }, message, NOW);
+      const names = conn.calls.map(([name]) => name);
+      expect(conn.calls.find(([name]) => name === 'where')[1][0]).toEqual({ customer_id: CUSTOMER_ID });
+      expect(names).toContain('whereNull');
+      expect(conn.calls.find(([name]) => name === 'whereNull')[1]).toEqual(['recurring_parent_id']);
+      expect(conn.calls.find(([name]) => name === 'orWhereNotIn')[1][1]).toEqual(['cancelled', 'canceled', 'no_show', 'skipped']);
+      expect(conn.calls.some(([name, args]) => name === 'where' && args[0]?.property_id === PROPERTY_ID)).toBe(true);
+      expect(conn.calls.some(([name, args]) => name === 'where' && args[0] === 'created_at' && args[1] === '>')).toBe(true);
+    });
+  });
+});

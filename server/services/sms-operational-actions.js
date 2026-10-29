@@ -5,7 +5,7 @@
 // No customer communications, scheduling writes, account merges or money movement.
 const db = require('../models/db');
 const logger = require('./logger');
-const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, promiseRecordEvidenceMode } = require('../config/feature-gates');
 const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
@@ -22,7 +22,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { verifyThreadCompletion, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, withExtendedEvidence, fulfillmentFingerprint, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -1367,9 +1367,122 @@ async function reconcileWithThread({ conn, row, current, message, now, verdict, 
   return verdict;
 }
 
+// GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4) — read at call time.
+// 'off' = nothing here runs. 'shadow' = nothing applies; it writes audit rows.
+// 'true' = rule 3 (on track until the visit) and the extended evidence apply.
+const promiseRecordMode = () => promiseRecordEvidenceMode?.() ?? 'off';
+const SHADOW_FULFILLMENT_ACTION = 'sms_commitment.fulfillment.shadow';
+const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
+// Extra model calls per refresh run in shadow mode.
+const SHADOW_MODEL_CALLS_PER_RUN = 10;
+// Rule 3: a waves promise of these kinds that is booked onto a visit is on
+// track until that visit's window ends.
+const ON_TRACK_KINDS = ['other', 'callback', 'technician_follow_up'];
+// A visit that did not run is no visit still to come. (A completed visit is
+// kept: R1 closes the ask it answers, and a promise it left open is held only
+// until that window's end.)
+const ON_TRACK_EXCLUDED_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped'];
+const onTrackWindowEnd = (visit) => {
+  const day = String(visit.scheduled_date || '').slice(0, 10);
+  const clock = (value) => (/^\d{2}:\d{2}/.test(String(value || '')) ? String(value).slice(0, 5) : null);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const end = clock(visit.window_end);
+  const start = clock(visit.window_start);
+  // The flat-60 convention of the scheduler when a window has a start and no end.
+  const at = end ? parseETDateTime(`${day}T${end}`)
+    : (start ? new Date(parseETDateTime(`${day}T${start}`).getTime() + 3600000) : null);
+  return at && !Number.isNaN(at.getTime()) ? at : null;
+};
+// The nearest visit that keeps an overdue waves promise on track: live (not
+// cancelled, no-show or skipped), not a recurring-series child, at the
+// promise's property when it names one, created after the promise text, with
+// its window end still ahead. Null when the gate is off, the row is not such a
+// promise, nothing qualifies, or the read fails (the ring then stands).
+async function findOnTrackVisit(conn, commitment, message, now) {
+  const mode = promiseRecordMode();
+  if (mode === 'off' || commitment.party !== 'waves' || commitment.sms_context?.basis !== 'promise'
+    || !ON_TRACK_KINDS.includes(commitment.kind)) return null;
+  try {
+    const sourceAt = new Date(commitment.sms_context?.source_at || message.created_at);
+    if (Number.isNaN(sourceAt.getTime())) return null;
+    const visits = await conn('scheduled_services').where({ customer_id: message.customer_id })
+      .whereNull('recurring_parent_id')
+      .where((q) => q.whereNull('status').orWhereNotIn('status', ON_TRACK_EXCLUDED_STATUSES))
+      .where('created_at', '>', sourceAt).where('created_at', '<=', now)
+      .whereRaw('scheduled_date >= ?::date', [etDateString(new Date(now.getTime() - 86400000))])
+      .modify((q) => { if (commitment.sms_context?.property_id) q.where({ property_id: commitment.sms_context.property_id }); })
+      .orderBy('scheduled_date').limit(20)
+      .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'),
+        conn.raw('window_start::text as window_start'), conn.raw('window_end::text as window_end'));
+    const ahead = visits.map((visit) => ({ visit, end: onTrackWindowEnd(visit) })).filter(({ end }) => end && end > now)
+      .sort((a, b) => a.end - b.end);
+    return ahead.length ? { mode, visit_id: ahead[0].visit.id, window_end: ahead[0].end.toISOString() } : null;
+  } catch (err) {
+    logger.warn(`[sms-operations] on-track visit check failed for commitment ${commitment.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Shadow mode, rule 3: the ring still happened; record that it would have
+// been held, once per promise per Eastern day. Never throws.
+async function recordOnTrackShadow(conn, commitment, onTrack, now) {
+  try {
+    const already = await conn('audit_log')
+      .where({ action: SHADOW_ON_TRACK_ACTION, resource_type: 'call_commitment', resource_id: commitment.id })
+      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?::date", [etDateString(now)]).first('id');
+    if (already) return false;
+    await recordAuditEvent({ trx: conn, actor_type: 'system', action: SHADOW_ON_TRACK_ACTION,
+      resource_type: 'call_commitment', resource_id: commitment.id,
+      metadata: { commitment_id: commitment.id, kind: commitment.kind, due_at: commitment.due_at,
+        visit_id: onTrack.visit_id, window_end: onTrack.window_end } });
+    return true;
+  } catch (err) {
+    logger.warn(`[sms-operations] on-track shadow write failed for commitment ${commitment.id}: ${err.message}`);
+    return false;
+  }
+}
+
+// Shadow mode, rules 1 and 2: when the normal check left a promise open and
+// the extended evidence holds a record the normal one refused (an invoice for
+// a staff promise, an accepted estimate), ask the model once more on the
+// extended evidence and write ONE audit row. Nothing else changes. Capped per
+// run, and never again for the same evidence (the fingerprint hash).
+async function recordFulfillmentShadow(conn, { current, message, evidence, baseVerdict, now, verify, eventOnly, budget }) {
+  try {
+    const staff = current.kind === 'other' && current.sms_context?.basis === 'promise';
+    if ((!staff && current.kind !== 'send_estimate') || budget.left <= 0) return false;
+    const extended = withExtendedEvidence(current);
+    const wider = await loadSmsFulfillmentEvidence(conn, extended, message, now);
+    const baseRefs = new Map(evidence.records.map((record) => [record.ref, record]));
+    const fresh = wider.records.filter((record) => ['invoice', 'estimate'].includes(record.type)
+      && admissibleWitness(record, extended, wider.records)
+      && !(baseRefs.has(record.ref) && admissibleWitness(baseRefs.get(record.ref), current, evidence.records)));
+    if (!fresh.length) return false;
+    const { evidenceHash } = fulfillmentFingerprint(extended, wider, { eventOnly });
+    const already = await conn('audit_log').where({ action: SHADOW_FULFILLMENT_ACTION, resource_type: 'call_commitment', resource_id: current.id })
+      .whereRaw("metadata->>'evidence_hash' = ?", [evidenceHash]).first('id');
+    if (already) return false;
+    budget.left -= 1;
+    const verdict = await verify(extended, wider, { now, eventOnly });
+    // A provider outage is retried on a later run, not recorded as an answer.
+    if (['provider_failed', 'invalid_model_output'].includes(verdict?.reason)) return false;
+    await recordAuditEvent({ trx: conn, actor_type: 'system', action: SHADOW_FULFILLMENT_ACTION,
+      resource_type: 'call_commitment', resource_id: current.id,
+      metadata: { commitment_id: current.id, kind: current.kind, sms_log_id: message.id,
+        new_records: fresh.map((record) => ({ type: record.type, id: record.id })),
+        shadow_verdict: verdict?.verdict ?? null, shadow_reason: verdict?.reason ?? null,
+        shadow_record: verdict?.record_type ? { type: verdict.record_type, id: verdict.record_id } : null,
+        base_verdict: baseVerdict?.verdict ?? null, evidence_hash: evidenceHash } });
+    return true;
+  } catch (err) {
+    logger.warn(`[sms-operations] fulfillment shadow failed for commitment ${current.id}: ${err.message}`);
+    return false;
+  }
+}
+
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
-async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verifyThreadCompletion) {
+async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verifyThreadCompletion, shadowBudget = { left: SHADOW_MODEL_CALLS_PER_RUN }) {
   const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
   // A later delivery failure cannot erase already-recorded staff work.
   // Intake still refuses failed sources; captured promises stay actionable.
@@ -1410,6 +1523,12 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
   const verdict = inWindow ? checked : await reconcileWithThread({ conn, row, current, message, now, verdict: checked, verifyThread });
   if (threadOnly && verdict.verdict !== 'fulfilled') return { outcome: settle('no_witness') };
   let closed = false;
+  // GATE_PROMISE_RECORD_EVIDENCE rule 3: an overdue promise with a visit still
+  // to come does not ring until that visit's window ends. Read before the
+  // transaction so a failed read can never abort it; null with the gate off.
+  const onTrack = deadlinePassed ? await findOnTrackVisit(conn, current, message, now) : null;
+  const holdBell = onTrack?.mode === 'true';
+  let rang = false;
   // Only a verdict this transaction actually persisted counts as handled.
   // Every early exit — a relinked or changed source, the gate turning off, a
   // fulfilled verdict the revalidator could not commit (a locked or changed
@@ -1435,10 +1554,11 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     persisted = true;
-    if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
+    if (keptLate(live, verdict) && !holdBell && !await trx('notifications').where({ recipient_type: 'admin' })
       .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).first('id')) {
       // A suppressed bell leaves no row to find next tick: close now instead.
       const bell = await ringSmsSourceBell(trx, { row, message, verdict: { ...verdict, late: true } });
+      rang = true;
       if (!bell.suppressed) return;
     }
     if (verdict.verdict === 'fulfilled') {
@@ -1456,8 +1576,15 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // never rings a bell on its own (there is no stated deadline to have
     // passed). The fulfillment_check above is still stored so a later
     // pass with new evidence does not repeat the same model call for free.
-    if (deadlinePassed) await ringSmsSourceBell(trx, { row, message, verdict });
+    if (deadlinePassed && !holdBell) {
+      await ringSmsSourceBell(trx, { row, message, verdict });
+      rang = true;
+    }
   });
+  if (persisted && rang && onTrack?.mode === 'shadow') await recordOnTrackShadow(conn, current, onTrack, now);
+  if (persisted && !closed && verdict.verdict !== 'fulfilled' && !inWindow && !threadOnly && promiseRecordMode() === 'shadow') {
+    await recordFulfillmentShadow(conn, { current, message, evidence, baseVerdict: verdict, now, verify, eventOnly: false, budget: shadowBudget });
+  }
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
   // retry_after, so this costs no extra provider calls).
@@ -1536,6 +1663,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // gets THREAD_CALLS_PER_CUSTOMER new thread calls a tick; the rest keep
   // their record verdict (and its alert) until a later tick (Codex #6415).
   const threadCalls = new Map();
+  const shadowBudget = { left: SHADOW_MODEL_CALLS_PER_RUN };
   const budgetedThread = (c, commitment, message, at) => verifyThread(c, commitment, message, at, { mayCall: () => {
     const used = threadCalls.get(message.customer_id) || 0;
     if (used >= THREAD_CALLS_PER_CUSTOMER) return false;
@@ -1545,7 +1673,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
     counts.scanned += 1;
-    const result = await refreshSmsCommitment(conn, row, now, verify, budgetedThread);
+    const result = await refreshSmsCommitment(conn, row, now, verify, budgetedThread, shadowBudget);
     if (result.outcome === 'no_witness') counts.skipped_no_witness += 1;
     if (result.outcome === 'not_due') counts.skipped_not_due += 1;
     if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
@@ -1631,4 +1759,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
