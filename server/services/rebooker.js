@@ -1496,6 +1496,88 @@ class SmartRebooker {
       keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
     }
 
+    // The span the occupancy probe tests (and a route-checked search uses):
+    // date-independent, so computed once.
+    const effDuration = (() => {
+      // Callers that book a DIFFERENT span than the visit's own block
+      // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
+      // probe tests exactly what they will submit.
+      const forced = parseInt(opts.probeSpanMinutes, 10);
+      if (Number.isInteger(forced) && forced > 0) return forced;
+      // Stored span FIRST, then the duration estimate — the same order
+      // the RescheduleModal uses to build the window it submits, so the
+      // probe tests exactly the block Select will commit.
+      if (service.window_start && service.window_end) {
+        const [h1, m1] = String(service.window_start).split(':').map(Number);
+        const [h2, m2] = String(service.window_end).split(':').map(Number);
+        const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+        if (span > 0) return span;
+      }
+      const d = parseInt(service.estimated_duration_minutes, 10);
+      if (Number.isInteger(d) && d > 0) return d;
+      return 60;
+    })();
+
+    // True when the commit's own overlap probe finds a clash for this window.
+    // A probe failure keeps the candidate (legacy behavior) — the commit-time
+    // check still rejects a genuine clash.
+    const clashesAt = async (dateStr, windowStart, windowEnd) => {
+      try {
+        const clash = await findConflictingVisits({
+          db,
+          date: dateStr,
+          windowStart,
+          windowEnd,
+          excludeServiceIds: [String(serviceId)],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
+          // survive the commit's own probe. Admin reschedule-options stay
+          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
+          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
+          // Second technician (gate-scoped inside the probe): every committer
+          // of these days (rain-out, the admin picker) keeps the visit's own
+          // technician, and commit probes that technician's route — so the
+          // option is judged on the same route and offer == commit.
+          technicianId: service.technician_id || null,
+        });
+        return clash.length > 0;
+      } catch (err) {
+        logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
+        return false;
+      }
+    };
+
+    const buildOption = (candidate, window, extra = {}) => ({
+      date: candidate.dateStr,
+      dayOfWeek: candidate.candidateDate.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }),
+      displayDate: candidate.candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
+      currentLoad: candidate.load,
+      sameAreaServices: candidate.sameAreaCount,
+      suggestedWindow: window,
+      score: candidate.score,
+      ...extra,
+    });
+
+    // Skip candidates whose committed block would deterministically 409:
+    // the picker submits window.start + the visit's own duration, so test
+    // exactly that span with the same occupancy predicate
+    // reschedule() enforces. Without this, busy days surface suggestions
+    // that can never be selected.
+    const admit = async (candidate) => {
+      const [h, m] = String(candidate.window.start).split(':').map(Number);
+      const endTotal = Math.min(h * 60 + (m || 0) + effDuration, 23 * 60 + 59);
+      const candidateEnd = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+      if (await clashesAt(candidate.dateStr, candidate.window.start, candidateEnd)) return;
+      options.push(buildOption(candidate, candidate.window));
+    };
+
+    // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the eligible days are
+    // collected and ranked by the dispatcher's route check instead of being
+    // probed one by one. Off, or the check cannot run: the loop below is the
+    // old one, call for call.
+    const routeRanked = require('./scheduling/route-ranked-days').routeRankedDaysLive();
+    const eligible = [];
+
     for (let d = 1; d <= 10; d++) {
       // ET calendar math — toISOString() reads the UTC date while displayDate
       // below formats in ET, so between 8 PM and midnight ET the customer would
@@ -1547,71 +1629,25 @@ class SmartRebooker {
       if (candidateDate.getDay() === new Date(service.scheduled_date).getDay()) score += 8; // Same day of week
 
       const window = this.findBestWindow(service);
+      const candidate = { dateStr, candidateDate, load, sameAreaCount, score, window };
 
-      // Skip candidates whose committed block would deterministically 409:
-      // the picker submits window.start + the visit's own duration, so test
-      // exactly that span with the same occupancy predicate
-      // reschedule() enforces. Without this, busy days surface suggestions
-      // that can never be selected.
-      const effDuration = (() => {
-        // Callers that book a DIFFERENT span than the visit's own block
-        // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
-        // probe tests exactly what they will submit.
-        const forced = parseInt(opts.probeSpanMinutes, 10);
-        if (Number.isInteger(forced) && forced > 0) return forced;
-        // Stored span FIRST, then the duration estimate — the same order
-        // the RescheduleModal uses to build the window it submits, so the
-        // probe tests exactly the block Select will commit.
-        if (service.window_start && service.window_end) {
-          const [h1, m1] = String(service.window_start).split(':').map(Number);
-          const [h2, m2] = String(service.window_end).split(':').map(Number);
-          const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
-          if (span > 0) return span;
-        }
-        const d = parseInt(service.estimated_duration_minutes, 10);
-        if (Number.isInteger(d) && d > 0) return d;
-        return 60;
-      })();
-      const startMin = (() => {
-        const [h, m] = String(window.start).split(':').map(Number);
-        return h * 60 + (m || 0);
-      })();
-      const endTotal = Math.min(startMin + effDuration, 23 * 60 + 59);
-      const candidateEnd = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
-      try {
-        const clash = await findConflictingVisits({
-          db,
-          date: dateStr,
-          windowStart: window.start,
-          windowEnd: candidateEnd,
-          excludeServiceIds: [String(serviceId)],
-          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
-          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
-          // survive the commit's own probe. Admin reschedule-options stay
-          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
-          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
-          // Second technician (gate-scoped inside the probe): every committer
-          // of these days (rain-out, the admin picker) keeps the visit's own
-          // technician, and commit probes that technician's route — so the
-          // option is judged on the same route and offer == commit.
-          technicianId: service.technician_id || null,
-        });
-        if (clash.length) continue;
-      } catch (err) {
-        // Occupancy probe failure keeps the candidate (legacy behavior) —
-        // the commit-time check still rejects a genuine clash.
-        logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
-      }
+      if (routeRanked) { eligible.push(candidate); continue; }
+      await admit(candidate);
+    }
 
-      options.push({
-        date: dateStr,
-        dayOfWeek: candidateDate.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }),
-        displayDate: candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
-        currentLoad: load,
-        sameAreaServices: sameAreaCount,
-        suggestedWindow: window,
-        score,
+    if (routeRanked) {
+      const ranked = await require('./scheduling/route-ranked-days').rankRouteCheckedDays({
+        serviceId, service, candidates: eligible, durationMinutes: effDuration,
+        caller: opts.caller || null, clashesAt,
       });
+      if (ranked) {
+        return ranked.slice(0, 3).map((entry) => buildOption(entry.candidate, entry.window, entry.routeChecked
+          ? { routeChecked: true, ...(Number.isFinite(Number(entry.slot?.detour_minutes))
+            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}) }
+          : { routeChecked: false }));
+      }
+      // No day could be route-checked: today's list, from the same candidates.
+      for (const candidate of eligible) await admit(candidate);
     }
 
     options.sort((a, b) => b.score - a.score);

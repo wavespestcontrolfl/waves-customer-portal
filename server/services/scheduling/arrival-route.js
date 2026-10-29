@@ -986,6 +986,16 @@ function pickerRoadCheckLive() {
   return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
 }
 
+// GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29, "Route Check Everywhere"
+// build 1): the staff day lists (the Reschedule window's suggested days, the
+// Quick Move day buttons, the Intelligence Bar's find_available_slots) rank
+// and filter by the dispatcher's arrival-window route check
+// (scheduling/route-ranked-days.js). Read at call time; callers also need
+// arrivalWindowRoutingEnabled(). Unset = today's lists, byte for byte.
+function routeCheckStaffListsLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_LISTS');
+}
+
 // GATE_SAVE_ROAD_TIMES (owner 2026-10-28, "yes do this"): a staff save's
 // check and its route number read the road times the pickers bought for that
 // day (`roads: 'cache'`), so a save agrees with the hour its picker offered.
@@ -1028,6 +1038,7 @@ async function checkArrivalPlacement({
 module.exports = {
   arrivalWindowRoutingEnabled, pickerRoadCheckLive, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
+  routeCheckStaffListsLive,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
