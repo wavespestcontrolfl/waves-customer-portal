@@ -18,6 +18,7 @@ function makeKnex(rowsByTable = {}) {
     const rows = rowsByTable[table] || [];
     const q = {
       where: () => q, andWhere: () => q, whereIn: () => q, whereNull: () => q, whereNot: () => q,
+      orWhere: () => q, whereNotIn: () => q, orWhereNotIn: () => q, whereRaw: () => q, orWhereRaw: () => q,
       orderBy: () => q, leftJoin: () => q, join: () => q, select: () => q, limit: () => q,
       columnInfo: () => Promise.resolve({}),
       first: () => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows[0] || null)),
@@ -134,7 +135,8 @@ describe('lawn protocol report context — actuals rows recorded without a plan'
 // A report for a visit on a 9x rounds series (recurring_pattern lawn_rounds_9, read with the record) states the protocol step of the
 // visit's ROUND; any other visit's report reads the month of its service date as before.
 describe('lawn protocol report context — 9x rounds visits', () => {
-  const knex = () => makeKnex({ customer_turf_profiles: [{ track_key: 'st_augustine', active: true }] });
+  // A pre-emergent is on the ledger this year, so these visits carry no catch-up (that read is pinned in the describe at the end).
+  const knex = () => makeKnex({ customer_turf_profiles: [{ track_key: 'st_augustine', active: true }], 'property_application_history as pah': [{ id: 'h1' }] });
   const roundsRecord = (extra) => ({ ...RECORD, service_date: '2027-03-20', scheduled_recurring_pattern: 'lawn_rounds_9', scheduled_visit_date: '2027-03-20', ...extra });
   beforeEach(() => { jest.clearAllMocks(); process.env.GATE_LAWN_V13 = 'true'; });
   afterEach(() => { delete process.env.GATE_LAWN_V13; });
@@ -163,5 +165,50 @@ describe('lawn protocol report context — 9x rounds visits', () => {
     delete process.env.GATE_LAWN_V13;
     await buildLawnProtocolReportContext(roundsRecord(), knex(), new Date('2027-03-21T12:00:00Z'));
     expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toBeUndefined();
+  });
+});
+
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js): a new customer's first rounds visit in round 3 with no pre-emergent on the ledger
+// this year reads the March window's Dimension 2EW row with its window, and the report's product list names it. The visit's own ledger rows
+// are left out of the check, so the completed visit still reads as it was planned.
+describe('lawn protocol report context — the spring pre-emergent catch-up', () => {
+  const { summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
+  const DIM_2EW = 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide';
+  const LABEL = 'Spring pre-emergent catch-up for a new customer';
+  const record = (extra) => ({ ...RECORD, service_date: '2027-03-20', scheduled_recurring_pattern: 'lawn_rounds_9', scheduled_visit_date: '2027-03-20', ...extra });
+  const knexWith = (extra = {}) => makeKnex({ customer_turf_profiles: [{ track_key: 'st_augustine', active: true }], ...extra });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_LAWN_V13 = 'true';
+    summarizeProtocolContext.mockImplementation(() => ({
+      grassTrack: 'st_augustine',
+      products: [
+        { productName: 'LESCO 24-0-11 with PolyPlus OPTI', protocolProductName: 'LESCO 24-0-11 with PolyPlus OPTI', role: 'nutrition' },
+        { productName: DIM_2EW, protocolProductName: DIM_2EW, role: 'pre_emergent' },
+      ],
+    }));
+  });
+  afterEach(() => {
+    delete process.env.GATE_LAWN_V13;
+    summarizeProtocolContext.mockImplementation((ctx) => (ctx?.protocol ? { grassTrack: ctx.protocol.grass_track } : null));
+  });
+
+  test('the window read asks for the catch-up row and the 2EW line is labelled; the bag line is not', async () => {
+    const result = await buildLawnProtocolReportContext(record(), knexWith(), new Date('2027-03-21T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2, catchUp: true });
+    const byName = Object.fromEntries(result.products.map((product) => [product.productName, product]));
+    expect(byName[DIM_2EW]).toMatchObject({ roundsCatchUp: true, roundsCatchUpLabel: LABEL });
+    expect(byName['LESCO 24-0-11 with PolyPlus OPTI']).not.toHaveProperty('roundsCatchUp');
+  });
+
+  test.each([
+    ['a pre-emergent on the ledger this year', record(), { 'property_application_history as pah': [{ id: 'h1' }] }],
+    ['an earlier visit in the series', record(), { scheduled_services: [{ id: 'earlier', recurring_parent_id: null }] }],
+    ['a first round-4 visit (May 5)', record({ service_date: '2027-05-05', scheduled_visit_date: '2027-05-05' }), {}],
+    ['a 12x March visit', record({ scheduled_recurring_pattern: 'monthly' }), {}],
+  ])('%s: no catch-up is read and nothing is labelled', async (_label, visit, tables) => {
+    const result = await buildLawnProtocolReportContext(visit, knexWith(tables), new Date('2027-03-21T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[0][1].roundStep?.catchUp).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain(LABEL);
   });
 });

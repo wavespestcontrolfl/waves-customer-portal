@@ -48,6 +48,8 @@ jest.mock('../services/service-completion-profiles', () => ({
 const mockCheckLimits = jest.fn();
 jest.mock('../services/application-limits', () => ({
   checkLimits: (...args) => mockCheckLimits(...args),
+  // The catch-up's ledger check scopes its query the way every limit reader does (the real helper builds query conditions only).
+  scopeHistoryToTreatment: (...args) => jest.requireActual('../services/application-limits').scopeHistoryToTreatment(...args),
 }));
 jest.mock('../services/service-report/since-last-visit', () => ({
   buildSinceLastVisitContext: jest.fn(async () => ({
@@ -99,7 +101,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull',
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNotIn', 'orWhereNotIn', 'whereNull',
       'whereNotNull', 'orWhereNot', 'orWhereNull', 'whereNot', 'whereBetween', 'join', 'leftJoin',
       'orderBy', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
@@ -893,6 +895,58 @@ describe('lawn bounded product section', () => {
       expect(before.held_products).toEqual([]);
       const elsewhere = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'Sarasota' });
       expect(elsewhere.held_products).toEqual([]);
+    });
+  });
+
+  // The spring pre-emergent catch-up (lawn-rounds-catchup.js): a new customer's first rounds visit in round 3 with no pre-emergent on the
+  // ledger this year also reads the March window's Dimension 2EW row, and the pocket reference names it.
+  describe('the spring pre-emergent catch-up on a first round-3 rounds visit', () => {
+    const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+    const DIM_2EW = 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide';
+    const LABEL = 'Spring pre-emergent catch-up for a new customer';
+    const summaryWithCatchUp = () => ({
+      window: { key: 'feb_v13_spreader_green_up', month: 2, title: 'February Green-Up Feeding (spreader)', visitType: 'granular', goal: 'One spreader feeding' },
+      products: [
+        { productName: F24, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, analysis: { n: 24, p: 0, k: 11 }, gates: { targetN: '0.75 lb N/1000' } },
+        { productName: DIM_2EW, protocolProductName: DIM_2EW, productId: 'd2ew', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', defaultInPlan: true, gates: { annualCounter: 'prodiamine_oz_per_1000' } },
+      ],
+    });
+    // The decision's reads: the visit's parent, then an earlier visit of its series (`earlier`), then the ledger (`ledger`).
+    const briefFor = async ({ earlier = [], ledger = [], date = '2027-03-20', pattern = 'lawn_rounds_9' } = {}) => {
+      mockSummarize.mockReturnValue(summaryWithCatchUp());
+      const visit = { ...SVC, service_type: 'Lawn Care Service', recurring_pattern: pattern, scheduled_date: date };
+      const state = useDb(baseResponses({
+        scheduled_services: (rec) => {
+          if (rec.ops.some(([method, args]) => method === 'first' && args[0] === 'recurring_parent_id')) return [{ recurring_parent_id: null }];
+          return rec.ops.some(([method]) => method === 'whereNot') ? earlier : [visit];
+        },
+        property_application_history: ledger,
+      }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test('asks the window read for the catch-up row and names the 2EW line as the spring pre-emergent catch-up', async () => {
+      const guidance = await briefFor();
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2, catchUp: true });
+      const line = [...guidance.products, ...guidance.conditional_products].find((p) => p.name === DIM_2EW);
+      expect(line).toMatchObject({ ratePer1000: 0.5, rateUnit: 'fl oz', trigger: LABEL });
+      expect(line.gates).toMatchObject({ roundsCatchUp: LABEL, annualCounter: 'prodiamine_oz_per_1000' });
+      // It is a gated line of the visit, never a fixed product of the round.
+      expect(guidance.products.map((p) => p.name)).not.toContain(DIM_2EW);
+    });
+
+    test.each([
+      ['a pre-emergent on the ledger this year', { ledger: [{ id: 'h1' }] }],
+      ['an earlier visit in the series', { earlier: [{ id: 'earlier' }] }],
+      ['a first round-4 visit (May 5)', { date: '2027-05-05' }],
+      ['a 12x March visit', { pattern: 'monthly' }],
+    ])('%s: no catch-up is asked for or named', async (_label, options) => {
+      const guidance = await briefFor(options);
+      expect(mockWindowContext.mock.calls[0][1].roundStep?.catchUp).toBeUndefined();
+      expect(JSON.stringify(guidance)).not.toContain(LABEL);
     });
   });
 

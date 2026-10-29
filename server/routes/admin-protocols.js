@@ -34,6 +34,7 @@ const {
   v13HoldWarnings,
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
+  v13RowCalculates,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
@@ -54,6 +55,7 @@ const {
 } = require('../services/lawn-protocol-operating-layer');
 const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/lawn-program');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
+const roundsCatchUp = require('../services/lawn-rounds-catchup');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1063,14 +1065,25 @@ const roundsGateContext = (rounds, holdRoundsNitrogen) => ({
   ...(rounds ? { spotMonthNumber: rounds.spotMonth, realMonthNumber: rounds.realMonth } : {}),
   ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}),
 });
-async function loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions, stepActive }) {
+async function loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions, stepActive, catchUp = false }) {
   if (!rounds) return loadV13RowsForMonth(db, trackKey, month, rowOptions);
-  const rows = await loadV13RowsForMonth(db, trackKey, month, { ...rowOptions, spotMonth: rounds.spotMonth });
+  // `catchUp`: the March window's Dimension 2EW row joins the round's rows (lawn-rounds-catchup.js).
+  const rows = await loadV13RowsForMonth(db, trackKey, month, { ...rowOptions, spotMonth: rounds.spotMonth, catchUp });
   if (!stepActive || appointmentMonth === month) return rows;
   // Round 3 in April reads February's window: the step's rows are the APPOINTMENT month's window's, in place of the round window's own
   // step rows (as the plan reads them, withStepProducts).
   const stepRows = [...new Set((await loadV13RowsForMonth(db, trackKey, appointmentMonth, rowOptions)).values())].filter(bermudaRemoval.isStepRow);
   return bermudaRemoval.rowsByProduct(bermudaRemoval.withStepProducts([...new Set(rows.values())], stepRows));
+}
+
+// The sheet's catch-up line (lawn-rounds-catchup.js), settled as the plan settles it: its yearly limit read first (a proposal at the row's dose),
+// then a line with no active product, no linked row that calculates, or a reached limit leaves with a warning. No catch-up line: the inputs.
+async function settleSheetCatchUp(items, { v13Active, scheduled, v13Rows, nutrientTargets }) {
+  const lines = items.filter(roundsCatchUp.isCatchUpItem);
+  if (!lines.length) return { items, warnings: [] };
+  if (!v13Active) return { items: items.filter((item) => !roundsCatchUp.isCatchUpItem(item)), warnings: [] };
+  const probe = await v13VisitLimits(db, scheduled, lines, v13Rows, nutrientTargets);
+  return roundsCatchUp.settleCatchUp(items, { rowOf: (item) => bermudaRemoval.rowFor(v13Rows, item.product.id, false), calculates: v13RowCalculates, cappedIds: new Set(probe.capped.keys()) });
 }
 
 router.get('/lawn-mix', async (req, res, next) => {
@@ -1117,7 +1130,13 @@ router.get('/lawn-mix', async (req, res, next) => {
       probeLimits: (probe) => v13VisitLimits(db, scheduled, probe, v13Rows),
       productOf: (id) => products.find((p) => String(p.id) === String(id)) || null,
     });
-    const conditionalLines = [...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
+    // A new customer's first rounds visit in round 3 with no pre-emergent this year carries the spring pre-emergent catch-up line, as the
+    // plan does (one decision: lawn-rounds-catchup.js). A failed read is "no catch-up" here; the plan's strict read is the one that throws.
+    const catchUpWanted = await roundsCatchUp.catchUpWanted(db, scheduled);
+    const conditionalLines = [
+      ...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines,
+      ...roundsCatchUp.catchUpLines(track, (text, role) => parseProtocolLines(text, role, { exactName }), catchUpWanted),
+    ];
     const allLines = [...baseLines, ...conditionalLines];
 
     const matchedLines = resolveProtocolItems(allLines, products, {
@@ -1136,7 +1155,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     let v13Rows;
     try {
       // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
-      v13Rows = chinchRateRows(await loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions: bermuda.rowOptions, stepActive: bermuda.info.active }), chinchRate ?? null);
+      v13Rows = chinchRateRows(await loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions: bermuda.rowOptions, stepActive: bermuda.info.active, catchUp: catchUpWanted }), chinchRate ?? null);
     } catch (err) {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
@@ -1164,7 +1183,9 @@ router.get('/lawn-mix', async (req, res, next) => {
     // The step is one selection, whole or absent (see openStep / projectBermudaStep).
     resolvedLines = bermuda.select(resolvedLines);
     const settled = await bermuda.settle(resolvedLines, v13Rows);
-    resolvedLines = settled.items;
+    // The catch-up is selected and settled like the plan settles it: a line that cannot be applied leaves with a warning, never a block.
+    const catchUp = await settleSheetCatchUp(roundsCatchUp.selectCatchUp(settled.items), { v13Active, scheduled, v13Rows, nutrientTargets });
+    resolvedLines = catchUp.items;
     // Step blocks are product-scoped and ride the response beside the limit blocks: they
     // never hold the base products' quantities or the mixing order.
     const blocks = v13SelectionBlocks(resolvedLines, (line) => bermudaRemoval.rowFor(v13Rows, line.product.id, line.bermudaStep === true), gateContext);
@@ -1177,9 +1198,10 @@ router.get('/lawn-mix', async (req, res, next) => {
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
       // no quantity at all; a capped line none either).
       const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
-      const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
+      const lineCarrier = roundsCatchUp.carrierFor(line, v13Line?.row, carrier);
+      const canMix = Boolean(product && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
-        product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
+        product, lawnSqft: sqft, carrierGalPer1000: lineCarrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
       });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
@@ -1202,7 +1224,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows)]) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows), ...roundsCatchUp.catchUpNotes(line)]) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
@@ -1229,7 +1251,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [...settled.warnings, ...lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
+    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
     res.json(lawnMixResponse({
       seesPricing: viewerSeesPricing(req),

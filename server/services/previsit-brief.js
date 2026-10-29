@@ -416,6 +416,18 @@ function statedRoundsNitrogen(entries, rounds, trackKey) {
   }
 }
 
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js): the March Dimension 2EW row the window read for this visit is named in the pocket
+// reference, as a gated line with the catch-up as its trigger (it is not a fixed product of the round). No catch-up: the entries as they are.
+function labelRoundsCatchUp(entries, catchUp) {
+  if (!catchUp) return;
+  const { isCatchUpRow, CATCH_UP_LABEL } = require('./lawn-rounds-catchup');
+  for (const entry of entries) {
+    if (!isCatchUpRow({ role: entry.shapedEntry.role, product_name: entry.shapedEntry.name })) continue;
+    entry.fixed = false;
+    entry.gates = { ...entry.gates, roundsCatchUp: CATCH_UP_LABEL, trigger: CATCH_UP_LABEL };
+  }
+}
+
 // The stored gate northPortBlocked ("not allowed in North Port this month") was written for the step's own month (the ban runs Apr 1 to
 // Sep 30). A rounds visit can read a step of another season (round 2 reads April's Dimension row in Feb and Mar), so the brief leaves
 // the key off while the REAL date is outside the ban, as the plan's note does (v13GateNotes). Every other visit: the entries as they are.
@@ -483,6 +495,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
     const { loadCustomerGrassContext } = require('./lawn-grass-context');
     const { getProtocolWindowContext, summarizeProtocolContext } = require('./lawn-protocol-operating-layer');
     const { roundRouting, roundsNitrogenHold } = require('./waveguard-plan-engine');
+    const roundsCatchUp = require('./lawn-rounds-catchup');
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
@@ -501,7 +514,10 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // A visit on a 9x rounds series: the brief states the step of its ROUND (a pinned window still wins), with the weed and spot rows of
     // the real date. null for every other visit, which reads the month of its date as before.
     const rounds = roundRouting(svc, grass.trackKey);
-    if (rounds) query.roundStep = { round: rounds.round, month: rounds.month };
+    // A new customer's first rounds visit in round 3 with no pre-emergent this year also carries the spring pre-emergent catch-up (the plan's own
+    // decision, lawn-rounds-catchup.js; STRICT like every read here): its March Dimension 2EW row joins the window and is labelled below.
+    const catchUp = await roundsCatchUp.catchUpWanted(dbh, svc, { strict: true });
+    if (rounds) query.roundStep = roundsCatchUp.roundStepFields({ round: rounds.round, month: rounds.month }, catchUp);
     if (assignedWindowKey) {
       query.windowKey = assignedWindowKey;
       // Resolve the assigned protocol row (key + version, newest match —
@@ -597,6 +613,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       }))
       .filter((p) => p.shapedEntry.name);
     statedRoundsNitrogen(shaped, rounds, grass.trackKey);
+    labelRoundsCatchUp(shaped, catchUp);
     withoutOffSeasonNorthPortBlock(shaped, rounds);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);

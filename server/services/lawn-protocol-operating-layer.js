@@ -272,9 +272,23 @@ async function withRoundSpotRows(knex, protocol, window, rows, { roundStep, real
   if (!roundStep) return { rows, spotWindow: null };
   const spotMonth = roundStep.spotMonth ?? roundSpotMonth({ round: roundStep.round, realMonth, grassTrack: protocol.grass_track });
   const spotWindow = windowForVisit(protocol, null, spotMonth);
-  if (!spotWindow || spotWindow.id === window.id) return { rows, spotWindow: null };
-  const spotRows = await readWindowProducts(knex, spotWindow, { strict, includeBermudaRemoval });
-  return { rows: [...rows.filter((row) => !isWeedSpotRow(row)), ...spotRows.filter(isWeedSpotRow)], spotWindow };
+  const spot = !spotWindow || spotWindow.id === window.id
+    ? { rows, spotWindow: null }
+    : { rows: [...rows.filter((row) => !isWeedSpotRow(row)), ...(await readWindowProducts(knex, spotWindow, { strict, includeBermudaRemoval })).filter(isWeedSpotRow)], spotWindow };
+  return { ...spot, rows: await withCatchUpRows(knex, protocol, spot.rows, { roundStep, strict }) };
+}
+
+// The spring pre-emergent catch-up (lawn-rounds-catchup.js; `roundStep.catchUp`, set by the caller that decided the visit qualifies): the
+// MARCH window's Dimension 2EW row joins the round's rows, so the plan, the completion attribution and every reader resolve one list. Not
+// added twice, and the same rows back when the visit has no catch-up or the March window has no such row.
+async function withCatchUpRows(knex, protocol, rows, { roundStep, strict }) {
+  if (roundStep?.catchUp !== true) return rows;
+  const catchUp = require('./lawn-rounds-catchup');
+  if (rows.some(catchUp.isCatchUpRow)) return rows;
+  const marchWindow = windowForVisit(protocol, null, catchUp.CATCH_UP_MONTH);
+  if (!marchWindow) return rows;
+  const found = (await readWindowProducts(knex, marchWindow, { strict, includeBermudaRemoval: false })).filter(catchUp.isCatchUpRow);
+  return found.length ? [...rows, found[0]] : rows;
 }
 
 // `roundStep` ({ round, month }): a 9x rounds visit. Its program rows come from the window of the ROUND's step month (`roundStep.month`; a
