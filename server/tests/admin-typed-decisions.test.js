@@ -25,7 +25,7 @@ jest.mock('../services/typed-decisions/eval', () => ({ evaluateCapabilities: (..
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
-const { askWavesSubjectHash, callSubjectHash, smsSubjectHash, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { askWavesSubjectHash, callSubjectHash, smsSubjectHash, socialPostSubjectHash, lawnDiagnosisSubjectHash } = require('../services/typed-decisions/subject-hash');
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
@@ -287,6 +287,68 @@ describe('Ask Waves chat subjects (ask_waves_safety.v1)', () => {
     expect(gone.body.code).toBe('subject_changed');
   });
 });
+
+describe('lawn diagnosis subjects (lawn_result_timing.v1)', () => {
+  const DIAG_ID = '44444444-4444-4444-8444-444444444444';
+  const SUMMARY = 'Your lawn shows thinning along the sunny edge. By mid-November the color should be much better.';
+  const EDITED = 'Your lawn shows thinning along the sunny edge.';
+  const HASH = lawnDiagnosisSubjectHash(SUMMARY);
+  const diag = (summary) => ({ id: DIAG_ID, report_contract: JSON.stringify({ customer_summary: summary }), created_at: new Date('2026-10-29T14:00:00Z') });
+  const timingRow = (over = {}) => baseRow({
+    capability: 'lawn_result_timing', package_id: 'lawn_result_timing.v1', served_model: 'jev-1.13.0',
+    subject_type: 'lawn_diagnostics', subject_id: DIAG_ID, question_id: 'states_result_timing',
+    baseline_answers: JSON.stringify({ production: false }), subject_hash: HASH, ...over,
+  });
+
+  test('the queue shows the stored contract summary the row judged, with no digest leaving the server', async () => {
+    const log = installDb({
+      decision_reviews: { list: [timingRow()] },
+      lawn_diagnostics: { list: [diag(SUMMARY)] },
+    });
+    const { status, body } = await get('/reviews');
+    expect(status).toBe(200);
+    expect(body.reviews[0]).toMatchObject({ subjectType: 'lawn_diagnostics', providerLabel: 'Jev', subjectChanged: false, subjectVersion: HASH });
+    expect(body.reviews[0].subject).toEqual({ type: 'lawn_diagnostics', text: SUMMARY, at: '2026-10-29T14:00:00.000Z' });
+    expect(body.reviews[0].question).toMatch(/WHEN a treatment's RESULT will be seen/);
+    expect(called(log, 'lawn_diagnostics', 'whereIn')).toContainEqual(['id', [DIAG_ID]]);
+    expect(log.sms_log).toBeUndefined();
+  });
+
+  test('an unchanged summary is labeled against its digest', async () => {
+    const log = installDb({
+      decision_reviews: { first: [timingRow()], returning: [timingRow({ label_status: 'confirmed_correct' })] },
+      lawn_diagnostics: { list: [diag(SUMMARY)] },
+    });
+    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(200);
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [HASH]]);
+  });
+
+  test('a summary edited after Jev judged it shows as changed and cannot be labeled', async () => {
+    installDb({
+      decision_reviews: { list: [timingRow()], first: [timingRow()] },
+      lawn_diagnostics: { list: [diag(EDITED)] },
+    });
+    const row = (await get('/reviews')).body.reviews[0];
+    expect(row.subjectChanged).toBe(true);
+    expect(row.subject.text).toBe(EDITED);
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+  });
+
+  test('a diagnosis with no summary left has no live digest: nothing shown, label refused', async () => {
+    installDb({
+      decision_reviews: { list: [timingRow()], first: [timingRow()] },
+      lawn_diagnostics: { list: [] },
+    });
+    expect((await get('/reviews')).body.reviews[0].subject).toBeNull();
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+  });
+});
+
 
 describe('POST /reviews/:id/label', () => {
   test.each([
