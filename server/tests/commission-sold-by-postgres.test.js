@@ -766,6 +766,35 @@ postgres('commission sold by', () => {
       expect(again.estimate).toMatchObject({ sold_by_technician_id: chosen, sold_by_source: 'office' });
     });
 
+    it('re-checks a flag credit on every revision: a moved address or a moved lead takes it off', async () => {
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t, { phone: '+19415550142', address: '123 Palm Ave', gps_check: { result: 'verified', mode: 'prospect', technician_id: t, premise: { address: '123 Palm Ave' } } });
+      const { estimate: created } = await create({ leadId: lead });
+      expect(created).toMatchObject({ sold_by_source: 'flag', sold_by_lead_id: lead });
+      const revise = (patch) => reviseAdminEstimate({
+        database: trx, estimateId: created.id, body: body(patch), technicianId: ADMIN_ID,
+        technician: { id: ADMIN_ID, name: 'Sample Admin' }, recompute: NO_INPUTS,
+      });
+      // The same place: the credit stays.
+      expect((await revise({ notes: 'Same place' })).estimate).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag' });
+      // The office moves the estimate to another address: the flag never proved it.
+      const moved = await revise({ address: '500 Other St', estimateData: { inputs: { address: '500 Other St' }, result: { total: 125 } } });
+      expect(moved.estimate).toMatchObject({ sold_by_technician_id: null, sold_by_source: null, sold_by_lead_id: null });
+      expect(await estimateRow(created.id)).toMatchObject({ sold_by_technician_id: null, sold_by_source: null });
+    });
+
+    it('takes a flag credit off when the office moves the lead to another estimate', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      const first = await estimate({ customer_id: cust });
+      const lead = await flagLead(t, { customer_id: cust, estimate_id: first });
+      expect((await autoFillSoldBy(trx, await estimateRow(first))).sold_by_lead_id).toBe(lead);
+      const second = await estimate({ customer_id: cust });
+      await trx('leads').where({ id: lead }).update({ estimate_id: second });
+      expect((await autoFillSoldBy(trx, await estimateRow(first))).sold_by_source).toBeNull();
+      expect((await autoFillSoldBy(trx, await estimateRow(second))).sold_by_lead_id).toBe(lead);
+    });
+
     it('does not change the edit version when Sold by changes', async () => {
       const { estimateEditVersion } = require('../services/admin-estimate-persistence');
       const { estimate: created } = await create();

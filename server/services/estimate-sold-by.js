@@ -96,16 +96,18 @@ function flagProvesPremise(flag, estimate) {
 }
 
 /**
- * Auto-fill, inside the estimate's write transaction. Gate off, an accepted estimate, or any
- * estimate that already has a source (flag, office or cleared) changes nothing. Returns the
+ * Auto-fill, inside the estimate's write transaction. Gate off or an accepted estimate changes
+ * nothing. A flag-filled estimate is re-checked first (recheckFlagCredit); an office choice or a
+ * clear is kept. Returns the
  * estimate row, with the Sold by columns when this call filled them.
  */
 async function autoFillSoldBy(trx, estimate, { now = () => new Date() } = {}) {
-  if (!soldByLive() || !estimate?.id) return estimate;
-  if (estimate.accepted_at || estimate.sold_by_source) return estimate;
+  if (!soldByLive() || !estimate?.id || estimate.accepted_at) return estimate;
+  const current = estimate.sold_by_source === 'flag' ? await recheckFlagCredit(trx, estimate) : estimate;
+  if (current.sold_by_source) return current;
   const at = now();
-  const flag = await findMatchingFlag(trx, estimate, at);
-  if (!flag) return estimate;
+  const flag = await findMatchingFlag(trx, current, at);
+  if (!flag) return current;
   // The guards ride the write: a concurrent accept or admin choice wins, and the flag must still
   // credit no other estimate (re-read after the lead lock, so two saves cannot both take it).
   const [filled] = await trx('estimates')
@@ -125,7 +127,25 @@ async function autoFillSoldBy(trx, estimate, { now = () => new Date() } = {}) {
       sold_by_set_at: at,
     })
     .returning(SOLD_BY_COLUMNS);
-  return filled ? { ...estimate, ...filled } : estimate;
+  return filled ? { ...current, ...filled } : current;
+}
+
+// A save may move a flag-filled estimate to another place (a revised address or customer), or the
+// office may have moved the lead to another estimate: the flag must still prove this estimate on
+// every save, or the credit comes off (and another flag that proves the new place may fill it).
+// The lead row is locked like a fill's. An office choice or a clear is never touched here.
+async function recheckFlagCredit(trx, estimate) {
+  const flag = estimate.sold_by_lead_id
+    ? await trx('leads').where({ id: estimate.sold_by_lead_id }).forUpdate()
+      .first('estimate_id', trx.raw("gps_check->>'mode' as gps_mode"), trx.raw("gps_check->'premise' as premise"))
+    : null;
+  if (flag && String(flag.estimate_id || '') === String(estimate.id) && flagProvesPremise(flag, estimate)) return estimate;
+  const [dropped] = await trx('estimates')
+    .where({ id: estimate.id, sold_by_source: 'flag' })
+    .whereNull('accepted_at')
+    .update({ sold_by_technician_id: null, sold_by_source: null, sold_by_lead_id: null, sold_by_set_by: null, sold_by_set_at: null })
+    .returning(SOLD_BY_COLUMNS);
+  return dropped ? { ...estimate, ...dropped } : estimate;
 }
 
 async function loadSellerCandidate(database, technicianId) {
