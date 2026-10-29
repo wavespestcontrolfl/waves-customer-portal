@@ -127,6 +127,9 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
     const updates = {
       status: 'paid',
+      // Money received earlier (a part payment) goes with the paid flip: collectedAmount below is what was still owed, and the paid invoice
+      // reads as the whole bill.
+      amount_paid: 0,
       paid_at: new Date(),
       collected_via: collectedVia,
       reconciled_by: req.technicianId || null,

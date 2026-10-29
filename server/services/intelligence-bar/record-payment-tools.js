@@ -12,10 +12,12 @@
  * It records money ALREADY RECEIVED by hand (cash, check, Zelle, Venmo, PayPal, other). It never charges a
  * card, creates a Stripe payment, refunds or voids; refunds and charging a saved card stay closed.
  *
- * What the screen does (and so what the card promises). The screen has NO amount and NO date field: it
- * settles the WHOLE amount due (total minus account credit applied) and stamps the payment as of now (ET).
+ * What the screen does (and so what the card promises). The card records the WHOLE amount due (total minus
+ * account credit applied and any part payment already received) and stamps the payment as of now (ET). A part
+ * payment (GATE_PARTIAL_PAYMENTS, the Invoices page's amount field) is NOT available from the bar: the
+ * handler drops any amount in the card's body and fences the whole balance with expectedAmountCents.
  * So the card takes `amount` only as a check against the balance due: it must equal it. A larger amount is
- * refused (no overpayment), a smaller one is refused (no partial payment on this screen). A payment date
+ * refused (no overpayment), a smaller one is refused (no partial payment from the bar). A payment date
  * other than today is refused.
  * The handler (services/invoice-manual-payment.js recordManualPayment) then: retires any open pay-page
  * card session for the invoice (cancelled so it cannot be charged later; a payment already in flight
@@ -172,7 +174,7 @@ async function invoiceRefusal(invoice, dueCents, amountCents) {
     return refusal(`The balance due is ${money(dueCents)}, less than the ${money(amountCents)} given. The Invoices page records the balance due and takes no overpayment; nothing was recorded.`, 'amount_exceeds_balance', { ...at, balance_due: dueCents / 100 });
   }
   if (amountCents < dueCents) {
-    return refusal(`The balance due is ${money(dueCents)}, more than the ${money(amountCents)} given. The Invoices page settles the whole balance and has no partial payment; nothing was recorded.`, 'partial_not_supported', { ...at, balance_due: dueCents / 100 });
+    return refusal(`The balance due is ${money(dueCents)}, more than the ${money(amountCents)} given. This card settles the whole balance and takes no partial payment; nothing was recorded.`, 'partial_not_supported', { ...at, balance_due: dueCents / 100 });
   }
   // Whose debt it is: the live resolver (the same one the settlement re-runs under the row lock), fail closed.
   let selfPay;

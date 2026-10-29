@@ -2042,6 +2042,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
 
       const fallbackInvoiceUpdates = {
         status: 'paid',
+        // A part payment recorded earlier on this invoice is part of the bill this settlement completes: total below carries it, and the
+        // column (money received on a still-open invoice) resets, so the paid invoice reads as the whole bill.
+        amount_paid: 0,
         paid_at: new Date().toISOString(),
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -2051,7 +2054,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       // account credit so the invoice keeps its real total instead of collapsing
       // to the reduced cash amount while credit_applied remains.
       if (chargedTotal !== null) {
-        fallbackInvoiceUpdates.total = Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100;
+        fallbackInvoiceUpdates.total = Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100;
       }
       if (details.paymentMethod) fallbackInvoiceUpdates.payment_method = details.paymentMethod;
       if (details.cardBrand) fallbackInvoiceUpdates.card_brand = details.cardBrand;
@@ -2165,14 +2168,17 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Update invoices table
   const invoiceUpdates = {
     status: 'paid',
+    // Money received by hand earlier (a part payment) is part of the bill this payment completes: total below carries it, and the column
+    // resets because it holds money received on a still-open invoice. Both read the old row inside the one UPDATE.
+    amount_paid: 0,
     paid_at: new Date().toISOString(),
     stripe_charge_id: paymentIntent.latest_charge || null,
   };
   // chargedTotal is CASH taken (amount due + surcharge); add back the row's own
-  // applied account credit IN SQL (the matched invoice isn't in this outer scope)
-  // so the invoice keeps its real total (credit + cash), not just the cash.
+  // applied account credit and part payments IN SQL (the matched invoice isn't in this outer scope)
+  // so the invoice keeps its real total (credit + earlier parts + cash), not just the cash.
   if (chargedTotal !== null) {
-    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [chargedTotal]);
+    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [chargedTotal]);
   }
   if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
@@ -6455,10 +6461,11 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
-        // `amount` is the ACH cash (already reduced by applied credit); add the
-        // row's credit_applied back IN SQL so total stays the real value — else the
-        // succeeded handler recomputes amount due off the collapsed total.
-        total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
+        // `amount` is the ACH cash (already reduced by applied credit and by any part payment); add the
+        // row's credit_applied and amount_paid back IN SQL so total stays the real value — else the
+        // succeeded handler recomputes amount due off the collapsed total. amount_paid itself stays (the invoice is
+        // not paid yet; a failed ACH reopens it with the part payment still on it).
+        total: db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [amount]),
         // The unacknowledged-ack sweep ages candidates on updated_at; an
         // old invoice whose ACH began today must date from THIS
         // transition, or the 3-day ceiling silently excludes it and a
