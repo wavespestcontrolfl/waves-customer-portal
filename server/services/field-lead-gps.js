@@ -153,21 +153,37 @@ async function checkProspectLocation({ database = db, technicianId, prospect, no
   }
   if (!location) return { ...check, result: 'address_not_found' };
 
-  const tech = await database('technicians').where({ id: technicianId }).first('bouncie_imei');
-  if (!tech?.bouncie_imei) return { ...check, result: 'no_truck' };
-  const truck = await database('vehicle_locations').where({ bouncie_imei: tech.bouncie_imei }).first('lat', 'lng', 'reported_at');
-  if (!truck || truck.lat == null || truck.lng == null) return { ...check, result: 'no_truck_position' };
-
-  const reportedMs = truck.reported_at ? new Date(truck.reported_at).getTime() : NaN;
-  if (!Number.isFinite(reportedMs)) return { ...check, result: 'stale_truck_position' };
-  check.truck_reported_at = new Date(reportedMs).toISOString();
-  if (now.getTime() - reportedMs > TRUCK_POSITION_MAX_AGE_MS) return { ...check, result: 'stale_truck_position' };
+  const truck = await truckPosition(database, technicianId, now);
+  if (truck.reportedAt) check.truck_reported_at = truck.reportedAt;
+  if (truck.result) return { ...check, result: truck.result };
 
   const { distanceMeters } = require('./gps-arrival-detector');
   const meters = distanceMeters(Number(truck.lat), Number(truck.lng), Number(location.lat), Number(location.lng));
   if (meters == null) return { ...check, result: 'no_truck_position' };
   check.distance_m = Math.round(meters);
   return { ...check, result: meters <= radius ? 'verified' : 'too_far' };
+}
+
+// The technician's truck position, or the reason there is none. vehicle_locations keeps the latest
+// point per device; a device moved to this technician's truck still holds points from before the
+// move, so by the tracker's shared rule (customer-tracking-eta.js techMappingCutoff, as
+// tracking-vehicle-location.js applies it) a point counts only when it was reported AND received by
+// the server (vehicle_locations.updated_at, stamped NOW() with each newer point) after the mapping
+// last changed (technicians.bouncie_imei_changed_at; NULL = never remapped).
+async function truckPosition(database, technicianId, now) {
+  const tech = await database('technicians').where({ id: technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
+  if (!tech?.bouncie_imei) return { result: 'no_truck' };
+  const truck = await database('vehicle_locations').where({ bouncie_imei: tech.bouncie_imei }).first('lat', 'lng', 'reported_at', 'updated_at');
+  if (!truck || truck.lat == null || truck.lng == null) return { result: 'no_truck_position' };
+  const reportedMs = truck.reported_at ? new Date(truck.reported_at).getTime() : NaN;
+  if (!Number.isFinite(reportedMs)) return { result: 'stale_truck_position' };
+  const reportedAt = new Date(reportedMs).toISOString();
+  if (now.getTime() - reportedMs > TRUCK_POSITION_MAX_AGE_MS) return { result: 'stale_truck_position', reportedAt };
+  const cutoff = require('./customer-tracking-eta').techMappingCutoff(tech.bouncie_imei_changed_at);
+  const cutoffMs = cutoff == null ? null : new Date(cutoff).getTime();
+  const receivedMs = truck.updated_at ? new Date(truck.updated_at).getTime() : NaN;
+  if (cutoffMs != null && !(reportedMs > cutoffMs && receivedMs > cutoffMs)) return { result: 'stale_truck_position', reportedAt };
+  return { lat: truck.lat, lng: truck.lng, reportedAt };
 }
 
 // Neighbor-mode body. First name, a 10-digit phone, an address and a ZIP are required.

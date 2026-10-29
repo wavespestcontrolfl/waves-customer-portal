@@ -344,6 +344,27 @@ postgres('commission sold by', () => {
       expect(TwilioService.sendSMS.mock.calls.at(-1)[1]).toBe('🔔 Field Lead: Sample Alpha flagged Pest opportunity at Neighbor S. (neighbor).\nNotes: Ants');
     });
 
+    it('never counts a point from before the device was moved to this technician', async () => {
+      const id = await tech('Sample Alpha');
+      const imei = await truck(id, TRUCK_NEAR, 1); // a point reported an hour ago
+      const setMapping = (hoursAgo) => trx('technicians').where({ id }).update({ bouncie_imei_changed_at: new Date(Date.now() - hoursAgo * HOUR) });
+      // Moved 30 minutes ago: the hour-old point belonged to the device's earlier truck.
+      await setMapping(0.5);
+      await neighbor(id);
+      expect((await leadFor(id)).gps_check.result).toBe('stale_truck_position');
+      // Moved 2 hours ago, but the point was received (written) before the move: still not proof.
+      await trx('leads').where({ assigned_to: id }).del();
+      await setMapping(2);
+      await trx('vehicle_locations').where({ bouncie_imei: imei }).update({ updated_at: new Date(Date.now() - 3 * HOUR) });
+      await neighbor(id);
+      expect((await leadFor(id)).gps_check.result).toBe('stale_truck_position');
+      // Moved 2 hours ago; the point was reported and received after the move: verified.
+      await trx('leads').where({ assigned_to: id }).del();
+      await trx('vehicle_locations').where({ bouncie_imei: imei }).update({ updated_at: new Date(Date.now() - 0.5 * HOUR) });
+      await neighbor(id);
+      expect((await leadFor(id)).gps_check.result).toBe('verified');
+    });
+
     it('is not verified when the truck is too far, and says how far', async () => {
       const id = await tech('Sample Alpha');
       await truck(id, TRUCK_FAR);
