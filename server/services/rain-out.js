@@ -955,9 +955,9 @@ function routeHourOption({ start, drive }, todayStr) {
   };
 }
 
-// null = no route answer (the finder threw or found no hour): the caller
-// falls back to sameDayOptions() so the sheet never opens with nothing the
-// guesses would have offered.
+// null = no route answer (the finder threw): the caller falls back to
+// sameDayOptions(). [] = the route keeps no hour today, so the sheet offers no
+// same-day hour rather than an unchecked guess the route cannot keep.
 async function routeSameDayOptions(service, now = new Date()) {
   const parts = etParts(now);
   const todayStr = etDateString(now);
@@ -982,8 +982,12 @@ async function routeSameDayOptions(service, now = new Date()) {
       // No Google drive times for a technician's request, the model only.
       providerTravel: false,
     });
+    if (result?.error) {
+      logger.warn(`[rain-out] tech route hours unavailable for ${service.id}, using the +2h/+4h guesses: ${result.error}`);
+      return null;
+    }
     const picked = pickRouteHours(Array.isArray(result?.slots) ? result.slots : [], { todayStr, firstStart });
-    return picked.length ? picked.map((hour) => routeHourOption(hour, todayStr)) : null;
+    return picked.map((hour) => routeHourOption(hour, todayStr));
   } catch (err) {
     logger.warn(`[rain-out] tech route hours failed for ${service.id}, using the +2h/+4h guesses: ${err.message}`);
     return null;
@@ -993,7 +997,8 @@ async function routeSameDayOptions(service, now = new Date()) {
 // Gate off = sameDayOptions() exactly as before.
 async function sameDayChoices(service) {
   if (!techMoveRouteTimesLive()) return sameDayOptions();
-  return (await routeSameDayOptions(service)) || sameDayOptions();
+  const routed = await routeSameDayOptions(service);
+  return routed === null ? sameDayOptions() : routed;
 }
 
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:

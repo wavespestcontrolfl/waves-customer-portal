@@ -414,9 +414,14 @@ describe('rain-out service', () => {
       expect(finder).not.toHaveBeenCalled();
     });
 
+    test('gate on: the route keeps no hour today, so no same-day hour is offered (no unchecked guess)', async () => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue({ slots: [] });
+      expect(await sameDay()).toEqual([]);
+    });
+
     test.each([
       ['throws', () => finder.mockRejectedValue(new Error('boom'))],
-      ['returns no hour', () => finder.mockResolvedValue({ slots: [] })],
       ['returns an error', () => finder.mockResolvedValue({ error: 'lat/lng required', slots: [] })],
     ])('gate on: the finder %s, so the +2h and +4h guesses are offered', async (_name, arrange) => {
       process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
