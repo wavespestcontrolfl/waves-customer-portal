@@ -460,7 +460,7 @@ function previousBalanceBlock(doc, previousBalance, x, y, width) {
   y = ensureRoom(doc, y + 16, 32 + rowH + captionH);
   y = sectionLabel(doc, 'Previous balance', x, y);
   doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED)
-    .text('Earlier invoices that are still unpaid. They are not part of the TOTAL above.', x, y, { width });
+    .text('Other invoices that are still unpaid. They are not part of the TOTAL above.', x, y, { width });
   y += 12;
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 6;

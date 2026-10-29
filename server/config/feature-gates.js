@@ -673,11 +673,13 @@ const gates = {
   // counterpart. Display-only — no money
   // moves under this gate and every underlying invoice stays intact
   // (dunning still ages off each invoice's own due date, so the oldest debt
-  // keeps escalating — ruling #2). The attached invoice PDF carries the
-  // same balance as an itemized "Previous balance" block (with service
-  // names; the email reaches only the customer's own saved recipient), and
-  // with payIncludeBalance also on, the note points at paying everything
-  // from this invoice's link. Customer-facing copy change, so
+  // keeps escalating — ruling #2). With payIncludeBalance also on, and only
+  // when this invoice's Pay button collects every open invoice, the note
+  // points at paying everything from this invoice's link and the attached
+  // invoice PDF itemizes the same balance as a "Previous balance" block
+  // (with service names; the email reaches only the customer's own saved
+  // recipient). A customer under a collections dispute hold gets neither
+  // the note nor the block. Customer-facing copy change, so
   // fail-closed ==='true' in EVERY environment. Gate off: emails and
   // their PDFs byte-identical to today.
   balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
