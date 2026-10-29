@@ -85,6 +85,14 @@ describe('resolveSeriesChildIdentity', () => {
     );
   });
 
+  test('unlinked "Lawn Care" on lawn rounds (lawn_rounds_9) links to the 6-week lawn row, as every_6_weeks does', async () => {
+    const catalog = [...CATALOG, { id: 'svc-l6', name: 'Every 6 Weeks Lawn Care Service', service_key: 'lawn_care_6week', is_active: true }];
+    const parent = { id: 'p', service_id: null, service_type: 'Lawn Care', recurring_pattern: 'lawn_rounds_9' };
+    const linked = { service_type: 'Every 6 Weeks Lawn Care Service', service_id: 'svc-l6', service_key: 'lawn_care_6week' };
+    await expect(resolveSeriesChildIdentity(fakeConn(catalog), parent)).resolves.toEqual(linked);
+    await expect(resolveSeriesChildIdentity(fakeConn(catalog), { ...parent, recurring_pattern: 'every_6_weeks' })).resolves.toEqual(linked);
+  });
+
   test('unlinked pre-rename catalog name → rename alias → current row', async () => {
     const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };
     await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), parent)).resolves.toEqual(
@@ -216,6 +224,8 @@ describe('service-name-aliases legacy map', () => {
   test('legacyCatalogName is pair-keyed and case-insensitive on the label; the rename bridge stays bidirectional', () => {
     expect(legacyCatalogName('pest control', 'monthly')).toBe('Monthly Pest Control Service');
     expect(legacyCatalogName('Pest Control', 'custom')).toBeNull();
+    expect(legacyCatalogName('Lawn Care', 'lawn_rounds_9')).toBe('Every 6 Weeks Lawn Care Service');
+    expect(legacyCatalogName('Pest Control', 'lawn_rounds_9')).toBeNull();
     expect(legacyCatalogName('Pest Control', null)).toBeNull();
     expect(counterpartServiceName('Lawn Care Program — Monthly')).toBe('Monthly Lawn Care Service');
     expect(counterpartServiceName('Monthly Lawn Care Service')).toBe('Lawn Care Program — Monthly');
