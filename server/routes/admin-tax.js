@@ -3089,13 +3089,13 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
     }
 
+    const baseSuggestion = row.suggestion || {};
     // refund_applied undo: atomically RESTORE the adjusted expense from the
     // refundRestore snapshot (verifying nothing else changed it since) and
     // return the credit row to review. If the expense was deleted, the undo
     // just releases the row — there is nothing left to restore.
     if (row.status === 'refund_applied') {
-      const target = row.suggestion?.refundAppliedTo;
-      const restore = row.suggestion?.refundRestore;
+      const { refundAppliedTo: target, refundRestore: restore } = baseSuggestion;
       const refund = Number(row.amount);
       // releaseOnly: the drift 409 below is otherwise a dead end — once
       // the operator restores the expense BY HAND on the Expenses tab,
@@ -3189,12 +3189,6 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       }
       return res.json({ success: true, reconciliation: null });
     }
-    // A line the payroll match linked to an expense the owner already had: the expense gets its category back.
-    if (row.status === 'matched_expense' && (row.matched_payroll_check_id || row.matched_tax_filing_id || (row.suggestion && row.suggestion.payrollMatch))) {
-      if (!(await bankImport.unlinkPayrollMatched(row))) return res.status(409).json({ error: 'row changed mid-flight — reload' });
-      return res.json({ success: true, reconciliation: null });
-    }
-    const baseSuggestion = row.suggestion || {};
     // rejections are CUMULATIVE: unlinking B after A must not let the
     // matcher re-propose A — every rejected id stays excluded forever
     const rejectedExpenseIds = [...new Set([
@@ -3244,7 +3238,9 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       });
 
     if (row.status === 'matched_expense' || !row.matched_payout_id) {
-      const changed = await doUnlink(db);
+      // A line the payroll match linked to an expense the owner already had (null = not one): the expense
+      // gets its category back.
+      const changed = await bankImport.unlinkPayrollMatched(row) ?? await doUnlink(db);
       if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
       return res.json({ success: true, reconciliation: null });
     }

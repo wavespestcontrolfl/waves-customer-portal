@@ -5447,6 +5447,74 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
   );
 }
 
+// What the payroll match says about one bank line: the paychecks or payroll tax rows it may be (the owner picks one,
+// or the existing expense the owner already entered), or the pair it was matched to.
+function PayrollBankLineNotes({ r, claimable, busy, act }) {
+  const candidates = claimable && r.direction === "debit" ? r.suggestion?.payrollCandidates : null;
+  const match = r.suggestion?.payrollMatch;
+  const linkPath = `/admin/tax/bank-import/${r.id}/link-payroll`;
+  return (
+    <>
+      {candidates?.length > 0 && (
+        <div className="mb-1 text-14 text-ink-primary" style={{ whiteSpace: "normal" }}>
+          {candidates.map((c) => {
+            const idField = c.kind === "check" ? { checkId: c.id } : { filingId: c.id };
+            const existing = c.existingExpenses?.length > 0;
+            const nearMiss = c.nearMiss ? " (one cent off)" : "";
+            return (
+              <div key={c.id} className="mb-1">
+                {c.kind === "check"
+                  ? `Paycheck for ${c.name}, ${fmtM(c.netCents / 100)}, pay date ${fmtD(c.payDate)}${nearMiss}`
+                  : `${c.title}, ${fmtM(c.amountCents / 100)}, due ${fmtD(c.dueDate)}${nearMiss}`}
+                {existing ? (
+                  <>
+                    <div className="mt-1">
+                      You may already have entered this payment. Link it to the existing expense, or book it as new.
+                    </div>
+                    {c.existingExpenses.map((e) => (
+                      <Button
+                        key={e.id}
+                        type="button"
+                        variant="secondary"
+                        className="mr-2 mt-1"
+                        disabled={!!busy}
+                        onClick={() => act("link-payroll", linkPath, { ...idField, expenseId: e.id })}
+                      >
+                        {`Use existing expense ${e.vendor_name || ""} ${fmtM(e.amount)} ${fmtD(e.expense_date)}`}
+                      </Button>
+                    ))}
+                  </>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="ml-2"
+                  disabled={!!busy}
+                  onClick={() =>
+                    act("link-payroll", linkPath, {
+                      ...idField,
+                      // "Book as new" is offered only beside the existing expenses the owner just saw
+                      ...(existing ? { createNew: true } : {}),
+                    })
+                  }
+                >
+                  {existing ? "Book as new" : c.kind === "check" ? "Link paycheck" : "Link tax payment"}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {match && (
+        <div className="text-14 text-ink-secondary" style={{ whiteSpace: "normal" }}>
+          {match.checkId ? "Matched to a paycheck" : "Matched to a payroll tax payment"}
+          {match.by === "auto" ? " automatically" : ""}
+        </div>
+      )}
+    </>
+  );
+}
+
 function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
@@ -6260,73 +6328,7 @@ function BankImportTab() {
                       </span>
                     </div>
                   )}
-                  {bankRowClaimable(r) && r.direction === "debit" && r.suggestion?.payrollCandidates?.length > 0 && (
-                    <div className="mb-1 text-14 text-ink-primary" style={{ whiteSpace: "normal" }}>
-                      {r.suggestion.payrollCandidates.map((c) => (
-                        <div key={c.id} className="mb-1">
-                          {c.kind === "check"
-                            ? `Paycheck for ${c.name}, ${fmtM(c.netCents / 100)}, pay date ${fmtD(c.payDate)}${c.nearMiss ? " (one cent off)" : ""}`
-                            : `${c.title}, ${fmtM(c.amountCents / 100)}, due ${fmtD(c.dueDate)}${c.nearMiss ? " (one cent off)" : ""}`}
-                          {c.existingExpenses?.length > 0 ? (
-                            <>
-                              <div className="mt-1">
-                                You may already have entered this payment. Link it to the existing expense, or book it as new.
-                              </div>
-                              {c.existingExpenses.map((e) => (
-                                <Button
-                                  key={e.id}
-                                  type="button"
-                                  variant="secondary"
-                                  className="mr-2 mt-1"
-                                  disabled={!!busy}
-                                  onClick={() =>
-                                    act(
-                                      "link-payroll",
-                                      `/admin/tax/bank-import/${r.id}/link-payroll`,
-                                      c.kind === "check"
-                                        ? { checkId: c.id, expenseId: e.id }
-                                        : { filingId: c.id, expenseId: e.id },
-                                    )
-                                  }
-                                >
-                                  {`Use existing expense ${e.vendor_name || ""} ${fmtM(e.amount)} ${fmtD(e.expense_date)}`}
-                                </Button>
-                              ))}
-                            </>
-                          ) : null}
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            className="ml-2"
-                            disabled={!!busy}
-                            onClick={() =>
-                              act(
-                                "link-payroll",
-                                `/admin/tax/bank-import/${r.id}/link-payroll`,
-                                {
-                                  ...(c.kind === "check" ? { checkId: c.id } : { filingId: c.id }),
-                                  // "Book as new" is offered only beside the existing expenses the owner just saw
-                                  ...(c.existingExpenses?.length > 0 ? { createNew: true } : {}),
-                                },
-                              )
-                            }
-                          >
-                            {c.existingExpenses?.length > 0
-                              ? "Book as new"
-                              : c.kind === "check"
-                                ? "Link paycheck"
-                                : "Link tax payment"}
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {r.suggestion?.payrollMatch && (
-                    <div className="text-14 text-ink-secondary" style={{ whiteSpace: "normal" }}>
-                      {r.suggestion.payrollMatch.checkId ? "Matched to a paycheck" : "Matched to a payroll tax payment"}
-                      {r.suggestion.payrollMatch.by === "auto" ? " automatically" : ""}
-                    </div>
-                  )}
+                  <PayrollBankLineNotes r={r} claimable={bankRowClaimable(r)} busy={busy} act={act} />
                   {/* a transfer-flagged CREDIT with candidates falls through
                       to the select — a vendor refund whose descriptor says
                       "transfer" still needs its Apply refund action (the

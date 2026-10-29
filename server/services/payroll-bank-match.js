@@ -150,6 +150,12 @@ function filingCandidate(filing, row) {
   };
 }
 
+// What gets parked on a bank line for a plan: the linked pair as a one-item list, else the suggestions.
+function planCandidates(plan, row) {
+  if (plan.action !== 'link') return plan.candidates || [];
+  return [plan.check ? checkCandidate(plan.check, row) : filingCandidate(plan.filing, row)];
+}
+
 /**
  * Plan for one bank line against finalized, unmatched paychecks.
  *   row      { id, txn_date, description, amount, direction, account_type }
@@ -255,6 +261,8 @@ module.exports = {
   netPayWindow,
   taxWindow,
   filingCents,
+  isBankDebit,
+  planCandidates,
   planNetPay,
   planTaxPayment,
   isPlausibleCheckLink,

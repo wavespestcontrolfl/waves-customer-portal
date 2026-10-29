@@ -1485,70 +1485,116 @@ function payrollExpenseWindow(txnDate, payDates) {
   return { from, to: addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS) };
 }
 
+// What differs between the two kinds of target, as data: a finalized paycheck or a payroll tax calendar row.
+// lock: the locked target row. usable: false = the target is gone or no longer counts (goneReason says why).
+// payDates: the pay dates that widen the expense window. book: the vendor, note label, payment method and
+// evidence for the expense and for suggestion.payrollMatch. pool / counter: where the matcher keeps the open
+// targets and its tally of automatic links.
+const FILING_PAYEES = {
+  federal: { vendor: 'IRS', label: 'federal payroll tax deposit' },
+  florida: { vendor: 'Florida Department of Revenue', label: 'Florida RT-6' },
+};
+const PAYROLL_TARGET_KINDS = {
+  check: {
+    fk: 'matched_payroll_check_id',
+    method: 'payroll_check',
+    goneReason: 'check_not_final',
+    pool: 'checks',
+    counter: 'payrollChecksLinked',
+    lock: (trx, id) => trx('payroll_checks').where({ id }).forUpdate()
+      .first('id', 'status', 'employee_name', 'net_cents', 'pay_method', 'check_number', trx.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date")),
+    usable: (t) => t.status === 'finalized',
+    plausible: (row, t) => payrollMatch.isPlausibleCheckLink(row, t),
+    payDates: (t) => [t.pay_date],
+    book: (t) => ({ vendor: t.employee_name, label: 'net pay', paymentMethod: t.pay_method === 'check' ? 'check' : 'ach', evidence: { checkId: t.id } }),
+  },
+  filing: {
+    fk: 'matched_tax_filing_id',
+    method: 'payroll_tax',
+    goneReason: 'filing_gone',
+    pool: 'filings',
+    counter: 'payrollTaxLinked',
+    lock: (trx, id) => trx('tax_filing_calendar').where({ id }).forUpdate()
+      .first('id', 'source_key', 'title', 'amount_due', 'amount_paid', trx.raw("to_char(due_date, 'YYYY-MM-DD') as due_date")),
+    usable: (t) => !!payrollMatch.taxWindow(t),
+    plausible: (row, t) => payrollMatch.isPlausibleTaxLink(row, t),
+    payDates: () => [],
+    book: (t) => {
+      const tax = payrollMatch.taxWindow(t).tax;
+      return { ...FILING_PAYEES[tax], paymentMethod: 'ach', evidence: { filingId: t.id, tax, amountCents: payrollMatch.filingCents(t) } };
+    },
+  },
+};
+// The kind of a plan, or of a { check, filing } pair: a paycheck when there is a check, else a tax row.
+const payrollKindOf = ({ check }) => (check ? 'check' : 'filing');
+
+// A claim that cannot go on throws this before anything is written: the transaction rolls back and
+// claimPayrollLink returns the result.
+const claimStop = (reason, extra = {}) => Object.assign(new Error(`payroll claim stopped: ${reason}`), { claimResult: { ok: false, reason, ...extra } });
+
+// Claim step 1, inside the transaction: lock the bank line and the target and prove both still qualify.
+// by = 'auto' also re-plans on a fresh read (a rival line or check that appeared since the survey makes
+// it a suggestion); by = 'owner' needs only the plausibility rules.
+async function lockPayrollClaim(trx, { row, kind, ref, by }) {
+  const spec = PAYROLL_TARGET_KINDS[kind];
+  const live = await trx('bank_transactions').where({ id: row.id }).forUpdate()
+    .first('id', 'status', 'amount', 'txn_date', 'description', 'direction', 'account_type', 'account_label', 'suggestion');
+  if (!live || live.status !== 'unmatched' || hasUnresolvedBankChange(live)
+    || (live.suggestion && live.suggestion.decision === 'income')
+    || (by === 'auto' && manualLinkOnly(live))) throw claimStop('row_changed');
+  const txnDate = toDateStr(live.txn_date);
+  const target = await spec.lock(trx, ref.id);
+  if (!target || !spec.usable(target)) throw claimStop(spec.goneReason);
+  if (by === 'owner' && !spec.plausible({ ...live, txn_date: txnDate }, target)) throw claimStop('implausible');
+  if (by === 'auto') {
+    const plan = payrollPlanFor(live, txnDate, await loadPayrollMatchContext(trx), live.suggestion || {});
+    if (plan.action !== 'link' || !plan[kind] || plan[kind].id !== ref.id) throw claimStop('no_longer_unique');
+  }
+  return { live, txnDate, target };
+}
+
+// Claim step 2: the expense the line will carry. Returns the owner's existing expense to re-categorize
+// (expenseId: it must still be plausible), or null for a new one. The automatic path never creates beside
+// an expense the owner already entered: the survey finds it and the claim stops with it listed.
+async function resolvePayrollExpense(trx, { live, txnDate, target, spec, by, expenseId, createNew }) {
+  const window = payrollExpenseWindow(txnDate, spec.payDates(target));
+  if (expenseId) {
+    const existing = await trx('expenses').where({ id: expenseId }).forUpdate()
+      .first('id', 'amount', 'expense_date', 'category_id', 'tax_deductible_amount');
+    if (!existing) throw claimStop('expense_gone');
+    const refunded = await appliedRefundTotal(existing.id, trx);
+    const expDate = toDateStr(existing.expense_date);
+    if (refunded > 0 || !withinCandidateTolerance(existing.amount, live.amount) || expDate < window.from || expDate > window.to) throw claimStop('implausible_expense');
+    return existing;
+  }
+  if (by === 'owner' && createNew) return null;
+  const survey = await surveyExpenseCandidatesForRow(live, rejectedTargets(live.suggestion), trx, { window });
+  if (survey.length) throw claimStop('existing_expense', { existing: survey });
+  return null;
+}
+
 // Claim one bank line for a paycheck or a payroll tax row: ONE transaction, the bank row and the
-// target locked, an expense in the pay-run category inserted, the line linked. by = 'auto'
-// re-plans on a fresh read under the lock (a rival line or check that appeared since the
-// survey makes it a suggestion); by = 'owner' needs only the plausibility rules.
+// target locked, an expense in the pay-run category inserted, the line linked. The claim follows the
+// expense claim's rules (status CAS, bank-change and Income guards, manualLink hold, locked targets).
 // An expense the owner already entered for this payment comes first (the ordinary matcher's own
 // survey, surveyExpenseCandidatesForRow): the automatic path never creates beside one and never links
 // one (reason 'existing_expense' + the list, the line parks for the owner); the owner either names it
 // (expenseId: it is re-categorized into the pay-run category, same id) or says createNew.
-// Returns { ok: true, expense } or { ok: false, reason, existing? }.
+// Returns { ok: true, expense, target, reused } or { ok: false, reason, existing? }.
 async function claimPayrollLink({ row, check = null, filing = null, by = 'auto', expenseId = null, createNew = false }) {
   const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
-  let result = { ok: false, reason: 'row_changed' };
+  const kind = payrollKindOf({ check });
+  const spec = PAYROLL_TARGET_KINDS[kind];
   try {
-    await db.transaction(async (trx) => {
-      const live = await trx('bank_transactions').where({ id: row.id }).forUpdate()
-        .first('id', 'status', 'amount', 'txn_date', 'description', 'direction', 'account_type', 'account_label', 'suggestion');
-      if (!live || live.status !== 'unmatched' || hasUnresolvedBankChange(live)
-        || (live.suggestion && live.suggestion.decision === 'income')) return;
-      if (by === 'auto' && manualLinkOnly(live)) return;
-      const txnDate = toDateStr(live.txn_date);
-      const planRow = { ...live, txn_date: txnDate };
-
-      let target;
-      if (check) {
-        target = await trx('payroll_checks').where({ id: check.id }).forUpdate()
-          .first('id', 'status', 'employee_name', 'net_cents', 'pay_method', 'check_number', trx.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
-        if (!target || target.status !== 'finalized') { result = { ok: false, reason: 'check_not_final' }; return; }
-        if (by === 'owner' && !payrollMatch.isPlausibleCheckLink(planRow, target)) { result = { ok: false, reason: 'implausible' }; return; }
-      } else {
-        target = await trx('tax_filing_calendar').where({ id: filing.id }).forUpdate()
-          .first('id', 'source_key', 'title', 'amount_due', 'amount_paid', trx.raw("to_char(due_date, 'YYYY-MM-DD') as due_date"));
-        if (!target || !payrollMatch.taxWindow(target)) { result = { ok: false, reason: 'filing_gone' }; return; }
-        if (by === 'owner' && !payrollMatch.isPlausibleTaxLink(planRow, target)) { result = { ok: false, reason: 'implausible' }; return; }
-      }
-      if (by === 'auto') {
-        const fresh = await loadPayrollMatchContext(trx);
-        const plan = payrollPlanFor(live, txnDate, fresh, live.suggestion || {});
-        const sameTarget = check ? plan.check && plan.check.id === check.id : plan.filing && plan.filing.id === filing.id;
-        if (plan.action !== 'link' || !sameTarget) { result = { ok: false, reason: 'no_longer_unique' }; return; }
-      }
-
+    return await db.transaction(async (trx) => {
+      const { live, txnDate, target } = await lockPayrollClaim(trx, { row, kind, ref: { check, filing }[kind], by });
       const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME, counted_from_pay_runs: true }).first('id');
-      if (!category) { result = { ok: false, reason: 'no_category' }; return; }
+      if (!category) throw claimStop('no_category');
       const period = taxPeriodFor(txnDate);
-      if (!period) { result = { ok: false, reason: 'bad_date' }; return; }
+      if (!period) throw claimStop('bad_date');
+      const reused = await resolvePayrollExpense(trx, { live, txnDate, target, spec, by, expenseId, createNew });
 
-      const taxKind = filing ? payrollMatch.taxWindow(target).tax : null;
-      const vendor = check ? target.employee_name : (taxKind === 'florida' ? 'Florida Department of Revenue' : 'IRS');
-
-      let reused = null;
-      if (expenseId) {
-        const existing = await trx('expenses').where({ id: expenseId }).forUpdate()
-          .first('id', 'amount', 'expense_date', 'category_id', 'tax_deductible_amount');
-        if (!existing) { result = { ok: false, reason: 'expense_gone' }; return; }
-        const refunded = await appliedRefundTotal(existing.id, trx);
-        const win = payrollExpenseWindow(txnDate, check ? [target.pay_date] : []);
-        const expDate = toDateStr(existing.expense_date);
-        if (refunded > 0 || !withinCandidateTolerance(existing.amount, live.amount) || expDate < win.from || expDate > win.to) { result = { ok: false, reason: 'implausible_expense' }; return; }
-        reused = existing;
-      } else if (!(by === 'owner' && createNew)) {
-        const survey = await surveyExpenseCandidatesForRow(live, rejectedTargets(live.suggestion), trx, { window: payrollExpenseWindow(txnDate, check ? [target.pay_date] : []) });
-        if (survey.length) { result = { ok: false, reason: 'existing_expense', existing: survey }; return; }
-      }
-
+      const book = spec.book(target);
       let expense;
       if (reused) {
         await trx('expenses').where({ id: reused.id }).update({ category_id: category.id, tax_deductible_amount: 0 });
@@ -1560,13 +1606,16 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
         // The deduction comes from the pay runs (pay-run-books), not from this bank line.
         tax_deductible_amount: 0,
         expense_date: period.date,
-        vendor_name: String(vendor || live.description).slice(0, 200),
-        payment_method: check && target.pay_method === 'check' ? 'check' : 'ach',
+        vendor_name: String(book.vendor || live.description).slice(0, 200),
+        payment_method: book.paymentMethod,
         tax_year: period.tax_year,
         quarter: period.quarter,
-        notes: `[Bank import ${live.account_label}] ${PAYROLL_NOTE_MARK} ${check ? 'net pay' : (taxKind === 'florida' ? 'Florida RT-6' : 'federal payroll tax deposit')}`,
+        notes: `[Bank import ${live.account_label}] ${PAYROLL_NOTE_MARK} ${book.label}`,
       }).returning('*');
 
+      const kept = reused
+        ? { reusedExpense: true, prevAmount: reused.amount, prevCategoryId: reused.category_id, prevDeductible: reused.tax_deductible_amount }
+        : { createdSnapshot: { amount: expense.amount, categoryId: expense.category_id } };
       const changed = await trx('bank_transactions')
         .where({ id: live.id, status: 'unmatched' })
         .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
@@ -1575,65 +1624,58 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
         .update({
           status: reused ? 'matched_expense' : 'created_expense',
           matched_expense_id: expense.id,
-          matched_payroll_check_id: check ? target.id : null,
-          matched_tax_filing_id: filing ? target.id : null,
-          match_method: check ? 'payroll_check' : 'payroll_tax',
+          matched_payroll_check_id: null,
+          matched_tax_filing_id: null,
+          [spec.fk]: target.id,
+          match_method: spec.method,
           matched_at: new Date(),
           updated_at: new Date(),
           suggestion: suggestionMerge({
-            payrollMatch: {
-              at: new Date().toISOString(),
-              by,
-              ...(check ? { checkId: target.id } : { filingId: target.id, tax: taxKind, amountCents: payrollMatch.filingCents(target) }),
-              expenseId: expense.id,
-              ...(reused ? {} : { createdSnapshot: { amount: expense.amount, categoryId: expense.category_id || null } }),
-              ...(reused ? { reusedExpense: true, prevAmount: reused.amount, prevCategoryId: reused.category_id || null, prevDeductible: reused.tax_deductible_amount == null ? null : reused.tax_deductible_amount } : {}),
-            },
+            payrollMatch: { at: new Date().toISOString(), by, ...book.evidence, expenseId: expense.id, ...kept },
           }, [...PAYROLL_CANDIDATE_KEYS, 'noMatch']),
         });
-      if (!changed) throw Object.assign(new Error('row was matched by someone else mid-flight'), { code: 'PAYROLL_CLAIM_LOST' });
-      result = { ok: true, expense, target, reused: !!reused };
+      if (!changed) throw claimStop('taken');
+      return { ok: true, expense, target, reused: !!reused };
     });
   } catch (err) {
-    if (isUniqueViolation(err) || err.code === 'PAYROLL_CLAIM_LOST') return { ok: false, reason: 'taken' };
+    if (err.claimResult) return err.claimResult;
+    if (isUniqueViolation(err)) return { ok: false, reason: 'taken' };
     throw err;
   }
-  return result;
 }
 
 // One bank debit against the payroll candidates. True = the line was linked (the caller skips
 // the rest of the flow); 'held' = parked beside an existing expense (no auto-link of either). A payroll error never breaks the bank pass.
 async function payrollMatchStep(row, txnDate, ctx, summary) {
-  if (row.direction !== 'debit' || row.account_type !== 'bank') return false;
-  let held = null;
+  if (!payrollMatch.isBankDebit(row)) return false;
+  let held = [];
   try {
     const sug = row.suggestion || {};
     const plan = payrollPlanFor(row, txnDate, ctx, sug);
     if (plan.action === 'link' && !manualLinkOnly(row)) {
-      const claim = await claimPayrollLink({ row, check: plan.check || null, filing: plan.filing || null, by: 'auto' });
+      const claim = await claimPayrollLink({ row, check: plan.check, filing: plan.filing, by: 'auto' });
       if (claim.ok) {
-        if (plan.check) { ctx.checks = ctx.checks.filter(c => c.id !== plan.check.id); summary.payrollChecksLinked++; } else { ctx.filings = ctx.filings.filter(f => f.id !== plan.filing.id); summary.payrollTaxLinked++; }
+        const kind = payrollKindOf(plan);
+        const { pool, counter } = PAYROLL_TARGET_KINDS[kind];
+        ctx[pool] = ctx[pool].filter(t => t.id !== plan[kind].id);
+        summary[counter]++;
         ctx.peers = ctx.peers.filter(p => p.id !== row.id);
         return true;
       }
       if (claim.reason !== 'existing_expense') return false;
       held = claim.existing;
     }
-    const planned = plan.action === 'link'
-      ? [plan.check ? { kind: 'check', id: plan.check.id, name: plan.check.employee_name, netCents: Number(plan.check.net_cents), payDate: plan.check.pay_date, checkNumber: plan.check.check_number || null }
-        : { kind: 'tax', id: plan.filing.id, title: plan.filing.title, amountCents: payrollMatch.filingCents(plan.filing), dueDate: plan.filing.due_date }]
-      : (plan.candidates || []);
+    const planned = payrollMatch.planCandidates(plan, row);
     // The same payment may already be an expense the owner entered: name it next to the paycheck / tax row.
     // Suggested candidates (ties, one cent off, a held line) get the same survey as an automatic link.
-    if (planned.length && !held) {
-      const found = await surveyExpenseCandidatesForRow(row, rejectedTargets(sug), db, { window: payrollExpenseWindow(txnDate, planned.filter(c => c.kind === 'check' && c.payDate).map(c => c.payDate)) });
-      if (found.length) held = found;
+    if (!held.length && planned.length) {
+      held = await surveyExpenseCandidatesForRow(row, rejectedTargets(sug), db, { window: payrollExpenseWindow(txnDate, planned.filter(c => c.kind === 'check' && c.payDate).map(c => c.payDate)) });
     }
-    const candidates = held
+    const candidates = held.length
       ? planned.map(c => ({ ...c, existingExpenses: held.slice(0, 5).map(e => ({ id: e.id, amount: Number(e.gross_amount != null ? e.gross_amount : e.amount), vendor_name: e.vendor_name, expense_date: toDateStr(e.expense_date) })) }))
       : planned;
     if (candidates.length) {
-      if (JSON.stringify(sug.payrollCandidates || null) !== JSON.stringify(candidates)) {
+      if (JSON.stringify(sug.payrollCandidates) !== JSON.stringify(candidates)) {
         summary.ambiguous++;
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
           suggestion: suggestionMerge({ payrollCandidates: candidates, payrollCandidatesTotal: candidates.length }, ['noMatch']),
@@ -1651,7 +1693,7 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
     logger.warn(`[bank-import] payroll match skipped for row ${row.id}: ${err.code || err.name || 'error'}`);
   }
   // 'held': an existing expense could be this payment, so the ordinary matcher may list it but not link it
-  return held ? 'held' : false;
+  return held.length ? 'held' : false;
 }
 
 // Undo what a payroll match did to the books: an expense the match CREATED is removed (it counted
@@ -1659,30 +1701,25 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
 // deductible amount back. Called after the bank line has been released.
 async function releasePayrollExpense(trx, live) {
   if (!live.matched_expense_id) return;
-  const pm = live.suggestion && live.suggestion.payrollMatch;
-  if (pm && pm.reusedExpense) {
+  const pm = (live.suggestion && live.suggestion.payrollMatch) || {};
+  if (pm.reusedExpense) {
     const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
     const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME }).first('id');
-    if (category) {
-      const current = await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).forUpdate()
-        .first('amount', 'tax_deductible_amount');
-      if (current) {
-        const patch = { category_id: pm.prevCategoryId || null };
-        // The match set the deduction to 0. A value the owner has typed since stays. Otherwise the old deduction
-        // comes back in proportion to the amount now (a refund or an edit may have changed it), never above it.
-        if (Number(current.tax_deductible_amount || 0) === 0) {
-          if (pm.prevDeductible == null) patch.tax_deductible_amount = null;
-          else {
-            const prevAmount = Number(pm.prevAmount);
-            const scaled = prevAmount > 0 && Number(current.amount) !== prevAmount
-              ? Math.round(Number(pm.prevDeductible) * (Number(current.amount) / prevAmount) * 100) / 100
-              : Number(pm.prevDeductible);
-            patch.tax_deductible_amount = Math.min(scaled, Number(current.amount));
-          }
-        }
-        await trx('expenses').where({ id: live.matched_expense_id }).update(patch);
-      }
+    if (!category) return;
+    const current = await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).forUpdate()
+      .first('amount', 'tax_deductible_amount');
+    if (!current) return;
+    const patch = { category_id: pm.prevCategoryId || null };
+    // The match set the deduction to 0. A value the owner has typed since stays. Otherwise the old deduction
+    // comes back in proportion to the amount now (a refund or an edit may have changed it), never above it.
+    if (!Number(current.tax_deductible_amount)) {
+      const prevAmount = Number(pm.prevAmount);
+      const scaled = prevAmount > 0 && Number(current.amount) !== prevAmount
+        ? Math.round(Number(pm.prevDeductible) * (Number(current.amount) / prevAmount) * 100) / 100
+        : Number(pm.prevDeductible);
+      patch.tax_deductible_amount = pm.prevDeductible == null ? null : Math.min(scaled, Number(current.amount));
     }
+    await trx('expenses').where({ id: live.matched_expense_id }).update(patch);
     return;
   }
   // An expense the match CREATED goes only if it is still what the match made: the owner may have corrected
@@ -1690,9 +1727,9 @@ async function releasePayrollExpense(trx, live) {
   const made = await trx('expenses').where({ id: live.matched_expense_id }).where('notes', 'like', `%${PAYROLL_NOTE_MARK}%`).forUpdate()
     .first('id', 'amount', 'category_id', 'description');
   if (!made) return;
-  const snap = pm && pm.createdSnapshot;
+  const snap = pm.createdSnapshot;
   const unchanged = !snap || (Math.round(Number(made.amount) * 100) === Math.round(Number(snap.amount) * 100)
-    && (made.category_id || null) === (snap.categoryId || null));
+    && made.category_id === snap.categoryId);
   if (unchanged) { await trx('expenses').where({ id: made.id }).del(); return; }
   if (live.id) {
     await trx('bank_transactions').where({ id: live.id }).update({
@@ -1769,9 +1806,9 @@ async function reconcileTaxLinks() {
         const live = await trx('bank_transactions').where({ id: found.id }).forUpdate()
           .first('id', 'amount', 'status', 'matched_expense_id', 'matched_tax_filing_id', 'suggestion');
         if (!live || !['created_expense', 'matched_expense'].includes(live.status)) return;
-        const pm = (live.suggestion && live.suggestion.payrollMatch) || null;
-        const filingId = live.matched_tax_filing_id || (pm && pm.filingId) || null;
-        if (!filingId || !pm || !pm.filingId) return;
+        const pm = live.suggestion && live.suggestion.payrollMatch;
+        if (!pm || !pm.filingId) return;
+        const filingId = live.matched_tax_filing_id || pm.filingId;
         const filing = live.matched_tax_filing_id
           ? await trx('tax_filing_calendar').where({ id: live.matched_tax_filing_id }).forUpdate().first('amount_paid', 'amount_due')
           : null;
@@ -1806,11 +1843,15 @@ async function reconcileTaxLinks() {
   return released;
 }
 
+// A line that carries payroll provenance: a payroll FK, or the stored payrollMatch.
+const hasPayrollProvenance = (row) => !!(row.matched_payroll_check_id || row.matched_tax_filing_id || (row.suggestion && row.suggestion.payrollMatch));
+
 // The owner's Unlink on a payroll-matched line (an expense the owner already had, reused by the match).
 // One transaction: the line goes back to review with its payroll links cleared, the expense gets its
 // category and deductible amount back from the snapshot, and the evidence stays in suggestion.
-// Returns false when the row changed under it.
+// Returns false when the row changed under it, null when the row is not a payroll-matched expense link.
 async function unlinkPayrollMatched(row) {
+  if (row.status !== 'matched_expense' || !hasPayrollProvenance(row)) return null;
   return db.transaction(async (trx) => {
     const live = await trx('bank_transactions').where({ id: row.id, status: row.status, matched_expense_id: row.matched_expense_id }).forUpdate()
       .first('id', 'status', 'match_method', 'matched_expense_id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
@@ -1849,7 +1890,7 @@ async function clearPayrollLinks(trx, id) {
     .first('id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
   if (!o) return false;
   const sug = o.suggestion || {};
-  if (!o.matched_payroll_check_id && !o.matched_tax_filing_id && !sug.payrollMatch) return false;
+  if (!hasPayrollProvenance(o)) return false;
   const pm = sug.payrollMatch || null;
   // an expense the match reused and another path (an edit heal, a generic unlink) released
   if (pm && pm.reusedExpense && pm.expenseId) await releasePayrollExpense(trx, { id: o.id, matched_expense_id: pm.expenseId, suggestion: sug });
@@ -1885,18 +1926,38 @@ async function healPayrollLinks() {
   return cleared + await releaseVoidedPayrollLinks() + await reconcileTaxLinks();
 }
 
+// The payroll side of one matching pass, decided from the gate ONCE. Gate off: a payrollCandidates suggestion
+// the gate wrote earlier is stripped (it is the Inbox's own candidate guard, so it would keep the line out of
+// the Inbox with no way to act on it), and the pass gets no extra examined keys, no context and no step.
+// Gate on: the links are healed first, loadContext reads the open paychecks and tax rows once the pass has its
+// summary, and step runs one bank line (see payrollMatchStep).
+async function startPayrollPass(on) {
+  if (!on) {
+    await db('bank_transactions').where({ status: 'unmatched' }).whereRaw("jsonb_exists(suggestion, 'payrollCandidates')")
+      .update({ suggestion: suggestionMerge({}, PAYROLL_CANDIDATE_KEYS), updated_at: new Date() });
+    return { examinedKeys: [], loadContext: () => {}, step: () => false };
+  }
+  await healPayrollLinks();
+  let ctx = null;
+  return {
+    examinedKeys: ['payrollCandidates'],
+    async loadContext(summary) {
+      summary.payrollChecksLinked = 0;
+      summary.payrollTaxLinked = 0;
+      try { ctx = await loadPayrollMatchContext(); } catch (err) {
+        logger.warn(`[bank-import] payroll match context not loaded: ${err.code || err.name || 'error'}`);
+      }
+    },
+    step: (row, txnDate, summary) => (ctx ? payrollMatchStep(row, txnDate, ctx, summary) : false),
+  };
+}
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const payrollOn = payrollBankMatchOn();
   const reconciliation = await retryPendingReconciliations();
   // after the expense-link heals above: a link they released must lose its payroll provenance before any claim
-  if (payrollOn) await healPayrollLinks();
-  else {
-    // Gate off: a suggestion the gate wrote earlier must not keep the line out of the Inbox (it is the
-    // Inbox's own candidate guard) with no way to act on it.
-    await db('bank_transactions').where({ status: 'unmatched' }).whereRaw("jsonb_exists(suggestion, 'payrollCandidates')")
-      .update({ suggestion: suggestionMerge({}, PAYROLL_CANDIDATE_KEYS), updated_at: new Date() });
-  }
+  const payroll = await startPayrollPass(payrollOn);
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
@@ -1915,9 +1976,8 @@ async function runDeterministicMatching({ limit } = {}) {
   // 'examined' is the ledger's marker (tax-ledger-rules): an owner rule or
   // an Income decision replaced this pass's transfer flag and kept the
   // examination evidence under that key, so the row is not a fresh row.
-  const EXAMINED_SQL = payrollOn
-    ? "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined','payrollCandidates'])"
-    : "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined'])";
+  const examinedKeys = ['ignore', 'candidates', 'payoutCandidates', 'refundCandidates', 'noMatch', 'examined', ...payroll.examinedKeys];
+  const EXAMINED_SQL = `jsonb_exists_any(suggestion, array[${examinedKeys.map(k => `'${k}'`).join(',')}])`;
   // A processed row that produced NOTHING (no candidates at all, or a
   // credit the matcher never matches) must still leave the fresh pool, or a
   // bounded pass would rescan the same oldest rows forever while
@@ -1999,19 +2059,12 @@ async function runDeterministicMatching({ limit } = {}) {
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
   const ledgerOn = ledgerRulesOn();
   const rulingGuardSql = ledgerOn ? NO_OWNER_RULING_SQL : NO_DECISION_SQL;
-  let payrollCtx = null;
-  if (payrollOn) {
-    summary.payrollChecksLinked = 0;
-    summary.payrollTaxLinked = 0;
-    try { payrollCtx = await loadPayrollMatchContext(); } catch (err) {
-      logger.warn(`[bank-import] payroll match context not loaded: ${err.code || err.name || 'error'}`);
-    }
-  }
+  await payroll.loadContext(summary);
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
     // Payroll first: net pay by bank transfer can read "transfer", which the next branch parks as an internal move.
-    const payrollStep = payrollCtx ? await payrollMatchStep(row, txnDate, payrollCtx, summary) : false;
+    const payrollStep = await payroll.step(row, txnDate, summary);
     if (payrollStep === true) continue;
     const payrollHold = payrollStep === 'held';
     // An operator's explicit unlink is a ruling: the automatic pass never
@@ -2275,7 +2328,7 @@ async function runDeterministicMatching({ limit } = {}) {
           }, refunds.length ? ['noMatch'] : ['refundCandidates', 'refundCandidatesTotal', 'noMatch']),
           updated_at: new Date(),
         });
-      } else if (candidates.length === 0) {
+      } else {
         // No payout explains this bank credit — it can still be a merchant
         // refund into checking (debit-card purchase refunded). Without this
         // path the operator's only actions were Ignore or a wrong payout
@@ -2305,8 +2358,9 @@ async function runDeterministicMatching({ limit } = {}) {
     // any plurality goes to the operator, evidence or not. Incompatible-
     // method expenses PARK too — the operator may know the books are
     // mislabeled.
-    const strong = candidates.filter(c => strongExpenseMatch(row, c));
-    if (candidates.length === 1 && strong.length === 1 && !manualLinkOnly(row) && !payrollHold) {
+    // a payroll-held line (an existing expense could be its paycheck) has no candidate the matcher may link
+    const strong = candidates.filter(c => !payrollHold && strongExpenseMatch(row, c));
+    if (candidates.length === 1 && strong.length === 1 && !manualLinkOnly(row)) {
       let claimedExpense = false;
       let recheckPlural = null;
       try {
