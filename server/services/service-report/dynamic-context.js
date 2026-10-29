@@ -14,6 +14,7 @@ const {
   summarizeProtocolContext,
 } = require('../lawn-protocol-operating-layer');
 const { loadCustomerGrassContext } = require('../lawn-grass-context');
+const { roundStepForPlan } = require('../lawn-program');
 const { sqlZip5 } = require('../stamped-address');
 const { dateOnlyStamp } = require('./time-format');
 
@@ -52,6 +53,9 @@ async function loadServiceRecordForDynamicContext(recordId, knex = db) {
     .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .select(
       'service_records.*',
+      // The visit's series and date: a 9x rounds visit (recurring_pattern lawn_rounds_9) reads its ROUND's lawn protocol step.
+      'ss.recurring_pattern as scheduled_recurring_pattern',
+      'ss.scheduled_date as scheduled_visit_date',
       ...customerSelect,
     )
     .first();
@@ -265,6 +269,11 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   const grassTrack = protocolId ? null : await loadCustomerTurfTrack(record, knex);
   if (!protocolId && !grassTrack) return null;
 
+  // A visit on a 9x rounds series: the step of its round (a pinned window, which closeout writes as that step's, still wins) and the
+  // real date's weed and spot rows. null for every other visit: the month of its date, as before.
+  const roundStep = roundStepForPlan({ recurring_pattern: record.scheduled_recurring_pattern, scheduled_date: record.scheduled_visit_date });
+  const roundOption = roundStep ? { roundStep: { round: roundStep.round, month: roundStep.month } } : {};
+
   let context = null;
   if (windowKey) {
     context = await getProtocolWindowContext(knex, {
@@ -273,6 +282,7 @@ async function buildLawnProtocolReportContext(record, knex, now) {
       grassTrack,
       region: 'swfl',
       windowKey,
+      ...roundOption,
     });
   } else {
     context = await getProtocolWindowContext(knex, {
@@ -280,6 +290,7 @@ async function buildLawnProtocolReportContext(record, knex, now) {
       protocolId,
       grassTrack,
       region: 'swfl',
+      ...roundOption,
     });
   }
 

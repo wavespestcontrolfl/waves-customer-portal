@@ -400,6 +400,22 @@ async function projectNitrogenCut(dbh, svc, entries, summary) {
   }
 }
 
+// Round 3 of a 9x rounds visit takes February's step at its rounds-only rate (1.0 lb N, not the 12x plan's 0.75): the row's stored target
+// says 0.75, so the brief states the rounds target the row also carries (gates.roundsTargetN, migration 20261029180000) or, on a
+// database that does not have it, the recipe's own rounds variant. Every other visit: the entries are left as they are.
+function statedRoundsNitrogen(entries, rounds, trackKey) {
+  if (rounds?.variant !== 'rounds') return;
+  const { lawnProtocols } = require('./lawn-program');
+  const { parseVisitNutrientTargets } = require('./waveguard-plan-engine');
+  const variant = lawnProtocols()?.[trackKey]?.visits?.find((visit) => visit.roundVariants)?.roundVariants?.lawn_rounds_9;
+  const fromRecipe = parseVisitNutrientTargets(variant?.notes).targetNPer1000;
+  for (const entry of entries) {
+    if (!entry.gates.targetN) continue;
+    const rounded = entry.gates.roundsTargetN || (fromRecipe ? `${Number.isInteger(fromRecipe) ? fromRecipe.toFixed(1) : fromRecipe} lb N/1000` : null);
+    if (rounded) entry.gates = { ...entry.gates, targetN: rounded };
+  }
+}
+
 // GATE_LAWN_DEC_LARGE_PATCH_K: for a visit where the plan swaps the whole-lawn bag (waveguard-plan-engine troubleProductSwap, the plan's
 // own decision) the brief says the swapped product replaces the normal bag, so the pocket reference agrees with the plan. Gate off, not
 // v13 or no swap: the entries are left as they are (no read). Strict, like projectFungusNitrogenCut.
@@ -453,6 +469,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
   try {
     const { loadCustomerGrassContext } = require('./lawn-grass-context');
     const { getProtocolWindowContext, summarizeProtocolContext } = require('./lawn-protocol-operating-layer');
+    const { roundRouting, roundsNitrogenHold } = require('./waveguard-plan-engine');
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
@@ -468,6 +485,10 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // hash and would overwrite a valid cached brief (runSweep counts the
     // visit failed and the prior brief survives).
     const query = { serviceDate, strict: true, planning: true };
+    // A visit on a 9x rounds series: the brief states the step of its ROUND (a pinned window still wins), with the weed and spot rows of
+    // the real date. null for every other visit, which reads the month of its date as before.
+    const rounds = roundRouting(svc, grass.trackKey);
+    if (rounds) query.roundStep = { round: rounds.round, month: rounds.month };
     if (assignedWindowKey) {
       query.windowKey = assignedWindowKey;
       // Resolve the assigned protocol row (key + version, newest match —
@@ -531,12 +552,18 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // profile municipality, customer city); strict, like every read here.
     const { v13NorthPortHold, loadVisitCity, v13HoldWarnings } = require('./waveguard-plan-engine');
     const municipality = await loadVisitCity(dbh, svc);
-    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality));
+    // Round 3 of a 9x rounds visit dated Apr 1 or later in North Port holds the nitrogen bag (the plan's own rule, roundsNitrogenHold).
+    const holdRoundsNitrogen = roundsNitrogenHold(rounds, municipality);
+    const roundsNitrogenRow = (p) => holdRoundsNitrogen && p.defaultInPlan === true && Number(p.analysis?.n) > 0;
+    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality) || roundsNitrogenRow(p));
     const held = heldRows.map((p) => ({
       name: cleanText(p.productName || p.protocolProductName, 120),
       role: cleanText(p.role, 60),
       hold: true,
-      message: cleanText(v13HoldWarnings([{ selectionReason: 'north_port_product_window', product: { id: p.productId, name: p.productName || p.protocolProductName } }])[0].message, 300),
+      message: cleanText(v13HoldWarnings([{
+        selectionReason: roundsNitrogenRow(p) && !v13NorthPortHold(p, municipality) ? 'north_port_rounds_nitrogen' : 'north_port_product_window',
+        product: { id: p.productId, name: p.productName || p.protocolProductName },
+      }])[0].message, 300),
     }));
     // A staged row that only a swap rule brings in (GATE_LAWN_DEC_LARGE_PATCH_K: the December 0-0-24, a non-default row) is not guidance
     // until that rule's gate is live: with it off the brief lists exactly the products it listed before the row existed.
@@ -556,6 +583,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
+    statedRoundsNitrogen(shaped, rounds, grass.trackKey);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);
     await projectChinchTetrinoRate(dbh, svc, shaped, summary);

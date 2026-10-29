@@ -29,6 +29,8 @@ const {
   loadVisitForPlan,
   loadVisitCity,
   holdNorthPortProducts,
+  roundRouting,
+  roundsNitrogenHold,
   v13HoldWarnings,
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
@@ -1054,15 +1056,22 @@ router.get('/lawn-mix', async (req, res, next) => {
     const track = lawnProtocols()?.[trackKey];
     if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
 
-    const month = monthAbbr(req.query.month);
-    const recipeVisit = track.visits?.find((v) => v.month === month);
+    let month = monthAbbr(req.query.month);
+    let recipeVisit = track.visits?.find((v) => v.month === month);
     if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
     // The visit the sheet is opened from (?scheduledServiceId=): its plan picks a cadence-
     // dependent step (v13 April, 9x; ?visitsPerYear= overrides it) and its customer,
     // property and date decide the application limits. With no visit (the reference tab)
     // the sheet keeps the 12x step, warns, and checks no limits.
     const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
-    const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
+    // A visit on a 9x rounds series (scheduledServiceId) takes the step of its ROUND whatever month the client sent (the schedule page
+    // sends the calendar month): the sheet reads the round's step and its rows, with the weed and spot rows of the real date.
+    const rounds = roundRouting(scheduled, trackKey);
+    if (rounds) {
+      month = MONTH_ABBR[rounds.month - 1];
+      recipeVisit = track.visits?.find((v) => v.month === month) || recipeVisit;
+    }
+    const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear, { track, trackKey });
     // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
     // with the cut nitrogen or the swapped bag stated, so the line text, the objective and the amount agree. Only a visit the planner would also
     // plan on v13, and only for the month of the window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
@@ -1104,7 +1113,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     let v13Rows;
     try {
       // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
-      v13Rows = chinchRateRows(await loadV13RowsForMonth(db, trackKey, month, bermuda.rowOptions), chinchRate ?? null);
+      v13Rows = chinchRateRows(await loadV13RowsForMonth(db, trackKey, month, rounds ? { ...bermuda.rowOptions, spotMonth: rounds.spotMonth } : bermuda.rowOptions), chinchRate ?? null);
     } catch (err) {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
@@ -1113,9 +1122,10 @@ router.get('/lawn-mix', async (req, res, next) => {
     // A product the city bans for this window (North Port Nutra-TECH, June to September) is held
     // back as in the plan: not selected, no amount, the plan's warning.
     const municipality = await loadVisitCity(db, scheduled);
-    let resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality);
+    const holdRoundsNitrogen = roundsNitrogenHold(rounds, municipality);
+    let resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
     const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
-    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, municipality };
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...(rounds ? { spotMonthNumber: rounds.spotMonth } : {}), ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}), municipality };
     const areaContext = {
       plan: req.query.plan,
       weedPressure: req.query.weedPressure,
@@ -1265,6 +1275,16 @@ router.get('/completion-actions', async (req, res, next) => {
       program = lawnProtocols()?.[track];
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
+      // A visit on a 9x rounds series (scheduledServiceId) takes the step of its ROUND, with the round's variant (April's 9x bag, February's
+      // 1.0 lb N bag) and the real date's weed and spot lines: the chips state what the plan and the tank sheet state. Every other visit
+      // keeps the calendar-month step it always had.
+      const roundsVisit = req.query.scheduledServiceId ? await visitOnce() : null;
+      const rounds = roundRouting(roundsVisit, track);
+      if (rounds) {
+        month = MONTH_ABBR[rounds.month - 1];
+        const stepVisit = program?.visits?.find((v) => v.month === month) || visit;
+        ({ visit } = stepVisit ? await visitForPlan(db, stepVisit, roundsVisit, null, { track: program, trackKey: track }) : { visit });
+      }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
       const matched = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });

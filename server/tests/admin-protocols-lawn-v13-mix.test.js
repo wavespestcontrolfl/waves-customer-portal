@@ -437,3 +437,76 @@ test('July is the scout visit on the tank sheet: no whole-lawn product, the insp
   expect(body.items.filter((item) => item.role === 'base' && item.product)).toEqual([]);
   expect(body.items.some((item) => item.role === 'base' && /^Scout visit/.test(item.raw))).toBe(true);
 });
+
+// A visit on a 9x rounds series (recurring_pattern lawn_rounds_9) takes the step of its ROUND whatever calendar month the client sends
+// (the schedule page sends the visit's calendar month with ?scheduledServiceId=): the sheet reads the round's step, its nitrogen target
+// and its bag, the program rows of that step's window and the weed rows of the REAL date's window. Every other visit is unchanged.
+describe('a 9x rounds visit takes the step of its round on the tank sheet', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const visit = (date, extra = {}) => ({ id: VISIT, customer_id: 'cust-1', property_id: null, scheduled_date: date, service_id: null, service_type: 'Lawn Care', recurring_pattern: 'lawn_rounds_9', recurring_interval_days: null, ...extra });
+  const codes = (body) => body.warnings.map((w) => w.code);
+  const secondary = (body) => String(body.visit.secondary || '');
+  const lastWindowCall = () => operatingLayer.getProtocolWindowContext.mock.calls.map((call) => call[1]).filter((options) => options.roundStep).pop();
+
+  test('round 3 (Mar 20, client month 3): February\'s 24-0-11 at 4.17 lb per 1,000 (1.0 lb N); March\'s weed mix', async () => {
+    visitRows = [visit('2027-03-20')];
+    const body = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(body.month).toBe('Feb');
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+    expect(itemFor(body, F24).jobMix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 1, amountUnit: 'lb' });
+    expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(4.1667, 3);
+    expect(body.visit.objective.startsWith('N rate: 1.0 lb N.')).toBe(true);
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 2, spotMonth: 3 });
+    expect(secondary(body)).toContain('Certainty Turf Herbicide');
+    expect(secondary(body)).toContain('Blindside Herbicide');
+    expect(codes(body)).not.toContain('lawn_v13_plan_cadence_unknown');
+  });
+
+  test('round 2 (Mar 10, St. Augustine): April\'s 9x Dimension bag (0.5 lb N) with February\'s green-up weed line: Celsius alone', async () => {
+    visitRows = [visit('2027-03-10')];
+    const body = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(body.month).toBe('Apr');
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
+    expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.7778, 3);
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 4, spotMonth: 2 });
+    expect(secondary(body)).toContain('Celsius WG');
+    expect(secondary(body)).not.toContain('Certainty Turf Herbicide');
+    expect(secondary(body)).not.toContain('Blindside');
+    expect(codes(body)).not.toContain('lawn_v13_plan_cadence_unknown');
+  });
+
+  test('round 2 (Mar 10) on bermuda: March\'s weed mix (the green-up rule is St. Augustine\'s)', async () => {
+    visitRows = [visit('2027-03-10')];
+    const body = await lawnMix({ month: '3', track: 'bermuda', scheduledServiceId: VISIT });
+    expect(lastWindowCall().roundStep).toMatchObject({ month: 4, spotMonth: 3 });
+    expect(secondary(body)).toContain('Certainty Turf Herbicide');
+  });
+
+  test('a 12x and a legacy 9x visit keep the calendar month: February 24-0-11 at 3.125 lb (0.75 lb N), no roundStep', async () => {
+    for (const pattern of ['monthly', 'every_6_weeks', 'custom', null]) {
+      operatingLayer.getProtocolWindowContext.mockClear();
+      visitRows = [visit('2027-02-10', { recurring_pattern: pattern, recurring_interval_days: pattern === 'custom' ? 42 : null })];
+      const body = await lawnMix({ month: '2', track: 'st_augustine', scheduledServiceId: VISIT });
+      expect(body.month).toBe('Feb');
+      expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(operatingLayer.getProtocolWindowContext.mock.calls.every((call) => !call[1].roundStep)).toBe(true);
+    }
+  });
+
+  test('the reference sheet (no visit) is the calendar month it was asked for', async () => {
+    const body = await lawnMix({ month: '3', track: 'st_augustine' });
+    expect(body.month).toBe('Mar');
+  });
+
+  test('North Port, round 3 on Apr 5: the 24-0-11 is held with the ban warning; Mar 25 plans it', async () => {
+    visitRows = [visit('2027-04-05', { service_address_city: 'North Port' })];
+    const held = await lawnMix({ month: '4', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(itemFor(held, F24)).toMatchObject({ selected: false, selectionReason: 'north_port_rounds_nitrogen', jobMix: null });
+    expect(held.warnings.find((w) => w.code === 'lawn_rounds_north_port_nitrogen').message).toMatch(/North Port bans nitrogen and phosphorus from April 1 to September 30/);
+    visitRows = [visit('2027-03-25', { service_address_city: 'North Port' })];
+    const before = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(itemFor(before, F24)).toMatchObject({ selected: true });
+    expect(itemFor(before, F24).jobMix.ratePer1000).toBeCloseTo(4.1667, 3);
+    expect(codes(before)).not.toContain('lawn_rounds_north_port_nitrogen');
+  });
+});
