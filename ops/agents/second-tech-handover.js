@@ -137,6 +137,8 @@ const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
 // Owner 2026-10-28, question 1 = C (header, OFF DAY): a target-day-off visit within 13 weeks of --start keeps its customer
 // with --from, whole.
 const OFF_DAY_CUSTOMER_DAYS = 91;
+// Series skip reasons that keep a whole customer: the plan also says how many customers.
+const CUSTOMER_SKIPS = new Set(['termite_bait_customer', 'off_day_customer']);
 
 /** First solo day when --start is not given: the next Monday after today, ET. */
 function defaultStart(now = new Date()) {
@@ -311,7 +313,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     notices_to_suppress: 0,
     ids: { retemplate: [], series: [], visits: [], moves: [] },
   };
-  const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set() });
+  const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set(), _customers: new Set() });
   // One visit stays: its series counts once per reason.
   const skip = (reason, seriesId) => {
     const s = bucket(reason);
@@ -319,10 +321,17 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     s.visits += 1;
   };
   // A whole series stays, with the visits it would have moved.
-  const seriesSkip = (reason, seriesId, candidates) => {
+  const seriesSkip = (reason, p, candidates) => {
     const s = bucket(reason);
-    s.series += 1; s._ids.add(seriesId); s.visits += candidates;
+    s.series += 1; s._ids.add(p.id); s._customers.add(p.customer_id); s.visits += candidates;
   };
+  // Why a series on --from stays whole: the first rule it meets. None = in scope. A customer-level reason also reports
+  // how many customers it kept (CUSTOMER_SKIPS).
+  const seriesStays = [
+    ['no_line', (p) => !p.line],
+    ['other_line', (p) => !lines.includes(p.line)],
+    ['termite_bait_customer', (p) => baitCustomers.has(p.customer_id)],
+  ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
   // (or stays with --from on a target day off).
   const visitStays = [
@@ -333,56 +342,55 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     ['other_technician', (v) => v.technician_id !== from],
     ['bad_date', (v) => dayOfWeekOfDate(v.scheduled_date) === null],
   ];
-  const baitHit = new Set();
-  const inScope = (p) => seriesTechnicianId(p) === from && p.line && lines.includes(p.line) && !baitCustomers.has(p.customer_id);
-  // Weekend customers (question 1 = C): a visit the run would otherwise move, on a target day off, before the window ends.
-  const weekendCustomers = new Set();
-  for (const p of active) {
-    if (!inScope(p)) continue;
-    const weekend = (bySeries.get(p.id) || []).some((v) => !visitStays.some(([, test]) => test(v))
-      && v.scheduled_date < plan.off_day_customer_until && !workDays.includes(dayOfWeekOfDate(v.scheduled_date)));
-    if (weekend) weekendCustomers.add(p.customer_id);
-  }
+  // What happens to one visit of an in-scope series: the first rule it stays for, 'off_day' (it stays with --from on a
+  // target day off) or 'move'. The weekend-customer test and the moves read the same answer.
+  const visitOutcome = (v) => {
+    const stay = visitStays.find(([, test]) => test(v));
+    if (stay) return stay[0];
+    return workDays.includes(dayOfWeekOfDate(v.scheduled_date)) ? 'move' : 'off_day';
+  };
+  const inScope = [];
 
-  for (const p of active) {
-    if (seriesTechnicianId(p) !== from) continue;
+  // Pass 1: each series on --from gets its skip reason, or joins the in-scope list with its visits' outcomes.
+  for (const p of active.filter((series) => seriesTechnicianId(series) === from)) {
     plan.series.on_from += 1;
     const members = bySeries.get(p.id) || [];
     // What this series would have moved if it were in scope: open, on/after start, held by --from.
     const candidates = members.filter((v) => isOpenVisit(v) && v.scheduled_date >= start && v.technician_id === from).length;
+    const stay = seriesStays.find(([, test]) => test(p));
+    if (stay) { seriesSkip(stay[0], p, candidates); continue; }
+    inScope.push({ p, candidates, outcomes: members.map((v) => ({ v, outcome: visitOutcome(v) })) });
+  }
+  const lineSkipped = ['no_line', 'other_line'].reduce((n, reason) => n + (plan.skipped[reason] ? plan.skipped[reason].series : 0), 0);
+  plan.series.in_lines = plan.series.on_from - lineSkipped;
+  // Weekend customers (owner 2026-10-28, question 1 = C): an off-day visit inside the window, in any in-scope series.
+  const weekendCustomers = new Set(inScope
+    .filter(({ outcomes }) => outcomes.some(({ v, outcome }) => outcome === 'off_day' && v.scheduled_date < plan.off_day_customer_until))
+    .map(({ p }) => p.customer_id));
 
-    if (!p.line) { seriesSkip('no_line', p.id, candidates); continue; }
-    if (!lines.includes(p.line)) { seriesSkip('other_line', p.id, candidates); continue; }
-    plan.series.in_lines += 1;
-    if (baitCustomers.has(p.customer_id)) {
-      seriesSkip('termite_bait_customer', p.id, candidates);
-      baitHit.add(p.customer_id);
-      continue;
-    }
-    if (weekendCustomers.has(p.customer_id)) {
-      seriesSkip('off_day_customer', p.id, candidates);
-      continue;
-    }
+  // Pass 2: every series of a weekend customer stays; any other series changes template and moves its work-day visits.
+  for (const { p, candidates, outcomes } of inScope) {
+    if (weekendCustomers.has(p.customer_id)) { seriesSkip('off_day_customer', p, candidates); continue; }
     plan.series.retemplate += 1;
     plan.ids.retemplate.push(p.id);
 
     let moved = 0;
-    for (const v of members) {
-      const stay = visitStays.find(([, test]) => test(v));
-      if (stay) { skip(stay[0], p.id); continue; }
+    for (const { v, outcome } of outcomes) {
       const dow = dayOfWeekOfDate(v.scheduled_date);
-      if (!workDays.includes(dow)) {
+      if (outcome === 'off_day') {
         plan.stays_off_day.visits += 1;
         bump(plan.stays_off_day.by_weekday, WEEKDAYS[dow]);
-        continue;
+      } else if (outcome !== 'move') {
+        skip(outcome, p.id);
+      } else {
+        moved += 1;
+        plan.would_change.visits += 1;
+        bump(plan.would_change.by_weekday, WEEKDAYS[dow]);
+        const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
+        byLine.visits += 1;
+        plan.ids.visits.push(v.id);
+        plan.ids.moves.push({ series_id: p.id, visit_id: v.id, date: v.scheduled_date });
       }
-      moved += 1;
-      plan.would_change.visits += 1;
-      bump(plan.would_change.by_weekday, WEEKDAYS[dow]);
-      const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
-      byLine.visits += 1;
-      plan.ids.visits.push(v.id);
-      plan.ids.moves.push({ series_id: p.id, visit_id: v.id, date: v.scheduled_date });
     }
     if (moved) {
       plan.series.with_visits_to_move += 1;
@@ -391,9 +399,11 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
       plan.ids.series.push(p.id);
     }
   }
-  if (plan.skipped.termite_bait_customer) plan.skipped.termite_bait_customer.customers = baitHit.size;
-  if (plan.skipped.off_day_customer) plan.skipped.off_day_customer.customers = weekendCustomers.size;
-  for (const s of Object.values(plan.skipped)) delete s._ids;
+  for (const [reason, s] of Object.entries(plan.skipped)) {
+    if (CUSTOMER_SKIPS.has(reason)) s.customers = s._customers.size;
+    delete s._ids;
+    delete s._customers;
+  }
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
   plan.planId = planIdOf({ from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves });
