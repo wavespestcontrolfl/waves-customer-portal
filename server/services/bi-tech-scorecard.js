@@ -70,7 +70,9 @@ function totalsByTechnician(days) {
       };
       t.dates.push(day.date);
       t.stops += stops;
-      t.onSiteCompleted += actual.onSiteCoverage?.total ?? 0;
+      // completed visits on the saved plan plus the ones added to the route after it (day-scorecard keeps them
+      // apart as unbaselined): without them partial timing evidence would read as complete
+      t.onSiteCompleted += (actual.onSiteCoverage?.total ?? 0) + (actual.onSiteCoverage?.unbaselined ?? 0);
       if (actual.onSiteMinutes != null) {
         t.onSiteMinutes += actual.onSiteMinutes;
         t.onSiteRecorded += actual.onSiteCoverage.covered;

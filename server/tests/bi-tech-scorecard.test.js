@@ -39,7 +39,7 @@ function fakeConn() {
 
 const actual = (o) => ({
   stops: o.stops, physicalStops: o.physical ?? o.stops, onSiteMinutes: o.onSite ?? null,
-  onSiteCoverage: { covered: o.covered ?? 0, total: o.stops, unbaselined: 0 },
+  onSiteCoverage: { covered: o.covered ?? 0, total: o.stops, unbaselined: o.unbaselined ?? 0 },
   driveMinutes: o.drive ?? null,
 });
 const dayRow = (technicianId, technician, a) => ({ technicianId, technician, actual: a });
@@ -150,6 +150,13 @@ describe('buildTechScorecard', () => {
     ] });
     const { rows } = await buildTechScorecard(fakeConn(), NOW);
     expect(rows.map((r) => [r.technician, r.lowSample])).toEqual([['Ada', true], ['Ben', false]]);
+  });
+
+  test('visits added to the route after the saved plan count as completed, so partial timing shows as partial', async () => {
+    mockDayScorecard.mockResolvedValue({ days: [
+      { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, onSite: 125, covered: 5, unbaselined: 3 }))] },
+    ] });
+    expect((await buildTechScorecard(fakeConn(), NOW)).rows[0].onSiteCoverage).toEqual({ recorded: 5, completed: 8 });
   });
 
   test('a visit group with no proven physical stop count falls back to completed visits', async () => {
