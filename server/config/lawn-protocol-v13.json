@@ -67,7 +67,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,
@@ -308,7 +314,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,
@@ -531,7 +543,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,

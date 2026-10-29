@@ -130,3 +130,38 @@ describe('lawn protocol report context — actuals rows recorded without a plan'
     expect(getProtocolWindowContext.mock.calls[0][1]).toMatchObject({ protocolId: 'proto-1', windowKey: 'summer_insect' });
   });
 });
+
+// A report for a visit on a 9x rounds series (recurring_pattern lawn_rounds_9, read with the record) states the protocol step of the
+// visit's ROUND; any other visit's report reads the month of its service date as before.
+describe('lawn protocol report context — 9x rounds visits', () => {
+  const knex = () => makeKnex({ customer_turf_profiles: [{ track_key: 'st_augustine', active: true }] });
+  const roundsRecord = (extra) => ({ ...RECORD, service_date: '2027-03-20', scheduled_recurring_pattern: 'lawn_rounds_9', scheduled_visit_date: '2027-03-20', ...extra });
+  beforeEach(() => { jest.clearAllMocks(); process.env.GATE_LAWN_V13 = 'true'; });
+  afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+  test('an unpinned rounds visit asks for its round\'s step window (round 3 = February) and the real date\'s weed rows', async () => {
+    await buildLawnProtocolReportContext(roundsRecord(), knex(), new Date('2027-03-21T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2 });
+  });
+
+  test('round 2 reads April\'s window; round 8 October\'s', async () => {
+    await buildLawnProtocolReportContext(roundsRecord({ service_date: '2027-02-10', scheduled_visit_date: '2027-02-10' }), knex(), new Date('2027-02-11T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 2, month: 4 });
+    await buildLawnProtocolReportContext(roundsRecord({ service_date: '2027-11-05', scheduled_visit_date: '2027-11-05' }), knex(), new Date('2027-11-06T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[1][1].roundStep).toEqual({ round: 8, month: 10 });
+  });
+
+  test('a 12x, legacy 9x or one-time visit reads the month of its date: no round step', async () => {
+    for (const pattern of ['monthly', 'every_6_weeks', 'custom', null, undefined]) {
+      getProtocolWindowContext.mockClear();
+      await buildLawnProtocolReportContext(roundsRecord({ scheduled_recurring_pattern: pattern }), knex(), new Date('2027-03-21T12:00:00Z'));
+      expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toBeUndefined();
+    }
+  });
+
+  test('v13 off: the old program keeps the calendar month for a rounds row too', async () => {
+    delete process.env.GATE_LAWN_V13;
+    await buildLawnProtocolReportContext(roundsRecord(), knex(), new Date('2027-03-21T12:00:00Z'));
+    expect(getProtocolWindowContext.mock.calls[0][1].roundStep).toBeUndefined();
+  });
+});

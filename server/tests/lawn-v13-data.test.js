@@ -51,12 +51,12 @@ describe('the v13 recipe', () => {
       expect(v13[grass].notes).toEqual(v13.st_augustine.notes);
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
-        // April alone carries the 9x plan step (cadenceVariants); addOns is the bermuda
+        // April alone carries the 9x plan step (cadenceVariants); February alone the 9x rounds step (roundVariants); addOns is the bermuda
         // removal step on the April and June St. Augustine and Zoysia visits
         // (GATE_LAWN_BERMUDA_REMOVAL); December alone carries the large patch potassium swap (GATE_LAWN_DEC_LARGE_PATCH_K);
         // every other visit is the plain shape.
         const bermudaStep = ['st_augustine', 'zoysia'].includes(grass) && ['Apr', 'Jun'].includes(visit.month);
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : []), ...(bermudaStep ? ['addOns'] : []), ...(visit.month === 'Dec' ? ['swaps'] : [])].sort());
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : []), ...(visit.month === 'Feb' ? ['roundVariants'] : []), ...(bermudaStep ? ['addOns'] : []), ...(visit.month === 'Dec' ? ['swaps'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }
