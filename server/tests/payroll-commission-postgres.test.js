@@ -1070,6 +1070,40 @@ postgres('payroll commission ledger', () => {
       expect(commissionOf((await api('GET', `/runs/${next.body.run.id}`)).body.run, 'Sample Alpha')).toBe(0);
     });
 
+    it('shares a deposit like a payment among every sale on the invoice it paid: $20 + $180 earns $10 each', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      const beta = await readyTech('Sample Beta');
+      await approvedWeek(alpha, W1);
+      await approvedWeek(beta, W1);
+      const cust = await customer('Dana', 'Sample');
+      const plan = await estimate(cust, alpha);
+      const addOnSale = await estimate(cust, beta);
+      const first = await visit(cust, plan);
+      const [addon] = await trx('scheduled_service_addons').insert({
+        scheduled_service_id: first, service_name: 'Sample add-on', area_addon_scope: JSON.stringify({ sourceEstimateId: addOnSale }),
+      }).returning('id');
+      // The plan's $20 deposit is credited after tax on the first visit's invoice, which also bills the other sale's add-on.
+      const inv = await invoice(cust, {
+        subtotal: '200.00', total: '180.00', scheduled_service_id: first,
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${first}_primary`, description: 'Sample pest control', amount: 100 },
+          { client_id: `scheduled_${first}_addon_${idOf(addon)}`, description: 'Sample add-on', amount: 100 },
+          { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -20, amount: -20, category: 'deposit_credit', estimate_id: plan },
+        ]),
+      });
+      await trx('estimate_deposits').insert({
+        estimate_id: plan, customer_id: cust, amount: '20.00', credited_amount: '20.00', status: 'credited', credited_invoice_id: inv,
+        stripe_payment_intent_id: `pi_sample_${randomUUID()}`, received_at: '2026-09-14T15:00:00Z', updated_at: '2026-09-14T15:00:00Z',
+      });
+      await payment(cust, inv, '2026-09-16', '180.00');
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
+      expect(commissionOf(created.body.run, 'Sample Beta')).toBe(1000);
+      // The deposit is counted once, half for each sale.
+      const depositEntries = (await entries()).filter((e) => e.payment_source === 'estimate_deposit');
+      expect(depositEntries.map((e) => Number(e.counted_cents))).toEqual([1000, 1000]);
+    });
+
     it('waits for a deposit that sits on no invoice of the sale, and counts a pending one never', async () => {
       const { tech, est } = await soldWorld();
       await approvedWeek(tech, W2);
