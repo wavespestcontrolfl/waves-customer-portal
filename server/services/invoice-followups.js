@@ -2882,12 +2882,28 @@ const AUTOPAY_HOLD_AMBIGUOUS_CODES = [
  *   its visit is waiting for that charge);
  * - no open customer-level schedule for the customer (that engine owns its reminders).
  */
-function staleAutopayHoldClause(query, cutoff, { afterOwnCharge = false } = {}) {
-  // afterOwnCharge (GATE_AUTOPAY_HOLD_TIMEOUT=charge only): the sweep itself just charged this invoice, so the
-  // rows that charge wrote (its stripe_invoice_charge_attempts claim, its failed payments row, a webhook's
-  // counter bump of updated_at) must not stop the release of the hold. Every other rule still applies.
+function staleAutopayHoldClause(query, cutoff, { afterOwnCharge = false, holdStamp = null } = {}) {
+  // afterOwnCharge (GATE_AUTOPAY_HOLD_TIMEOUT=charge only, with the observed holdStamp): the sweep itself called
+  // the charge on this invoice and it failed cleanly, so ONLY the rows that charge writes are exempt: a
+  // stripe_invoice_charge_attempts row with status 'failed' and a payments row with status 'failed'. Any other
+  // attempt or any other payment since the hold began still keeps the hold. The age rule and the hold-stamp
+  // equality are dropped (the charge can bump updated_at). Every other rule is unchanged.
   const base = query.where('s.status', 'autopay_hold');
-  if (!afterOwnCharge) {
+  if (afterOwnCharge) {
+    if (!holdStamp) throw new Error('afterOwnCharge needs the observed holdStamp');
+    base
+      .whereNotExists(function noOpenChargeAttempt() {
+        this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
+          .whereRaw('a.invoice_id = s.invoice_id')
+          .whereRaw("a.status IS DISTINCT FROM 'failed'");
+      })
+      .whereNotExists(function noNonFailedPayment() {
+        this.select(db.raw('1')).from('payments as p')
+          .whereRaw('p.customer_id = s.customer_id')
+          .whereRaw('p.created_at >= ?::timestamptz', [holdStamp])
+          .whereRaw("p.status IS DISTINCT FROM 'failed'");
+      });
+  } else {
     base
       .where('s.updated_at', '<', cutoff)
       .whereNotExists(function noChargeAttempt() {
@@ -2930,9 +2946,9 @@ async function releaseStaleAutopayHold(row, cutoff, { afterOwnCharge = false } =
   const seq = await db('invoice_followup_sequences').where({ id: row.id }).first('anchor_at', 'step_index');
   const invoice = await db('invoices').where({ id: row.invoice_id }).first();
   if (!seq || !invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return false;
-  const guarded = staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff, { afterOwnCharge })
+  const guarded = staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff, { afterOwnCharge, holdStamp: row.hold_stamp })
     .where('s.id', row.id);
-  // The hold's own stamp is compared only before any charge: the charge itself can move updated_at.
+  // The hold's own stamp is compared only when no charge was called: a called charge can move updated_at.
   if (!afterOwnCharge) guarded.whereRaw('s.updated_at = ?::timestamptz', [row.hold_stamp]);
   const count = await guarded.update(autopayReleaseFields(seq, invoice));
   return count > 0;
@@ -3062,13 +3078,17 @@ async function chargeStaleAutopayHold(row, cutoff) {
 
   let method = null;
   let quote = null;
+  let chargeCalled = false;
   let failure = null; // { kind: 'declined' | 'refused' | 'ambiguous' | 'no_method', err }
   try {
-    method = await require('./autopay-eligibility').getChargeableAutopayMethod({ id: row.customer_id }, db);
+    // rethrow: a failed lookup must not read as "no method" (that releases the hold). Only a lookup that
+    // succeeds and finds nothing is no_method.
+    method = await require('./autopay-eligibility').getChargeableAutopayMethod({ id: row.customer_id }, db, { rethrow: true });
   } catch (lookupErr) {
-    failure = { kind: 'no_method', err: lookupErr };
+    logger.error(`[invoice-followups] autopay hold charge: Auto Pay method lookup failed for invoice ${row.invoice_id}; hold kept, next run retries: ${lookupErr.message}`);
+    return { outcome: 'skipped' };
   }
-  if (!failure && !method) failure = { kind: 'no_method', err: null };
+  if (!method) failure = { kind: 'no_method', err: null };
   if (!failure) {
     try {
       quote = await StripeService.quoteInvoiceSavedCardCharge(invoice.id, method.id);
@@ -3082,6 +3102,7 @@ async function chargeStaleAutopayHold(row, cutoff) {
   if (!failure) {
     try {
       // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
+      chargeCalled = true;
       result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
         expectedTotal: quote.total,
         maxAuthorizedTotalCents: Math.round(quote.total * 100),
@@ -3119,7 +3140,9 @@ async function chargeStaleAutopayHold(row, cutoff) {
     return { outcome: 'ambiguous' };
   }
 
-  const released = await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: true });
+  // No charge was called (no method, quote refused): release under the original guards, hold stamp included.
+  // A called charge that failed cleanly exempts only the failed attempt and failed payment it wrote itself.
+  const released = await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: chargeCalled });
   await recordAutopayHoldChargeAudit({
     row, invoice, outcome: released ? 'declined_released' : 'declined_not_released', reason: failure.kind, errorCode, amountCents, methodType, released,
   });

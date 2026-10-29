@@ -459,7 +459,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     test('quotes the method, then charges it with the surcharge-inclusive quote total and the Auto Pay guards', async () => {
       const h = await held();
       await sweep();
-      expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything());
+      expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything(), { rethrow: true });
       expect(quote).toHaveBeenCalledWith(h.invoiceId, 'pm-1');
       expect(chargeCall).toHaveBeenCalledTimes(1);
       // toEqual on the whole options object: no operatorOverride, no other guard slips in.
@@ -548,6 +548,67 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       expect(notify.mock.calls[0][2]).toContain('Auto Pay refused the charge');
       const [row] = await chargeAuditRows();
       expect(row.metadata).toMatchObject({ outcome: 'declined_released', reason: 'refused' });
+    });
+
+    test('a method lookup that throws is not "no method": hold kept, skipped, no quote, charge, alert or audit row', async () => {
+      const h = await held();
+      Eligibility.getChargeableAutopayMethod.mockRejectedValue(new Error('connection reset'));
+      expect(await sweep()).toMatchObject({ candidates: 1, skipped: 1, declined_released: 0, released: 0, charged: 0 });
+      await untouched(h);
+      expect(Eligibility.getChargeableAutopayMethod).toHaveBeenCalledWith({ id: h.customerId }, expect.anything(), { rethrow: true });
+      expect(quote).not.toHaveBeenCalled();
+      expect(chargeCall).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      expect(await chargeAuditRows()).toHaveLength(0);
+      // The next run retries.
+      Eligibility.getChargeableAutopayMethod.mockResolvedValue(METHOD);
+      expect(await sweep()).toMatchObject({ charged: 1 });
+    });
+
+    test('a quote refusal (no charge called) keeps the hold when a paid payment appeared since the hold began', async () => {
+      const h = await held();
+      quote.mockImplementation(async () => {
+        await mockPg('payments').insert({ customer_id: h.customerId, status: 'paid' });
+        throw new Error('Invoice is billed to a third-party payer');
+      });
+      expect(await sweep()).toMatchObject({ candidates: 1, declined_released: 0, release_failed: 1 });
+      await untouched(h);
+      expect(chargeCall).not.toHaveBeenCalled();
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_not_released', reason: 'refused', released: false });
+    });
+
+    test('no method found keeps the hold when the hold itself changed since the read (stamp equality still applies)', async () => {
+      const h = await held();
+      Eligibility.getChargeableAutopayMethod.mockImplementation(async () => {
+        await mockPg('invoice_followup_sequences').where({ invoice_id: h.invoiceId }).update({ updated_at: new Date(Date.now() - 3.5 * DAY) });
+        return null;
+      });
+      expect(await sweep()).toMatchObject({ declined_released: 0, release_failed: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
+    });
+
+    test('a decline keeps the hold when a processing payment (not our failed row) exists since the hold began', async () => {
+      const h = await held();
+      chargeCall.mockImplementation(async () => {
+        await leaveDeclineRows(h);
+        await mockPg('payments').insert({ customer_id: h.customerId, status: 'processing' });
+        throw decline();
+      });
+      expect(await sweep()).toMatchObject({ declined_released: 0, release_failed: 1, ambiguous: 0 });
+      await untouched(h);
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_not_released', released: false });
+    });
+
+    test('a plain decline that leaves a non-failed attempt is read as unclear: kept, one check-Stripe alert', async () => {
+      const h = await held();
+      chargeCall.mockImplementation(async () => {
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'succeeded' });
+        throw decline();
+      });
+      expect(await sweep()).toMatchObject({ ambiguous: 1, declined_released: 0 });
+      await untouched(h);
     });
 
     test('a quote that fails moves no money: the hold is released and the charge is never called', async () => {
