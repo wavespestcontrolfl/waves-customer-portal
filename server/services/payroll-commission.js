@@ -475,15 +475,31 @@ const settledStatementRow = (payment) => !payment.statement_id
   || String(payment.description || '').startsWith(`Payer statement S-${payment.statement_id} settlement (`);
 
 /**
+ * The card surcharge part of a refund, in cents: what the row records (refunded_surcharge_cents; an in-app partial
+ * refund records what it actually sent, which can be 0). A payer statement row's refund writer (stripe-webhook.js
+ * charge.refunded) records none, so there it is at least the surcharge's proportional share of the refund, the share the
+ * webhook gives a dashboard refund (round(refund x surcharge / charged), at most the surcharge).
+ */
+function surchargeShare(payment, refundedTotal) {
+  const recorded = BigInt(payment.refunded_surcharge_cents || 0);
+  const surcharge = BigInt(payment.surcharge_cents || 0);
+  const charged = BigInt(payment.charged_cents || 0);
+  if (!payment.statement_id || surcharge <= 0n || charged <= 0n) return recorded;
+  const share = roundDiv(refundedTotal * surcharge, charged);
+  const proportional = share < surcharge ? share : surcharge;
+  return proportional > recorded ? proportional : recorded;
+}
+
+/**
  * The base of a payment (the card surcharge is not in base) the row shows as refunded, in cents: the refunded cash
- * (refund_amount) without the surcharge share of it (refunded_surcharge_cents), at most the base. A 'refunded' row
- * with no refund amount and a 'disputed' row show the whole base.
+ * (refund_amount) without the surcharge share of it (surchargeShare), at most the base. A 'refunded' row with no refund
+ * amount and a 'disputed' row show the whole base.
  */
 function refundedNow(payment) {
   const base = BigInt(payment.base_cents);
   const refundedTotal = payrollUnits(payment.refund_amount);
   if (payment.status === 'disputed' || (payment.status === 'refunded' && refundedTotal <= 0n)) return base;
-  const refunded = refundedTotal - BigInt(payment.refunded_surcharge_cents || 0);
+  const refunded = refundedTotal - surchargeShare(payment, refundedTotal);
   if (refunded <= 0n) return 0n;
   return refunded < base ? refunded : base;
 }
@@ -515,6 +531,8 @@ function commissionOf(payment, refund, snap, rateBps) {
 
 const paymentColumns = (trx) => ['p.id', 'p.customer_id', 'p.statement_id', 'p.status', 'p.description', 'p.refund_amount', 'p.stripe_payment_intent_id',
   trx.raw('COALESCE(p.refunded_surcharge_cents, 0) as refunded_surcharge_cents'),
+  trx.raw('COALESCE(p.surcharge_amount_cents, 0) as surcharge_cents'),
+  trx.raw('ROUND(p.amount * 100)::bigint as charged_cents'),
   trx.raw("NULLIF(p.metadata->>'invoice_id', '') as metadata_invoice_id"),
   trx.raw("to_char(p.payment_date, 'YYYY-MM-DD') as payment_on"),
   trx.raw('COALESCE(p.base_amount_cents, ROUND(p.amount * 100))::bigint as base_cents')];

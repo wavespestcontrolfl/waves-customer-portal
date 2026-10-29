@@ -1220,6 +1220,20 @@ postgres('payroll commission ledger', () => {
       expect(await entries()).toHaveLength(2);
     });
 
+    it('takes only the base out of a partial refund of a surcharged statement payment: $102.90 of $1,029 leaves $900', async () => {
+      const { cust, est } = await soldWorld();
+      const { child, settle } = await statementWorld();
+      await child(cust, await visit(cust, est), '1000.00');
+      // A $1,000 statement paid by card with a $29 surcharge.
+      const paid = await settle('1029.00', { base_amount_cents: 100000, surcharge_amount_cents: 2900 });
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(10000);
+      // stripe-webhook.js charge.refunded on a statement payment records the gross refund and no surcharge share.
+      await trx('payments').where({ id: paid }).update({ refund_amount: '102.90', refund_status: 'partial' });
+      expect(commissionOf((await recompute(created.body.run.id)).body.run, 'Sample Alpha')).toBe(9000);
+      expect(Number((await entries())[0].refund_counted_cents)).toBe(10000);
+    });
+
     it('counts only the settlement row of a statement, never a webhook marker written before it', async () => {
       const { cust, est } = await soldWorld();
       const { statementId, child, settle } = await statementWorld();
