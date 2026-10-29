@@ -81,6 +81,22 @@ describe('admin SMS template routes', () => {
     };
   });
 
+  test('GET / is a read only: one select of sms_templates, no table check, no DDL, no seeding insert', async () => {
+    db.schema = { hasTable: jest.fn(), hasColumn: jest.fn(), createTable: jest.fn(), alterTable: jest.fn() };
+    const list = chain({ result: [{ id: 'sms-1', template_key: 'appointment_reminder', name: 'Appointment reminder', category: 'service', body: 'Hi {first_name}', sort_order: 10 }] });
+    setDbQueues({ sms_templates: [list] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates?category=service`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.templates).toEqual([expect.objectContaining({ id: 'sms-1', can_delete: false })]);
+      expect(db).toHaveBeenCalledTimes(1);
+      expect(list.insert).not.toHaveBeenCalled();
+      expect(list.onConflict).not.toHaveBeenCalled();
+      for (const method of ['hasTable', 'hasColumn', 'createTable', 'alterTable']) expect(db.schema[method]).not.toHaveBeenCalled();
+    });
+  });
+
   test('protects seeded SMS templates from hard delete', async () => {
     setDbQueues({
       sms_templates: [chain({
