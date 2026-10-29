@@ -4,7 +4,7 @@
 // server sets a row's buttons when it raises the row (composeAdminAlert `buttons`, kept as metadata.buttons);
 // this module serves them to the bell and runs a tap. Each kind is a handler that repeats a step a page already
 // offers, through the same server function, after reading its record again; it never trusts the row's words.
-// Admin role only. A tap records who pressed what and when on the row, and closes it.
+// Admin role only. One tap runs at a time on a row; each tap is recorded on it, and a successful one closes it.
 
 const db = require('../models/db');
 const logger = require('./logger');
@@ -57,15 +57,40 @@ function withAlertButtons(rows, { role } = {}) {
   });
 }
 
-// Who pressed which button, when, and how it ended, kept on the row. Best effort: the step already ran.
-async function recordTap(id, tap) {
+// A tap that crashed before it finished leaves a claim; after this long another tap may take the row.
+const CLAIM_TTL_SECONDS = 120;
+
+// Claim the row for one tap, in one conditional write: only while the row is open, still the version the bell
+// served, and not claimed by another tap. Of two taps at once, one runs and the other answers 409. Returns
+// true when this tap holds the row.
+async function claimTap(id, version, { by, action }) {
+  const claimed = await db('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version])
+    .whereRaw("(metadata->'buttonClaim' IS NULL OR (metadata->'buttonClaim'->>'at')::timestamptz < now() - (? * interval '1 second'))", [CLAIM_TTL_SECONDS])
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonClaim', jsonb_build_object('by', ?::text, 'action', ?::text, 'at', now()))", [by, action]),
+    });
+  return Number(claimed) > 0;
+}
+
+// The tap's record, appended to the row's `buttonTaps` (a later tap never erases an earlier one), and the claim
+// released. Best effort: the step already ran.
+async function finishTap(id, tap) {
   try {
     await db('notifications').where({ id, recipient_type: 'admin' }).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonTap', ?::jsonb)", [JSON.stringify(tap)]),
+      metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'buttonClaim') || jsonb_build_object('buttonTaps', COALESCE(metadata->'buttonTaps', '[]'::jsonb) || jsonb_build_array(?::jsonb))", [JSON.stringify(tap)]),
     });
   } catch (err) {
     logger.warn(`[alert-buttons] tap not recorded on ${id}: ${err.message}`);
   }
+}
+
+// Why a claim was lost: the row closed meanwhile, another tap holds it, or its content changed.
+async function lostClaim(id) {
+  const row = await db('notifications').where({ id, recipient_type: 'admin' }).first('done_at', 'metadata');
+  if (!row || row.done_at != null) return reply(409, { error: 'done', message: 'That alert was already handled.' });
+  if (parseMetadata(row.metadata).buttonClaim) return reply(409, { error: 'busy', message: 'Someone is already acting on this alert.' });
+  return reply(409, { error: 'changed' });
 }
 
 const reply = (status, body) => ({ status, body });
@@ -88,9 +113,17 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   if (!item) return reply(400, { error: 'unknown_action' });
   if (!kindLive(buttons.kind)) return reply(409, { error: 'off', message: 'These buttons are turned off. Open the alert to act on it.' });
 
-  const result = await KINDS[buttons.kind]().run({ row, item, technicianId });
   const by = String(technicianId);
-  await recordTap(notificationId, { action: item.id, by, at: new Date().toISOString(), outcome: result.ok ? 'done' : result.code });
+  if (!(await claimTap(notificationId, version, { by, action: item.id }))) return lostClaim(notificationId);
+  const tap = { action: item.id, by, at: new Date().toISOString() };
+  let result;
+  try {
+    result = await KINDS[buttons.kind]().run({ row, item, technicianId });
+  } catch (err) {
+    await finishTap(notificationId, { ...tap, outcome: 'error' });
+    throw err;
+  }
+  await finishTap(notificationId, { ...tap, outcome: result.ok ? 'done' : result.code });
   if (result.ok) {
     // The step's own close may have marked the row done first; this keeps that close (markAdminDone writes only
     // an open row).

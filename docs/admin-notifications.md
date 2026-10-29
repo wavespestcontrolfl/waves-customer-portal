@@ -69,8 +69,9 @@ The owner's rules ("ok go" on the plan, Oct 29):
    those cases, and the page does it instead.
 4. The server sets a row's buttons when it raises the row. The phone or browser cannot add one:
    a tap names a button the row carries, and nothing else runs.
-5. A tap records who pressed what and when (`metadata.buttonTap`), and closes the row. A second
-   tap does nothing.
+5. A tap records who pressed what and when (`metadata.buttonTaps`, one entry per tap), and
+   closes the row. One tap runs at a time: it claims the row in one conditional write against the
+   version the bell served, so a second tap at the same moment, or after, does nothing.
 
 How: `buttons: { kind, items: [{ id, label, prompt?, args? }] }` in the spec, kept as
 `metadata.buttons`. `kind` names a handler in `server/services/admin-alert-buttons.js` (`KINDS`).
@@ -225,7 +226,7 @@ checks stay in the bell). The Agents Activity feed shows every routed row (`meta
 | Claude's own reminders and our engineering faults leave the bell: an admin row with `metadata.opsJob` (unless `opsWho` is `person`) or in a named fault class is written Activity-only and stamped `who = claude`, `severity` `broken` for a fault; customer-contact categories, registry events, customer-tied rows and `ops_digest` rows are never routed | `server/services/admin-alert-routing.js`, applied in `NotificationService.create` and `notifyAdmin`; `server/scripts/reroute-claude-queue-rows.js` moves rows already open | enforced while `GATE_ALERT_CLAUDE_QUEUE` is on (dark by default) |
 | Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). Not built: the 14-day Monday summary for an unread `needs-you` row | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
-| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, fenced by the row's version, recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default) |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.

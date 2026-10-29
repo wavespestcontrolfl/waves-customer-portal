@@ -586,7 +586,8 @@ jest.mock('../services/customer-credit', () => ({
       const after = await db('notifications').where({ id: row.id }).first();
       expect(after.done_at).not.toBeNull();
       expect(after.resolution).toBe('Marked not a referral');
-      expect(after.metadata.buttonTap).toMatchObject({ action: 'dismiss', by: TECH, outcome: 'done' });
+      expect(after.metadata.buttonTaps).toEqual([expect.objectContaining({ action: 'dismiss', by: TECH, outcome: 'done' })]);
+      expect(after.metadata).not.toHaveProperty('buttonClaim');
       expect(await served()).toEqual([]);
 
       await expect(tap(row, 'dismiss')).resolves.toMatchObject({ status: 409, body: { error: 'done' } });
@@ -607,6 +608,21 @@ jest.mock('../services/customer-credit', () => ({
       expect(await answerOf(friend.id)).toMatchObject({ outcome: 'confirmed', reviewed_by: TECH });
       expect(postCreditMovement).not.toHaveBeenCalled();
       expect(await db('notifications').where({ id: row.id }).first()).toMatchObject({ resolution: 'Referrer confirmed' });
+    });
+
+    test('two taps on one row at the same moment: one runs, the other runs nothing', async () => {
+      await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await bell.syncReferralInboundBells();
+      const [row] = await served();
+      const results = await Promise.all([tap(row, 'dismiss'), tap(row, 'confirm')]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      expect(['busy', 'done', 'changed']).toContain(results.find((r) => r.status === 409).body.error);
+      expect(await db('referral_inbound_reviews').where({ customer_id: friend.id }).count('* as n').first()).toEqual({ n: '1' });
+      const after = await db('notifications').where({ id: row.id }).first();
+      expect(after.metadata.buttonTaps).toHaveLength(1);
+      expect(after.metadata.buttonTaps[0].outcome).toBe('done');
+      expect(after.metadata).not.toHaveProperty('buttonClaim');
     });
 
     test('an answer in the Queue closes the open row', async () => {

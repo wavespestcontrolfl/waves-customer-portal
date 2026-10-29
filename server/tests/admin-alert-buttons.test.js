@@ -10,14 +10,21 @@ jest.mock('../services/referral-inbound-bell', () => ({
 }));
 
 let mockRow;
+let mockReread; // the row a lost claim reads back: every read after the first
+let mockReads = 0;
+let mockClaimed;
 const mockUpdates = [];
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table !== 'notifications') throw new Error(`unexpected table ${table}`);
+    // The claim is the one conditional write: it filters on done_at and the version.
+    let claim = false;
     const q = {
       where: jest.fn(() => q),
-      first: jest.fn(async () => mockRow),
-      update: jest.fn(async (patch) => { mockUpdates.push(patch); return 1; }),
+      whereNull: jest.fn(() => { claim = true; return q; }),
+      whereRaw: jest.fn(() => q),
+      first: jest.fn(async () => (mockReads++ === 0 ? mockRow : (mockReread ?? mockRow))),
+      update: jest.fn(async (patch) => { mockUpdates.push({ claim, patch }); return claim ? mockClaimed : 1; }),
     };
     return q;
   });
@@ -41,9 +48,16 @@ const BUTTONS = {
 const row = (over = {}) => ({ id: ID, done_at: null, version: VERSION, metadata: { buttons: BUTTONS, subject: { type: 'customer', id: 'c-1' } }, ...over });
 const tap = (over = {}) => runAlertButton({ notificationId: ID, actionId: 'confirm', version: VERSION, technicianId: 't-1', role: 'admin', ...over });
 
+// The tap record finishTap appended, and the claim that came before it.
+const claimOf = () => mockUpdates.find((u) => u.claim);
+const tapOf = () => JSON.parse(mockUpdates.find((u) => !u.claim).patch.metadata.bindings[0]);
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockUpdates.length = 0;
+  mockReread = undefined;
+  mockReads = 0;
+  mockClaimed = 1;
   mockRow = row();
   buttonHandler.live.mockReturnValue(true);
 });
@@ -86,8 +100,9 @@ describe('runAlertButton: one tap', () => {
     buttonHandler.run.mockResolvedValue({ ok: true, message: 'Lea Quill is confirmed.', resolution: 'Referrer confirmed' });
     await expect(tap()).resolves.toEqual({ status: 200, body: { success: true, message: 'Lea Quill is confirmed.' } });
     expect(buttonHandler.run).toHaveBeenCalledWith({ row: mockRow, item: BUTTONS.items[0], technicianId: 't-1' });
-    const tapPatch = JSON.parse(mockUpdates[0].metadata.bindings[0]);
-    expect(tapPatch).toMatchObject({ action: 'confirm', by: 't-1', outcome: 'done' });
+    expect(claimOf().patch.metadata.bindings).toEqual(['t-1', 'confirm']);
+    expect(tapOf()).toMatchObject({ action: 'confirm', by: 't-1', outcome: 'done' });
+    expect(mockUpdates.find((u) => !u.claim).patch.metadata.__raw).toMatch(/- 'buttonClaim'\) \|\| jsonb_build_object\('buttonTaps'/);
     expect(NotificationService.markAdminDone).toHaveBeenCalledWith([ID], { by: 't-1', resolution: 'Referrer confirmed', role: 'admin' });
   });
 
@@ -95,7 +110,7 @@ describe('runAlertButton: one tap', () => {
     buttonHandler.run.mockResolvedValue({ ok: false, code: 'answered', message: 'This referral was already answered.', close: 'Referrer confirmed' });
     await expect(tap()).resolves.toEqual({ status: 409, body: { error: 'answered', message: 'This referral was already answered.' } });
     expect(NotificationService.markAdminDone).toHaveBeenCalledWith([ID], { by: 'alert-button', resolution: 'Referrer confirmed' });
-    expect(JSON.parse(mockUpdates[0].metadata.bindings[0]).outcome).toBe('answered');
+    expect(tapOf().outcome).toBe('answered');
   });
 
   test('a refusal that leaves the record open keeps the row open', async () => {
@@ -135,6 +150,26 @@ describe('runAlertButton: one tap', () => {
     mockRow = row({ metadata: { subject: { type: 'customer', id: 'c-1' } } });
     await expect(tap()).resolves.toEqual({ status: 400, body: { error: 'unknown_action' } });
     expect(buttonHandler.run).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['another tap holds the row', () => row({ metadata: { buttons: BUTTONS, buttonClaim: { by: 't-2', action: 'dismiss' } } }), { error: 'busy', message: 'Someone is already acting on this alert.' }],
+    ['the row closed in between', () => row({ done_at: new Date() }), { error: 'done', message: 'That alert was already handled.' }],
+    ['the row changed in between', () => row(), { error: 'changed' }],
+  ])('a lost claim runs nothing: %s', async (_name, reread, body) => {
+    mockClaimed = 0;
+    mockReread = reread();
+    await expect(tap()).resolves.toEqual({ status: 409, body });
+    expect(claimOf()).toBeDefined();
+    expect(buttonHandler.run).not.toHaveBeenCalled();
+    expect(mockUpdates.filter((u) => !u.claim)).toHaveLength(0);
+  });
+
+  test('a step that throws still records the tap and releases the claim', async () => {
+    buttonHandler.run.mockRejectedValue(new Error('connection reset'));
+    await expect(tap()).rejects.toThrow('connection reset');
+    expect(tapOf()).toMatchObject({ action: 'confirm', outcome: 'error' });
+    expect(NotificationService.markAdminDone).not.toHaveBeenCalled();
   });
 
   test('a kind that is off runs nothing', async () => {
