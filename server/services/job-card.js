@@ -59,7 +59,8 @@ const SPRAY_WINDOW_HOURS = 4;
 const RAIN_HOLD_PCT = 50;
 // GATE_SPRAY_RAIN_RULES (owner 2026-10-26, D1 = A): one odds table for every rain number, the weather
 // rebooker's own. Owner 2026-10-29 ("i just want to warn techs"): with the rain rules on, no weather
-// reading withholds a dose; a reading past the hold tier is a caution that names it.
+// reading withholds a dose; a reading past the hold tier is a caution that names it, and rain past it is
+// the stronger Warning level (plan page "Spray Weather Warnings", step 2).
 const RAIN_CAUTION_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.caution_if_rain_prob_above;
 const RAIN_HOLD_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.reschedule_if_rain_prob_above;
 const MAX_PARAGRAPH_WORDS = 60;
@@ -789,6 +790,31 @@ const LIMIT_CHECKS = [
   { limit: 'maxWindMph', key: 'windMph', kind: 'wind', breaks: (v, l) => v > l, reason: (l) => `wind over ${l} mph` },
 ];
 const CONDITIONAL_REVIEW = 'Conditional label restrictions need review';
+// GATE_SPRAY_RAIN_RULES (owner 2026-10-29, plan step 2): wind and temperature are judged where the tech stands, at
+// the start hour and the next one, and the caution names the reading and its hour.
+const SITE_HOURS = 2;
+const SITE_TEXT = {
+  minTempF: (v, at, l) => `${v}°F at ${at} — under the ${l}°F limit`,
+  maxTempF: (v, at, l) => `${v}°F at ${at} — over the ${l}°F limit`,
+  maxWindMph: (v, at, l) => `wind ${v} mph at ${at} — over the ${l} mph limit`,
+};
+const hourLabel = (row) => formatETTime(new Date(row.startTime)).replace(':00', '').toLowerCase();
+// The worst reading past a limit among the rows, with its hour (the lowest for a minimum, else the highest).
+function worstBreach(rows, key, breaks, low = false) {
+  const past = rows.filter((h) => h[key] != null && breaks(Number(h[key])));
+  if (!past.length) return null;
+  const row = past.reduce((a, b) => ((low ? Number(b[key]) < Number(a[key]) : Number(b[key]) > Number(a[key])) ? b : a));
+  return { value: Number(row[key]), at: hourLabel(row) };
+}
+// One action per caution, from its main check (plan step 2): the label's own words where it has them, else
+// spray it first, or at the Warning level skip it and note why, or plan a re-treat.
+function cautionAction(check, level) {
+  if (check.action) return check.action;
+  if (check.kind === 'wind') return 'Check the wind at the nozzle. Do not spray if it drifts onto beds.';
+  if (check.kind === 'temperature') return 'Check the temperature on site before you spray.';
+  if (check.source === 'label') return 'Spray before the rain starts, or after it stops.';
+  return level === 'warning' ? 'Skip it today and note why, or plan a re-treat.' : 'Spray it first.';
+}
 
 function buildSprayCheck({ products = [], hourly = null, now = new Date(), labelSources = {}, rainRules = null } = {}) {
   const start = now.getTime();
@@ -837,6 +863,16 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
     reason: () => c.reason(limits[c.limit]),
   }));
+  const siteRows = hoursAhead(SITE_HOURS);
+  const siteComplete = covers(siteRows, SITE_HOURS);
+  const siteLimitChecks = (limits) => LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
+    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: 'product limit',
+    tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
+    reason: (known, rows) => {
+      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, limits[c.limit]), c.limit === 'minTempF');
+      return worst ? SITE_TEXT[c.limit](worst.value, worst.at, limits[c.limit]) : c.reason(limits[c.limit]);
+    },
+  }));
   // Rain tiers the highest chance it reads: above holdAbove holds, above cautionAbove is a caution.
   const rainCheck = ({ hours, rows = hoursAhead(hours), complete = covers(rows, hours), label = `rain ${hours} h`, holdAbove = RAIN_HOLD_ABOVE_PCT, cautionAbove = RAIN_CAUTION_ABOVE_PCT, text, ...rest }) => ({
     ...rest, rows, complete, label, key: 'rainChance', kind: 'rain',
@@ -864,10 +900,24 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
   const rainRuleChecks = (product, limits) => {
     const rule = labelRainRuleFor(product);
     const dry = rule?.dryBeforeRain?.hours;
-    // A label with rain wording (watering in included) or a catalog interval leaves no room for the Waves rule.
-    const waves = !rule && limits.rainFreeHours == null && isTankMixable(product) ? rainRules.waves[product.id] : null;
+    // The Waves rule gives a dry time to a tank spray whose label gives none (plan step 2: a label's "no spraying
+    // during rain" line covers the start hour only), unless the label waters it in or the catalog states an
+    // interval. A dust is not a spray.
+    const dust = /\bdust\b/i.test(`${product.application_method || ''} ${product.formulation || ''} ${product.name || ''}`);
+    const waves = !dry && !rule?.waterIn && limits.rainFreeHours == null && isTankMixable(product) && !dust ? rainRules.waves[product.id] : null;
+    // A label heat line (Celsius: no adjuvant above 90°F) replaces a looser catalog maximum, so one line shows.
+    const heat = rule?.heat;
+    const siteLimits = heat && limits.maxTempF != null && heat.aboveF <= limits.maxTempF ? { ...limits, maxTempF: null } : limits;
     return [
-      ...limitChecks(limits),
+      ...siteLimitChecks(siteLimits),
+      heat && {
+        rows: siteRows, complete: siteComplete, key: 'temperatureF', label: 'temperature', kind: 'temperature', source: 'label', action: heat.action,
+        tier: (known) => (known.some((v) => v > heat.aboveF) ? 'hold' : null),
+        reason: (known, rows) => {
+          const worst = worstBreach(rows, 'temperatureF', (v) => v > heat.aboveF);
+          return `${worst ? `${worst.value}°F at ${worst.at}` : `over ${heat.aboveF}°F`} — label: ${heat.text}`;
+        },
+      },
       // "Do not make applications during rain": the hour the work starts (now, once the window opened).
       rule?.duringRain && rainCheck({ rows: startRow ? [startRow] : [], complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
       dry && rainCheck({ hours: dry, source: 'label advice', holdAbove: Infinity, gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
@@ -882,18 +932,27 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     for (const check of checks) {
       const known = check.rows.map((h) => h[check.key]).filter((v) => v != null);
       const tier = check.tier(known);
-      if (tier) tiers[tier].push({ ...check, reason: check.reason(known) });
+      if (tier) tiers[tier].push({ ...check, reason: check.reason(known, check.rows) });
       const gap = !check.complete || known.length < check.rows.length;
       if (tier !== 'hold' && gap && check.gapIsUnknown !== false && !missing.includes(check.label)) missing.push(check.label);
     }
-    // The rain rules name the check that fired; today's verdicts keep their shape.
-    const fired = (verdict, list) => ({
-      productId, verdict, reason: list.map((c) => c.reason).join(', '),
-      ...(rainRules ? { kind: list[0].kind, source: list[0].source, at: list[0].at || null } : {}),
-    });
-    // Owner 2026-10-29: the rain rules warn and never withhold, so a reading past a hold tier is a caution. It
-    // still outranks a missing hour, as the hold did: a known breach is worth saying.
-    if (tiers.hold.length) return fired(rainRules ? 'caution' : 'hold', tiers.hold);
+    // The rain rules name the check that fired, its level and one action; today's verdicts keep their shape.
+    const fired = (verdict, list, level = null) => {
+      // With the rain rules, one line per kind: two rain checks about the same rain say it once (the first, strongest).
+      const shown = rainRules ? list.filter((c, i) => list.findIndex((d) => d.kind === c.kind) === i) : list;
+      return {
+        productId, verdict, reason: shown.map((c) => c.reason).join(', '),
+        ...(rainRules ? { kind: shown[0].kind, source: shown[0].source, at: shown[0].at || null, ...(level ? { level } : {}), action: cautionAction(shown[0], level) } : {}),
+      };
+    };
+    // Owner 2026-10-29: the rain rules warn and never withhold, so a reading past a hold tier is a caution; rain
+    // past it is the Warning level and leads the line. It still outranks a missing hour, as the hold did: a known
+    // breach is worth saying.
+    if (tiers.hold.length && rainRules) {
+      const strong = [...tiers.hold].sort((a, b) => Number(b.kind === 'rain') - Number(a.kind === 'rain'));
+      return fired('caution', [...strong, ...tiers.caution], strong[0].kind === 'rain' ? 'warning' : null);
+    }
+    if (tiers.hold.length) return fired('hold', tiers.hold);
     // forecastGap: only the forecast is missing, nothing about the label (the Tree & Shrub guide still shows its mix).
     if (missing.length) return { productId, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast`, ...(rainRules ? { forecastGap: true } : {}) };
     if (review?.unresolved) return { productId, verdict: 'unknown', reason: CONDITIONAL_REVIEW };
@@ -1620,6 +1679,9 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.source ? `${line.source}: ${describeLine(line.raw)}` : describeLine(line.raw), ...line.extraLines.map(describeLine)].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
+      // GATE_SPRAY_RAIN_RULES step 2: the Warning level and the one action, only when the rain rules set them.
+      ...(verdict.level ? { verdictLevel: verdict.level } : {}),
+      ...(verdict.action ? { verdictAction: verdict.action } : {}),
       planned,
       // A chemical area add-on's label text (rate, area, limit, safety).
       governed: governedForCard(line.governed, verdict, p, line.scope),
@@ -1724,23 +1786,26 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
 // The strip's one weather chip. Without the rain rules (GATE_SPRAY_RAIN_RULES), today's labels exactly.
 // With them nothing holds (owner 2026-10-29), so the chip is never red: it names the caution that fired,
 // ahead of "Weather unknown" (a missing forecast), so one product without a forecast cannot hide another's rain.
-function cautionChipLabel(verdict) {
-  if (verdict.kind === 'wind') return 'Wind caution';
-  if (verdict.kind === 'temperature') return 'Temperature caution';
-  if (verdict.source === 'label') return `Rain likely ${verdict.at} · label: no spraying in rain`;
-  if (verdict.source === 'label advice') return 'Rain caution · label advice';
-  return verdict.source === 'Waves rule' ? 'Rain caution · Waves rule' : 'Rain caution';
+// Step 2: the chip names the product, and a label's start-hour rain its hour; the source is on the card.
+function cautionChipLabel(verdict, name) {
+  const who = name ? ` · ${name}` : '';
+  if (verdict.kind === 'wind') return `Wind caution${who}`;
+  if (verdict.kind === 'temperature') return `Temperature caution${who}`;
+  const strong = verdict.level === 'warning';
+  if (verdict.source === 'label') return `Rain ${strong ? 'very likely' : 'likely'} ${verdict.at}${who}`;
+  return `Rain ${strong ? 'warning' : 'caution'}${who}`;
 }
 
-function weatherIssue(sprayCheck, isToday) {
+// names: product id -> name, for the chip (empty: the chip has no product).
+function weatherIssue(sprayCheck, isToday, names = new Map()) {
   if (!sprayCheck.rainRules) {
     if (sprayCheck.hold) return { kind: 'weather', status: 'hold', label: 'Weather hold' };
     if (!isToday) return { kind: 'weather', status: 'unknown', label: 'Weather on visit day' };
     if (sprayCheck.verdicts.some(v => v.verdict !== 'ok')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
     return null;
   }
-  const caution = sprayCheck.verdicts.find((v) => v.verdict === 'caution');
-  if (caution) return { kind: 'weather', status: 'caution', label: cautionChipLabel(caution) };
+  const caution = sprayCheck.verdicts.find((v) => v.verdict === 'caution' && v.level === 'warning') || sprayCheck.verdicts.find((v) => v.verdict === 'caution');
+  if (caution) return { kind: 'weather', status: 'caution', label: cautionChipLabel(caution, names.get(caution.productId)) };
   if (!isToday) return { kind: 'weather', status: 'unknown', label: 'Weather on visit day' };
   if (sprayCheck.verdicts.some((v) => v.verdict === 'unknown')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
   return null;
@@ -1750,7 +1815,7 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
   const issues = [];
   if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
   else {
-    const weather = weatherIssue(sprayCheck, isToday);
+    const weather = weatherIssue(sprayCheck, isToday, new Map(lines.map((l) => [l.product.id, l.product.name])));
     if (weather) issues.push(weather);
   }
 
@@ -1810,11 +1875,12 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules: rainMode === 'true' ? rainRules : null });
   if (rainMode !== 'off' && isToday && lines.length) {
     const shadow = rainMode === 'true' ? sprayCheck : buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
+    const names = new Map(products.map((p) => [p.id, p.name]));
     Promise.resolve()
       .then(() => (deps.recordSprayRainShadow || require('./spray-rain-rule-shadow').recordSprayRainShadow)({
         dbh, facts, products, hourly, serviceInstant,
-        live: { hold: sprayCheck.hold, issue: weatherIssue(sprayCheck, isToday) },
-        shadow: { verdicts: shadow.verdicts, issue: weatherIssue(shadow, isToday) },
+        live: { hold: sprayCheck.hold, issue: weatherIssue(sprayCheck, isToday, names) },
+        shadow: { verdicts: shadow.verdicts, issue: weatherIssue(shadow, isToday, names) },
       }))
       .catch((err) => logger.warn(`[job-card] rain rule shadow not recorded: ${err.message}`));
   }
@@ -2024,7 +2090,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     const services = planned || !owners.length ? [svc.service_type, ...owners] : owners;
     const rainRules = sprayRainRulesMode() === 'true' ? { waves: { [product.id]: wavesRainRule(services) } } : null;
     const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, rainRules, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
-    sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason };
+    sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason, ...(sprayVerdict.level ? { level: sprayVerdict.level } : {}), ...(sprayVerdict.action ? { action: sprayVerdict.action } : {}) };
   }
   // Withhold reasons in guard order — the first that applies wins; the
   // catalog contract (label_verified_at) and a spray Hold sit among them.

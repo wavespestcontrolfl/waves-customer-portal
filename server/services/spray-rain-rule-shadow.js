@@ -41,6 +41,8 @@ function shadowRow({ facts, products = [], hourly = null, serviceInstant, live, 
     dose_hidden: shadow.verdicts.some((v) => v.verdict === 'hold'),
     products: JSON.stringify(shadow.verdicts.map((v) => ({
       name: names.get(v.productId) || null, verdict: v.verdict, reason: v.reason || null, source: v.source || null,
+      // The Warning level (rain past the hold tier, owner 2026-10-29 step 2), so warnings stay countable.
+      ...(v.level ? { level: v.level } : {}),
     }))),
   };
 }

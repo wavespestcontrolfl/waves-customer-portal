@@ -1492,19 +1492,19 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
       const [arg] = recordSprayRainShadow.mock.calls[0];
       expect(arg.live).toEqual({ hold: false, issue: { kind: 'weather', status: 'unknown', label: 'Weather unknown' } });
-      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' });
-      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', source: 'label', at: '10 am' })]);
+      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
+      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', level: 'warning', source: 'label', at: '10 am' })]);
       expect(arg.serviceInstant.toISOString()).toBe('2026-09-04T14:00:00.000Z');
       // A failed record never takes the poll down.
       const failing = jest.fn(async () => { throw new Error('relation does not exist'); });
       expect(weather(await poll(85, { recordSprayRainShadow: failing }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
     });
 
-    test('true: above 60% at the start is a caution, above 80% still a caution, 60% or less no chip', async () => {
+    test('true: above 60% at the start is a caution, above 80% the Warning level, 60% or less no chip', async () => {
       process.env.GATE_SPRAY_RAIN_RULES = 'true';
       const recordSprayRainShadow = jest.fn(async () => null);
-      expect(weather(await poll(65, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' });
-      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' });
+      expect(weather(await poll(65, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · Talstar P' });
+      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
       expect(weather(await poll(60, { recordSprayRainShadow }))).toBeNull();
     });
 
@@ -1515,7 +1515,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       await new Promise((resolve) => setImmediate(resolve));
       expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
       const [arg] = recordSprayRainShadow.mock.calls[0];
-      const issue = { kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' };
+      const issue = { kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' };
       expect(arg.live).toEqual({ hold: false, issue });
       expect(arg.shadow.issue).toEqual(issue);
       expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', reason: 'rain 85% at 10 am — label: no spraying during rain' })]);
@@ -1536,7 +1536,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(weather(await card({}, onHost))).toBeNull();
       const viaAddon = { ...protocols, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs' }] } };
       expect(weather(await card({ 'scheduled_service_addons as a': [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }] }, viaAddon)))
-        .toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution · Waves rule' });
+        .toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Talus IGR' });
     });
   });
 
