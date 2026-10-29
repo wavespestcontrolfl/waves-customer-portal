@@ -119,6 +119,19 @@ function SubjectText({ subject }) {
       </div>
     );
   }
+  if (subject.type === "lawn_diagnostics") {
+    // The model-written customer summary of a lawn diagnosis (lawn_result_timing):
+    // Jev read it one sentence at a time; the answer shown is "does any sentence
+    // say when a result will show".
+    return (
+      <div className="min-w-0 space-y-1">
+        <div className="text-12 font-medium uppercase text-ink-secondary">
+          Lawn diagnosis summary, read sentence by sentence{subject.at ? ` · ${timeLabel(subject.at)}` : ""}
+        </div>
+        <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{subject.text}</div>
+      </div>
+    );
+  }
   if (subject.type === "scheduled_services") {
     // A visit's facts as the models read them (visit_access): saved
     // preferences, notes, customer texts and the last technician note, with

@@ -953,12 +953,15 @@ function residualDefinitiveClaim(text) {
 // using the P15 detector (lawnResultTimingViolation, fail closed: a sentence
 // with a count is dropped even if a current row carries that number). Text
 // with no timing passes through untouched; null when nothing usable remains.
-function withoutResultTimingSentences(text) {
+// `alsoDrop(sentence)` (optional) drops further sentences by the same rule: the
+// store-time Jev timing check (GATE_LAWN_JEV_TIMING_CHECK=enforce) passes the
+// sentences Jev flagged, so both checks share one splitter and one empty result.
+function withoutResultTimingSentences(text, alsoDrop = null) {
   const sentences = String(text).split(/(?<=[.!?])\s+/);
   // No care-plan exemption here: a timeline phrased around watering or mowing
   // ("color should return in 2-3 weeks once watering is corrected") is still a
   // result promise in a customer summary.
-  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence, { carePlanExempt: false }));
+  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence, { carePlanExempt: false }) && !(alsoDrop && alsoDrop(sentence.trim())));
   if (kept.length === sentences.length) return text;
   return kept.length ? kept.join(' ') : null;
 }
@@ -1241,6 +1244,8 @@ module.exports = {
   stripIntensifierNot,
   CONDITION_LABEL_VALUES,
   safeCustomerSummary,
+  withoutResultTimingSentences,
+  GENERIC_LOW_CONFIDENCE_SUMMARY,
   SUMMARY_CAUSE_RE,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,

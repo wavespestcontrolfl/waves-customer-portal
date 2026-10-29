@@ -69,7 +69,13 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 const mockGateEnv = jest.fn(() => false);
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: (...args) => mockGateEnv(...args) }));
+let mockJevMode = 'off';
+let mockWriterSummary = null; // set: the (mocked) model writer produces this customer_summary
+jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: (...args) => mockGateEnv(...args), lawnJevTimingCheckMode: () => mockJevMode }));
+const mockJevAsk = jest.fn();
+jest.mock('../services/typed-decisions/jev', () => ({ askPackage: (...a) => mockJevAsk(...a) }));
+const mockJevRecord = jest.fn(async () => ({ recorded: 1 }));
+jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: (...a) => mockJevRecord(...a) }));
 const mockIdentifyPestV2 = jest.fn();
 jest.mock('../services/photo-id-v2/pest-engine', () => ({ identifyPestV2: (...args) => mockIdentifyPestV2(...args) }));
 jest.mock('../utils/funnel-photos', () => ({ storeFunnelPhotos: jest.fn(async () => {}) }));
@@ -84,7 +90,9 @@ jest.mock('../services/lawn-diagnostic-analyze', () => {
   return {
     ...actual,
     runFindingsLadder: (...args) => mockLadder(...args),
-    applyWriterSummary: jest.fn(async () => {}),
+    applyWriterSummary: jest.fn(async (contract, { provenance }) => {
+      if (mockWriterSummary) { contract.customer_summary = mockWriterSummary; provenance.writerModel = 'writer-sentinel'; }
+    }),
   };
 });
 jest.mock('../services/lawn-assessment', () => ({ getSeason: () => 'peak' }));
@@ -201,6 +209,9 @@ beforeEach(() => {
   Object.keys(inserts).forEach((k) => delete inserts[k]);
   Object.keys(updates).forEach((k) => delete updates[k]);
   whereCalls = [];
+  mockJevMode = 'off';
+  mockWriterSummary = null;
+  mockJevAsk.mockReset();
   mockSendEmail.mockResolvedValue({ ok: true, messageId: 'msg-1' });
   mockGetPhotoBuffer.mockResolvedValue({ buffer: Buffer.from('raw-mms-bytes'), contentType: 'image/jpeg' });
 });
@@ -668,6 +679,67 @@ describe('POST /:type (admin create)', () => {
       expect(res.status).toBe(503);
       expect(inserts.pest_identifications).toBeUndefined();
     });
+  });
+});
+
+describe('POST /lawn (Analyze photos) with GATE_LAWN_JEV_TIMING_CHECK', () => {
+  const S1 = 'Your lawn shows thinning along the sunny edge near the driveway.';
+  const S2 = 'By mid-November the color should be much better.';
+  const S3 = 'We will keep watching the area on each visit.';
+  const WRITTEN = `${S1} ${S2} ${S3}`;
+  const LADDER = {
+    findings: [{ finding_id: 'F1', name: 'Thin turf density', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', observed_evidence: ['edge thinning'], negative_evidence: [], confirmation_step: 'check shade' }],
+    findingsSource: 'multimodel', fallbackReason: null, photoAnalysis: null,
+    provenance: { challenge: { passed: true }, perceptionModel: 'p', challengeModel: 'c', writerModel: null },
+  };
+  const jev = (flagged = []) => async (packageId, state) => ({
+    ok: true, answers: { states_result_timing: { p: flagged.includes(state.sentence) ? 0.97 : 0.02, yes: flagged.includes(state.sentence), confident: true } },
+    servedModel: 'jev-1.13.0', packageId, packageHash: 'h'.repeat(64), provider: 'typesafe',
+  });
+  const create = () => withServer(async (base) => {
+    mockLadder.mockImplementation(async () => ({ ...LADDER, provenance: { ...LADDER.provenance } }));
+    const res = await fetch(`${base}/api/admin/photo-assessments/lawn`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photos: [{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }], note: 'phone prospect' }),
+    });
+    expect(res.status).toBe(201);
+    return inserts.lawn_diagnostics[0];
+  });
+  const summaryIn = (row) => JSON.parse(row.report_contract).customer_summary;
+  const settle = async (fn) => { for (let i = 0; i < 40 && !fn(); i += 1) await new Promise((r) => setImmediate(r)); };
+
+  test('off: nothing is asked and the row holds the writer summary in both copies', async () => {
+    mockWriterSummary = WRITTEN;
+    const row = await create();
+    expect(mockJevAsk).not.toHaveBeenCalled();
+    expect(summaryIn(row)).toBe(WRITTEN);
+    expect(row.ai_summary).toBe(WRITTEN);
+  });
+
+  test('shadow: row identical to off, verdict recorded after the insert against the new row', async () => {
+    mockWriterSummary = WRITTEN;
+    const offRow = await create();
+    delete inserts.lawn_diagnostics;
+    mockJevMode = 'shadow';
+    mockJevAsk.mockImplementation(jev([S2]));
+    const row = await create();
+    expect(row.report_contract).toBe(offRow.report_contract);
+    expect(row.ai_summary).toBe(offRow.ai_summary);
+    await settle(() => mockJevRecord.mock.calls.length);
+    expect(mockJevRecord.mock.calls[0][0]).toMatchObject({ subjectType: 'lawn_diagnostics', subjectId: ROW_ID });
+  });
+
+  test('enforce: the flagged sentence is dropped from report_contract and ai_summary alike; a failed call keeps the text', async () => {
+    mockWriterSummary = WRITTEN;
+    mockJevMode = 'enforce';
+    mockJevAsk.mockImplementation(jev([S2]));
+    const row = await create();
+    expect(summaryIn(row)).toBe(`${S1} ${S3}`);
+    expect(row.ai_summary).toBe(`${S1} ${S3}`);
+    delete inserts.lawn_diagnostics;
+    mockJevAsk.mockImplementation(async () => ({ ok: false, reason: 'error' }));
+    const kept = await create();
+    expect(summaryIn(kept)).toBe(WRITTEN);
+    expect(kept.ai_summary).toBe(WRITTEN);
   });
 });
 

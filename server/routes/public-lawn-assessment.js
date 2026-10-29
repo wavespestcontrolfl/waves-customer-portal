@@ -38,6 +38,7 @@ const {
   deriveOverallScore,
 } = require('../services/lawn-diagnostic-analyze');
 const { buildPublicLawnReport } = require('./public-lawn-diagnostic');
+const { checkDiagnosisSummary } = require('../services/service-report/lawn-jev-timing-check');
 const { isEnabled } = require('../config/feature-gates');
 const { verifyTurnstileToken } = require('../utils/turnstile');
 const { consumeSharedDailyCap, DAILY_LIMIT_MESSAGE, PHOTO_ASSESSMENT_CAP } = require('../middleware/public-llm-shared-cap');
@@ -224,7 +225,10 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
     });
     const releaseMode = classifyReleaseMode(reportContract);
     await applyWriterSummary(reportContract, { season, findingsSource, releaseMode, provenance });
-    const sanitizedContract = applyAutoReleaseRepair(reportContract, releaseMode);
+    // GATE_LAWN_JEV_TIMING_CHECK: Jev reads the model's summary before it is stored
+    // (enforce drops flagged sentences; shadow records after the insert; off = untouched).
+    const jevCheck = await checkDiagnosisSummary(applyAutoReleaseRepair(reportContract, releaseMode), { modelWritten: Boolean(provenance.writerModel) });
+    const sanitizedContract = jevCheck.contract;
 
     const claimToken = crypto.randomBytes(16).toString('hex');
     const [row] = await db('lawn_diagnostics').insert({
@@ -248,6 +252,7 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
       overall_score: deriveOverallScore(sanitizedContract, null),
       ai_summary: cleanString(sanitizedContract.customer_summary, 2000),
     }).returning(['id', 'overall_score', 'report_contract', 'created_at']);
+    jevCheck.afterInsert(row.id);
 
     // Best-effort photo storage for the admin review view — analysis already
     // ran from memory, so storage failure never fails the request.
