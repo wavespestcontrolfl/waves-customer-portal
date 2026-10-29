@@ -268,6 +268,7 @@
  *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
+ *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -2837,6 +2838,8 @@ const gates = {
   referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
   // GATE_ALERT_CLOSE_BUTTONS (Handled / Called back buttons on text, follow-up and missed-call bell rows, dark). Boot-log entry only; the call-time reader is alertCloseButtonsLive().
   alertCloseButtons: process.env.GATE_ALERT_CLOSE_BUTTONS === 'true',
+  // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
+  bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -6775,6 +6778,13 @@ function alertCloseButtonsLive() {
   return process.env.GATE_ALERT_CLOSE_BUTTONS === 'true';
 }
 
+// GATE_BID_ALERT_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the bid_decision
+// button kind (services/bid-desk/alert-buttons.js): No bid on a new bid invite's bell row, Bid once its due date is
+// confirmed. Off: those rows serve no such button and a tap answers 409. Kill: unset.
+function bidAlertButtonsLive() {
+  return process.env.GATE_BID_ALERT_BUTTONS === 'true';
+}
+
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
 // (server/routes/reservice-public.js). Strict 'true', and only alongside
 // GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
@@ -8573,6 +8583,8 @@ module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 module.exports.referralInboundBellLive = referralInboundBellLive;
 // GATE_ALERT_CLOSE_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
+// GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
+module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
