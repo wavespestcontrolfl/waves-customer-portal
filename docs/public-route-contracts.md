@@ -6303,6 +6303,13 @@ error code, limiter or token changes, and no message is sent.
   with `start`, `end`, `startTime24`, `endTime24`; one slot per distinct start).
   No pin, a list that did not build in about 1.5 seconds (3 seconds for a
   text quote), or any error serves the old list.
+- The assistant's list is also filtered against `confirmBooking`'s own commit
+  constraints (closed day, notice window, last start, and its technician-blind
+  occupancy probe with the travel gap), so a time the assistant offers is a
+  time `book_appointment` accepts. A start that only one technician has free,
+  while another technician's visit overlaps it, is not offered. A filter that
+  fails or takes over 1 second serves the old list. Text quotes are not
+  filtered (a person books them).
 - Text quotes carry the list that produced them (`open_times_snapshot.lookup.source`
   is `route_times`); the send-time recheck asks that same list, whatever the
   gate says by then. A snapshot without that source is the old list's, and is

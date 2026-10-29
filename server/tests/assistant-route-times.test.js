@@ -43,6 +43,10 @@ let logger;
 let oldFinder;
 let bookableOfferCustomer;
 let geocoders;
+let visits;
+let findConflictingVisits;
+let isBlackoutDate;
+let violatesSelfServeNotice;
 const NO_PIN_CUSTOMER = { id: 'cust-1', latitude: null, longitude: null, address_line1: '1 Main St', city: 'Venice', state: 'FL', zip: '34285' };
 let availabilityForPin;
 let funnelKeyForEstimateId;
@@ -70,7 +74,6 @@ beforeEach(() => {
   funnelKeyForEstimateId = jest.fn().mockResolvedValue('lawn_care');
   placeMovedVisit = jest.fn().mockResolvedValue([]);
   jest.doMock('../services/logger', () => logger);
-  jest.doMock('../models/db', () => jest.fn());
   jest.doMock('../services/availability', () => ({ getAvailableSlots: oldFinder }));
   jest.doMock('../services/scheduling/text-offer-times', () => ({ resolveTextOfferPin: geocoders.resolveTextOfferPin, textOfferDays: jest.fn() }));
   jest.doMock('../services/scheduling/day-stops', () => ({ resolveServiceLocation: geocoders.resolveServiceLocation }));
@@ -89,11 +92,29 @@ beforeEach(() => {
   }));
   jest.doMock('../services/estimate-converter', () => ({ funnelKeyForEstimateId }));
   jest.doMock('../services/scheduling/arrival-route', () => ({ placeMovedVisit }));
+  // confirmBooking's own commit probe, modelled on its real semantics: TECHNICIAN-BLIND (any
+  // technician's visit overlapping the window refuses it), half-open overlap.
+  visits = [];
+  findConflictingVisits = jest.fn(async ({ date, windowStart, windowEnd }) => visits.filter((v) => v.date === date
+    && v.start < windowEnd && v.end > windowStart));
+  isBlackoutDate = jest.fn(async () => false);
+  violatesSelfServeNotice = jest.fn(() => false);
+  jest.doMock('../services/scheduling/occupancy', () => ({ findConflictingVisits }));
+  jest.doMock('../services/scheduling/blackout-dates', () => ({ isBlackoutDate }));
+  jest.doMock('../services/scheduling/self-serve-notice', () => ({ violatesSelfServeNotice }));
+  jest.doMock('../services/scheduling/travel-gap', () => ({ travelGapEnabled: () => false }));
+  jest.doMock('../services/scheduling/expected-service-minutes', () => ({ expectedServiceMinutes: jest.fn() }));
+  jest.doMock('../models/db', () => jest.fn((table) => ({
+    first: async () => (table === 'booking_config' ? { slot_duration_minutes: 60 } : null),
+    where: () => ({ first: async () => ({ service_interest: 'Lawn Care' }) }),
+  })));
   routeTimes = require('../services/scheduling/assistant-route-times');
 });
 afterEach(() => {
   ['../services/logger', '../models/db', '../services/availability', '../services/scheduling/text-offer-times', '../routes/booking',
-    '../services/estimate-converter', '../services/scheduling/arrival-route', '../services/scheduling/day-stops', '../services/customer-geocode-review'].forEach((m) => jest.dontMock(m));
+    '../services/estimate-converter', '../services/scheduling/arrival-route', '../services/scheduling/day-stops', '../services/customer-geocode-review', '../services/scheduling/occupancy',
+    '../services/scheduling/blackout-dates', '../services/scheduling/self-serve-notice', '../services/scheduling/travel-gap',
+    '../services/scheduling/expected-service-minutes'].forEach((m) => jest.dontMock(m));
   jest.useRealTimers();
   jest.resetModules();
 });
@@ -151,7 +172,7 @@ describe('serveAssistantTimes — the assistant', () => {
     // old: 11/02 09:00, 11/02 14:00, 11/03 10:00. new: 11/02 09:00, 11/02 11:00, 11/04 13:00.
     const lines = infoLines();
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^\[assistant-route-times\] surface=assistant mode=shadow old=3 new=3 both=1 only_old=2 only_new=2 ms=\d+$/);
+    expect(lines[0]).toMatch(/^\[assistant-route-times\] surface=assistant mode=shadow old=3 new=3 both=1 only_old=2 only_new=2 commit_dropped=0 ms=\d+$/);
   });
 
   test('shadow: the reply does not wait for the new list', async () => {
@@ -489,5 +510,116 @@ describe('no geocode, ever: a customer without a stored pin is served the old li
     expect(out.engine).toBe('route_times');
     expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control' });
     Object.values(geocoders).forEach((spy) => expect(spy).not.toHaveBeenCalled());
+  });
+});
+
+describe('offer == commit: the assistant\'s list is filtered against confirmBooking\'s own constraints', () => {
+  // Technician A has a visit 09:00-10:00; B is free then. The customer pages offer per technician,
+  // so 09:00 is listed (B), 11:00 is free for both.
+  const TWO_TECH_DAYS = [
+    { date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, month: 'Nov', fullDate: 'Monday, November 2', slots: [
+      slot('09:00', '10:00', '9:00 AM', '10:00 AM', 'tB'),
+      slot('11:00', '12:00', '11:00 AM', '12:00 PM', 'tA'), slot('11:00', '12:00', '11:00 AM', '12:00 PM', 'tB'),
+    ] },
+    { date: '2026-11-03', dayOfWeek: 'Tue', dayNum: 3, month: 'Nov', fullDate: 'Tuesday, November 3', slots: [
+      slot('13:00', '14:00', '1:00 PM', '2:00 PM', 'tB'),
+    ] },
+  ];
+  const startsOf = (result) => result.days.map((d) => [d.date, d.slots.map((x) => x.startTime24)]);
+  const run = () => routeTimes.serveAssistantTimes({ customerId: 'cust-1', loadOld: () => oldFinder() });
+
+  beforeEach(() => {
+    availabilityForPin.mockResolvedValue({ days: TWO_TECH_DAYS });
+    visits.push({ technician_id: 'A', date: '2026-11-02', start: '09:00', end: '10:00' });
+  });
+
+  test('true: A busy at 09:00 and B free -> 09:00 is NOT offered (the commit would refuse it); a start free for both stays', async () => {
+    process.env[GATE] = 'true';
+    const out = await run();
+    expect(out.engine).toBe('route_times');
+    expect(startsOf(out.result)).toEqual([['2026-11-02', ['11:00']], ['2026-11-03', ['13:00']]]);
+    // The commit's own probe, the way confirmBooking calls it: technician-blind, interviews counted, one slot long.
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      date: '2026-11-02', windowStart: '09:00', windowEnd: '10:00', includeInterviews: true, excludeServiceIds: [],
+    }));
+    findConflictingVisits.mock.calls.forEach(([args]) => expect(args.technicianId).toBeUndefined());
+  });
+
+  test('true: a day whose every start would be refused disappears; if nothing is bookable the answer is empty, not the old list', async () => {
+    process.env[GATE] = 'true';
+    visits.push({ technician_id: 'A', date: '2026-11-03', start: '12:30', end: '13:30' });
+    visits.push({ technician_id: 'B', date: '2026-11-02', start: '11:00', end: '11:30' });
+    const out = await run();
+    expect(out.engine).toBe('route_times');
+    expect(out.result.days).toEqual([]);
+  });
+
+  test('true: the commit\'s other refusals drop a start too: a closed day, the notice window', async () => {
+    process.env[GATE] = 'true';
+    isBlackoutDate.mockImplementation(async (date) => date === '2026-11-03');
+    violatesSelfServeNotice.mockImplementation(({ date, startTime }) => date === '2026-11-02' && startTime === '11:00');
+    const out = await run();
+    expect(startsOf(out.result)).toEqual([]);
+    expect(violatesSelfServeNotice).toHaveBeenCalledWith({ date: '2026-11-02', startTime: '11:00' });
+  });
+
+  test('true: the travel pin and expected-minutes credit ride along exactly like confirmBooking\'s probe', async () => {
+    process.env[GATE] = 'true';
+    jest.resetModules();
+    jest.doMock('../services/scheduling/travel-gap', () => ({ travelGapEnabled: () => true }));
+    const expectedServiceMinutes = jest.fn().mockResolvedValue(45);
+    jest.doMock('../services/scheduling/expected-service-minutes', () => ({ expectedServiceMinutes }));
+    const adapter = require('../services/scheduling/assistant-route-times');
+    await adapter.serveAssistantTimes({ customerId: 'cust-1', estimateId: 'est-1', loadOld: () => oldFinder() });
+    expect(expectedServiceMinutes).toHaveBeenCalledWith(expect.anything(), { serviceType: 'Lawn Care', windowMinutes: 60 });
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ travel: { lat: '27.1', lng: '-82.4', expectedMinutes: 45 } }));
+  });
+
+  test('true: a commit check that fails or is slow serves the old list, never an unchecked new one', async () => {
+    process.env[GATE] = 'true';
+    findConflictingVisits.mockRejectedValueOnce(new Error('db down'));
+    expect((await run()).engine).toBe('old');
+    findConflictingVisits.mockImplementation(() => new Promise(() => {}));
+    jest.useFakeTimers();
+    const pending = run();
+    await jest.advanceTimersByTimeAsync(3000);
+    expect((await pending).engine).toBe('old');
+  });
+
+  test('shadow: serves the old list and logs how many starts the commit filter would drop', async () => {
+    process.env[GATE] = 'shadow';
+    const out = await run();
+    await out.settled;
+    expect(out.engine).toBe('old');
+    expect(infoLines()[0]).toMatch(/surface=assistant mode=shadow old=3 new=3 both=\d+ only_old=\d+ only_new=\d+ commit_dropped=1 ms=\d+$/);
+  });
+
+  test('off: the commit probe never runs', async () => {
+    await run();
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('check_availability under true offers the two-technician day without 09:00', async () => {
+    process.env[GATE] = 'true';
+    const { executeToolCall } = require('../services/ai-assistant/tools-expanded');
+    const out = await executeToolCall('check_availability', { city: 'Venice' }, 'cust-1');
+    expect(out.days[0].slots.map((x) => x.start)).toEqual(['11:00 AM']);
+  });
+
+  test('the text drafter\'s route quotes are not commit-filtered: a person books them (the offer kind is unknown to the ledger), never confirmBooking', async () => {
+    process.env[GATE] = 'true';
+    process.env[REAL_ANSWERS] = 'true';
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const offer = await drafter.cityFallbackOfferFor({
+      eligible: true, serviceType: 'Pest Control', estimateId: null, city: 'Venice', context: { customer: { id: 'cust-1' } },
+    });
+    expect(offer.preloadedDays).toBe(TWO_TECH_DAYS);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+    jest.dontMock('../services/call-booking-catalog');
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
+    expect(src).not.toMatch(/confirmBooking/);
   });
 });
