@@ -725,6 +725,161 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     });
   });
 
+  describe('GATE_BID_DESK_AUTO_DATES', () => {
+    beforeEach(() => { process.env.GATE_BID_DESK_AUTO_DATES = 'true'; });
+    afterEach(() => { delete process.env.GATE_BID_DESK_AUTO_DATES; });
+
+    describe('a template date counts as confirmed when the bid is first filed', () => {
+      test('gate on: a BuildingConnected invite with Bid Due is filed confirmed, and still rings its one bell', async () => {
+        const out = await service.ingestEmail(await storeEmail());
+        expect(await bidRow(out.bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false, due_source_line: 'Bid Due: October 20, 2026' });
+        expect(rung('new')).toHaveLength(1);
+      });
+
+      test('gate off: the same invite is filed unconfirmed', async () => {
+        delete process.env.GATE_BID_DESK_AUTO_DATES;
+        const out = await service.ingestEmail(await storeEmail());
+        expect(await bidRow(out.bidId)).toMatchObject({ due_confirmed: false });
+      });
+
+      test('the Bid Desk gate off turns it off too (the reader needs both)', async () => {
+        const reading = require('../config/feature-gates').bidDeskAutoDatesLive;
+        delete process.env.GATE_BID_DESK;
+        expect(reading()).toBe(false);
+        process.env.GATE_BID_DESK = 'true';
+        expect(reading()).toBe(true);
+      });
+
+      test('history (the backfill) is never auto-confirmed', async () => {
+        const out = await service.ingestEmail(await storeEmail(), { historical: true });
+        expect(await bidRow(out.bidId)).toMatchObject({ historical: true, due_confirmed: false });
+      });
+
+      test('a template with no date, and a government email that is not a template, are filed with no date and unconfirmed', async () => {
+        const noDate = await service.ingestEmail(await storeEmail({ body_text: 'x', subject: 'Invitation to bid', gmail_thread_id: `t-${randomUUID()}` }));
+        expect(await bidRow(noDate.bidId)).toMatchObject({ due_at: null, due_confirmed: false });
+        const gov = await service.ingestEmail(await storeEmail({
+          from_address: 'purchasing@sample-county.example', from_name: 'Sample County Purchasing', subject: 'Request for Proposal 26-100 Pest Control Services',
+          body_text: 'Proposals are due October 20, 2026 at 2:00 PM.', gmail_thread_id: `t-${randomUUID()}`,
+        }));
+        expect(gov.bidId).toBeTruthy();
+        expect(await bidRow(gov.bidId)).toMatchObject({ due_at: null, due_confirmed: false });
+      });
+
+      test('a manual mark of a plain email stays unconfirmed', async () => {
+        const email = await storeEmail({ from_address: 'manager@sample-hoa.example', subject: 'Quote request', body_text: 'Due October 20, 2026', gmail_thread_id: `t-${randomUUID()}` });
+        const out = await service.markEmailAsBid(email.id);
+        expect(await bidRow(out.bidId)).toMatchObject({ due_at: null, due_confirmed: false });
+      });
+
+      test('a bid whose first email is an addendum is not auto-confirmed', async () => {
+        const out = await service.ingestEmail(await storeEmail({ subject: 'Addendum 1: Sample Ridge Residences', body_text: BC_BODY('Sample Ridge Residences', 'October 27, 2026') }));
+        expect(out).toMatchObject({ created: true, kind: 'addendum' });
+        expect(await bidRow(out.bidId)).toMatchObject({ due_confirmed: false });
+      });
+
+      test('a later email still flags a changed date and never overwrites the confirmed one (attachPatch is unchanged)', async () => {
+        const first = await storeEmail();
+        const { bidId } = await service.ingestEmail(first);
+        const before = await bidRow(bidId);
+        expect(before.due_confirmed).toBe(true);
+        await service.ingestEmail(await storeEmail({
+          gmail_thread_id: first.gmail_thread_id, subject: 'Addendum 1: Sample Ridge Residences',
+          body_text: BC_BODY('Sample Ridge Residences', 'October 27, 2026'), received_at: new Date(NOW.getTime() - 30000),
+        }));
+        const after = await bidRow(bidId);
+        expect(after.due_at.toISOString()).toBe(before.due_at.toISOString());
+        expect(after).toMatchObject({ due_confirmed: true, needs_date_confirmation: true });
+      });
+
+      test('a confirmed template date reminds without the operator touching it', async () => {
+        const { bidId } = await service.ingestEmail(await storeEmail({ body_text: BC_BODY('Sample Ridge Residences', 'October 5, 2026') }));
+        raiseAdminAlertWithReopen.mockClear();
+        expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+        expect((await bidRow(bidId)).reminder_7d_sent_at).not.toBeNull();
+      });
+    });
+
+    describe('a bid whose due date passed closes itself', () => {
+      const DUE_PAST = (days) => new Date(NOW.getTime() - days * DAY);
+      async function openBid(over = {}) {
+        const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
+        await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: DUE_PAST(2), ...over });
+        return bidId;
+      }
+      const ring = (bidId, key = `bid-desk:new:${bidId}`) => mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) });
+      const openBells = async (bidId) => (await mockPg('notifications').whereRaw("metadata->>'dedupeKey' like ?", [`bid-desk:%${bidId}%`])
+        .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'").select('metadata')).map((r) => r.metadata.dedupeKey).sort();
+
+      test('a new bid 2 days past due closes as no bid with the note, and its bells close like an operator decision', async () => {
+        const bidId = await openBid();
+        await ring(bidId);
+        await ring(bidId, `bid-desk:remind:${bidId}:2d:x`);
+        await ring(bidId, `bid-desk:addendum:${bidId}:${randomUUID()}`);
+        const other = await openBid({ due_at: DUE_PAST(0.2) });
+        await ring(other);
+        const before = await bidRow(bidId);
+        raiseAdminAlert.mockClear();
+        expect(await service.closeLapsedBids({ now: NOW })).toBe(1);
+        const after = await bidRow(bidId);
+        expect(after).toMatchObject({ status: 'no_bid', decision_note: 'Closed by itself: the due date (Sep 29) passed with no decision.' });
+        expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime());
+        expect(await openBells(bidId)).toEqual([]);
+        expect(await openBells(other)).toEqual([`bid-desk:new:${other}`]);
+        expect((await bidRow(other)).status).toBe('new');
+        // Nothing is rung or sent by closing.
+        expect(raiseAdminAlert).not.toHaveBeenCalled();
+        expect(await service.closeLapsedBids({ now: NOW })).toBe(0);
+      });
+
+      test('the 15-minute tick closes it and reports the count', async () => {
+        const bidId = await openBid();
+        const result = await service.runBidDeskTick({ now: NOW });
+        expect(result.autoClosed).toBe(1);
+        expect((await bidRow(bidId)).status).toBe('no_bid');
+      });
+
+      test('gate off: nothing closes and the tick reports no count', async () => {
+        delete process.env.GATE_BID_DESK_AUTO_DATES;
+        const bidId = await openBid();
+        expect(await service.closeLapsedBids({ now: NOW })).toBe(0);
+        expect((await service.runBidDeskTick({ now: NOW })).autoClosed).toBeUndefined();
+        expect(await bidRow(bidId)).toMatchObject({ status: 'new', decision_note: null });
+      });
+
+      test('a bid marked bid, a submitted bid, a bid with no date and a decided bid are left alone', async () => {
+        const marked = await openBid({ status: 'bid' });
+        const submitted = await openBid({ submitted_at: DUE_PAST(3) });
+        const undated = await openBid({ due_at: null });
+        const declined = await openBid({ status: 'no_bid', decision_note: 'too far' });
+        expect(await service.closeLapsedBids({ now: NOW })).toBe(0);
+        expect((await bidRow(marked)).status).toBe('bid');
+        expect((await bidRow(submitted)).status).toBe('new');
+        expect((await bidRow(undated)).status).toBe('new');
+        expect(await bidRow(declined)).toMatchObject({ status: 'no_bid', decision_note: 'too far' });
+      });
+
+      test('a date flagged for an addendum check waits 30 days', async () => {
+        const waiting = await openBid({ needs_date_confirmation: true, due_at: DUE_PAST(5) });
+        const stale = await openBid({ needs_date_confirmation: true, due_at: DUE_PAST(31) });
+        expect(await service.closeLapsedBids({ now: NOW })).toBe(1);
+        expect((await bidRow(waiting)).status).toBe('new');
+        expect((await bidRow(stale)).status).toBe('no_bid');
+      });
+
+      test('a bid the owner sets back to new keeps the note and never closes itself again', async () => {
+        const bidId = await openBid();
+        await service.closeLapsedBids({ now: NOW });
+        expect((await call('PATCH', `/${bidId}`, { status: 'new' })).status).toBe(200);
+        const reopened = await bidRow(bidId);
+        expect(reopened.status).toBe('new');
+        expect(reopened.decision_note).toMatch(/^Closed by itself/);
+        expect(await service.closeLapsedBids({ now: new Date(NOW.getTime() + 60 * DAY) })).toBe(0);
+        expect((await bidRow(bidId)).status).toBe('new');
+      });
+    });
+  });
+
   describe('manual mark', () => {
     test('files a bid from one email with source manual and no bell, and answers the same bid the second time', async () => {
       const email = await storeEmail({ from_address: 'manager@sample-hoa.example', subject: 'Grounds pest control quote', body_text: 'Please send pricing.' });
