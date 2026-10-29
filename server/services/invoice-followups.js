@@ -40,13 +40,13 @@ const { sendMicrodepositVerificationEmail } = require('./microdeposit-verificati
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { customerOnAutopay } = require('./autopay-eligibility');
+const { customerOnAutopay, isBankMethodType } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
 const { approvalDigest, phoneKey, emailKey } = require('../utils/approval-digest');
-const { etDateString, formatETDayDate } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, formatETDayDate } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const {
@@ -2871,12 +2871,26 @@ const AUTOPAY_HOLD_CHARGE_STARTED_ACTION = 'invoice_followup.autopay_hold_timeou
 const AUTOPAY_HOLD_AMBIGUOUS_CODES = [
   'STRIPE_CHARGED_DB_FAILED', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST',
 ];
+// chargeInvoiceWithSavedCard's requireBankDebitDue refusal: the bank debit date has not arrived (stripe.js). Raised
+// before any credit apply or Stripe call, so the charge path releases its claim and the attempt row keeps only the
+// message (decline_code null): the recovery pass recognises the refusal by BANK_DEBIT_NOT_DUE_PATTERN.
+const BANK_DEBIT_NOT_DUE_CODE = 'BANK_DEBIT_NOT_DUE';
+const BANK_DEBIT_NOT_DUE_PATTERN = /Bank debit date has not arrived/i;
 // A payments row that is money a person took, not Auto Pay acting: paid, with no gateway (processor), charge or
 // PaymentIntent. recordManualPayment writes exactly this for cash, check, Zelle, Venmo, PayPal and other, and so do
 // the prepaid-credit rows (complete-scheduled-service, admin-schedule) and the check/cash branch of the payment
 // reconcile. Every Auto Pay and pay-page writer (stripe.js, pay-combined, the Stripe webhook, billing-cron's
 // failed or deferred monthly rows) sets processor 'stripe' or a Stripe id, or is not 'paid', so it still blocks.
 const OFF_GATEWAY_PAID_TENDER = "p.status = 'paid' AND p.processor IS NULL AND p.stripe_charge_id IS NULL AND p.stripe_payment_intent_id IS NULL";
+
+// An invoice an annual-prepay term references (annual_prepay_terms.prepay_invoice_id, unique per invoice) is governed
+// by a dedicated rail: termite-annual-renewal-charge.js (renewalChargeCeiling: signed flat-fee cap, surcharge rule,
+// renewal gate), termite-annual-signature-charge.js (signed agreement) and recurring-card-on-file.js (the deferred
+// prepay) all charge through that one column, and no other annual_prepay_terms column names an invoice. The hold
+// sweep never charges these (it has none of those authorizations); charge mode releases them as 'true' does.
+function annualPrepayTermRail() {
+  this.select(db.raw('1')).from('annual_prepay_terms as apt').whereRaw('apt.prepay_invoice_id = s.invoice_id');
+}
 
 /**
  * The SQL half of the timeout rule, on a builder over `invoice_followup_sequences as s`. The sweep's
@@ -2895,7 +2909,7 @@ const OFF_GATEWAY_PAID_TENDER = "p.status = 'paid' AND p.processor IS NULL AND p
  * - no open customer-level schedule for the customer (that engine owns its reminders: it promotes only
  *   `active` rows, so a hold it never touched would otherwise sit, but a row it owns is judged by it).
  */
-function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCharge = false, holdStamp = null } = {}) {
+function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCharge = false, holdStamp = null, termRail = null } = {}) {
   // Three rule sets for the money rules (attempts, payments); every other rule is shared:
   // - default ('true' and 'shadow'): no attempt row at all, no payment for the customer since the hold began
   //   other than an off-gateway paid tender;
@@ -2905,6 +2919,8 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
   //   failed cleanly, so ONLY the rows that charge wrote are exempt: a 'failed' attempt (not
   //   authentication_required) and a 'failed' payment. The age rule and the hold-stamp equality are dropped (the
   //   charge can bump updated_at); the invoice-specific and in-flight payment rules apply since the hold stamp.
+  // termRail ('only' | 'none' | null) splits the holds by the dedicated annual-prepay rails (see annualPrepayTermRail):
+  // charge mode releases the 'only' set as 'true' does and charges the 'none' set. Not used by 'true' or 'shadow'.
   const base = query.where('s.status', 'autopay_hold');
   if (afterOwnCharge) {
     if (!holdStamp) throw new Error('afterOwnCharge needs the observed holdStamp');
@@ -2938,6 +2954,7 @@ function staleAutopayHoldClause(query, cutoff, { chargeMode = false, afterOwnCha
           .whereRaw(`NOT (${OFF_GATEWAY_PAID_TENDER})`);
       });
   }
+  if (termRail) base[termRail === 'only' ? 'whereExists' : 'whereNotExists'](annualPrepayTermRail);
   return base
     .whereNotExists(function noPendingRetry() {
       this.select(db.raw('1')).from('payments as r')
@@ -3050,11 +3067,14 @@ const moneyLabel = (amountCents) => `$${(amountCents / 100).toLocaleString('en-U
 // What a failed charge call means. 'ambiguous': money may have moved or a charge is still settling (the
 // codes the charge path documents, a reconciliation flag, or a decline that leaves a live PaymentIntent for
 // the customer to finish: authentication_required). 'declined': a real processor decline. 'refused': any
-// other refusal, which the charge path raises before it submits anything to Stripe.
+// other refusal, which the charge path raises before it submits anything to Stripe. 'not_due': the bank debit
+// date has not arrived (quiet: retried on a later run).
 function classifyAutopayHoldChargeError(err) {
   const code = err && err.code;
   // A collection-hold refusal is retryable and was never attempted (collections/collection-hold.js): deferred.
   if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) return 'deferred';
+  // A bank debit before the invoice's due date was refused under the lock, also before anything reached Stripe.
+  if (code === BANK_DEBIT_NOT_DUE_CODE) return 'not_due';
   if (AUTOPAY_HOLD_AMBIGUOUS_CODES.includes(code) || err?.reconciliationRequired === true) return 'ambiguous';
   if (err?.wavesCardDecline?.declineCode === 'authentication_required') return 'ambiguous';
   if (err?.wavesCardDecline || code === 'STRIPE_CHARGE_FAILED') return 'declined';
@@ -3184,12 +3204,15 @@ async function disputeHoldBlocksCharge(customerId) {
  *   { kind: 'skipped' }                                   a method lookup that threw: nothing was tried
  *   { kind: 'charged', status, result, ... }              paid, processing (bank) or covered by account credit
  *   { kind: 'held_off' }                                  a dispute hold stops the charge: nothing was tried, nothing written
+ *   { kind: 'bank_wait' }                                 a bank method whose invoice due date is after today (ET): nothing was tried, nothing written
+ *   { kind: 'no_debit_date' }                             a bank method on an invoice with no due date: no authorized debit date, nothing was tried
  *   { kind: 'deferred', reason: 'deferred', err, ... }    the charge itself refused on a dispute hold (a race): retried later
+ *   { kind: 'not_due', reason: 'not_due', err, ... }      the charge itself refused a bank debit before the due date (a race): retried later
  *   { kind: 'ambiguous', reason: 'ambiguous', err, ... }  money may have moved or a charge is still settling
  *   { kind: 'declined', reason: 'declined' | 'refused' | 'no_method', err, ... }   clean, nothing was charged
  * `chargeCalled` says whether chargeInvoiceWithSavedCard was reached (it decides the release guards).
  */
-async function attemptAutopayHoldCharge(row, invoice) {
+async function attemptAutopayHoldCharge(row, invoice, now = new Date()) {
   let method;
   try {
     // rethrow: a failed lookup must not read as "no method" (that releases the hold). Only a lookup that
@@ -3204,6 +3227,14 @@ async function attemptAutopayHoldCharge(row, invoice) {
   // A dispute hold that appeared since the select (or one that cannot be read): the charge would refuse it, so
   // nothing is attempted. No marker, no attempt, no release, no alert; the next run tries again.
   if (await disputeHoldBlocksCharge(row.customer_id)) return { kind: 'held_off' };
+  // The bank consent (payment-method-consent-text.js) authorizes a debit for the invoice on or after its due date (or
+  // on the Auto Pay billing day the customer selected, an alternative EARLIER date: waiting for the due date never
+  // exceeds the authorization, so the billing day is ignored). Date-only ET strings. No due date = no authorized
+  // debit date. Both leave before the quote and the start marker; the charge re-checks this under the invoice lock.
+  if (isBankMethodType(method.method_type)) {
+    if (!invoice.due_date) return { kind: 'no_debit_date' };
+    if (etCalendarDayOf(invoice.due_date) > etDateString(now)) return { kind: 'bank_wait' };
+  }
 
   let quote;
   try {
@@ -3243,6 +3274,7 @@ async function attemptAutopayHoldCharge(row, invoice) {
       maxAuthorizedTotalCents: Math.round(quote.total * 100),
       requireAutopayForCustomerId: row.customer_id,
       refuseWhenDunningStopped: true,
+      requireBankDebitDue: true,
       ...visitGuards,
     });
     const status = result && result.covered_by_credit === true ? 'covered_by_credit' : String(result?.status || 'paid');
@@ -3251,7 +3283,7 @@ async function attemptAutopayHoldCharge(row, invoice) {
     let reason = classifyAutopayHoldChargeError(chargeErr);
     // A clean decline, refusal or deferral leaves no open attempt. Anything else may have reached Stripe.
     if (reason !== 'ambiguous' && await invoiceHasOpenChargeAttempt(invoice.id)) reason = 'ambiguous';
-    return decision({ kind: ['ambiguous', 'deferred'].includes(reason) ? reason : 'declined', reason, chargeCalled: true, quote, err: chargeErr });
+    return decision({ kind: ['ambiguous', 'deferred', 'not_due'].includes(reason) ? reason : 'declined', reason, chargeCalled: true, quote, err: chargeErr });
   }
 }
 
@@ -3296,6 +3328,16 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
     log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} deferred by a dispute hold; hold kept, retried after it clears`],
     result: () => 'deferred',
   },
+  // The charge refused a bank debit before the invoice due date (a race with the select): the hold stays, no
+  // alert, the final row reads 'deferred' so chargeModeAttemptRule lets the next run charge it once it is due.
+  not_due: {
+    releases: false,
+    stops: () => false,
+    audit: () => 'deferred',
+    alert: null,
+    log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} bank debit date not reached; hold kept, retried on or after the due date`],
+    result: () => 'not_due',
+  },
   declined: {
     releases: true,
     stops: () => false,
@@ -3306,6 +3348,16 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
   },
 };
 
+// Released exactly as GATE_AUTOPAY_HOLD_TIMEOUT=true releases it: its clause and recheck (releaseStaleAutopayHold with
+// no charge-mode options), its office alert, no charge attempt, no marker, no charge audit row. Used for an invoice
+// a dedicated annual-prepay rail governs and for a bank method with no authorized debit date.
+async function releaseAsTrue(row, cutoff, now) {
+  return { outcome: (await releaseStaleAutopayHold(row, cutoff, now)) ? 'true_released' : 'skipped' };
+}
+
+// Decisions that end a hold's turn before any marker, quote or charge: nothing is written for them.
+const AUTOPAY_HOLD_EARLY_OUTCOMES = { skipped: 'skipped', held_off: 'deferred', bank_wait: 'not_due' };
+
 /**
  * GATE_AUTOPAY_HOLD_TIMEOUT=charge: the action for ONE stale hold the sweep selected. Charges the method Auto
  * Pay itself would charge (attemptAutopayHoldCharge), then applies the decision's plan:
@@ -3315,9 +3367,13 @@ const AUTOPAY_HOLD_CHARGE_PLANS = {
  * - declined, refused or no chargeable method: the hold is released as 'true' releases it (original guards
  *   when no charge was called; only our own failed rows exempted when one was), and one office alert says why;
  * - ambiguous: the hold stays, nothing retries, and one office alert says to check Stripe.
- * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'deferred' | 'skipped' | 'alert_failed' }.
+ * - a bank method before its invoice due date: nothing is written and the hold stays ('not_due'); a bank method on an
+ *   invoice with no due date has no authorized debit date, so it is released as 'true' releases it ('true_released').
+ * Returns { outcome: 'charged' | 'declined_released' | 'release_failed' | 'ambiguous' | 'deferred' | 'not_due' | 'true_released' | 'skipped' | 'alert_failed' }.
  */
-async function chargeStaleAutopayHold(row, cutoff) {
+async function chargeStaleAutopayHold(row, cutoff, now = new Date()) {
+  // An annual-prepay term rail invoice (row.termRail, see annualPrepayTermRail) is never charged here.
+  if (row.termRail) return releaseAsTrue(row, cutoff, now);
   // Still the same stale hold? Minutes can pass between the read and this row; money must not move on a
   // hold that a payment, plan, visit or failure bump has since changed. A read, not a lock.
   const stillStale = await staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff, { chargeMode: true })
@@ -3328,9 +3384,9 @@ async function chargeStaleAutopayHold(row, cutoff) {
   const invoice = await db('invoices').where({ id: row.invoice_id }).first();
   if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return { outcome: 'skipped' };
 
-  const d = await attemptAutopayHoldCharge(row, invoice);
-  if (d.kind === 'skipped') return { outcome: 'skipped' };
-  if (d.kind === 'held_off') return { outcome: 'deferred' };
+  const d = await attemptAutopayHoldCharge(row, invoice, now);
+  if (AUTOPAY_HOLD_EARLY_OUTCOMES[d.kind]) return { outcome: AUTOPAY_HOLD_EARLY_OUTCOMES[d.kind] };
+  if (d.kind === 'no_debit_date') return releaseAsTrue(row, cutoff, now);
 
   const covered = d.status === 'covered_by_credit';
   const amountCents = covered ? 0 : (d.quote ? Math.round(d.quote.total * 100) : cents(invoiceAmountDue(invoice)));
@@ -3388,6 +3444,21 @@ async function unfinishedAutopayHoldCharges() {
     .select('m.resource_id as invoice_id', 'm.created_at as started_at', 'm.metadata as metadata', 's.customer_id');
 }
 
+// Which plan an unfinished attempt maps to, from the attempt rows created since its marker. A failed attempt that
+// asks the customer to authenticate is ambiguous, like the live classifier reads it. A failed attempt whose message
+// is a collection-hold or bank-debit-date refusal was never attempted: retry later (the first alerts, the second
+// is quiet).
+function recoveredAttemptKind(attempts, invoice) {
+  if (!attempts.length) return 'abandoned';
+  const clean = attempts.every((attempt) => attempt.status === 'failed' && attempt.decline_code !== 'authentication_required');
+  const refusedBy = (pattern) => attempts.some((attempt) => pattern.test(String(attempt.error_message || '')));
+  if (clean && refusedBy(/billing dispute|Collection hold could not be verified/i)) return 'deferred';
+  if (clean && refusedBy(BANK_DEBIT_NOT_DUE_PATTERN)) return 'not_due';
+  if (clean) return 'declined';
+  return ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase()) ? 'charged' : 'ambiguous';
+}
+const RECOVERED_REASON = { declined: 'recovered', ambiguous: 'ambiguous', deferred: 'collection_hold', not_due: 'bank_debit_not_due' };
+
 async function recoverAutopayHoldCharge(marker, cutoff) {
   const meta = marker.metadata || {};
   const invoice = await db('invoices').where({ id: marker.invoice_id }).first();
@@ -3396,19 +3467,9 @@ async function recoverAutopayHoldCharge(marker, cutoff) {
     .where({ invoice_id: marker.invoice_id })
     .where('created_at', '>=', marker.started_at)
     .select('status', 'decline_code', 'error_message');
-  // A failed attempt that asks the customer to authenticate is ambiguous, like the live classifier reads it.
-  const cleanDecline = (attempt) => attempt.status === 'failed' && attempt.decline_code !== 'authentication_required';
-  // A failed attempt whose message is a collection-hold refusal was never attempted: retry after the hold clears.
-  const holdRefusal = (attempt) => /billing dispute|Collection hold could not be verified/i.test(String(attempt.error_message || ''));
-  let kind = 'ambiguous';
-  if (!attempts.length) kind = 'abandoned';
-  else if (attempts.every(cleanDecline) && attempts.some(holdRefusal)) kind = 'deferred';
-  else if (attempts.every(cleanDecline)) kind = 'declined';
-  else if (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) kind = 'charged';
+  const kind = recoveredAttemptKind(attempts, invoice);
   const row = { id: meta.sequence_id, invoice_id: marker.invoice_id, customer_id: marker.customer_id, hold_stamp: meta.hold_stamp };
-  const d = { kind, reason: kind === 'declined' ? 'recovered' : null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null };
-  if (kind === 'ambiguous') d.reason = 'ambiguous';
-  if (kind === 'deferred') d.reason = 'collection_hold';
+  const d = { kind, reason: RECOVERED_REASON[kind] || null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null };
   return (await applyAutopayHoldPlan(row, cutoff, invoice, d, Number(meta.amount_cents) || 0)).outcome;
 }
 
@@ -3442,8 +3503,8 @@ async function recoverAutopayHoldCharges(cutoff) {
  * hold is counted and the sweep goes on: before the charge call it moved no money, after it the charge path's
  * own attempt row fences the invoice.
  */
-async function chargeStaleAutopayHolds(allDue, cutoff) {
-  const counts = { charged: 0, declined_released: 0, release_failed: 0, ambiguous: 0, deferred: 0, skipped: 0, errors: 0 };
+async function chargeStaleAutopayHolds(allDue, cutoff, now = new Date()) {
+  const counts = { charged: 0, declined_released: 0, true_released: 0, release_failed: 0, ambiguous: 0, deferred: 0, not_due: 0, skipped: 0, errors: 0 };
   // First finish what an earlier run left half done. The recovery pass never charges, and an invoice it
   // touched is not charged again in this run.
   const recovery = await recoverAutopayHoldCharges(cutoff);
@@ -3451,7 +3512,7 @@ async function chargeStaleAutopayHolds(allDue, cutoff) {
   const due = allDue.filter((row) => !recovery.invoiceIds.has(String(row.invoice_id)));
   for (const row of due) {
     try {
-      const { outcome } = await chargeStaleAutopayHold(row, cutoff);
+      const { outcome } = await chargeStaleAutopayHold(row, cutoff, now);
       // An alert that could not be filed leaves the attempt unfinished for the next run's recovery.
       counts[outcome === 'alert_failed' ? 'errors' : outcome] += 1;
     } catch (err) {
@@ -3459,8 +3520,8 @@ async function chargeStaleAutopayHolds(allDue, cutoff) {
       logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
     }
   }
-  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.ambiguous} ambiguous, ${counts.deferred} deferred, ${counts.skipped} skipped, ${counts.release_failed} not released, ${recovery.recovered} recovered, ${counts.errors} error(s)`);
-  return { mode: 'charge', candidates: due.length, released: counts.declined_released, recorded: 0, recovered: recovery.recovered, ...counts };
+  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.true_released} released as true (term rail or no bank debit date), ${counts.ambiguous} ambiguous, ${counts.deferred} deferred, ${counts.not_due} waiting for a bank debit date, ${counts.skipped} skipped, ${counts.release_failed} not released, ${recovery.recovered} recovered, ${counts.errors} error(s)`);
+  return { mode: 'charge', candidates: due.length, released: counts.declined_released + counts.true_released, recorded: 0, recovered: recovery.recovered, ...counts };
 }
 
 // 'shadow': one audit_log row per would-release invoice per ET day, nothing else. Returns how many were newly recorded.
@@ -3491,27 +3552,13 @@ async function recordShadowAutopayHolds(due, now) {
   return recorded;
 }
 
-/**
- * Release Auto Pay holds that Auto Pay never acted on: `autopay_hold` sequences that meet
- * staleAutopayHoldClause, on an invoice that is not terminal, not payer-billed and still schedulable,
- * for a customer with no OPEN customer-level schedule (an open one owns its reminders and judges Auto Pay
- * itself). The live engine's coverage (GATE_DUNNING_CUSTOMER_SCHEDULE, its allowlist) is not a skip: with no
- * allowlist it covers every customer, and the engine never promotes an `autopay_hold` row, so skipping
- * covered customers would leave every uncharged Auto Pay invoice held for good. Every held row is read, in
- * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
- * writes at most one audit_log row per invoice per ET day and changes nothing; 'charge' charges the saved
- * Auto Pay method first (chargeStaleAutopayHold) and releases only a declined or refused hold; off returns
- * before any query.
- */
-async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
-  const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
-  if (!['shadow', 'true', 'charge'].includes(mode)) return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
-
-  const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
+// Every held row `staleAutopayHoldClause(..., clauseOptions)` selects, in id-keyset pages so rows the skips pass over
+// never hide the rows behind them, minus invoices that are terminal, payer-billed or no longer schedulable.
+async function selectStaleAutopayHolds(cutoff, pageSize, clauseOptions) {
   const due = [];
   let afterId = null;
   for (;;) {
-    const page = staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff, { chargeMode: mode === 'charge' })
+    const page = staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff, clauseOptions)
       .orderBy('s.id', 'asc')
       .limit(pageSize)
       .select('s.id', 's.invoice_id', 's.customer_id', 's.updated_at', db.raw('s.updated_at::text as hold_stamp'));
@@ -3526,10 +3573,37 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
     if (rows.length < pageSize) break;
     afterId = rows[rows.length - 1].id;
   }
+  return due;
+}
+
+/**
+ * Release Auto Pay holds that Auto Pay never acted on: `autopay_hold` sequences that meet
+ * staleAutopayHoldClause, on an invoice that is not terminal, not payer-billed and still schedulable,
+ * for a customer with no OPEN customer-level schedule (an open one owns its reminders and judges Auto Pay
+ * itself). The live engine's coverage (GATE_DUNNING_CUSTOMER_SCHEDULE, its allowlist) is not a skip: with no
+ * allowlist it covers every customer, and the engine never promotes an `autopay_hold` row, so skipping
+ * covered customers would leave every uncharged Auto Pay invoice held for good. Every held row is read, in
+ * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
+ * writes at most one audit_log row per invoice per ET day and changes nothing; 'charge' charges the saved
+ * Auto Pay method first (chargeStaleAutopayHold) and releases only a declined or refused hold, except that an
+ * annual-prepay term rail invoice is never charged (released as 'true' releases it) and a bank method waits for the
+ * invoice due date (no due date: released as 'true'); off returns before any query.
+ */
+async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
+  const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
+  if (!['shadow', 'true', 'charge'].includes(mode)) return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
+
+  const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
+  // Charge mode splits the holds: an annual-prepay term rail invoice is released as 'true' releases it (the 'true'
+  // clause, termRail 'only'), every other hold is a charge candidate (termRail 'none'). 'true' and 'shadow' select once.
+  const railDue = mode === 'charge'
+    ? (await selectStaleAutopayHolds(cutoff, pageSize, { termRail: 'only' })).map((row) => ({ ...row, termRail: true }))
+    : [];
+  const due = await selectStaleAutopayHolds(cutoff, pageSize, mode === 'charge' ? { chargeMode: true, termRail: 'none' } : {});
 
   let released = 0;
   let recorded = 0;
-  if (mode === 'charge') return chargeStaleAutopayHolds(due, cutoff);
+  if (mode === 'charge') return chargeStaleAutopayHolds([...railDue, ...due], cutoff, now);
   if (mode === 'true') {
     for (const row of due) {
       if (await releaseStaleAutopayHold(row, cutoff, now)) released += 1;

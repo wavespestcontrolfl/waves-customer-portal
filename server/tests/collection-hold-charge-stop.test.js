@@ -253,7 +253,7 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
   // holdRows are what the collections_flags query returns (the fake below does
   // not evaluate SQL predicates — discrimination is covered by the lookup
   // tests above and the real-Postgres suite).
-  function setup({ holdRows = [], holdThrows = false, invoiceExtra = {} } = {}) {
+  function setup({ holdRows = [], holdThrows = false, invoiceExtra = {}, cardExtra = {} } = {}) {
     jest.resetModules();
     const events = [];
     jest.dontMock('../services/stripe');
@@ -268,7 +268,7 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       });
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return { ...invoice, ...invoiceExtra };
-        if (table === 'payment_methods') return card;
+        if (table === 'payment_methods') return { ...card, ...cardExtra };
         if (table === 'scheduled_services') return { id: invoiceExtra.scheduled_service_id, customer_id: 'cust-1', source_estimate_id: null };
         if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
         if (table === 'collections_flags') {
@@ -350,6 +350,53 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
         const { StripeService, stripeClient } = setup({ invoiceExtra: { scheduled_service_id: 'visit-1' } });
         await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
           .rejects.not.toThrow('The invoice is now bound to a visit');
+        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+      });
+    });
+
+    describe('requireBankDebitDue (opt-in: the Auto Pay hold charge mode)', () => {
+      const BANK = { method_type: 'us_bank_account' };
+      const etDay = (offsetDays) => require('../utils/datetime-et').etDateString(new Date(Date.now() + offsetDays * 86400000));
+
+      test.each([
+        ['a string due date after today', etDay(3)],
+        ['a due date that is a UTC-midnight Date after today', new Date(`${etDay(3)}T00:00:00.000Z`)],
+        ['no due date', null],
+      ])('a bank method on an invoice with %s refuses BANK_DEBIT_NOT_DUE before any credit or Stripe call', async (_label, due) => {
+        const { StripeService, stripeClient } = setup({ cardExtra: BANK, invoiceExtra: { due_date: due } });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireBankDebitDue: true }))
+          .rejects.toMatchObject({ code: 'BANK_DEBIT_NOT_DUE', message: expect.stringMatching(/Bank debit date has not arrived/i) });
+        expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      });
+
+      test('the refusal also covers the ach alias row', async () => {
+        const { StripeService, stripeClient } = setup({ cardExtra: { method_type: 'ach' }, invoiceExtra: { due_date: etDay(3) } });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireBankDebitDue: true }))
+          .rejects.toMatchObject({ code: 'BANK_DEBIT_NOT_DUE' });
+        expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['today (ET)', etDay(0)],
+        ['in the past', etDay(-9)],
+      ])('a bank method on an invoice due %s proceeds to Stripe', async (_label, due) => {
+        const { StripeService, stripeClient } = setup({ cardExtra: BANK, invoiceExtra: { due_date: due } });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireBankDebitDue: true }))
+          .rejects.not.toMatchObject({ code: 'BANK_DEBIT_NOT_DUE' });
+        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+      });
+
+      test.each([[etDay(3)], [null]])('a card is unaffected by the option (due date %p)', async (due) => {
+        const { StripeService, stripeClient } = setup({ invoiceExtra: { due_date: due } });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireBankDebitDue: true }))
+          .rejects.not.toMatchObject({ code: 'BANK_DEBIT_NOT_DUE' });
+        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+      });
+
+      test('without the option a bank method before its due date behaves as before', async () => {
+        const { StripeService, stripeClient } = setup({ cardExtra: BANK, invoiceExtra: { due_date: etDay(3) } });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
+          .rejects.not.toMatchObject({ code: 'BANK_DEBIT_NOT_DUE' });
         expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
       });
     });

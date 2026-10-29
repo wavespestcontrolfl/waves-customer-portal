@@ -21,6 +21,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
+const { etDateString } = require('../utils/datetime-et');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -45,7 +46,9 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.raw(`CREATE TABLE invoices (
       id uuid PRIMARY KEY, status text, payer_id uuid, scheduled_send_error text, scheduled_service_id uuid,
-      invoice_number text, total numeric, credit_applied numeric DEFAULT 0, amount_paid numeric NOT NULL DEFAULT 0, sent_at timestamptz, sms_sent_at timestamptz, created_at timestamptz DEFAULT now())`);
+      invoice_number text, total numeric, credit_applied numeric DEFAULT 0, amount_paid numeric NOT NULL DEFAULT 0, sent_at timestamptz, sms_sent_at timestamptz, due_date date, created_at timestamptz DEFAULT now())`);
+    // The dedicated annual-prepay rails charge through annual_prepay_terms.prepay_invoice_id (unique per invoice).
+    await mockPg.raw('CREATE TABLE annual_prepay_terms (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), prepay_invoice_id uuid UNIQUE)');
     await mockPg.raw(`CREATE TABLE invoice_followup_sequences (
       id uuid PRIMARY KEY, invoice_id uuid NOT NULL, customer_id uuid NOT NULL, status text,
       step_index integer DEFAULT 0, next_touch_at timestamptz, anchor_at timestamptz,
@@ -85,7 +88,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log, fail_release, collections_flags');
+    await mockPg.raw('TRUNCATE customers, invoices, annual_prepay_terms, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log, fail_release, collections_flags');
     delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
     mockNotify.mockClear();
   });
@@ -95,7 +98,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   // same customer passes its customerId.
   async function held({
     heldDaysAgo = 4, anchorDaysAgo = 20, at = new Date(), invoiceStatus = 'sent', status = 'autopay_hold', payerId = null,
-    visitStatus = null, sequenceId = randomUUID(), customerId = randomUUID(), total = 120,
+    visitStatus = null, sequenceId = randomUUID(), customerId = randomUUID(), total = 120, dueDate = null,
   } = {}) {
     const invoiceId = randomUUID();
     const heldAt = new Date(at.getTime() - heldDaysAgo * DAY);
@@ -107,7 +110,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await mockPg('scheduled_services').insert({ id: visitId, status: visitStatus });
     }
     await mockPg('invoices').insert({
-      id: invoiceId, status: invoiceStatus, payer_id: payerId, scheduled_service_id: visitId, sent_at: sentAt, invoice_number: `WPC-${invoiceId.slice(0, 4)}`, total,
+      id: invoiceId, status: invoiceStatus, payer_id: payerId, scheduled_service_id: visitId, sent_at: sentAt, invoice_number: `WPC-${invoiceId.slice(0, 4)}`, total, due_date: dueDate,
     });
     await mockPg('invoice_followup_sequences').insert({
       id: sequenceId,
@@ -595,6 +598,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         maxAuthorizedTotalCents: 10309,
         requireAutopayForCustomerId: h.customerId,
         refuseWhenDunningStopped: true,
+        requireBankDebitDue: true,
         requireUnboundInvoice: true,
         requireSelfPayCustomerId: h.customerId,
       }]);
@@ -622,6 +626,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         maxAuthorizedTotalCents: 10309,
         requireAutopayForCustomerId: h.customerId,
         refuseWhenDunningStopped: true,
+        requireBankDebitDue: true,
         requireSelfPayScheduledServiceId: h.visitId,
         requireCompletedVisit: true,
         requireInvoiceScheduledServiceBinding: true,
@@ -646,7 +651,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     });
 
     test('a bank charge that is processing keeps the hold open for the webhook and writes one audit row', async () => {
-      const h = await held();
+      const h = await held({ dueDate: etDateString(new Date(Date.now() - 2 * DAY)) });
       Eligibility.getChargeableAutopayMethod.mockResolvedValue({ id: 'pm-bank', method_type: 'us_bank_account' });
       quote.mockResolvedValue({ base: 100, surcharge: 0, total: 100 });
       chargeCall.mockImplementation(async () => {
@@ -1226,6 +1231,153 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         }
         expect(chargeCall).not.toHaveBeenCalled();
         await untouched(h);
+      });
+    });
+
+    describe('annual-prepay term rails and bank debit dates (hold-timeout charge fixes)', () => {
+      const FINAL = 'invoice_followup.autopay_hold_timeout_charge';
+      const BANK = { id: 'pm-bank', method_type: 'us_bank_account' };
+      const etDay = (offsetDays) => etDateString(new Date(Date.now() + offsetDays * DAY));
+      const trueAlerts = () => notify.mock.calls.filter((c) => /^autopay-hold-timeout:/.test(c[3]?.dedupeKey || ''));
+      const chargeAlerts = () => notify.mock.calls.filter((c) => /^autopay_hold_charge:/.test(c[3]?.dedupeKey || ''));
+      const markers = () => mockPg('audit_log').where({ action: `${FINAL}_started` });
+      const nothingWritten = async () => {
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        expect(await markers()).toHaveLength(0);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await mockPg('stripe_invoice_charge_attempts')).toHaveLength(0);
+      };
+
+      test('finding 1: an invoice an annual-prepay term references is never quoted or charged; it is released as true releases it, with the true-mode alert once', async () => {
+        const rail = await held();
+        await mockPg('annual_prepay_terms').insert({ prepay_invoice_id: rail.invoiceId });
+        const sibling = await held({ customerId: rail.customerId });
+        const result = await sweep();
+        expect(result).toMatchObject({ mode: 'charge', candidates: 2, charged: 1, true_released: 1, declined_released: 0, released: 1, errors: 0 });
+        // The sibling of the same customer is charged as before; the rail invoice never reaches the quote or the charge.
+        expect(quote.mock.calls.map((c) => c[0])).toEqual([sibling.invoiceId]);
+        expect(chargeCall.mock.calls.map((c) => c[0])).toEqual([sibling.invoiceId]);
+        const seq = await seqOf(rail.invoiceId);
+        expect(seq.status).toBe('active');
+        expect(seq.is_autopay_held).toBe(false);
+        expect(seq.next_touch_at).not.toBeNull();
+        // The true-mode alert, once, and no charge-mode alert, marker or audit row for the rail invoice.
+        expect(trueAlerts()).toHaveLength(1);
+        expect(trueAlerts()[0][3].dedupeKey).toMatch(new RegExp(`^autopay-hold-timeout:${rail.invoiceId}:`));
+        expect(chargeAlerts()).toHaveLength(0);
+        expect((await markers()).map((r) => r.resource_id)).toEqual([sibling.invoiceId]);
+        expect((await chargeAuditRows()).map((r) => r.resource_id)).toEqual([sibling.invoiceId]);
+        // A re-run finds nothing: no second alert, no second release, no charge.
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0, true_released: 0 });
+        expect(trueAlerts()).toHaveLength(1);
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test('finding 1: a rail invoice is released by the same rules as true (an attempt row keeps it held, and it is still not charged)', async () => {
+        const rail = await held();
+        await mockPg('annual_prepay_terms').insert({ prepay_invoice_id: rail.invoiceId });
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: rail.invoiceId, status: 'succeeded' });
+        expect(await sweep()).toMatchObject({ candidates: 0, charged: 0, true_released: 0 });
+        await untouched(rail);
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('finding 2: a bank method before the due date: no quote, marker, attempt, charge, release or alert; charged once on the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        quote.mockResolvedValue({ base: 100, surcharge: 0, total: 100 });
+        const h = await held({ dueDate: etDay(5) });
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0, true_released: 0, declined_released: 0, deferred: 0, errors: 0 });
+        await untouched(h);
+        await nothingWritten();
+        // Still waiting on the next run, still silent.
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0 });
+        await nothingWritten();
+        // The due date arrives: charged exactly once.
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(0) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, not_due: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(chargeCall.mock.calls[0][2]).toMatchObject({ requireBankDebitDue: true });
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+      });
+
+      test.each([['today', 0], ['in the past', -6]])('finding 2: a bank method on an invoice due %s is charged', async (_label, offset) => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await held({ dueDate: etDay(offset) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, not_due: 0 });
+        expect(chargeCall.mock.calls[0][0]).toBe(h.invoiceId);
+      });
+
+      test('finding 2: a bank method on an invoice with no due date has no authorized debit date: released as true releases it, never charged', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await held({ dueDate: null });
+        expect(await sweep()).toMatchObject({ candidates: 1, true_released: 1, released: 1, charged: 0, declined_released: 0, errors: 0 });
+        expect(quote).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+        expect(trueAlerts()).toHaveLength(1);
+        expect(chargeAlerts()).toHaveLength(0);
+        expect(await markers()).toHaveLength(0);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(trueAlerts()).toHaveLength(1);
+      });
+
+      test('finding 2: a card is unchanged by the due date, whether it is weeks away or missing', async () => {
+        const later = await held({ dueDate: etDay(25) });
+        const none = await held({ dueDate: null });
+        expect(await sweep()).toMatchObject({ candidates: 2, charged: 2, not_due: 0, true_released: 0 });
+        expect(chargeCall.mock.calls.map((c) => c[0]).sort()).toEqual([later.invoiceId, none.invoiceId].sort());
+      });
+
+      test('finding 2 (race): the charge refuses a bank debit before the due date under the lock: final row deferred, no alert, hold kept; charged once after the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await held({ dueDate: etDay(0) });
+        // The due date moves later after the sweep read it; the charge path then refuses under its lock.
+        chargeCall.mockImplementationOnce(async () => {
+          await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(7) });
+          await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'Bank debit date has not arrived. The invoice can be debited on or after its due date.' });
+          throw Object.assign(new Error('Bank debit date has not arrived. The invoice can be debited on or after its due date.'), { code: 'BANK_DEBIT_NOT_DUE' });
+        });
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0, declined_released: 0, deferred: 0, errors: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'not_due', error_code: 'BANK_DEBIT_NOT_DUE', released: false, method_type: 'us_bank_account' });
+        // Still before the due date: the failed attempt is covered by the deferred row, and the next run waits quietly.
+        expect(await sweep()).toMatchObject({ candidates: 1, not_due: 1, charged: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        // After the due date it is charged exactly once.
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ due_date: etDay(0) });
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1, recovered: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect((await seqOf(h.invoiceId)).status).toBe('completed');
+        expect(await sweep()).toMatchObject({ candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(2);
+        expect(notify).not.toHaveBeenCalled();
+      });
+
+      test('finding 2 (recovery): a marker whose attempt was refused for the bank debit date is deferred, not released; no alert; charged after the due date', async () => {
+        Eligibility.getChargeableAutopayMethod.mockResolvedValue(BANK);
+        const h = await held({ dueDate: etDay(0) });
+        await mockPg('audit_log').insert({
+          actor_type: 'system', action: `${FINAL}_started`, resource_type: 'invoice', resource_id: h.invoiceId,
+          metadata: { sequence_id: h.sequenceId, customer_id: h.customerId, hold_stamp: h.heldAt.toISOString(), amount_cents: 10000 },
+        });
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed', error_message: 'Bank debit date has not arrived. The invoice can be debited on or after its due date.' });
+        const first = await sweep();
+        expect(first).toMatchObject({ recovered: 1, declined_released: 0, true_released: 0, charged: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'deferred', reason: 'bank_debit_not_due', released: false });
+        expect(chargeCall).not.toHaveBeenCalled();
+        // The next run (the invoice is due) charges it once; the failed attempt is covered by the deferred row.
+        expect(await sweep()).toMatchObject({ candidates: 1, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
       });
     });
 

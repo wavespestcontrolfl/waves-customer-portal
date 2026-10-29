@@ -8,7 +8,7 @@ const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
 const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
 
 // Rendered-version stamp for a consent captured through an intent (codex
@@ -456,6 +456,18 @@ async function resolveSettledInvoiceSavedCardChargeAttempt({
         resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement',
       });
     return resolvedAttempt > 0 || resolvedOrphan > 0;
+  });
+}
+
+// The bank consent (payment-method-consent-text.js ACH_CONSENT_TEXT) authorizes a debit for an invoice on or after its
+// due date (or on the Auto Pay billing day the customer selected, an alternative EARLIER date: waiting for the due date
+// never exceeds the authorization, so it is ignored). Read against the LOCKED invoice with ET date-only strings. A bank
+// method on an invoice with no due date, or one due after today, has no authorized debit yet. Cards are unaffected.
+function assertBankDebitDue(method, lockedInvoice) {
+  if (!require('./autopay-eligibility').isBankMethodType(method.method_type)) return;
+  if (lockedInvoice.due_date && etCalendarDayOf(lockedInvoice.due_date) <= etDateString()) return;
+  throw Object.assign(new Error('Bank debit date has not arrived. The invoice can be debited on or after its due date.'), {
+    code: 'BANK_DEBIT_NOT_DUE',
   });
 }
 
@@ -2185,7 +2197,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, requireUnboundInvoice = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, requireUnboundInvoice = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2299,6 +2311,9 @@ const StripeService = {
         if (requireUnboundInvoice && lockedInvoice.scheduled_service_id) {
           throw new Error('The invoice is now bound to a visit. Review before charging.');
         }
+        // Opt-in (the Auto Pay hold charge mode): a bank debit before the invoice's authorized debit date refuses here,
+        // before any credit apply or Stripe call.
+        if (requireBankDebitDue) assertBankDebitDue(card, lockedInvoice);
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
         // (r8 P1: the fully-covered-by-credit early return would otherwise
