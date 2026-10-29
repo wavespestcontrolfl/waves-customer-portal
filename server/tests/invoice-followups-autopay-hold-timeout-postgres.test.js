@@ -62,6 +62,14 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type text NOT NULL, actor_id uuid, action text NOT NULL,
       resource_type text, resource_id uuid, metadata jsonb, ip_address text, user_agent text,
       created_at timestamptz NOT NULL DEFAULT now())`);
+    // Lets a test make the release UPDATE fail while a row sits in fail_release: insert the row, run, delete it.
+    await mockPg.raw('CREATE TABLE fail_release (id int)');
+    await mockPg.raw(`CREATE FUNCTION fail_release_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.status = 'active' AND EXISTS (SELECT 1 FROM fail_release) THEN RAISE EXCEPTION 'release failed (test)'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await mockPg.raw('CREATE TRIGGER fail_release_trg BEFORE UPDATE ON invoice_followup_sequences FOR EACH ROW EXECUTE FUNCTION fail_release_fn()');
     ({ releaseStaleAutopayHolds: sweep, AUTOPAY_HOLD_TIMEOUT_DAYS: TIMEOUT_DAYS } = require('../services/invoice-followups'));
   });
 
@@ -74,7 +82,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log');
+    await mockPg.raw('TRUNCATE customers, invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log, fail_release');
     delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
   });
 
@@ -470,7 +478,22 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         requireAutopayForCustomerId: h.customerId,
         refuseWhenDunningStopped: true,
         requireUnboundInvoice: true,
+        requireSelfPayCustomerId: h.customerId,
       }]);
+    });
+
+    test('an unbound invoice whose customer gained a default payer after the read: the payer refusal means no charge, the refused path', async () => {
+      const h = await held();
+      chargeCall.mockImplementation(async () => {
+        await leaveDeclineRows(h);
+        throw Object.assign(new Error('This bill routes to a third-party payer. The saved card must not be charged.'), { code: 'PAYER_BILLED_GUARD' });
+      });
+      expect(await sweep()).toMatchObject({ candidates: 1, charged: 0, ambiguous: 0, declined_released: 1 });
+      expect(chargeCall).toHaveBeenCalledTimes(1);
+      expect(chargeCall.mock.calls[0][2]).toMatchObject({ requireUnboundInvoice: true, requireSelfPayCustomerId: h.customerId });
+      const [row] = await chargeAuditRows();
+      expect(row.metadata).toMatchObject({ outcome: 'declined_released', reason: 'refused', error_code: 'PAYER_BILLED_GUARD' });
+      expect(notify).toHaveBeenCalledTimes(1);
     });
 
     test('an invoice bound to a closed visit is charged with the visit guards: visit completed, invoice still bound to it', async () => {
@@ -744,6 +767,139 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       expect(chargeCall).not.toHaveBeenCalled();
       expect(notify).not.toHaveBeenCalled();
       expect(await chargeAuditRows()).toHaveLength(0);
+    });
+
+    describe('recovery of an attempt that did not finish', () => {
+      const STARTED = 'invoice_followup.autopay_hold_timeout_charge_started';
+      const startedRows = () => mockPg('audit_log').where({ action: STARTED });
+      const markStarted = (h) => mockPg('audit_log').insert({
+        actor_type: 'system', action: STARTED, resource_type: 'invoice', resource_id: h.invoiceId,
+        metadata: { sequence_id: h.sequenceId, customer_id: h.customerId, hold_stamp: h.heldAt.toISOString(), amount_cents: 10309 },
+      });
+
+      test('the marker is written right before the charge, with the hold stamp and amount', async () => {
+        const h = await held();
+        let markerAtChargeTime = null;
+        chargeCall.mockImplementation(async () => { markerAtChargeTime = await startedRows(); return { status: 'paid', amount: 103.09 }; });
+        await sweep();
+        expect(markerAtChargeTime).toHaveLength(1);
+        expect(markerAtChargeTime[0]).toMatchObject({ actor_type: 'system', resource_type: 'invoice', resource_id: h.invoiceId });
+        expect(markerAtChargeTime[0].metadata).toMatchObject({ sequence_id: h.sequenceId, customer_id: h.customerId, amount_cents: 10309 });
+        expect(typeof markerAtChargeTime[0].metadata.hold_stamp).toBe('string');
+        // The final row is written after the marker.
+        const [final] = await chargeAuditRows();
+        expect(new Date(final.created_at).getTime()).toBeGreaterThanOrEqual(new Date(markerAtChargeTime[0].created_at).getTime());
+      });
+
+      test('(a) a decline whose release throws once: no final row, the next run releases, alerts once, writes recovered, and never charges again', async () => {
+        const h = await held();
+        chargeCall.mockImplementation(async () => { await leaveDeclineRows(h); throw decline(); });
+        await mockPg('fail_release').insert({ id: 1 });
+        const first = await sweep();
+        expect(first).toMatchObject({ candidates: 1, errors: 1, declined_released: 0 });
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(notify).not.toHaveBeenCalled();
+        expect(await startedRows()).toHaveLength(1);
+
+        await mockPg('fail_release').del();
+        const second = await sweep();
+        expect(second).toMatchObject({ recovered: 1, errors: 0, charged: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        const seq = await seqOf(h.invoiceId);
+        expect(seq.status).toBe('active');
+        expect(seq.next_touch_at).not.toBeNull();
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:declined:${h.invoiceId}`);
+        const rows = await chargeAuditRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ outcome: 'declined_released', reason: 'recovered', amount_cents: 10309, released: true });
+
+        // Done: a third run finds nothing to recover and still does not charge.
+        expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledTimes(1);
+      });
+
+      test('(b) a marker with a succeeded attempt on a paid invoice: sequence closed, final row charged, no alert, no charge', async () => {
+        const h = await held();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'succeeded' });
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ status: 'paid' });
+        expect(await sweep()).toMatchObject({ recovered: 1, charged: 0 });
+        expect((await seqOf(h.invoiceId)).status).toBe('completed');
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'charged', reason: null, released: false });
+        expect(notify).not.toHaveBeenCalled();
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(c) a marker with a claimed (open) attempt: one ambiguous alert, hold kept, nothing charged, and the alert is not repeated', async () => {
+        const h = await held();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'claimed' });
+        expect(await sweep()).toMatchObject({ recovered: 1 });
+        await untouched(h);
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][3].dedupeKey).toBe(`autopay_hold_charge:ambiguous:${h.invoiceId}`);
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'ambiguous', reason: 'ambiguous', released: false });
+        expect(await sweep()).toMatchObject({ recovered: 0 });
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('(d) a marker with no attempt after it: final row abandoned, no charge in that run, the next run charges normally', async () => {
+        const h = await held();
+        await markStarted(h);
+        const first = await sweep();
+        expect(first).toMatchObject({ recovered: 1, charged: 0, candidates: 0 });
+        expect(chargeCall).not.toHaveBeenCalled();
+        const [row] = await chargeAuditRows();
+        expect(row.metadata).toMatchObject({ outcome: 'abandoned', released: false });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+
+        const second = await sweep();
+        expect(second).toMatchObject({ recovered: 0, charged: 1 });
+        expect(chargeCall).toHaveBeenCalledTimes(1);
+        expect(await startedRows()).toHaveLength(2);
+      });
+
+      test('(e) a failed attempt without our marker (Auto Pay itself) is never touched by recovery', async () => {
+        const h = await held();
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed' });
+        expect(await sweep()).toMatchObject({ recovered: 0, candidates: 0, errors: 0 });
+        await untouched(h);
+        expect(notify).not.toHaveBeenCalled();
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(chargeCall).not.toHaveBeenCalled();
+      });
+
+      test('true, shadow and off never run recovery', async () => {
+        const h = await held();
+        await markStarted(h);
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, status: 'failed' });
+        for (const value of ['true', 'shadow', 'off']) {
+          process.env.GATE_AUTOPAY_HOLD_TIMEOUT = value;
+          await sweep();
+        }
+        await untouched(h);
+        expect(await chargeAuditRows()).toHaveLength(0);
+        expect(notify).not.toHaveBeenCalled();
+      });
+
+      test('a marker that cannot be written means no charge', async () => {
+        const h = await held();
+        await mockPg.raw('ALTER TABLE audit_log ADD CONSTRAINT no_marker CHECK (action <> \'invoice_followup.autopay_hold_timeout_charge_started\')');
+        try {
+          expect(await sweep()).toMatchObject({ candidates: 1, skipped: 1, charged: 0 });
+        } finally {
+          await mockPg.raw('ALTER TABLE audit_log DROP CONSTRAINT no_marker');
+        }
+        expect(chargeCall).not.toHaveBeenCalled();
+        await untouched(h);
+      });
     });
 
     test.each([['charge', 'charge'], [' Charge ', 'charge'], ['CHARGE', 'charge'], ['chargeit', 'off'], ['true ', 'true'], ['shadow', 'shadow'], ['yes', 'off']])('the gate reads %p as %s', (value, expected) => {

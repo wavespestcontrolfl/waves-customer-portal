@@ -2861,6 +2861,9 @@ const AUTOPAY_HOLD_TIMEOUT_DAYS = 3;
 const AUTOPAY_HOLD_SWEEP_PAGE = 500;
 const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow';
 const AUTOPAY_HOLD_CHARGE_ACTION = 'invoice_followup.autopay_hold_timeout_charge';
+// Written (and committed) right before the charge is called. The final AUTOPAY_HOLD_CHARGE_ACTION row is the
+// LAST write of a finished attempt, so a marker with no later final row is an attempt that did not finish.
+const AUTOPAY_HOLD_CHARGE_STARTED_ACTION = 'invoice_followup.autopay_hold_timeout_charge_started';
 // chargeInvoiceWithSavedCard codes after which money may have moved or a charge is still being settled:
 // never release the hold, never retry, tell the office to check Stripe.
 const AUTOPAY_HOLD_AMBIGUOUS_CODES = [
@@ -3033,10 +3036,12 @@ async function raiseAutopayHoldChargeAlert({ kind, invoice, row, amountCents, re
   }
 }
 
-// One audit_log row per charge attempt: ids, amounts and codes only, no card data, no names.
+// One audit_log row per charge attempt: ids, amounts and codes only, no card data, no names. critical: a write
+// that fails throws, so a final row that was not recorded is never mistaken for a finished attempt.
 async function recordAutopayHoldChargeAudit({ row, invoice, outcome, reason = null, errorCode = null, amountCents, methodType = null, released = null }) {
   const { recordAuditEvent } = require('./audit-log');
   await recordAuditEvent({
+    critical: true,
     actor_type: 'system',
     action: AUTOPAY_HOLD_CHARGE_ACTION,
     resource_type: 'invoice',
@@ -3086,10 +3091,27 @@ async function attemptAutopayHoldCharge(row, invoice) {
 
   // The open-visit rule was judged on unlocked reads. The charge path re-checks the visit under its locks,
   // before credit is applied or Stripe is called: a bound invoice needs its visit still completed and the
-  // invoice still bound to exactly that visit; an unbound invoice must still be unbound.
+  // invoice still bound to exactly that visit (and re-resolves that visit's payer); an unbound invoice must
+  // still be unbound and the customer's CURRENT default payer is re-resolved under the lock (a Bill-To update
+  // can assign one after the invoice was minted), so third-party debt is never charged to the homeowner.
   const visitGuards = invoice.scheduled_service_id
     ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id, requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
-    : { requireUnboundInvoice: true };
+    : { requireUnboundInvoice: true, requireSelfPayCustomerId: row.customer_id };
+  try {
+    // The durable marker: committed BEFORE the charge, so a crash or a failed release after a clean decline
+    // can be recovered (recoverAutopayHoldCharges). If it cannot be written, nothing is charged.
+    await require('./audit-log').recordAuditEvent({
+      critical: true,
+      actor_type: 'system',
+      action: AUTOPAY_HOLD_CHARGE_STARTED_ACTION,
+      resource_type: 'invoice',
+      resource_id: invoice.id,
+      metadata: { sequence_id: row.id, customer_id: row.customer_id, hold_stamp: row.hold_stamp, amount_cents: Math.round(quote.total * 100) },
+    });
+  } catch (markerErr) {
+    logger.error(`[invoice-followups] autopay hold charge: could not write the start marker for invoice ${invoice.id}; nothing charged, next run retries: ${markerErr.message}`);
+    return { kind: 'skipped' };
+  }
   try {
     // quote.total is the surcharge-inclusive total, the number the charge path compares to expectedTotal.
     const result = await StripeService.chargeInvoiceWithSavedCard(invoice.id, method.id, {
@@ -3116,11 +3138,21 @@ async function attemptAutopayHoldCharge(row, invoice) {
 const AUTOPAY_HOLD_CHARGE_PLANS = {
   charged: {
     releases: false,
-    stops: (d) => d.status === 'paid' || d.status === 'covered_by_credit',
+    stops: (d) => ['paid', 'covered_by_credit', 'charged'].includes(d.status),
     audit: (d) => d.status,
     alert: null,
     log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} ${d.status}`],
     result: () => 'charged',
+  },
+  // Recovery only: a marker whose charge never reached a claim. Nothing was charged; the normal clause
+  // picks the hold up again on the next run.
+  abandoned: {
+    releases: false,
+    stops: () => false,
+    audit: () => 'abandoned',
+    alert: null,
+    log: (d, released, invoice) => ['info', `[invoice-followups] autopay hold charge: invoice ${invoice.id} had a start marker but no charge attempt; left for the next run`],
+    result: () => 'abandoned',
   },
   ambiguous: {
     releases: false,
@@ -3165,26 +3197,96 @@ async function chargeStaleAutopayHold(row, cutoff) {
   const d = await attemptAutopayHoldCharge(row, invoice);
   if (d.kind === 'skipped') return { outcome: 'skipped' };
 
-  const plan = AUTOPAY_HOLD_CHARGE_PLANS[d.kind];
   const covered = d.status === 'covered_by_credit';
   const amountCents = covered ? 0 : (d.quote ? Math.round(d.quote.total * 100) : cents(invoiceAmountDue(invoice)));
+  return applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents);
+}
+
+// Applies a decision's plan. Order matters: release, stopOnPayment, alert, and the final audit row LAST, so the
+// presence of that row means the attempt finished (recoverAutopayHoldCharges looks for the rows that are missing).
+async function applyAutopayHoldPlan(row, cutoff, invoice, d, amountCents) {
+  const plan = AUTOPAY_HOLD_CHARGE_PLANS[d.kind];
   // No charge called (no method, quote refused): the original guards, hold stamp included. A charge that
   // failed cleanly exempts only the failed attempt and failed payment it wrote itself.
   const released = plan.releases && await releaseStaleAutopayHold(row, cutoff, { afterOwnCharge: d.chargeCalled });
   if (plan.stops(d)) {
     await stopOnPayment(invoice.id).catch((stopErr) => logger.error(`[invoice-followups] autopay hold charge: stopOnPayment failed for invoice ${invoice.id}: ${stopErr.message}`));
   }
-  await recordAutopayHoldChargeAudit({
-    row, invoice, outcome: plan.audit(d, released), reason: d.reason, errorCode: d.err?.code || null, amountCents, methodType: d.method?.method_type || null, released,
-  });
   if (plan.alert) {
     await raiseAutopayHoldChargeAlert({
       kind: plan.alert, invoice, row, amountCents, reason: d.reason, errorCode: d.err?.code || null, errorMessage: d.err?.message || null, released,
     });
   }
+  await recordAutopayHoldChargeAudit({
+    row, invoice, outcome: plan.audit(d, released), reason: d.reason, errorCode: d.err?.code || null, amountCents, methodType: d.method?.method_type || null, released,
+  });
   const [level, text] = plan.log(d, released, invoice);
   logger[level](text);
   return { outcome: plan.result(d, released) };
+}
+
+/**
+ * Charge-mode recovery (never charges). A start marker with no later final row, on a sequence still held, is an
+ * attempt that did not finish: the process died, or the release/alert/audit step failed after the charge path
+ * recorded a clean decline (which the stale clause then excludes forever). Only the stripe_invoice_charge_attempts
+ * rows created at or after the marker decide it.
+ */
+async function unfinishedAutopayHoldCharges() {
+  return db('audit_log as m')
+    .joinRaw("JOIN invoice_followup_sequences s ON s.id::text = m.metadata->>'sequence_id' AND s.invoice_id = m.resource_id")
+    .where('m.action', AUTOPAY_HOLD_CHARGE_STARTED_ACTION)
+    .where('s.status', 'autopay_hold')
+    .whereNotExists(function noFinalRow() {
+      this.select(db.raw('1')).from('audit_log as f')
+        .where('f.action', AUTOPAY_HOLD_CHARGE_ACTION)
+        .whereRaw('f.resource_id = m.resource_id')
+        .whereRaw("f.metadata->>'sequence_id' = m.metadata->>'sequence_id'")
+        .whereRaw('f.created_at >= m.created_at');
+    })
+    .orderBy('m.created_at', 'asc')
+    .select('m.resource_id as invoice_id', 'm.created_at as started_at', 'm.metadata as metadata', 's.customer_id');
+}
+
+async function recoverAutopayHoldCharge(marker, cutoff) {
+  const meta = marker.metadata || {};
+  const invoice = await db('invoices').where({ id: marker.invoice_id }).first();
+  if (!invoice) return false;
+  const statuses = await db('stripe_invoice_charge_attempts')
+    .where({ invoice_id: marker.invoice_id })
+    .where('created_at', '>=', marker.started_at)
+    .pluck('status');
+  let kind = 'ambiguous';
+  if (!statuses.length) kind = 'abandoned';
+  else if (statuses.every((status) => status === 'failed')) kind = 'declined';
+  else if (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) kind = 'charged';
+  const row = { id: meta.sequence_id, invoice_id: marker.invoice_id, customer_id: marker.customer_id, hold_stamp: meta.hold_stamp };
+  const d = { kind, reason: kind === 'declined' ? 'recovered' : null, chargeCalled: true, err: null, result: null, status: kind === 'charged' ? 'charged' : null, quote: null, method: null };
+  if (kind === 'ambiguous') d.reason = 'ambiguous';
+  await applyAutopayHoldPlan(row, cutoff, invoice, d, Number(meta.amount_cents) || 0);
+  return true;
+}
+
+// Returns { recovered, errors, invoiceIds }. invoiceIds are left out of this run's charges, abandoned ones too.
+async function recoverAutopayHoldCharges(cutoff) {
+  const result = { recovered: 0, errors: 0, invoiceIds: new Set() };
+  let markers;
+  try {
+    markers = await unfinishedAutopayHoldCharges();
+  } catch (err) {
+    result.errors += 1;
+    logger.error(`[invoice-followups] autopay hold charge recovery could not read the start markers: ${err.message}`);
+    return result;
+  }
+  for (const marker of markers) {
+    result.invoiceIds.add(String(marker.invoice_id));
+    try {
+      if (await recoverAutopayHoldCharge(marker, cutoff)) result.recovered += 1;
+    } catch (err) {
+      result.errors += 1;
+      logger.error(`[invoice-followups] autopay hold charge recovery failed for invoice ${marker.invoice_id}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 /**
@@ -3192,8 +3294,13 @@ async function chargeStaleAutopayHold(row, cutoff) {
  * hold is counted and the sweep goes on: before the charge call it moved no money, after it the charge path's
  * own attempt row fences the invoice.
  */
-async function chargeStaleAutopayHolds(due, cutoff) {
+async function chargeStaleAutopayHolds(allDue, cutoff) {
   const counts = { charged: 0, declined_released: 0, release_failed: 0, ambiguous: 0, skipped: 0, errors: 0 };
+  // First finish what an earlier run left half done. The recovery pass never charges, and an invoice it
+  // touched is not charged again in this run.
+  const recovery = await recoverAutopayHoldCharges(cutoff);
+  counts.errors += recovery.errors;
+  const due = allDue.filter((row) => !recovery.invoiceIds.has(String(row.invoice_id)));
   for (const row of due) {
     try {
       const { outcome } = await chargeStaleAutopayHold(row, cutoff);
@@ -3203,8 +3310,8 @@ async function chargeStaleAutopayHolds(due, cutoff) {
       logger.error(`[invoice-followups] autopay hold charge failed for invoice ${row.invoice_id}: ${err.message}`);
     }
   }
-  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.ambiguous} ambiguous, ${counts.skipped} skipped, ${counts.release_failed} not released, ${counts.errors} error(s)`);
-  return { mode: 'charge', candidates: due.length, released: counts.declined_released, recorded: 0, ...counts };
+  logger.info(`[invoice-followups] autopay hold timeout (charge): ${due.length} stale hold(s): ${counts.charged} charged, ${counts.declined_released} released after a decline or refusal, ${counts.ambiguous} ambiguous, ${counts.skipped} skipped, ${counts.release_failed} not released, ${recovery.recovered} recovered, ${counts.errors} error(s)`);
+  return { mode: 'charge', candidates: due.length, released: counts.declined_released, recorded: 0, recovered: recovery.recovered, ...counts };
 }
 
 // 'shadow': one audit_log row per would-release invoice per ET day, nothing else. Returns how many were newly recorded.
