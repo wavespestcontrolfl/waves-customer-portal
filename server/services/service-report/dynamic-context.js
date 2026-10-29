@@ -15,6 +15,7 @@ const {
 } = require('../lawn-protocol-operating-layer');
 const { loadCustomerGrassContext } = require('../lawn-grass-context');
 const { roundStepForPlan } = require('../lawn-program');
+const roundsCatchUp = require('../lawn-rounds-catchup');
 const { sqlZip5 } = require('../stamped-address');
 const { dateOnlyStamp } = require('./time-format');
 
@@ -56,6 +57,7 @@ async function loadServiceRecordForDynamicContext(recordId, knex = db) {
       // The visit's series and date: a 9x rounds visit (recurring_pattern lawn_rounds_9) reads its ROUND's lawn protocol step.
       'ss.recurring_pattern as scheduled_recurring_pattern',
       'ss.scheduled_date as scheduled_visit_date',
+      'ss.property_id as scheduled_visit_property_id',
       ...customerSelect,
     )
     .first();
@@ -272,7 +274,14 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   // A visit on a 9x rounds series: the step of its round (a pinned window, which closeout writes as that step's, still wins) and the
   // real date's weed and spot rows. null for every other visit: the month of its date, as before.
   const roundStep = roundStepForPlan({ recurring_pattern: record.scheduled_recurring_pattern, scheduled_date: record.scheduled_visit_date });
-  const roundOption = roundStep ? { roundStep: { round: roundStep.round, month: roundStep.month } } : {};
+  // A new customer's first rounds visit in round 3 with no pre-emergent this year carries the spring pre-emergent catch-up (the visit's own
+  // ledger rows are left out of the check, so the completed visit still reads as it was planned): its March Dimension 2EW row joins the
+  // window's products and is labelled. A failed read is "no catch-up" here: the report never fails on it.
+  const catchUp = roundStep ? await roundsCatchUp.catchUpWanted(knex, {
+    id: record.scheduled_service_id, customer_id: record.customer_id, property_id: record.scheduled_visit_property_id,
+    scheduled_date: record.scheduled_visit_date, recurring_pattern: record.scheduled_recurring_pattern,
+  }) : false;
+  const roundOption = roundStep ? { roundStep: { round: roundStep.round, month: roundStep.month, ...(catchUp ? { catchUp: true } : {}) } } : {};
 
   let context = null;
   if (windowKey) {
@@ -294,8 +303,31 @@ async function buildLawnProtocolReportContext(record, knex, now) {
     });
   }
 
-  const summary = summarizeProtocolContext(context);
+  const summary = await withCatchUpIfApplied(summarizeProtocolContext(context), { record, knex, catchUp });
   return attachProtocolOperationalContext(await withoutUnappliedSwapRows(summary, { record, knex }), { completion, assignment });
+}
+
+// The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when
+// this visit recorded that product as applied, and then it names itself (lawn-rounds-catchup.js). Eligibility alone never adds it: the plan may
+// have dropped the line (cap, inactive product) and the technician may have skipped it. Not recorded, or a failed read: the row leaves the list.
+// No catch-up read for this visit: the summary as it was (the same object).
+async function withCatchUpIfApplied(summary, { record, knex, catchUp }) {
+  if (!catchUp || !Array.isArray(summary?.products)) return summary;
+  const isRow = (product) => roundsCatchUp.isCatchUpRow({ role: product.role, product_name: product.protocolProductName, catalog_product_name: product.productName });
+  const rows = summary.products.filter(isRow);
+  if (!rows.length) return summary;
+  const ids = rows.map((product) => product.productId).filter(Boolean);
+  const applied = record?.id && ids.length
+    ? await knex('service_products').where({ service_record_id: record.id }).whereIn('product_id', ids).select('product_id').catch(() => [])
+    : [];
+  const appliedIds = new Set(applied.map((row) => String(row.product_id)));
+  return {
+    ...summary,
+    products: summary.products.flatMap((product) => {
+      if (!isRow(product)) return [product];
+      return appliedIds.has(String(product.productId)) ? [{ ...product, roundsCatchUp: true, roundsCatchUpLabel: roundsCatchUp.CATCH_UP_LABEL }] : [];
+    }),
+  };
 }
 
 // The customer report lists a protocol window's products. A swap rule's replacement bag (the non-default December LESCO Black Out 0-0-24

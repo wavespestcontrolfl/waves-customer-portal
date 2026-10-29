@@ -332,3 +332,87 @@ test('the finding key stays put on routine row edits and moves when the finding 
   expect(fewer.recordedVisits).toBe(before.recordedVisits - 1);
   expect(fewer.findingKey).not.toBe(before.findingKey);
 });
+
+// Lawn rounds: a rounds series whose most recently ENDED round passed with no completed visit never took that round's step (owner 2026-10-29,
+// PR 4b of the rounds build). The finding names the round and its dates, covers only the latest ended round (so it clears itself once the next
+// round ends with a completed visit), counts no booster, and leaves every other pattern as it was.
+describe('a lawn round that passed with no completed visit', () => {
+  const { createHash } = require('node:crypto');
+  const MISSED_ROUND_3 = 'Round 3 (Mar 15-Apr 23) passed with no completed visit; that round\'s step was not applied.';
+  const roundsRow = (id, date, status, extra = {}) => ({
+    ...parent({ id, scheduled_date: date, status, recurring_pattern: 'lawn_rounds_9', service_type: 'Lawn Care', catalog_service_key: 'lawn_program', service_key_snapshot: 'lawn_program', recurring_parent_id: id === 'r2' ? null : 'r2' }),
+    ...extra,
+  });
+  // Round 2 (Feb 10) done, round 3 (Mar 20) cancelled, round 4 (May 5) and round 5 (Jun 10) ahead.
+  const base = (round4 = 'scheduled') => [
+    roundsRow('r2', '2027-02-10', 'completed'), roundsRow('r3', '2027-03-20', 'cancelled'),
+    roundsRow('r4', '2027-05-05', round4), roundsRow('r5', '2027-06-10', 'scheduled'),
+  ];
+  const on = (todayET, rows, pattern = lawn9x()) => acceptedScheduleFindings(pattern, rows, new Set(), { todayET });
+  const missedIssues = (findings) => (findings[0]?.issues || []).filter((issue) => /^Round \d/.test(issue));
+
+  test('round 3 ended with only a cancelled visit: the issue names round 3 and its dates and says its step was not applied', () => {
+    const [finding] = on('2027-04-30', base());
+    expect(finding.issues).toContain(MISSED_ROUND_3);
+    expect(missedIssues([finding])).toEqual([MISSED_ROUND_3]);
+  });
+
+  test('it stays while round 4 is running, and clears once round 4 ends with a completed visit', () => {
+    expect(missedIssues(on('2027-05-20', base()))).toEqual([MISSED_ROUND_3]);
+    // Round 4 ended Jun 2: its visit was completed, so the latest ended round is fine and the finding is gone.
+    expect(missedIssues(on('2027-06-05', base('completed')))).toEqual([]);
+  });
+
+  test('only the latest ended round: if round 4 also ends with no completed visit the issue names round 4, not round 3', () => {
+    const findings = on('2027-06-05', base('cancelled'));
+    expect(missedIssues(findings)).toEqual(['Round 4 (Apr 24-Jun 2) passed with no completed visit; that round\'s step was not applied.']);
+  });
+
+  test('a visit that was scheduled in the round but never completed is a missed round too', () => {
+    const rows = [roundsRow('r2', '2027-02-10', 'completed'), roundsRow('r3', '2027-03-20', 'scheduled'), roundsRow('r4', '2027-05-05', 'scheduled')];
+    expect(missedIssues(on('2027-05-01', rows))).toEqual([MISSED_ROUND_3]);
+  });
+
+  test('a completed visit anywhere in the round (moved to Apr 10) counts', () => {
+    const rows = base().map((row) => (row.id === 'r3' ? { ...row, status: 'completed', scheduled_date: '2027-04-10' } : row));
+    expect(missedIssues(on('2027-04-30', rows))).toEqual([]);
+  });
+
+  test('a completed booster in the round does not count as the round\'s visit', () => {
+    const booster = roundsRow('b3', '2027-03-25', 'completed', { is_recurring: false, recurring_pattern: null });
+    expect(missedIssues(on('2027-04-30', [...base(), booster]))).toEqual([MISSED_ROUND_3]);
+  });
+
+  test('a round before the series\' first visit, and a round past its last row, are not missed rounds', () => {
+    // The series starts in round 4: round 3 is not its round. Today is in round 4, so no round of the series has ended.
+    const startsAtRound4 = [roundsRow('r2', '2027-05-05', 'scheduled'), roundsRow('r5', '2027-06-10', 'scheduled')];
+    expect(missedIssues(on('2027-05-20', startsAtRound4))).toEqual([]);
+    // The last row is in round 4 and round 5 has ended: the series has no row there, so it is past its term (the other issues cover it).
+    const ended = [roundsRow('r2', '2027-02-10', 'completed'), roundsRow('r4', '2027-05-05', 'completed')];
+    expect(missedIssues(on('2027-07-20', ended))).toEqual([]);
+  });
+
+  test('a 12x series, and a legacy 9x series (every_6_weeks, custom 42 days), get no such issue', () => {
+    const twelveX = ['2027-02-10', '2027-03-20', '2027-04-20', '2027-05-20'].map((date, index) => parent({ id: `m${index}`, scheduled_date: date, status: index === 1 ? 'cancelled' : 'completed', recurring_pattern: 'monthly' }));
+    expect(missedIssues(on('2027-04-30', twelveX, estimate()))).toEqual([]);
+    for (const [pattern, interval] of [['every_6_weeks', null], ['custom', 42]]) {
+      const legacy = base().map((row) => ({ ...row, recurring_pattern: pattern, recurring_interval_days: interval }));
+      expect(missedIssues(on('2027-04-30', legacy))).toEqual([]);
+    }
+  });
+
+  test('the finding key carries the round: a new missed round changes it, the same round on another day does not', () => {
+    const keyOn = (todayET, rows) => on(todayET, rows)[0].findingKey;
+    expect(keyOn('2027-04-30', base())).toBe(keyOn('2027-05-20', base()));
+    expect(keyOn('2027-06-05', base('cancelled'))).not.toBe(keyOn('2027-05-20', base()));
+    // The same round of the NEXT year is a different incident: the ordinal runs on, though the words repeat.
+    const nextYear = base().map((row) => ({ ...row, scheduled_date: `2028${row.scheduled_date.slice(4)}` }));
+    expect(on('2028-04-30', nextYear)[0].issues).toContain(MISSED_ROUND_3);
+    expect(keyOn('2028-04-30', nextYear)).not.toBe(keyOn('2027-04-30', base()));
+  });
+
+  test('every other finding keeps the key it always had (no round field in it)', () => {
+    const [finding] = check(estimate(), series('monthly', 12).slice(0, 11));
+    expect(finding.findingKey).toBe(createHash('sha256').update(JSON.stringify({ issues: finding.issues, pattern: finding.pattern, expectedVisits: finding.expectedVisits, recordedVisits: finding.recordedVisits })).digest('hex').slice(0, 20));
+  });
+});
