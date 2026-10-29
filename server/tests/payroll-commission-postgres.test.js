@@ -4,8 +4,8 @@
 // The lines are derived data, re-synced when a run is drafted, recomputed and finalized: 10% of
 // what Waves collects for the new service only, in the first 12 months, net of tax, the card
 // surcharge and refunds; a refund comes off the next commission, never below $0, never from wages.
-// Refunds are read from the payment row (status, refund_amount, refunded_surcharge_cents). The row keeps no refund
-// date, so one counts while the sale's 12 months run or when the record last changed inside them (updated_at).
+// Refunds are read from the payment row (status, refund_amount, refunded_surcharge_cents). No reliable refund date
+// exists, so a refund counts when a pay run sees it while the sale's 12 months run, and is never taken back after them.
 // All names are synthetic. DATABASE_URL-gated like the other *-postgres suites.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
@@ -724,7 +724,7 @@ postgres('payroll commission ledger', () => {
       expect(await entryOf(paid)).toEqual([60000, 6000]);
     });
 
-    it('takes a refund off when the record last changed on the last day of the 12 months, though payroll first sees it after them', async () => {
+    it('never takes back a refund first seen after the 12 months, though the record says it last changed inside them', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, W1);
       await approvedWeek(tech, W2);
@@ -734,13 +734,12 @@ postgres('payroll commission ledger', () => {
       expect(commissionOf(run1.body.run, 'Sample Alpha')).toBe(10000);
       expect((await finalize(run1.body.run.id)).status).toBe(200);
 
-      // 2026-01-09 15:00Z is that day, 10:00 Eastern.
+      // Refund writers do not all stamp updated_at, so the record cannot date the refund: 2026-01-09 is the last day.
       await refund(oldPayment, '400.00', { updated_at: '2026-01-09T15:00:00Z' });
       await payment(cust, await soldAgain(cust, tech, '2026-09-14T15:00:00Z', '500.00'), '2026-09-23', '500.00');
       const run2 = await draft(W2);
-      // The old entry is $60 now, $100 was paid: $40 comes off the new $50.
-      expect(commissionOf(run2.body.run, 'Sample Alpha')).toBe(1000);
-      expect(await entryOf(oldPayment)).toEqual([60000, 6000]);
+      expect(commissionOf(run2.body.run, 'Sample Alpha')).toBe(5000);
+      expect(await entryOf(oldPayment)).toEqual([100000, 10000]);
     });
 
     it('does not take back a refund on a record that changed after the 12 months, first seen after them', async () => {
@@ -1216,6 +1215,43 @@ postgres('payroll commission ledger', () => {
       await trx('payments').where({ id: paid }).update({ refund_amount: '100.00', refund_status: 'partial' });
       expect(commissionOf((await recompute(created.body.run.id)).body.run, 'Sample Alpha')).toBe(750);
       expect(Number((await entries())[0].refund_counted_cents)).toBe(10000);
+    });
+  });
+
+  describe('a statement refund after the 12 months', () => {
+    it('is never taken back, though the statement refund writer leaves updated_at alone', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, W1);
+      await approvedWeek(tech, W2);
+      const cust = await customer();
+      // Accepted 2025-01-10: the 12 months ended 2026-01-09, before the tests' today (2026-10-15).
+      const est = await estimate(cust, tech, { accepted_at: '2025-01-10T15:00:00Z' });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Property Group', payment_terms: 'net30' }).returning('id');
+      const [statement] = await trx('payer_statements').insert({
+        payer_id: idOf(payer), period_start: '2025-01-01', period_end: '2025-01-31', status: 'paid', terms_snapshot: 'net30',
+        token: randomUUID().replace(/-/g, ''), total: '400.00', subtotal: '400.00', invoice_count: 1,
+      }).returning('id');
+      await invoice(cust, {
+        subtotal: '400.00', total: '400.00', status: 'paid', payer_statement_id: idOf(statement),
+        scheduled_service_id: await visit(cust, est, { scheduled_date: '2025-01-20' }),
+      });
+      const [settled] = await trx('payments').insert({
+        customer_id: null, payer_id: idOf(payer), statement_id: idOf(statement), payment_date: '2025-02-03', amount: '400.00',
+        status: 'paid', base_amount_cents: 40000, description: `Payer statement S-${idOf(statement)} settlement (ach)`,
+        updated_at: '2025-02-03T15:00:00Z',
+      }).returning('id');
+      const paid = idOf(settled);
+      const run1 = await draft(W1);
+      expect(commissionOf(run1.body.run, 'Sample Alpha')).toBe(4000);
+      expect((await finalize(run1.body.run.id)).status).toBe(200);
+      // stripe-webhook.js charge.refunded on a statement payment: the refund fields change, updated_at does not.
+      await trx('payments').where({ id: paid }).update({ status: 'refunded', refund_amount: '400.00', refund_status: 'full' });
+      const next = await estimate(cust, tech, { accepted_at: '2026-09-14T15:00:00Z' });
+      await payment(cust, await mintedInvoice(cust, next, { subtotal: '500.00' }), '2026-09-23', '500.00');
+      const run2 = await draft(W2);
+      // The new $50 is paid whole: nothing of the refund is taken back after the 12 months.
+      expect(commissionOf(run2.body.run, 'Sample Alpha')).toBe(5000);
+      expect((await trx('commission_entries').where({ payment_id: paid })).map((e) => Number(e.counted_cents))).toEqual([40000]);
     });
   });
 

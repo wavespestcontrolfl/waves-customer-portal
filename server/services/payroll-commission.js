@@ -15,11 +15,12 @@
  *    leaves, payments keep paying until the 12 months end. A refund dated after the 12 months is not
  *    taken back.
  *
- * Refunds are read from the payment row (status, refund_amount, refunded_surcharge_cents). The row keeps no
- * refund date, so the date is judged like this: a refund is taken off while the sale's 12 months still run
- * (today's Eastern date <= window_end), or when the payment record's last change (updated_at, an upper bound on
- * when the refund happened) is inside them. A refund first seen only after the 12 months, on a record changed
- * after them, is not taken back. Each entry stores the refunded base it has deducted so far
+ * Refunds are read from the payment row (status, refund_amount, refunded_surcharge_cents). Waves keeps no reliable
+ * refund date (payments.refunded_at is never written, and refund writers do not all stamp updated_at), so a refund
+ * is dated the day a pay run first sees it: one seen while the sale's 12 months still run (today's Eastern date <=
+ * window_end) is taken off; one first seen after them is never taken back. A pay run syncs at every draft, recompute
+ * and finalize, so only a refund made in the last days of the 12 months can be seen after them, and that errs toward
+ * the technician (never from wages). Each entry stores the refunded base it has deducted so far
  * (refund_counted_cents); when the row shows less refunded than that (a refund failed, a dispute was won) the
  * money kept counts again. Every entry recomputes on every sync, so a refund inside the 12 months comes off the
  * next commission, never below $0 and never from wages; nothing is taken back when no later commission comes.
@@ -356,17 +357,17 @@ function depositApplications(invoice) {
 }
 
 /**
- * What the deposit ledger says about an estimate's applied deposit money, per estimate: applied (credited_amount), the
- * part a refund or dispute reversed, and the ledger's last change. estimate_deposits records a refund or dispute on the
+ * What the deposit ledger says about an estimate's applied deposit money, per estimate: applied (credited_amount) and the
+ * part a refund or dispute reversed. estimate_deposits records a refund or dispute on the
  * deposit row (refunded_amount, the face value returned; status 'refunded' when all of it went back) and leaves the
  * invoice's credit line for manual reconciliation (handleDepositChargeReversed). A refund returns the part never applied
  * (amount - credited_amount) first; only the rest reverses applied money.
  */
 async function depositLedgers(trx, estimateIds) {
   const ids = [...new Set(estimateIds)];
-  const ledgers = new Map(ids.map((id) => [id, { applied: 0n, reversed: 0n, updatedOn: null }]));
+  const ledgers = new Map(ids.map((id) => [id, { applied: 0n, reversed: 0n }]));
   const rows = ids.length ? await trx('estimate_deposits').whereIn('estimate_id', ids).whereIn('status', COLLECTED_DEPOSITS)
-    .select('estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount', 'created_at', 'updated_at') : [];
+    .select('estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount') : [];
   for (const row of rows) {
     const ledger = ledgers.get(String(row.estimate_id).toLowerCase());
     const amount = payrollUnits(row.amount);
@@ -375,8 +376,6 @@ async function depositLedgers(trx, estimateIds) {
     const intoApplied = refunded - (amount - credited);
     ledger.applied += credited;
     ledger.reversed += intoApplied <= 0n ? 0n : (intoApplied < credited ? intoApplied : credited);
-    const changed = etDateOf(row.updated_at || row.created_at);
-    if (!ledger.updatedOn || changed > ledger.updatedOn) ledger.updatedOn = changed;
   }
   return ledgers;
 }
@@ -387,14 +386,12 @@ const dollarsOf = (cents) => (Number(cents) / 100).toFixed(2);
  * One deposit application as a payment row (refundedNow, countedRefund and commissionOf read it): its cents, less the
  * same part of it the estimate's ledger shows reversed (reversed / applied, half-up). A voided invoice gave its credit
  * back to the deposit (restoreDepositCreditForVoidedInvoice), and an application the ledger shows no applied money
- * behind backs nothing, so either reads as refunded in full. Dated the day the invoice was made, never before the sale;
- * a refund is judged on the later of the ledger's and the invoice's last change (the 12-month rule).
+ * behind backs nothing, so either reads as refunded in full. Dated the day the invoice was made, never before the sale.
  */
 function applicationPayment(estimateId, invoice, cents, ledger, sale) {
   const backed = ledger && ledger.applied > 0n && !VOIDED_INVOICE.includes(invoice.status);
   const reversed = backed ? roundDiv(cents * ledger.reversed, ledger.applied) : cents;
   const made = etDateOf(invoice.created_at);
-  const changed = etDateOf(invoice.updated_at || invoice.created_at);
   return {
     id: estimateId,
     status: 'paid',
@@ -402,7 +399,6 @@ function applicationPayment(estimateId, invoice, cents, ledger, sale) {
     refunded_surcharge_cents: 0,
     base_cents: cents.toString(),
     payment_on: made > sale.accepted_on ? made : sale.accepted_on,
-    updated_on: ledger && ledger.updatedOn && ledger.updatedOn > changed ? ledger.updatedOn : changed,
   };
 }
 
@@ -487,12 +483,13 @@ function refundedNow(payment) {
 
 /**
  * The refunded base this entry deducts: what the row shows now when that is no more than the entry deducted so far (money
- * kept counts again); a larger refund only while the 12 months run or when the record's last change is inside them.
+ * kept counts again); a larger refund only when a pay run sees it while the 12 months still run (no reliable refund
+ * date exists, see the header), never after them.
  */
 function countedRefund(payment, previous, sale, today) {
   const now = refundedNow(payment);
   if (now <= previous) return now;
-  return today <= sale.window_end || payment.updated_on <= sale.window_end ? now : previous;
+  return today <= sale.window_end ? now : previous;
 }
 
 /**
@@ -513,7 +510,6 @@ const paymentColumns = (trx) => ['p.id', 'p.customer_id', 'p.statement_id', 'p.s
   trx.raw('COALESCE(p.refunded_surcharge_cents, 0) as refunded_surcharge_cents'),
   trx.raw("NULLIF(p.metadata->>'invoice_id', '') as metadata_invoice_id"),
   trx.raw("to_char(p.payment_date, 'YYYY-MM-DD') as payment_on"),
-  trx.raw("to_char((p.updated_at AT TIME ZONE ?)::date, 'YYYY-MM-DD') as updated_on", [STAFF_TIME_ZONE]),
   trx.raw('COALESCE(p.base_amount_cents, ROUND(p.amount * 100))::bigint as base_cents')];
 
 /**
