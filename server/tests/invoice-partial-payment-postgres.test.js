@@ -96,9 +96,14 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     return invoice;
   }
 
-  const record = (invoiceId, over = {}) => recordManualPayment(invoiceId, {
-    method: 'check', reference: '1042', note: 'check in hand', recordedBy: 'Synthetic Office', sendReceipt: false, ...over,
-  });
+  // Like the Invoices page: an amount travels with the amount owed the page showed (read now, unless the case pins one).
+  const record = async (invoiceId, over = {}) => {
+    const seen = over.amountCents != null && over.owedCentsSeen === undefined
+      ? { owedCentsSeen: Math.round(invoiceAmountDue(await database('invoices').where({ id: invoiceId }).first()) * 100) } : {};
+    return recordManualPayment(invoiceId, {
+      method: 'check', reference: '1042', note: 'check in hand', recordedBy: 'Synthetic Office', sendReceipt: false, ...seen, ...over,
+    });
+  };
   const row = (invoiceId) => database('invoices').where({ id: invoiceId }).first();
   async function shownPaymentId(invoiceId) {
     const description = await describeManualPaymentUndo(invoiceId);
@@ -113,6 +118,20 @@ postgres('Partial payments against migrated PostgreSQL', () => {
   }
   const seedSequence = (invoice) => database('invoice_followup_sequences').insert({
     invoice_id: invoice.id, customer_id: invoice.customer_id, status: 'active', step_index: 1, touches_sent: 1, next_touch_at: new Date(Date.now() + 3600 * 1000),
+  });
+
+  it('the same part payment submitted twice at once records once: the second meets $60 owed, not the $100 the page showed', async () => {
+    const invoice = await makeInvoice();
+    const results = await Promise.allSettled([
+      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
+      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = results.find((r) => r.status === 'rejected');
+    expect(refused.reason).toMatchObject({ statusCode: 409 });
+    expect(refused.reason.message).toMatch(/changed to \$60\.00/);
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+    expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
   });
 
   it('a part payment adds to amount_paid and leaves the invoice open: same status, reminders running, one ledger row, no receipt', async () => {

@@ -24,6 +24,9 @@
  * invoice that is still open), books the REMAINDER as the payments row, and the receipt reads the whole bill.
  * Refused for a part: gate off; Auto Pay customer (fail closed); an active payment plan; an annual prepay invoice; a payer-billed
  * invoice; any caller carrying expectedAmountCents / settlementFence / requireSelfPay / automated (the Zelle paths, the Intelligence Bar).
+ * owedCentsSeen (required with amountCents): the amount owed the page showed. It must still be what is owed, before the lock and on
+ * the locked row, so a double click, a retry after a lost response, or a payment someone else recorded meanwhile is refused (409)
+ * instead of booking the same part payment twice.
  *
  * expectedAmountCents (optional, the Zelle notice reconciler): the amount the
  * caller is settling FOR. Checked under the invoice row lock right before the
@@ -164,6 +167,10 @@ async function partPaymentRefusal(conn, invoice) {
   return null;
 }
 
+function owedChangedMessage(nowCents) {
+  return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
+}
+
 async function recordManualPayment(id, {
   method,
   reference,
@@ -173,6 +180,8 @@ async function recordManualPayment(id, {
   via = 'both',
   expectedAmountCents = null,
   amountCents = null,
+  // The amount owed the Invoices page showed when the office typed amountCents (required with it).
+  owedCentsSeen = null,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
@@ -185,6 +194,9 @@ async function recordManualPayment(id, {
   }
   if (amountCents != null && !(Number.isSafeInteger(amountCents) && amountCents > 0)) {
     throw refusal(400, 'amount must be a positive amount of money');
+  }
+  if (amountCents != null && !(Number.isSafeInteger(owedCentsSeen) && owedCentsSeen > 0)) {
+    throw refusal(400, 'Reload the invoice and enter the payment again. Nothing was recorded.');
   }
   if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
     throw refusal(400, `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`);
@@ -224,6 +236,9 @@ async function recordManualPayment(id, {
   let partCents = null;
   if (amountCents != null) {
     const owedCents = Math.round(invoiceAmountDue(invoice) * 100);
+    // A repeat of the same submit (a double click, a retry after a lost response) or a payment someone else recorded meanwhile meets
+    // a different amount owed than the page showed: refused, so one payment is never booked twice. Checked again on the locked row.
+    if (owedCentsSeen !== owedCents) throw refusal(409, owedChangedMessage(owedCents));
     if (amountCents > owedCents) {
       throw refusal(400, `That is more than the $${(owedCents / 100).toFixed(2)} still owed on this invoice. Nothing was recorded.`);
     }
@@ -391,6 +406,7 @@ async function recordManualPayment(id, {
     // A part payment, decided on the LOCKED row: still less than what is owed, and nothing that makes it unsafe appeared since the pre-lock read.
     if (partCents != null) {
       const lockedOwedCents = Math.round(invoiceAmountDue(locked) * 100);
+      if (lockedOwedCents !== owedCentsSeen) return { owedChanged: { nowCents: lockedOwedCents } };
       if (partCents >= lockedOwedCents) return { amountMismatch: { expectedCents: partCents, actualCents: lockedOwedCents } };
       const refused = await partPaymentRefusal(trx, locked);
       if (refused) return { partRefused: refused };
@@ -562,6 +578,9 @@ async function recordManualPayment(id, {
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
+  }
+  if (updatedInvoice?.owedChanged) {
+    throw refusal(409, owedChangedMessage(updatedInvoice.owedChanged.nowCents));
   }
   if (updatedInvoice?.partRefused) {
     throw refusal(409, `${updatedInvoice.partRefused} Nothing was recorded.`);

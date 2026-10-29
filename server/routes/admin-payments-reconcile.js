@@ -320,6 +320,12 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       } catch (e) {
         return { conflict: e.message };
       }
+      // collectedAmount and the charge check above used the pre-lock amount owed. A part payment (or an edit) committing since then
+      // moves it, and booking the old figure while amount_paid is zeroed below would collect the part twice: refuse a stale request.
+      const lockedOwedCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
+      if (lockedOwedCents !== Math.round(invoiceAmountDue(invoice) * 100)) {
+        return { conflict: `The amount owed on this invoice changed to $${(lockedOwedCents / 100).toFixed(2)} while it was being reconciled. Reload it and reconcile again. Nothing was recorded.` };
+      }
       const rows = await trx('invoices')
         .where({ id: invoiceId })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)

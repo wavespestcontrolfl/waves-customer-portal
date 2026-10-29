@@ -2842,6 +2842,7 @@ const recordPaymentHandler = async (req, res, next) => {
       sendReceipt = true,
       via = 'both',
       amount,
+      owedSeen,
     } = req.body || {};
 
     if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
@@ -2859,6 +2860,12 @@ const recordPaymentHandler = async (req, res, next) => {
         return res.status(400).json({ error: 'amount must be a dollar amount above $0.00, with at most two decimals' });
       }
     }
+    // The amount owed the page showed beside that amount: the writer refuses when it is no longer what is owed (a repeat submit).
+    let owedCentsSeen = null;
+    if (amountCents != null && owedSeen != null && owedSeen !== '') {
+      const dollars = Number(owedSeen);
+      owedCentsSeen = Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
+    }
     if (sendReceipt && !['email', 'sms', 'both'].includes(via)) {
       return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
     }
@@ -2870,7 +2877,7 @@ const recordPaymentHandler = async (req, res, next) => {
     // reconciler). Refusals arrive as statusCode-shaped errors.
     const { invoice, receipt, closeout, partial } = await recordManualPayment(id, {
       method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
-      ...(amountCents != null ? { amountCents } : {}),
+      ...(amountCents != null ? { amountCents, owedCentsSeen } : {}),
       ...cardPinsOf(req),
     });
     res.json({ ok: true, invoice, receipt, ...(partial ? { partial } : {}), ...cardResultOf(req, closeout) });

@@ -1121,7 +1121,7 @@ describe("Part payments (GATE_PARTIAL_PAYMENTS)", () => {
     overrides.set(key, () => response({ ok: true, invoice: rows[0], receipt: null, partial: { amount: 45.5, remaining: 74.5 } }));
     fireEvent.click(dialog.getByRole("button", { name: "Record part payment", exact: true }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add payment" })).not.toBeInTheDocument());
-    expect(requests.find(request => request.key === key).body).toEqual({ method: "cash", amount: 45.5, sendReceipt: false });
+    expect(requests.find(request => request.key === key).body).toEqual({ method: "cash", amount: 45.5, owedSeen: 120, sendReceipt: false });
     expect(await screen.findByText("Part payment recorded · $74.50 still owed")).toBeInTheDocument();
   });
 

@@ -5132,6 +5132,8 @@ function RecordPaymentModal({
             via: !isPart && sendReceipt && hasContact ? receiptVia : undefined,
             // The server compares this with what is owed right now: equal records the whole balance, smaller a part payment.
             amount: partialPaymentsEnabled ? typedCents / 100 : undefined,
+            // The amount owed this page showed: a repeat of the same submit meets a smaller amount owed and is refused, not booked twice.
+            owedSeen: partialPaymentsEnabled ? owedCents / 100 : undefined,
           }),
         },
       );

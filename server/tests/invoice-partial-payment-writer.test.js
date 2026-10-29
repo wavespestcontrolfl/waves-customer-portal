@@ -78,9 +78,16 @@ async function refusalOf(promise) {
   throw new Error('expected a refusal');
 }
 
+let lastPre = null;
+// The Invoices page sends the amount owed it showed beside the amount (owedCentsSeen); these cases send what the pre-lock row owes.
+const owedCentsOf = (inv) => Math.max(0, Math.round(Number(inv.total) * 100) - Math.round(Number(inv.credit_applied || 0) * 100)
+  - Math.round(Number(inv.amount_paid || 0) * 100));
+const recordFromPage = (id, opts) => recordManualPayment(id, { owedCentsSeen: owedCentsOf(lastPre), ...opts });
+
 // The pool answers the pre-lock reads (the invoice, the part-payment checks, the activity row); the transaction answers the locked ones.
 // `locked` is the row FOR UPDATE returns; `after` is what the UPDATE ... RETURNING gives back.
 function harness({ pre = openInvoice(), locked = pre, after = null, plan = null, term = null, customer = { id: 'cust-1' } } = {}) {
+  lastPre = pre;
   const calls = { invoiceUpdate: null, paymentsInsert: null };
   const activity = recorder();
   db.mockImplementation((table) => {
@@ -133,7 +140,7 @@ afterAll(() => { delete process.env.GATE_PARTIAL_PAYMENTS; });
 describe('the amount against what is owed', () => {
   test('more than owed is refused before anything opens', async () => {
     harness({ pre: openInvoice({ amount_paid: '30.00' }) });
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 7001 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 7001 }));
     expect(err.statusCode).toBe(400);
     expect(err.message).toBe('That is more than the $70.00 still owed on this invoice. Nothing was recorded.');
     expect(db.transaction).not.toHaveBeenCalled();
@@ -141,7 +148,7 @@ describe('the amount against what is owed', () => {
 
   test('a bad amount is refused before any read', async () => {
     for (const amountCents of [0, -5, 12.5]) {
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents }));
+      const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents }));
       expect(err.statusCode).toBe(400);
     }
     expect(db).not.toHaveBeenCalled();
@@ -149,14 +156,14 @@ describe('the amount against what is owed', () => {
 
   test('the whole amount owed is the full path: paid flip, amount_paid reset, fenced to the figure the page showed', async () => {
     const { calls } = harness({ pre: openInvoice(), after: openInvoice({ status: 'paid', amount_paid: 0 }) });
-    const out = await recordManualPayment('inv-1', { method: 'check', amountCents: 10000, sendReceipt: false });
+    const out = await recordFromPage('inv-1', { method: 'check', amountCents: 10000, sendReceipt: false });
     expect(out.partial).toBeUndefined();
     expect(calls.invoiceUpdate).toMatchObject({ status: 'paid', amount_paid: 0 });
     expect(calls.paymentsInsert.amount).toBe(100);
     expect(FollowUps.stopOnPayment).toHaveBeenCalledWith('inv-1');
     // The page's figure no longer matches what is owed (an edit or credit since): refused, nothing written.
     harness({ pre: openInvoice({ total: '90.00' }) });
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', amountCents: 10000 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'check', amountCents: 10000 }));
     expect(err.statusCode).toBe(400);
   });
 
@@ -178,7 +185,7 @@ describe('the amount against what is owed', () => {
 describe('a part payment', () => {
   test('records the part: amount_paid grows, status and tender stay, one payments row, both markers, nothing else fires', async () => {
     const { calls, activity } = harness({ after: openInvoice({ amount_paid: '40.00' }) });
-    const out = await recordManualPayment('inv-1', {
+    const out = await recordFromPage('inv-1', {
       method: 'zelle', reference: 'ZL1', note: 'half now', amountCents: 4000, recordedBy: 'Office', recordedByTechnicianId: 7,
     });
     expect(out.partial).toEqual({ amount: 40, remaining: 60 });
@@ -214,9 +221,9 @@ describe('a part payment', () => {
   test('a second part is a part of what is still owed', async () => {
     const pre = openInvoice({ amount_paid: '40.00' });
     harness({ pre, after: openInvoice({ amount_paid: '90.00' }) });
-    const out = await recordManualPayment('inv-1', { method: 'cash', amountCents: 5000 });
+    const out = await recordFromPage('inv-1', { method: 'cash', amountCents: 5000 });
     expect(out.partial).toEqual({ amount: 50, remaining: 10 });
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 6001 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 6001 }));
     expect(err.message).toBe('That is more than the $60.00 still owed on this invoice. Nothing was recorded.');
   });
 
@@ -230,7 +237,7 @@ describe('a part payment', () => {
   ])('refused when %s, before any transaction', async (_label, arrange, extra, status, message) => {
     arrange();
     harness();
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000, ...extra }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 4000, ...extra }));
     expect(err.statusCode).toBe(status);
     expect(err.message).toMatch(message);
     expect(db.transaction).not.toHaveBeenCalled();
@@ -248,7 +255,7 @@ describe('a part payment', () => {
   ])('refused for %s: 409, nothing recorded', async (_label, setup, arrange, message) => {
     harness(setup);
     arrange();
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 4000 }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(message);
     expect(err.message).toMatch(/Nothing was recorded\.$/);
@@ -257,7 +264,7 @@ describe('a part payment', () => {
 
   test('Auto Pay is read fail-closed against the pool before the lock and again on the locked row', async () => {
     harness();
-    await recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 });
+    await recordFromPage('inv-1', { method: 'cash', amountCents: 4000 });
     expect(customerOnAutopay).toHaveBeenCalledTimes(2);
     for (const call of customerOnAutopay.mock.calls) expect(call[1]).toMatchObject({ failClosed: true });
   });
@@ -265,7 +272,7 @@ describe('a part payment', () => {
   test('a customer who joined Auto Pay, or a plan created, between the first read and the lock: 409 under the lock, nothing written', async () => {
     const h = harness();
     customerOnAutopay.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 4000 }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/on Auto Pay/);
     expect(h.calls.invoiceUpdate).toBeNull();
@@ -275,9 +282,10 @@ describe('a part payment', () => {
 
   test('the amount owed moved to the part or below while waiting for the lock: 409, nothing written', async () => {
     const h = harness({ pre: openInvoice(), locked: openInvoice({ amount_paid: '60.00' }) });
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 4000 }));
     expect(err.statusCode).toBe(409);
-    expect(err.amountMismatch).toEqual({ expectedCents: 4000, actualCents: 4000 });
+    // The locked row no longer owes what the page showed ($100): the owed-amount fence answers first.
+    expect(err.message).toMatch(/changed to \$40\.00 since the page loaded/);
     expect(h.calls.invoiceUpdate).toBeNull();
     expect(h.calls.paymentsInsert).toBeNull();
   });
@@ -285,7 +293,7 @@ describe('a part payment', () => {
   test('a payer assigned after the first read refuses under the lock (the live self-pay re-resolution)', async () => {
     const h = harness();
     rowIsSelfPayDue.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 }));
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 4000 }));
     expect(err.statusCode).toBe(409);
     expect(h.calls.paymentsInsert).toBeNull();
   });
@@ -307,5 +315,32 @@ describe('a part-paid invoice and the Zelle reconciler', () => {
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/Zelle notice cannot settle it by itself/);
     expect(h.calls.paymentsInsert).toBeNull();
+  });
+});
+
+describe('a repeated submit never books the same part payment twice (pre-push P0)', () => {
+  test('an amount without the amount owed the page showed is refused before anything opens', async () => {
+    harness();
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000 }));
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toMatch(/Reload the invoice/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the same $40 submitted again after the first landed meets $60 owed, not the $100 it saw, and is refused', async () => {
+    harness({ pre: openInvoice({ amount_paid: '40.00' }) });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000, owedCentsSeen: 10000 }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/changed to \$60\.00 since the page loaded/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a part payment that committed while this one waited for the lock is seen on the locked row: refused, nothing written', async () => {
+    const { calls } = harness({ pre: openInvoice(), locked: openInvoice({ amount_paid: '40.00' }) });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', amountCents: 4000, owedCentsSeen: 10000 }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/changed to \$60\.00/);
+    expect(calls.paymentsInsert).toBeNull();
+    expect(calls.invoiceUpdate).toBeNull();
   });
 });
