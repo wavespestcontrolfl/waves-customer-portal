@@ -208,6 +208,8 @@ describe('close-only buttons (close_note): the bell\'s own Done with the button\
     expect(NotificationService.markAdminDone).toHaveBeenNthCalledWith(1, [ID], { by: 't-1', resolution: 'Called back', role: 'admin', expectedVersion: mockClaimedVersion });
     expect(settleCommitmentsForDoneAlert).toHaveBeenCalledWith(expect.anything(), ID, { reviewedBy: 't-1' });
     expect(tapOf()).toMatchObject({ action: 'called_back', outcome: 'done' });
+    // The step closed it, fenced; the runner does not close it a second time, unfenced.
+    expect(NotificationService.markAdminDone).toHaveBeenCalledTimes(1);
   });
 
   test('a row a new message rewrote after the claim is not closed, and nothing settles', async () => {

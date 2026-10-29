@@ -11,9 +11,10 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { buttonViolations } = require('./admin-alert-compose');
 
-// kind -> its handler { live() -> boolean, run({ row, item, technicianId }) }. A run answers
-// { ok: true, message, resolution } or { ok: false, code, message, close? }, where `close` is the resolution
-// for a row whose record was already answered elsewhere. Required at call time: serving the bell list loads no
+// kind -> its handler { live() -> boolean, run({ row, item, technicianId, claimedVersion }) }. A run answers
+// { ok: true, message, resolution, closed? } or { ok: false, code, message, close? }: `closed` says the step
+// already closed the row itself (fenced), `close` is the resolution for a row whose record was already
+// answered elsewhere. Required at call time: serving the bell list loads no
 // emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
 // for that kind first (section 2, part 9).
 const KINDS = {
@@ -46,7 +47,9 @@ const closeNoteHandler = {
     } catch (err) {
       logger.warn(`[alert-buttons] follow-up not settled for alert ${row.id}: ${err.message}`);
     }
-    return { ok: true, message: `Marked ${resolution.toLowerCase()}.`, resolution };
+    // Closed above on the claimed version: the runner must not close it again unfenced, or a new text that
+    // reopened the row since would be closed unseen.
+    return { ok: true, closed: true, message: `Marked ${resolution.toLowerCase()}.`, resolution };
   },
 };
 
@@ -156,9 +159,10 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   }
   await finishTap(notificationId, { ...tap, outcome: result.ok ? 'done' : result.code });
   if (result.ok) {
-    // The step's own close may have marked the row done first; this keeps that close (markAdminDone writes only
-    // an open row).
-    await NotificationService.markAdminDone([notificationId], { by, resolution: result.resolution, role });
+    // A step that answered its record elsewhere (the referral's own close) may have closed the row already;
+    // this keeps that close (markAdminDone writes only an open row). A step that closed the row itself, fenced,
+    // is not closed again.
+    if (!result.closed) await NotificationService.markAdminDone([notificationId], { by, resolution: result.resolution, role });
     return reply(200, { success: true, message: result.message });
   }
   if (result.close) await NotificationService.markAdminDone([notificationId], { by: 'alert-button', resolution: result.close });

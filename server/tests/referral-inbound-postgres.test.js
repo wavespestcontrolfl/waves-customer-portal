@@ -715,6 +715,24 @@ jest.mock('../services/customer-credit', () => ({
       expect(after.metadata).not.toHaveProperty('buttonClaim');
     });
 
+    test('a new text that reopens the row right after the close stays open', async () => {
+      const row = await textRow();
+      const ops = require('../services/sms-operational-actions');
+      // A ringing refresh (a new text) lands just after the fenced close: it reopens the row with the new text.
+      const spy = jest.spyOn(ops, 'settleCommitmentsForDoneAlert').mockImplementationOnce(async () => {
+        await db('notifications').where({ id: row.id }).update({ done_at: null, done_by: null, resolution: null, read_at: null, body: 'One more thing: the dog is out.' });
+        return 0;
+      });
+      try {
+        await expect(tap(row)).resolves.toMatchObject({ status: 200 });
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await db('notifications').where({ id: row.id }).first();
+      expect(after.done_at).toBeNull();
+      expect(after.body).toBe('One more thing: the dog is out.');
+    });
+
     test('a new text that rewrites the row between the claim and the close is not marked handled', async () => {
       const row = await textRow();
       const realDone = NotificationService.markAdminDone.bind(NotificationService);
