@@ -8,7 +8,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const inbound = require('../services/referral-inbound');
-const { form1099ThresholdCents } = require('../services/referral-1099');
+const { form1099ThresholdCents } = require('../services/form-1099-threshold');
 const { referralInboundConfirmLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
