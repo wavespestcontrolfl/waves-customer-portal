@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
-const { slabHomeNoTaxLive, lawnSprayNoTaxLive } = require('../config/feature-gates');
+const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -61,6 +61,17 @@ const TaxCalculator = {
       if (exemption) {
         return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };
       }
+    }
+
+    // 1b. Building use (GATE_BUILDING_USE_TAX): Florida taxes pest control
+    // only at a nonresidential building (Rule 12A-1.009), whoever pays. An
+    // account whose won proposal says its site is residential (homes,
+    // apartments, condos and their common areas) is taxed like any
+    // residential customer: not at all (owner 2026-10-08, "any residential
+    // service is non taxable"). The use belongs to the site, so a payer-billed
+    // invoice (skipCustomerExemption) follows it too.
+    if (customer.building_use === 'residential' && buildingUseTaxLive()) {
+      return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Residential building use — pest control at homes and their common areas is not taxable (FL Rule 12A-1.009)' };
     }
 
     // 2. Check service taxability. opts.isCommercial forces commercial treatment
@@ -138,8 +149,10 @@ const TaxCalculator = {
     // Pre-construction termite treatment (slab pre-treat): Florida taxes it
     // only for a nonresidential building (Rule 12A-1.009); for a home it is
     // residential pest control, even when the customer is a builder whose
-    // account is commercial. No record stores the building's use, so the
-    // service name carries it (GATE_SLAB_HOME_NO_TAX).
+    // account is commercial. A builder's account holds homes and its own
+    // offices alike, so the service name carries the building's use here
+    // (GATE_SLAB_HOME_NO_TAX); the account-level use in step 1b covers a
+    // whole residential site.
     if (slabHomeNoTaxLive() && this.isHomeSlabPretreat(serviceType)) {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
     }

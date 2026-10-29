@@ -1006,6 +1006,12 @@ async function winCommercialProposal(trx, updatedEstimate) {
     customerId: updatedEstimate.customer_id,
     proposal: normalizeProposal(updatedEstimate),
   });
+  // The proposal's building use, which decides the tax on later visits (GATE_BUILDING_USE_TAX).
+  await proposalWin.recordProposalBuildingUse({
+    trx,
+    customerId: updatedEstimate.customer_id,
+    proposal: normalizeProposal(updatedEstimate),
+  });
   // A NON-invoice-mode win with authored structured payment terms has no path
   // that consumes them (codex #3297 r4). Auto Pay is the exception and the
   // mirror (GATE_COMMERCIAL_AUTOPAY): the customer's Auto Pay enrollment

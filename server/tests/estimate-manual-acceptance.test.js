@@ -83,6 +83,7 @@ jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
+  recordProposalBuildingUse: jest.fn(),
   createProposalAcceptanceInvoice: jest.fn(),
 }));
 
@@ -1374,6 +1375,7 @@ describe('commercial proposal win paths (#1917)', () => {
     proposalWin.ensureCustomerForProposalWin.mockReset();
     proposalWin.promoteLinkedCustomerForProposalWin.mockReset();
     proposalWin.flagProposalCustomerCommercialIfTaxable.mockReset();
+    proposalWin.recordProposalBuildingUse.mockReset();
     proposalWin.createProposalAcceptanceInvoice.mockReset();
   });
 
@@ -1465,6 +1467,8 @@ describe('commercial proposal win paths (#1917)', () => {
 
     expect(proposalWin.promoteLinkedCustomerForProposalWin).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
     expect(proposalWin.flagProposalCustomerCommercialIfTaxable).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
+    // Every win records the proposal's building use (GATE_BUILDING_USE_TAX reads it on later visits).
+    expect(proposalWin.recordProposalBuildingUse).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
     expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled(); // not invoice-mode
   });
 

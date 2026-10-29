@@ -3826,6 +3826,15 @@ const gates = {
   // customer's property_type exactly as before.
   slabHomeNoTax: gateEnvValue('GATE_SLAB_HOME_NO_TAX'),
 
+  // Residential building use is not taxed (2026-10-28): Florida taxes pest
+  // control only at a nonresidential building (Rule 12A-1.009), whoever pays,
+  // so an account whose won proposal says its site is a home or residential
+  // community (customers.building_use = 'residential') owes no tax on its
+  // visits. TaxCalculator.calculateTax reads it at call time via
+  // buildingUseTaxLive(); dark by default. Off = commercial accounts are taxed
+  // by property_type exactly as before.
+  buildingUseTax: gateEnvValue('GATE_BUILDING_USE_TAX'),
+
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
   // taxes pest control only for an infestation of a nonresidential building, so
@@ -6206,6 +6215,11 @@ function taxReturnEngineLive() {
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
+}
+
+// GATE_BUILDING_USE_TAX read at CALL time (so a flip needs no redeploy).
+function buildingUseTaxLive() {
+  return gateEnvValue('GATE_BUILDING_USE_TAX');
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -8848,3 +8862,5 @@ module.exports.techOpenTimeLive = techOpenTimeLive;
 module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNoticeReconcileLive;
 // GATE_SETUP_FEE_APPLICATION_SETTLED reader, on its own line so gate PRs never conflict.
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
+// GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
+module.exports.buildingUseTaxLive = buildingUseTaxLive;
