@@ -724,7 +724,10 @@ async function loadCadenceByRowId(database, customerId) {
       // doesn't name. Whichever produces the cadence, the visit count always
       // comes from the one shared mapping.
       const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
-      const liveCadence = (visitsPerYearForCadence(rawPattern) ? rawPattern : null)
+      // A lawn rounds series (lawn_rounds_9) is the 9x lawn plan: it reads, and
+      // is worded, as every_6_weeks.
+      const liveCadence = (rawPattern === 'lawn_rounds_9' ? 'every_6_weeks' : null)
+        || (visitsPerYearForCadence(rawPattern) ? rawPattern : null)
         || normalizeCoverageCadence(row.recurring_pattern)
         || cadenceFromIntervalDays(row.recurring_interval_days);
       const liveVisitsPerYear = visitsPerYearForCadence(liveCadence);

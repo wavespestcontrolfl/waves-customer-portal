@@ -96,6 +96,7 @@ describe('lawnVisitsPerYear: the visit\'s plan from the catalog service, then th
     const generic = { service_type: 'Lawn Care' };
     expect(await visits({ ...generic, recurring_pattern: 'every_6_weeks' })).toBe(9);
     expect(await visits({ ...generic, recurring_pattern: 'custom', recurring_interval_days: 42 })).toBe(9);
+    expect(await visits({ ...generic, recurring_pattern: 'lawn_rounds_9' })).toBe(9);
     expect(await visits({ ...generic, recurring_pattern: 'monthly' })).toBe(12);
     expect(await visits({ ...generic, recurring_pattern: 'monthly_nth_weekday' })).toBe(12);
     expect(await visits({ ...generic, recurring_pattern: 'custom', recurring_interval_days: 30 })).toBe(12);

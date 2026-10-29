@@ -6,8 +6,9 @@
 // every rule so a reader can check the words.
 //
 //   duringRain     the label says "Do not make applications during rain" (or "during times of
-//                  precipitation"). Judged on the start hour: a caution, and a hold only at the
-//                  reschedule tier (reschedule-rules.js weather.rain).
+//                  precipitation"). Judged on the start hour: a caution above the caution tier
+//                  (reschedule-rules.js weather.rain). Never a hold: owner 2026-10-29, the card
+//                  warns and the technician checks the site, so the dose always shows.
 //   dryBeforeRain  the label ADVISES hours to dry before rain ("Avoid making applications when rainfall
 //                  is expected before the product has sufficient time to dry (minimum 4 hours)"). A
 //                  caution only, never a hold.

@@ -4,7 +4,12 @@
  * calendar (payroll-tax-calendar.js, layer 2), so the calendar row asks for the
  * amount the return shows.
  *   - Line 4 (taxable wages): each check's wages under the $7,000 base
- *     (RATES.futaAndStateWageBaseCents) left after its year-to-date wages.
+ *     (RATES.futaAndStateWageBaseCents) left after its year-to-date wages. A check
+ *     that stored its own unemployment wages (unemployment_wages_cents, a check
+ *     drafted with GATE_PAYROLL_FAMILY_EMPLOYEE on) uses them. A family
+ *     employee's exempt check (F.S. 443.1216(13)(d): not covered employment)
+ *     adds nothing to any line. Stored columns are read whatever the gate says now;
+ *     a row without them (null or not selected) is worked out as before.
  *   - Line 5: line 4 times the rate, rounded once on the quarter (Florida RT-6
  *     instructions), not the sum of per-check rounding.
  *   - The rate: the one each check stored (calc_snapshot.floridaReemploymentRateBp),
@@ -24,13 +29,17 @@ const pct = (cents, bp) => Math.floor((cents * bp + 5000) / 10000);
 
 // One check's RT-6 inputs from a payroll_checks row (cents columns, calc_snapshot).
 function rt6CheckInputs(row) {
-  const gross = num(row.gross_cents);
-  const capWages = Math.min(gross, max0(RATES.futaAndStateWageBaseCents - num(row.ytd_gross_before_cents)));
+  const exempt = row.unemployment_exempt === true;
+  const gross = exempt ? 0 : num(row.gross_cents);
+  const stored = row.unemployment_wages_cents;
+  const capWages = exempt ? 0
+    : (stored != null ? num(stored)
+      : Math.min(gross, max0(RATES.futaAndStateWageBaseCents - num(row.ytd_gross_before_cents))));
   let snapshot = row.calc_snapshot;
   if (typeof snapshot === 'string') {
     try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
   }
-  return { gross, capWages, excessWages: gross - capWages, flReemployment: num(row.fl_reemployment_cents), snapshot };
+  return { gross, capWages, excessWages: gross - capWages, flReemployment: exempt ? 0 : num(row.fl_reemployment_cents), snapshot };
 }
 
 function rt6Rate(checks) {

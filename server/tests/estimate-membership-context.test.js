@@ -1583,6 +1583,22 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('a lawn rounds series reads as the 9x lawn plan, with the every-6-weeks wording', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 90 }),
+      scheduledRows: [{ id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-03-05' }],
+      catalogRows: [{ id: 'l1', recurring_pattern: 'lawn_rounds_9', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Every 6 weeks',
+      visitsPerYear: 9,
+      currentPerVisit: 120,
+    }));
+  });
+
   test('an unaverageable prepaid contract withholds even when an older invoice exists', async () => {
     const database = fakeDb({
       scheduledRows: [

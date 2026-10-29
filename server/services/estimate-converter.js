@@ -4835,6 +4835,11 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the seeder writes a residential
+    // lawn 9x series as lawn_rounds_9 (parent mark and every child). An accept
+    // with annual prepay keeps the every_6_weeks series the prepay coverage
+    // cadence records, until rounds prepay coverage ships.
+    ...(opts.annualPrepay === true ? { lawnRounds: false } : {}),
     visitsPerYear,
     skipWeekends: true,
     weekendShift: 'forward',
@@ -7245,6 +7250,7 @@ const EstimateConverter = {
                   // row's first-application invoice covers the shared trip);
                   // its follow-ups bill this line's own per-visit amount.
                   estimatedPrice: reservedPerVisitSplit?.byUnit.get(unit),
+                  annualPrepay: billingTerm === 'prepay_annual',
                 });
               } catch (seedErr) {
                 if (combinedCapacity) throw seedErr;
@@ -7600,6 +7606,7 @@ const EstimateConverter = {
                 // The reserved row keeps the same-day total it was accepted
                 // and invoiced at; its follow-ups bill only this line.
                 estimatedPrice: reservedPerVisitSplit?.reserved,
+                annualPrepay: billingTerm === 'prepay_annual',
               });
               return { seedResult };
             });
@@ -7903,6 +7910,7 @@ const EstimateConverter = {
                 // same split the reserved-slot path applies. undefined = the
                 // seeder's parent-copy price (single-program accepts).
                 estimatedPrice: unitPerVisit,
+                annualPrepay: billingTerm === 'prepay_annual',
               });
             } catch (seedErr) {
               logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
@@ -9260,6 +9268,8 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
+module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;
 module.exports.isPalmInjectionFamily = isPalmInjectionFamily;
 module.exports.guardServiceTypeFor = guardServiceTypeFor;
 module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;

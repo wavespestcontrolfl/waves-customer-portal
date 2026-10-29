@@ -2,7 +2,8 @@
 
 // GATE_SPRAY_RAIN_RULES=shadow (owner 2026-10-26, plan page "Visit-Day Rain Rule"): records, per visit and
 // visit day, the WORST verdict the rain rules would have shown (spray_rain_rule_shadow), next to the chip
-// the board shows today. Written from a visit-day job card or readiness build (job-card.js); nothing reads
+// the board shows today. At `true` (owner 2026-10-29) the live check is the rain rules, so both sides
+// match and the row keeps counting the real rain odds behind each caution; nothing is held then. Written from a visit-day job card or readiness build (job-card.js); nothing reads
 // it to decide anything. A row is refreshed at most every 10 minutes unless the verdict got worse or a live
 // hold appeared, so the board's 60-second readiness poll does not write every minute.
 const db = require('../models/db');
