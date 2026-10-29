@@ -195,6 +195,16 @@ describe('seeder wiring for lawn_rounds_9', () => {
     expect(clampDateToRound('lawn_rounds_9', '2027-03-15', { blackoutDates: blackout, intendedDate: '2027-03-14' })).toBeNull();
   });
 
+  test('clampDateToRound: a date months outside its round still lands on the crossed edge (no distance limit)', () => {
+    const { clampDateToRound } = Seeder;
+    // Round 4 runs Sat Apr 24 - Wed Jun 2, 2027. September is ~100 days past its end.
+    expect(clampDateToRound('lawn_rounds_9', '2027-09-15', { intendedDate: '2027-05-12' })).toBe('2027-06-02');
+    expect(clampDateToRound('lawn_rounds_9', '2027-09-15', { skipWeekends: true, intendedDate: '2027-05-12' })).toBe('2027-06-02');
+    // January is ~100 days before its start: the walk starts at Apr 24 (a Saturday).
+    expect(clampDateToRound('lawn_rounds_9', '2027-01-10', { intendedDate: '2027-05-12' })).toBe('2027-04-24');
+    expect(clampDateToRound('lawn_rounds_9', '2027-01-10', { skipWeekends: true, intendedDate: '2027-05-12' })).toBe('2027-04-26');
+  });
+
   test('weekend anchor with skipWeekends never leaves its round', () => {
     // Sat anchors: raw dates are Saturdays; the forward shift to Monday can cross a round edge.
     for (const anchor of ['2027-02-06', '2027-03-13', '2027-04-23', '2027-06-12']) {

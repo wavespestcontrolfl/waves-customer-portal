@@ -23,6 +23,7 @@ const PATTERNS = [
   'monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'biannual', 'annual', 'yearly',
   'monthly_nth_weekday',
   'seasonal_feb_oct',
+  'lawn_rounds_9',
   'custom',
 ];
 const BASES = ['2026-09-02', '2026-01-15', '2026-11-20'];
@@ -47,6 +48,17 @@ describe('nextRecurringDate parity across the three copies', () => {
     expect(rebooker('2026-09-02', 'every_6_weeks', 1, {})).toBe('2026-10-14');
     expect(adminSchedule('2026-09-02', 'every_6_weeks', 1, {})).toBe('2026-10-14');
     expect(seeder('2026-09-02', 'every_6_weeks', 1, {})).toBe('2026-10-14');
+  });
+
+  test('lawn_rounds_9 with the series anchor: all three hop from the latest visit onto the same round dates', () => {
+    for (const base of ['2027-03-17', '2027-11-10']) {
+      for (let i = 0; i <= 9; i++) {
+        const opts = { ...OPTS, roundAnchor: '2027-01-12' };
+        const a = seeder(base, 'lawn_rounds_9', i, opts);
+        expect(rebooker(base, 'lawn_rounds_9', i, opts)).toBe(a);
+        expect(adminSchedule(base, 'lawn_rounds_9', i, opts)).toBe(a);
+      }
+    }
   });
 
   test('an UNKNOWN pattern still falls back identically (91-day gap) in all three', () => {

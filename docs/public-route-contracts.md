@@ -982,6 +982,35 @@ loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets
 the same reload when a date would be named.
 
+Lawn rounds on the public reschedule link (owner 2026-10-28, `lawn_rounds_9`;
+no gate, inert until a visit carries that pattern; every other pattern is
+byte-identical). A `lawn_rounds_9` visit has one visit in each of nine fixed
+rounds a year and a customer move stays inside the round the visit sits in:
+- **Picker.** `buildAvailabilityForService` (behind `GET
+  /api/public/reschedule/:token`, `POST /:token/find-slots` and the commit's
+  anti-forgery re-check) drops every day and slot dated outside the visit's own
+  round, for a visit whose `recurring_pattern` is `lawn_rounds_9` only. The
+  payload shape is unchanged: fewer `days` and `slots`. A date outside the round
+  that a client posts anyway is not in the rebuilt availability, so
+  `POST /api/public/reschedule/:token` answers the existing `409 { code:
+  'SLOT_TAKEN', ... }` recovery response, not a new code.
+- **Expired-round exception.** A visit whose round has already ended (a missed
+  visit being rebooked) is not held to a round: the filter is a no-op and the
+  picker offers the usual days. The office places that visit.
+- **Refusal from the move itself** (`SmartRebooker`, non-admin initiators; an
+  admin move is never refused for a round). It answers through the route's
+  existing error branch, `409 { "error": <message>, "code": <code> }` (no
+  `subcode`), and nothing moves:
+  - `OUT_OF_ROUND`: a single move, or a series re-anchor whose new date is
+    outside the round of the visit being moved. Message: "This lawn visit has to
+    stay inside its round. Contact the office if you need a different date." The
+    picker filter above already hides such dates, so this fires only on a race
+    or a direct call that got past the anti-forgery re-check.
+- A series re-anchor keeps each later visit in its own round: a visit keeps its
+  distance in rounds from the moved visit, so a skipped or cancelled round stays
+  empty, and a date exception stays in the round of its own place in the
+  series. No token, eligibility, rate-limit or privacy change.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
@@ -4874,6 +4903,25 @@ and priced on site — we'll call to schedule your free design visit."
 instead of the generic copy. No pricing, no self-book slot, no new auth
 surface — additive response-copy branching only.
 
+Top dressing is quote-only (owner 2026-10-29, top dressing scope option A; the
+engine formula is a floor that loses money on larger lawns, so the office
+prices every job by hand). Every `top_dressing` engine line carries
+`requiresManualReview` + the enforced `requiresCustomQuote` with
+`customQuoteReason: 'top_dressing_quote_only'` (`estimate-engine.js`), measured
+turf and an explicit top-dress area included. A low-confidence turf reason
+stays the line's `customQuoteReason` and both reasons are listed in
+`manualReviewReasons`. A direct `services.topDressing` request to `/calculate`
+therefore answers `202 { quote_required: true, service: 'top_dressing', reason:
+'top_dressing_quote_only', service_interest, message }` (it priced instantly
+before). `message` reuses the quote-on-request copy ("{service interest} is
+priced by our team, not the calculator — we'll send your estimate shortly."),
+and the office notice reads as an estimate request. When the turf reason wins
+(`low_confidence_turf_requires_field_verification`) the response is that
+reason's existing turf copy, unchanged. The lead is captured with zero totals
+and no self-book handoff. The keyed `top_dressing` catalog key was already
+quote-on-request and is unchanged. Additive: no new field, no new copy, no new
+auth surface, no migration, no gate.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -5100,7 +5148,7 @@ dependency).
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
 `/api/public/pricing-ranges` (read-only engine-derived per-service price
-ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
+ranges; `top_dressing` is no longer published (quote-only, owner 2026-10-29) — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
