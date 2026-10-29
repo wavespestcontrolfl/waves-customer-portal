@@ -419,7 +419,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'broken', who: 'claude', expiryDays: 30 },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
     build: (p) => ({
       title: 'Sandy transfer without context',
@@ -670,7 +670,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
-    rule: { area: 'Comms', severity: 'broken', who: 'person', expiryDays: 30 },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
@@ -684,7 +684,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'broken', who: 'either', expiryDays: 30 },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     // Tech-visible: urgent comms failures link to /admin/communications,
     // a technician-allowed surface — a failed customer call/SMS is exactly
     // what field staff must see and acknowledge.
@@ -766,7 +766,7 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'high',
     group: 'Payments',
-    rule: { area: 'Billing', severity: 'broken', who: 'either', expiryDays: 30 },
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => {
       const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
       const method = p.methodLabel || 'Payment method';
