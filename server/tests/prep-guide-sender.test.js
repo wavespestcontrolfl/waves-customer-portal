@@ -811,10 +811,14 @@ describe('sendPrepToCustomer', () => {
     const ex = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
       .filter(([sql]) => sql.startsWith('(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?'))
       .map(([, args]) => ({ keyword: args[0], unless: args.slice(1) })));
-    expect(ex).toHaveLength(1);
+    // Sanitation, plus the standalone "Dead Rodent Removal & Odor Treatment" (GATE_DEAD_ANIMAL_REMOVAL): a one-off
+    // pickup and odor visit that prep.rodent's trapping-first steps do not describe.
+    expect(ex).toHaveLength(2);
     expect(ex[0].keyword).toBe('%sanitation%');
     // A combined "Rodent Trapping & Sanitation" keeps its prep.
     expect(ex[0].unless).toEqual(expect.arrayContaining(['%trap%', '%exclusion%']));
+    expect(ex[1].keyword).toBe('%dead rodent%');
+    expect(ex[1].unless).toEqual(expect.arrayContaining(['%trap%', '%exclusion%', '%bait%', '%control%']));
     // No inspection exclusion: prep.rodent covers inspections itself.
     expect(ex.map((e) => e.keyword)).not.toContain('%inspect%');
   });
