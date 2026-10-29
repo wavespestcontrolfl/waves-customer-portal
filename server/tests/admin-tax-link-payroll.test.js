@@ -10,6 +10,9 @@ const builder = (table) => {
   const b = {
     where: jest.fn(() => b),
     orderBy: jest.fn(() => b),
+    limit: jest.fn(() => b),
+    offset: jest.fn(() => b),
+    count: jest.fn(() => b),
     whereIn: jest.fn(() => b),
     whereRaw: jest.fn(() => b),
     select: jest.fn(() => (table === 'bank_transactions' ? Promise.resolve(state.seen) : b)),
@@ -37,6 +40,14 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   claimPayrollLink: jest.fn(),
+  // the snapshot heals have their own suites; the list routes here only shape the response
+  resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
+  healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
+  healUnreconciledLinks: jest.fn(() => Promise.resolve({ reverted: 0, remarked: 0 })),
+  healOrphanRefunds: jest.fn(() => Promise.resolve(0)),
+  verifyPendingExpenseClaims: jest.fn(() => Promise.resolve({ cleared: 0, reverted: 0, more: false })),
+  verifyPendingPayoutClaims: jest.fn(() => Promise.resolve({ cleared: 0, reverted: 0, more: false })),
+  retryPendingEchoes: jest.fn(() => Promise.resolve({ pending: 0, morePending: false, retried: 0, humanRejected: 0 })),
 }));
 const bankImport = require('../services/bank-import');
 
@@ -107,6 +118,47 @@ describe('link-payroll', () => {
     expect((await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { filingId: UUID_B })).status).toBe(400);
     bankImport.claimPayrollLink.mockResolvedValue({ ok: false, reason: 'taken' });
     expect((await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B })).status).toBe(409);
+  });
+});
+
+describe('bank lines with the gate off', () => {
+  const stored = () => ({
+    id: UUID_A, status: 'unmatched', direction: 'debit', description: 'CHECK 1042', amount: '812.63',
+    matched_payroll_check_id: null, matched_tax_filing_id: null,
+    suggestion: {
+      noMatch: true,
+      payrollCandidates: [{ kind: 'check', id: UUID_B, name: 'Sample Alpha' }], payrollCandidatesTotal: 1,
+      payrollMatch: { by: 'auto', checkId: UUID_B }, payrollUnlinked: { checkId: UUID_B }, rejectedPayrollCheckIds: [UUID_B],
+    },
+  });
+  const listed = async (path) => (await (await fetch(`${baseUrl}/admin/tax${path}`)).json());
+
+  test('the transactions list drops every payroll suggestion key and the two link columns', async () => {
+    delete process.env.GATE_PAYROLL_BANK_MATCH;
+    const row = stored();
+    state.seen = [row];
+    const body = await listed('/bank-import/transactions');
+    expect(body.transactions[0].suggestion).toEqual({ noMatch: true });
+    expect(body.transactions[0]).not.toHaveProperty('matched_payroll_check_id');
+    // the stored row is not rewritten
+    expect(Object.keys(row.suggestion)).toContain('payrollCandidates');
+  });
+
+  test('the ledger inbox drops them too', async () => {
+    delete process.env.GATE_PAYROLL_BANK_MATCH;
+    process.env.GATE_TAX_LEDGER = 'true';
+    try {
+      state.seen = [stored()];
+      const body = await listed('/bank-import/ledger/inbox');
+      expect(body.rows[0].suggestion).toEqual({ noMatch: true });
+    } finally { delete process.env.GATE_TAX_LEDGER; }
+  });
+
+  test('with the gate on the payroll keys reach the client', async () => {
+    state.seen = [stored()];
+    const body = await listed('/bank-import/transactions');
+    expect(body.transactions[0].suggestion.payrollCandidates).toHaveLength(1);
+    expect(body.transactions[0].suggestion.payrollMatch).toBeDefined();
   });
 });
 

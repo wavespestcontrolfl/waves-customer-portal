@@ -76,9 +76,27 @@ describe('planNetPay', () => {
 
   it('breaks a two-check tie with the check number printed on the line', () => {
     const checks = [check({ check_number: '1041' }), check({ id: 'check-b', check_number: '1042' })];
-    const plan = planNetPay({ row: line({ description: 'CHECK # 001042' }), checks, peers: [line(), line({ id: 'line-2' })] });
+    const peers = [line(), line({ id: 'line-2', description: 'CHECK 1041' })];
+    const plan = planNetPay({ row: line({ description: 'CHECK # 001042' }), checks, peers });
     expect(plan.action).toBe('link');
     expect(plan.check.id).toBe('check-b');
+  });
+
+  it('suggests, never links, when two bank lines both print the same check number', () => {
+    const checks = [check({ check_number: '1041' }), check({ id: 'check-b', check_number: '1042' })];
+    const peers = [line(), line({ id: 'line-2', description: 'CHECK 1042' })];
+    const plan = planNetPay({ row: line({ description: 'CHECK 1042' }), checks, peers });
+    expect(plan.action).toBe('suggest');
+    expect(plan.candidates.map((c) => c.id)).toEqual(['check-b']);
+  });
+
+  it('reads only the printed check number, not any other number on the line', () => {
+    const numbered = check({ check_number: '1042' });
+    expect(planNetPay({ row: line({ description: 'CHECK 1099 REF 1042' }), checks: [numbered] }).action).toBe('suggest');
+    expect(carriesCheckNumber('CHECK 1099 REF 1042', '1042')).toBe(false);
+    expect(carriesCheckNumber('CHECK 1042 REF 1099', '1042')).toBe(true);
+    // a line that prints two different check numbers is not clear evidence for either
+    expect(planNetPay({ row: line({ description: 'CHECK 1042 CHECK 1099' }), checks: [numbered] }).action).toBe('suggest');
   });
 
   it('suggests when the line prints a number that is not the check number', () => {
@@ -92,6 +110,27 @@ describe('planNetPay', () => {
 
   it('skips a check the owner already unlinked from this line', () => {
     expect(planNetPay({ row: line(), checks: [check()], rejected: ['check-a'] }).action).toBe('none');
+  });
+});
+
+describe('tax-looking lines are never net pay', () => {
+  it('leaves an EFTPS or Florida DOR debit equal to a paycheck net to tax matching', () => {
+    expect(planNetPay({ row: line({ description: 'IRS USATAXPYMT 270012345' }), checks: [check()] })).toEqual({ action: 'none' });
+    expect(planNetPay({ row: line({ description: 'FL DEPT OF REVENUE' }), checks: [check()] })).toEqual({ action: 'none' });
+    // not even as a one-cent near miss
+    expect(planNetPay({ row: line({ description: 'EFTPS PAYMENT', amount: '812.64' }), checks: [check()] })).toEqual({ action: 'none' });
+  });
+
+  it('does not let a tax line count as a rival bank line for a paycheck', () => {
+    const rival = line({ id: 'tax-line', description: 'IRS USATAXPYMT', txn_date: '2026-11-02' });
+    expect(planNetPay({ row: line(), checks: [check()], peers: [line(), rival] }).action).toBe('link');
+  });
+
+  it('still matches the exact tax row when a paycheck net is one cent off', () => {
+    const irs = line({ id: 'tax-line', description: 'EFTPS PAYMENT', amount: '350.00', txn_date: '2026-11-13' });
+    const nearCheck = check({ net_cents: 35001, pay_date: '2026-11-10' });
+    expect(planNetPay({ row: irs, checks: [nearCheck] }).action).toBe('none');
+    expect(planTaxPayment({ row: irs, filings: [filing()] }).action).toBe('link');
   });
 });
 

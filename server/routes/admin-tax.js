@@ -20,6 +20,17 @@ router.use(adminAuthenticate, requireAdmin);
 // GATE_PAYROLL_BANK_MATCH, read at call time (the typeof guard keeps a feature-gates test mock without the reader working: off).
 const payrollBankMatchOn = () => typeof featureGates.payrollBankMatchLive === 'function' && featureGates.payrollBankMatchLive();
 
+// The suggestion keys the payroll match owns. With the gate off they stay in the stored row (the audit trail and
+// existing links survive a flip back) but never reach a client, which would draw payroll buttons that answer 404.
+const PAYROLL_SUGGESTION_KEYS = ['payrollCandidates', 'payrollCandidatesTotal', 'payrollMatch', 'payrollUnlinked', 'rejectedPayrollCheckIds', 'rejectedTaxFilingIds'];
+function withoutPayrollSuggestion(row) {
+  const sug = row && row.suggestion;
+  if (!sug || typeof sug !== 'object' || !PAYROLL_SUGGESTION_KEYS.some((k) => k in sug)) return row;
+  const suggestion = { ...sug };
+  for (const k of PAYROLL_SUGGESTION_KEYS) delete suggestion[k];
+  return { ...row, suggestion };
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
@@ -2385,7 +2396,7 @@ router.get('/bank-import/transactions', async (req, res, next) => {
     const shown = rows.slice(0, limit).map((raw) => {
       // the payroll link columns exist only for the gate: off, a row has exactly today's keys
       const { matched_payroll_check_id: _check, matched_tax_filing_id: _filing, ...rest } = raw;
-      const r = payrollOn ? raw : rest;
+      const r = payrollOn ? raw : withoutPayrollSuggestion(rest);
       return r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r;
     });
     res.json({ transactions: shown, hasMore: rows.length > limit, offset, limit });
@@ -3399,7 +3410,7 @@ router.get('/bank-import/ledger/inbox', async (req, res, next) => {
     // created_at); the DATE goes out as its calendar text, not a timestamp
     const rows = await base().orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit).offset(offset)
       .select('id', db.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date"), 'description', 'amount', 'direction', 'account_label', 'account_type', 'suggestion');
-    res.json({ rows, total: parseInt(total?.n, 10) || 0, limit, offset, view });
+    res.json({ rows: payrollBankMatchOn() ? rows : rows.map(withoutPayrollSuggestion), total: parseInt(total?.n, 10) || 0, limit, offset, view });
   } catch (err) { next(err); }
 });
 

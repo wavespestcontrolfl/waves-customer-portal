@@ -61,11 +61,12 @@ function checkNumbersIn(description) {
 
 const stripZeros = (v) => String(v || '').trim().replace(/^0+(?=\d)/, '');
 
-// Does the description carry this check number as a whole token?
+// Does the line PRINT this check number (the number after CHECK / CHK / CK #)? A number anywhere else in
+// the description (a reference, a store number) is not evidence: "CHECK 1099 REF 1042" prints 1099.
 function carriesCheckNumber(description, checkNumber) {
   const wanted = stripZeros(checkNumber);
   if (!wanted || !/^\d+$/.test(wanted)) return false;
-  return new RegExp(`(^|[^0-9])0*${wanted}([^0-9]|$)`).test(String(description || ''));
+  return checkNumbersIn(description).map(stripZeros).includes(wanted);
 }
 
 function netPayWindow(check) {
@@ -139,6 +140,8 @@ function filingCandidate(filing, row) {
  */
 function planNetPay({ row, checks, peers = [], rejected = [] }) {
   if (!isBankDebit(row) || !(Number(row.amount) > 0)) return { action: 'none' };
+  // A line that names the IRS or the Florida DOR is a tax payment, whatever its amount: it never becomes net pay.
+  if (taxPaymentKind(row.description)) return { action: 'none' };
   const cents = centsOf(row.amount);
   const open = checks.filter((c) => !rejected.includes(c.id) && Number(c.net_cents) > 0 && inWindow(row.txn_date, netPayWindow(c)));
   const exact = open.filter((c) => Number(c.net_cents) === cents);
@@ -147,10 +150,19 @@ function planNetPay({ row, checks, peers = [], rejected = [] }) {
     return near.length ? { action: 'suggest', candidates: near.slice(0, SUGGESTION_CAP).map((c) => checkCandidate(c, row)) } : { action: 'none' };
   }
 
-  // The line names a check number: it belongs to the one check with that number, or to none of these.
+  // The line prints a check number. It decides only when it is clear: exactly one paycheck carries that
+  // number, the line prints no other number, and no other eligible bank line prints the same number.
   const printed = checkNumbersIn(row.description).map(stripZeros);
   const byNumber = exact.filter((c) => carriesCheckNumber(row.description, c.check_number));
-  if (byNumber.length === 1) return { action: 'link', check: byNumber[0] };
+  if (byNumber.length === 1) {
+    const [numbered] = byNumber;
+    const window = netPayWindow(numbered);
+    const sameNumberElsewhere = peers.some((p) => p.id !== row.id && isBankDebit(p) && centsOf(p.amount) === cents
+      && inWindow(p.txn_date, window) && carriesCheckNumber(p.description, numbered.check_number));
+    const onlyThatNumber = printed.every((n) => n === stripZeros(numbered.check_number));
+    if (!sameNumberElsewhere && onlyThatNumber) return { action: 'link', check: numbered };
+    return { action: 'suggest', candidates: [checkCandidate(numbered, row)] };
+  }
   if (byNumber.length > 1) return { action: 'suggest', candidates: byNumber.slice(0, SUGGESTION_CAP).map((c) => checkCandidate(c, row)) };
   const contradicted = printed.length > 0 && exact.some((c) => c.check_number && !printed.includes(stripZeros(c.check_number)));
   if (contradicted) return { action: 'suggest', candidates: exact.slice(0, SUGGESTION_CAP).map((c) => checkCandidate(c, row)) };
@@ -160,7 +172,7 @@ function planNetPay({ row, checks, peers = [], rejected = [] }) {
   // One check, one amount: the line must also be the only open line that could be this check.
   const check = exact[0];
   const window = netPayWindow(check);
-  const rivals = peers.filter((p) => p.id !== row.id && isBankDebit(p) && centsOf(p.amount) === cents && inWindow(p.txn_date, window));
+  const rivals = peers.filter((p) => p.id !== row.id && isBankDebit(p) && !taxPaymentKind(p.description) && centsOf(p.amount) === cents && inWindow(p.txn_date, window));
   if (rivals.length > 0) return { action: 'suggest', candidates: [checkCandidate(check, row)] };
   return { action: 'link', check };
 }

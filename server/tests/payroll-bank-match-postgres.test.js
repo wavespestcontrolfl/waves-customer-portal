@@ -161,6 +161,43 @@ postgres('payroll bank match in the bank import', () => {
       expect((await payRunTotals(trx, '2026-10-01', '2026-10-31')).checks).toBe(2);
     });
 
+    it('an EFTPS debit equal to a paycheck net links the tax row, not the paycheck', async () => {
+      await trx('tax_filing_calendar').where({ id: filingId }).update({ amount_due: '812.63' });
+      const irs = await line('IRS USATAXPYMT 270012345', '812.63', '2026-11-13');
+      const summary = await bankImport.runDeterministicMatching();
+      expect(summary).toMatchObject({ payrollChecksLinked: 0, payrollTaxLinked: 1 });
+      expect(await row(irs)).toMatchObject({ status: 'created_expense', match_method: 'payroll_tax', matched_tax_filing_id: filingId, matched_payroll_check_id: null });
+      expect(await trx('payroll_checks as pc').leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pc.id').whereNotNull('bt.id').count('* as n').first()).toMatchObject({ n: '0' });
+    });
+
+    it('a paycheck one cent off does not suppress an exact EFTPS tax match', async () => {
+      const irs = await line('EFTPS PAYMENT', '350.00', '2026-11-13');
+      await insertCheck({ name: 'Sample Delta', net: 35001 });
+      await bankImport.runDeterministicMatching();
+      const r = await row(irs);
+      expect(r).toMatchObject({ status: 'created_expense', match_method: 'payroll_tax', matched_tax_filing_id: filingId });
+      expect(JSON.stringify(r.suggestion)).not.toMatch(/Delta/);
+    });
+
+    it('two bank lines printing the same check number are suggested, never linked', async () => {
+      await trx('payroll_checks').where({ id: checkA }).update({ check_number: '1042' });
+      const one = await line('CHECK 1042', '812.63', '2026-10-28');
+      const two = await line('CHECK 1042', '812.63', '2026-10-29');
+      await bankImport.runDeterministicMatching();
+      for (const id of [one, two]) {
+        const r = await row(id);
+        expect(r.status).toBe('unmatched');
+        expect(r.suggestion.payrollCandidates).toEqual([expect.objectContaining({ id: checkA })]);
+      }
+    });
+
+    it('CHECK 1099 REF 1042 is not evidence for check 1042', async () => {
+      await trx('payroll_checks').where({ id: checkA }).update({ check_number: '1042' });
+      const id = await line('CHECK 1099 REF 1042', '812.63', '2026-10-28');
+      await bankImport.runDeterministicMatching();
+      expect((await row(id)).status).toBe('unmatched');
+    });
+
     it('is idempotent: a second pass links nothing new', async () => {
       await seedLines();
       await bankImport.runDeterministicMatching();
