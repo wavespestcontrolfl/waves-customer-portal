@@ -98,8 +98,10 @@ Kinds today:
   buttons. **Handled** on a customer's texts (the `sms_reply` thread row), **Called back** on a
   call-back follow-up (an `sms_operational_followup` row for a call-back promise; other promise
   kinds get no button) and on a missed call (`customer_missed_call`). The step is the bell's own
-  Done with the button's label as the note, and it settles a text follow-up the row speaks for, as
-  Done does. It sends no reply and places no call. The emitters set the button when they raise the
+  Done with the button's label as the note, fenced on the version the tap claimed (a new message
+  that rewrote the row meanwhile is never closed unseen), and it settles a text follow-up the row
+  speaks for, as Done does. It sends no reply and places no call. A follow-up row that is no longer
+  call-back only writes `buttons: null`, so a refresh drops the old button. The emitters set the button when they raise the
   row (`closeNoteButtons`), so rows raised before the change carry none.
 
 ## 3. Never in a headline or a why

@@ -678,4 +678,60 @@ jest.mock('../services/customer-credit', () => ({
       expect(await db('referrals').count('* as n').first()).toEqual({ n: '0' });
     });
   });
+  describe('close-only buttons (close_note) on a real bell row', () => {
+    let buttons;
+    let NotificationService;
+    let saved;
+    const TECH = randomUUID();
+
+    beforeAll(() => {
+      saved = process.env.GATE_ALERT_CLOSE_BUTTONS;
+      process.env.GATE_ALERT_CLOSE_BUTTONS = 'true';
+      buttons = require('../services/admin-alert-buttons');
+      NotificationService = require('../services/notification-service');
+    });
+    afterAll(() => {
+      if (saved === undefined) delete process.env.GATE_ALERT_CLOSE_BUTTONS;
+      else process.env.GATE_ALERT_CLOSE_BUTTONS = saved;
+    });
+
+    const textRow = async () => {
+      const [row] = await db('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: '1 text from Fixture Person', body: 'Is Friday still on?',
+        link: '/admin/communications?thread=x', metadata: JSON.stringify({ triggerKey: 'sms_reply', dedupeKey: `sms-thread:${randomUUID()}`, buttons: buttons.closeNoteButtons('handled') }),
+      }).returning('id');
+      const [served] = buttons.withAlertButtons(await NotificationService.getAdminNotifications(30, 0, { role: 'admin' }), { role: 'admin' });
+      expect(served).toMatchObject({ id: row.id, actions: [{ id: 'handled', label: 'Handled' }] });
+      return served;
+    };
+    const tap = (row) => buttons.runAlertButton({ notificationId: row.id, actionId: 'handled', version: row.version, technicianId: TECH, role: 'admin' });
+
+    test('Handled marks the row done by the person with that note, and records the tap', async () => {
+      const row = await textRow();
+      await expect(tap(row)).resolves.toEqual({ status: 200, body: { success: true, message: 'Marked handled.' } });
+      const after = await db('notifications').where({ id: row.id }).first();
+      expect(after).toMatchObject({ done_by: TECH, resolution: 'Handled' });
+      expect(after.metadata.buttonTaps).toEqual([expect.objectContaining({ action: 'handled', by: TECH, outcome: 'done' })]);
+      expect(after.metadata).not.toHaveProperty('buttonClaim');
+    });
+
+    test('a new text that rewrites the row between the claim and the close is not marked handled', async () => {
+      const row = await textRow();
+      const realDone = NotificationService.markAdminDone.bind(NotificationService);
+      const spy = jest.spyOn(NotificationService, 'markAdminDone').mockImplementationOnce(async (...args) => {
+        await db('notifications').where({ id: row.id }).update({ title: '2 texts from Fixture Person', body: 'Also the side gate is open.' });
+        return realDone(...args);
+      });
+      try {
+        await expect(tap(row)).resolves.toEqual({ status: 409, body: { error: 'changed' } });
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await db('notifications').where({ id: row.id }).first();
+      expect(after.done_at).toBeNull();
+      expect(after.body).toBe('Also the side gate is open.');
+      expect(after.metadata.buttonTaps).toEqual([expect.objectContaining({ outcome: 'changed' })]);
+      expect(after.metadata).not.toHaveProperty('buttonClaim');
+    });
+  });
 });

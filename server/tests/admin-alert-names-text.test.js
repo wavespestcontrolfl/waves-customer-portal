@@ -257,11 +257,22 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(body).toBe("“please call me back about the gate” (Sep 29) — can't tell if it was done.");
   });
 
-  test('a call-back promise carries the Called back button; other kinds carry none', async () => {
+  test('a call-back promise carries the Called back button; any other row clears it', async () => {
+    const CALLED_BACK = { kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] };
     await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] } });
-    expect(lastCall()[3].metadata.buttons).toEqual({ kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] });
+    expect(lastCall()[3].metadata.buttons).toEqual(CALLED_BACK);
     await ring({ row: { kind: 'send_estimate', evidence: [{ quote: 'send me the price for the lawn' }] } });
-    expect(lastCall()[3].metadata).not.toHaveProperty('buttons');
+    expect(lastCall()[3].metadata.buttons).toBeNull();
+    // One text with a call-back and another promise: the shared row is not call-back only.
+    const callback = row({ id: 'commit-1', kind: 'callback', evidence: [{ quote: 'call me back', matched: true }], sms_context: { basis: 'promise' } });
+    const estimate = row({ id: 'commit-2', kind: 'send_estimate', evidence: [{ quote: 'send the price', matched: true }], sms_context: { basis: 'promise' } });
+    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [callback, estimate] } });
+    expect(lastCall()[3].metadata.buttons).toBeNull();
+    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [callback, row({ ...callback, id: 'commit-3' })] } });
+    expect(lastCall()[3].metadata.buttons).toEqual(CALLED_BACK);
+    // notifyAdmin's refresh merge lets that null win over a standing row's old button.
+    const { mergeRefreshMetadata } = jest.requireActual('../services/notification-service')._private;
+    expect(mergeRefreshMetadata({ buttons: CALLED_BACK, kind: 'callback' }, { buttons: null }, false).buttons).toBeNull();
   });
 
   test('the text and missed-call bells carry Handled and Called back', () => {

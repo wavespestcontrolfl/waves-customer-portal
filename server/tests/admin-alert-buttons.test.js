@@ -15,22 +15,26 @@ let mockRow;
 let mockReread; // the row a lost claim reads back: every read after the first
 let mockReads = 0;
 let mockClaimed;
+const mockClaimedVersion = 'c'.repeat(32); // the row's version after the claim wrote it
 const mockUpdates = [];
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table !== 'notifications') throw new Error(`unexpected table ${table}`);
-    // The claim is the one conditional write: it filters on done_at and the version.
-    let claim = false;
     const q = {
       where: jest.fn(() => q),
-      whereNull: jest.fn(() => { claim = true; return q; }),
-      whereRaw: jest.fn(() => q),
       first: jest.fn(async () => (mockReads++ === 0 ? mockRow : (mockReread ?? mockRow))),
-      update: jest.fn(async (patch) => { mockUpdates.push({ claim, patch }); return claim ? mockClaimed : 1; }),
+      update: jest.fn(async (patch) => { mockUpdates.push({ claim: false, patch }); return 1; }),
     };
     return q;
   });
-  db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // The claim is the one conditional UPDATE, run raw so it can return the row's version after it.
+  db.raw = jest.fn((sql, bindings) => {
+    if (/^UPDATE notifications/.test(sql)) {
+      mockUpdates.push({ claim: true, sql, bindings });
+      return Promise.resolve({ rows: mockClaimed ? [{ version: mockClaimedVersion }] : [] });
+    }
+    return { __raw: sql, bindings };
+  });
   return db;
 });
 
@@ -103,8 +107,9 @@ describe('runAlertButton: one tap', () => {
   test('the step runs, the tap is recorded, and the row is marked done by the person', async () => {
     buttonHandler.run.mockResolvedValue({ ok: true, message: 'Lea Quill is confirmed.', resolution: 'Referrer confirmed' });
     await expect(tap()).resolves.toEqual({ status: 200, body: { success: true, message: 'Lea Quill is confirmed.' } });
-    expect(buttonHandler.run).toHaveBeenCalledWith({ row: mockRow, item: BUTTONS.items[0], technicianId: 't-1' });
-    expect(claimOf().patch.metadata.bindings).toEqual(['t-1', 'confirm']);
+    expect(buttonHandler.run).toHaveBeenCalledWith({ row: mockRow, item: BUTTONS.items[0], technicianId: 't-1', claimedVersion: mockClaimedVersion });
+    expect(claimOf().bindings).toEqual(['t-1', 'confirm', ID, VERSION, 120]);
+    expect(claimOf().sql).toMatch(/done_at IS NULL AND md5\(content\) = \?/);
     expect(tapOf()).toMatchObject({ action: 'confirm', by: 't-1', outcome: 'done' });
     expect(mockUpdates.find((u) => !u.claim).patch.metadata.__raw).toMatch(/- 'buttonClaim'\) \|\| jsonb_build_object\('buttonTaps'/);
     expect(NotificationService.markAdminDone).toHaveBeenCalledWith([ID], { by: 't-1', resolution: 'Referrer confirmed', role: 'admin' });
@@ -198,17 +203,19 @@ describe('close-only buttons (close_note): the bell\'s own Done with the button\
     expect(withAlertButtons([closeRow()], { role: 'admin' })[0]).not.toHaveProperty('actions');
   });
 
-  test('a tap marks the row done by the person with the note, then settles the follow-up it speaks for', async () => {
+  test('a tap marks the row done by the person with the note, on the claimed version, then settles the follow-up', async () => {
     await expect(tap({ actionId: 'called_back' })).resolves.toEqual({ status: 200, body: { success: true, message: 'Marked called back.' } });
-    expect(NotificationService.markAdminDone).toHaveBeenNthCalledWith(1, [ID], { by: 't-1', resolution: 'Called back', role: 'admin' });
+    expect(NotificationService.markAdminDone).toHaveBeenNthCalledWith(1, [ID], { by: 't-1', resolution: 'Called back', role: 'admin', expectedVersion: mockClaimedVersion });
     expect(settleCommitmentsForDoneAlert).toHaveBeenCalledWith(expect.anything(), ID, { reviewedBy: 't-1' });
     expect(tapOf()).toMatchObject({ action: 'called_back', outcome: 'done' });
   });
 
-  test('a row that was already done settles nothing', async () => {
+  test('a row a new message rewrote after the claim is not closed, and nothing settles', async () => {
     NotificationService.markAdminDone.mockResolvedValueOnce(0);
-    await expect(tap({ actionId: 'called_back' })).resolves.toMatchObject({ status: 200 });
+    await expect(tap({ actionId: 'called_back' })).resolves.toEqual({ status: 409, body: { error: 'changed' } });
     expect(settleCommitmentsForDoneAlert).not.toHaveBeenCalled();
+    expect(NotificationService.markAdminDone).toHaveBeenCalledTimes(1);
+    expect(tapOf().outcome).toBe('changed');
   });
 
   test('a failed settle never undoes the Done', async () => {

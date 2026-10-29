@@ -1286,7 +1286,10 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict,
-      ...(promises ? { commitment_ids: promises.map((item) => item.id) } : {}) } };
+      ...(promises ? { commitment_ids: promises.map((item) => item.id) } : {}),
+      // A refresh merges over the standing row: a row that is no longer call-back only must drop Called back,
+      // or a tap would settle promises that are not call-backs.
+      ...(spec.buttons ? {} : { buttons: null }) } };
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
   // ring (read state, done state and push stay), so a later check never makes

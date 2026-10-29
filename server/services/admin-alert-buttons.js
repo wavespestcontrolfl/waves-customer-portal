@@ -29,19 +29,22 @@ const CLOSE_NOTES = { handled: 'Handled', called_back: 'Called back' };
 const closeNoteButtons = (id) => ({ kind: 'close_note', items: [{ id, label: CLOSE_NOTES[id] }] });
 
 // The bell's own Done (PUT /api/admin/notifications/:id/done), with the button's label as the resolution: the
-// row is marked done by the person, then a text follow-up it speaks for is settled, as Done settles it.
+// row is marked done by the person, then a text follow-up it speaks for is settled, as Done settles it. Fenced
+// like Done: only while the row is still the version this tap claimed, so a new text that rewrote the row
+// meanwhile is never marked handled unseen.
 const closeNoteHandler = {
   live: () => require('../config/feature-gates').alertCloseButtonsLive(),
-  async run({ row, item, technicianId }) {
+  async run({ row, item, technicianId, claimedVersion }) {
     const resolution = Object.hasOwn(CLOSE_NOTES, item.id) ? CLOSE_NOTES[item.id] : null;
     if (!resolution) return { ok: false, code: 'unknown_action', message: 'This button is not known.' };
-    const updated = await NotificationService.markAdminDone([row.id], { by: String(technicianId), resolution, role: 'admin' });
-    if (updated > 0) {
-      try {
-        await require('./sms-operational-actions').settleCommitmentsForDoneAlert(db, row.id, { reviewedBy: technicianId });
-      } catch (err) {
-        logger.warn(`[alert-buttons] follow-up not settled for alert ${row.id}: ${err.message}`);
-      }
+    const updated = await NotificationService.markAdminDone([row.id], {
+      by: String(technicianId), resolution, role: 'admin', expectedVersion: claimedVersion,
+    });
+    if (!updated) return { ok: false, code: 'changed' };
+    try {
+      await require('./sms-operational-actions').settleCommitmentsForDoneAlert(db, row.id, { reviewedBy: technicianId });
+    } catch (err) {
+      logger.warn(`[alert-buttons] follow-up not settled for alert ${row.id}: ${err.message}`);
     }
     return { ok: true, message: `Marked ${resolution.toLowerCase()}.`, resolution };
   },
@@ -87,16 +90,17 @@ function withAlertButtons(rows, { role } = {}) {
 const CLAIM_TTL_SECONDS = 120;
 
 // Claim the row for one tap, in one conditional write: only while the row is open, still the version the bell
-// served, and not claimed by another tap. Of two taps at once, one runs and the other answers 409. Returns
-// true when this tap holds the row.
+// served, and not claimed by another tap. Of two taps at once, one runs and the other answers 409. Returns the
+// row's version after the claim (the claim changes it; a step that writes the row fences on it), or null when
+// this tap does not hold the row.
 async function claimTap(id, version, { by, action }) {
-  const claimed = await db('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version])
-    .whereRaw("(metadata->'buttonClaim' IS NULL OR (metadata->'buttonClaim'->>'at')::timestamptz < now() - (? * interval '1 second'))", [CLAIM_TTL_SECONDS])
-    .update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonClaim', jsonb_build_object('by', ?::text, 'action', ?::text, 'at', now()))", [by, action]),
-    });
-  return Number(claimed) > 0;
+  const VERSION = NotificationService._private.NOTIFICATION_VERSION_SQL;
+  const result = await db.raw(`UPDATE notifications
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonClaim', jsonb_build_object('by', ?::text, 'action', ?::text, 'at', now()))
+     WHERE id = ? AND recipient_type = 'admin' AND done_at IS NULL AND ${VERSION} = ?
+       AND (metadata->'buttonClaim' IS NULL OR (metadata->'buttonClaim'->>'at')::timestamptz < now() - (? * interval '1 second'))
+     RETURNING ${VERSION} AS version`, [by, action, id, version, CLAIM_TTL_SECONDS]);
+  return result?.rows?.[0]?.version || null;
 }
 
 // The tap's record, appended to the row's `buttonTaps` (a later tap never erases an earlier one), and the claim
@@ -140,11 +144,12 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   if (!kindLive(buttons.kind)) return reply(409, { error: 'off', message: 'These buttons are turned off. Open the alert to act on it.' });
 
   const by = String(technicianId);
-  if (!(await claimTap(notificationId, version, { by, action: item.id }))) return lostClaim(notificationId);
+  const claimedVersion = await claimTap(notificationId, version, { by, action: item.id });
+  if (!claimedVersion) return lostClaim(notificationId);
   const tap = { action: item.id, by, at: new Date().toISOString() };
   let result;
   try {
-    result = await KINDS[buttons.kind]().run({ row, item, technicianId });
+    result = await KINDS[buttons.kind]().run({ row, item, technicianId, claimedVersion });
   } catch (err) {
     await finishTap(notificationId, { ...tap, outcome: 'error' });
     throw err;
