@@ -6532,11 +6532,18 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
 // under a savepoint and never fails the booking. Read at call time; a partial
 // test mock of the gates module reads as off.
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b) is
+// the umbrella for the automatic writers: with the gate above off it places the
+// same booking through the shared auto-save helper (source 'call_booking'). With
+// the gate above on, THIS call is the only placement, so the umbrella never adds
+// a second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
   const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue !== 'function' || !gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) return null;
-  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
+    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+  }
+  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,

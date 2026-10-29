@@ -149,7 +149,12 @@ postgres('homes not placed and add as unconfirmed', () => {
       countyLot: { zip: '34201', county: 'Manatee', community: `Heron Pointe at Sample ${tag} Place` },
     });
     expect(homes[0]).toMatchObject({ savedCode: true, countyLot: null });
-    expect(JSON.stringify(r.body)).not.toMatch(/2468|1357|9753/);
+    // No gate code leaks. Random ids and this file's random tag can hold those digits by chance
+    // (#7016 CI: a customerId contained 1357), so blank them before matching.
+    const visible = JSON.stringify(r.body)
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
+      .split(tag).join('<tag>');
+    expect(visible).not.toMatch(/2468|1357|9753/);
     expect(homes.map((h) => h.propertyId)).not.toContain(placed.propertyId);
     expect(homes.map((h) => h.propertyId)).not.toContain(cleared.propertyId);
 
