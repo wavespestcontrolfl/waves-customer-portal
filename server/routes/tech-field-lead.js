@@ -2,15 +2,65 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate } = require('../middleware/admin-auth');
+const { soldByLive } = require('../services/estimate-sold-by');
 
 // Tech auth — any authenticated technician
 router.use(adminAuthenticate);
+
+// GATE_COMMISSION_SOLD_BY helpers (owner 2026-10-29, D5 part 3b-1). With the gate off each one
+// returns an empty value, so the route's reads and writes are exactly what they were before.
+// Before the customer is looked up: the Neighbor's details, checked for the required fields.
+async function prepareGpsCheck(req) {
+  const { customerId, prospect } = req.body;
+  if (!soldByLive() || customerId || prospect == null) return {};
+  const { normalizeProspect } = require('../services/field-lead-gps');
+  return { live: true, ...normalizeProspect(prospect) };
+}
+
+// After the route scoping guard: the truck GPS check. A failed check is a result; a check that
+// could not run stays null ("no check ran") and the lead is made either way.
+async function runGpsCheck(req, gpsSetup) {
+  const { customerId, scheduledServiceId } = req.body;
+  if (!soldByLive() || (!customerId && !gpsSetup.prospect)) return null;
+  const gps = require('../services/field-lead-gps');
+  try {
+    return customerId
+      ? await gps.checkCustomerArrival({ technicianId: req.technicianId, customerId, scheduledServiceId })
+      : await gps.checkProspectLocation({ technicianId: req.technicianId, prospect: gpsSetup.prospect });
+  } catch (err) {
+    require('../services/logger').warn(`[tech-field-lead] gps check failed: ${err.message}`);
+    return null;
+  }
+}
+
+// A Neighbor has no customer row: the typed details fill the lead's contact columns.
+function prospectLeadColumns(prospect) {
+  if (!prospect) return {};
+  return {
+    first_name: prospect.firstName, last_name: prospect.lastName || null, phone: prospect.phone,
+    address: prospect.address, city: prospect.city || null, zip: prospect.zip,
+  };
+}
+
+function gpsLeadColumns(gpsCheck) {
+  if (!gpsCheck) return {};
+  return { gps_verified: gpsCheck.result === 'verified', gps_check: JSON.stringify(gpsCheck) };
+}
+
+function gpsActivitySuffix(gpsCheck) {
+  if (!gpsCheck) return '';
+  return ` · ${require('../services/field-lead-gps').describeGpsCheck(gpsCheck)}`;
+}
 
 /* POST / — create a field lead */
 router.post('/', async (req, res, next) => {
   try {
     const { customerId, leadServiceType, notes, urgency } = req.body;
     if (!leadServiceType) return res.status(400).json({ error: 'Service type is required' });
+
+    // GATE_COMMISSION_SOLD_BY: the truck GPS checks the flag. Off = {}: nothing new is read or written.
+    const gpsSetup = await prepareGpsCheck(req);
+    if (gpsSetup.error) return res.status(400).json({ error: gpsSetup.error });
 
     // Look up the field_tech lead source
     const leadSource = await db('lead_sources')
@@ -27,6 +77,8 @@ router.post('/', async (req, res, next) => {
       if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
       customer = await db('customers').where({ id: customerId }).first();
     }
+
+    const gpsCheck = await runGpsCheck(req, gpsSetup);
 
     // Create the lead
     const [lead] = await db('leads')
@@ -45,6 +97,8 @@ router.post('/', async (req, res, next) => {
         first_contact_channel: 'field_observation',
         status: 'new',
         assigned_to: req.technicianId,
+        ...prospectLeadColumns(gpsSetup.prospect),
+        ...gpsLeadColumns(gpsCheck),
       })
       .returning('*');
 
@@ -52,7 +106,7 @@ router.post('/', async (req, res, next) => {
     await db('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'field_observation',
-      description: `Field lead created by ${req.technician.name}: ${leadServiceType}${notes ? ' — ' + notes : ''}`,
+      description: `Field lead created by ${req.technician.name}: ${leadServiceType}${notes ? ' — ' + notes : ''}${gpsActivitySuffix(gpsCheck)}`,
       performed_by: req.technician.name,
       metadata: JSON.stringify({ technicianId: req.technicianId, notes, urgency }),
     });

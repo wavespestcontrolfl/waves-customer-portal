@@ -1,0 +1,670 @@
+// Real PostgreSQL transactions (rolled back): "Sold by" from a technician's field flag that the
+// truck GPS confirms (owner ruling 2026-10-29, D5 part 3b-1), dark behind GATE_COMMISSION_SOLD_BY.
+// Covers the flag route in both modes, the estimate auto-fill, the admin routes and the table
+// CHECKs. Records who sold; pays, texts and charges nothing. All names are synthetic.
+// CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+let mockConnection;
+jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
+  get(_target, key) {
+    const value = mockConnection?.[key];
+    return typeof value === 'function' ? value.bind(mockConnection) : value;
+  },
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => {
+    req.technicianId = req.headers['x-test-tech'] || null;
+    req.technician = { id: req.technicianId, name: req.headers['x-test-name'] || 'Sample Tech' };
+    req.techRole = req.headers['x-test-role'] || 'technician';
+    next();
+  },
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn().mockResolvedValue({ success: true }) }));
+jest.mock('../services/geocoder', () => ({ geocodeAddressWithStatus: jest.fn() }));
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(), PutObjectCommand: jest.fn(), GetObjectCommand: jest.fn(), DeleteObjectCommand: jest.fn(),
+}));
+jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
+
+const { randomUUID } = require('node:crypto');
+const express = require('express');
+const { geocodeAddressWithStatus } = require('../services/geocoder');
+const TwilioService = require('../services/twilio');
+const { autoFillSoldBy, setEstimateSoldBy, loadSoldByForList } = require('../services/estimate-sold-by');
+const { describeGpsCheck } = require('../services/field-lead-gps');
+const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
+
+jest.setTimeout(60000);
+
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+// A synthetic house and a truck 40 m north of it (0.00036 degrees of latitude is about 40 m).
+const HOUSE = { lat: 27.4, lng: -82.45 };
+const TRUCK_NEAR = { lat: 27.40036, lng: -82.45 };
+const TRUCK_FAR = { lat: 27.41, lng: -82.45 }; // about 1.1 km
+const PROSPECT = { firstName: 'Neighbor', lastName: 'Sample', phone: '(941) 555-0142', address: '12 Sample Way', city: 'Bradenton', zip: '34202' };
+
+postgres('commission sold by', () => {
+  let database;
+  let trx;
+  let server;
+  let baseUrl;
+  const OLD_GATE = process.env.GATE_COMMISSION_SOLD_BY;
+  const ADMIN_ID = randomUUID();
+
+  const tech = async (name, patch = {}) => {
+    const id = randomUUID();
+    await trx('technicians').insert({ id, name, employment_type: 'w2', active: true, role: 'technician', ...patch });
+    return id;
+  };
+  const customer = async (patch = {}) => {
+    const id = randomUUID();
+    await trx('customers').insert({ id, first_name: 'Sample', last_name: 'Customer', phone: '+19415550111', ...patch });
+    return id;
+  };
+  const visit = async (technicianId, customerId, patch = {}) => {
+    const id = randomUUID();
+    await trx('scheduled_services').insert({
+      id, technician_id: technicianId, customer_id: customerId, scheduled_date: new Date().toISOString().slice(0, 10),
+      service_type: 'Pest Control', status: 'confirmed', ...patch,
+    });
+    return id;
+  };
+  const arrival = (visitId, hoursAgo, distance = 40) => trx('audit_log').insert({
+    actor_type: 'system:gps-arrival', action: 'gps_arrival.mark_on_property', resource_type: 'scheduled_service',
+    resource_id: visitId, metadata: { distance_meters: distance }, created_at: new Date(Date.now() - hoursAgo * HOUR),
+  });
+  const truck = async (technicianId, position, hoursAgo = 0.1) => {
+    const imei = `IMEI${Math.floor(Math.random() * 1e12)}`;
+    await trx('technicians').where({ id: technicianId }).update({ bouncie_imei: imei });
+    await trx('vehicle_locations').insert({
+      bouncie_imei: imei, lat: position.lat, lng: position.lng, reported_at: new Date(Date.now() - hoursAgo * HOUR),
+    });
+    return imei;
+  };
+  const flagLead = async (technicianId, patch = {}) => {
+    const [row] = await trx('leads').insert({
+      first_name: 'Sample', lead_type: 'field_observation', first_contact_channel: 'field_observation', status: 'new',
+      assigned_to: technicianId, gps_verified: true, created_at: new Date(Date.now() - 2 * DAY), ...patch,
+    }).returning('id');
+    return row.id || row;
+  };
+  const estimate = async (patch = {}) => {
+    const [row] = await trx('estimates').insert({ customer_name: 'Sample Customer', status: 'draft', ...patch }).returning('id');
+    return row.id || row;
+  };
+  const estimateRow = (id) => trx('estimates').where({ id }).first();
+  const flag = async (headers, body) => {
+    const response = await fetch(`${baseUrl}/api/tech/field-lead`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json().catch(() => ({})) };
+  };
+  const admin = (method, path, body) => fetch(`${baseUrl}/api/admin/estimates${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', 'x-test-tech': ADMIN_ID, 'x-test-role': 'admin' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+  const leadFor = (technicianId) => trx('leads').where({ assigned_to: technicianId }).orderBy('created_at', 'desc').first();
+  const activityFor = (leadId) => trx('lead_activities').where({ lead_id: leadId }).first();
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = process.env.WAVES_DATABASE_ENVIRONMENT === 'test'
+      && /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname) && !privateQa) {
+      throw new Error('Use an isolated local/CI database or labeled private QA database');
+    }
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/field-lead', require('../routes/tech-field-lead'));
+    app.use('/api/admin/estimates', require('../routes/admin-estimates'));
+    await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    process.env.GATE_COMMISSION_SOLD_BY = 'true';
+    trx = await database.transaction();
+    mockConnection = trx;
+    await trx('technicians').insert({ id: ADMIN_ID, name: 'Sample Admin', role: 'admin', employment_type: '1099', active: true });
+    geocodeAddressWithStatus.mockResolvedValue({ location: HOUSE });
+  });
+  afterEach(async () => {
+    await trx.rollback();
+    if (OLD_GATE === undefined) delete process.env.GATE_COMMISSION_SOLD_BY; else process.env.GATE_COMMISSION_SOLD_BY = OLD_GATE;
+  });
+  afterAll(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (database) await database.destroy();
+  });
+
+  describe('the field flag with the gate off', () => {
+    it('writes exactly what it wrote before and ignores the new fields', async () => {
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const id = await tech('Sample Alpha');
+      const cust = await customer();
+      const v = await visit(id, cust);
+      await arrival(v, 1);
+      const res = await flag({ 'x-test-tech': id, 'x-test-name': 'Sample Alpha' }, {
+        customerId: cust, leadServiceType: 'Lawn', notes: 'Brown patch', urgency: 'high', scheduledServiceId: v, prospect: PROSPECT,
+      });
+      expect(res.status).toBe(200);
+      const lead = await leadFor(id);
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check).toBeNull();
+      expect(lead.zip).toBeNull();
+      expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Brown patch');
+    });
+
+    it('still makes a customer-less lead from a body with no customer, ignoring a prospect', async () => {
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const id = await tech('Sample Alpha');
+      const res = await flag({ 'x-test-tech': id }, { leadServiceType: 'Pest', prospect: PROSPECT });
+      expect(res.status).toBe(200);
+      const lead = await leadFor(id);
+      expect(lead.customer_id).toBeNull();
+      expect(lead.first_name).toBeNull();
+      expect(lead.gps_check).toBeNull();
+      expect(geocodeAddressWithStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the field flag with the gate on, from a visit', () => {
+    const run = async ({ arrivalHoursAgo, mutate } = {}) => {
+      const id = await tech('Sample Alpha');
+      const cust = await customer();
+      const v = await visit(id, cust);
+      if (arrivalHoursAgo !== undefined) await arrival(v, arrivalHoursAgo);
+      const extra = mutate ? await mutate({ id, cust, v }) : {};
+      const res = await flag({ 'x-test-tech': id, 'x-test-name': 'Sample Alpha' }, {
+        customerId: cust, leadServiceType: 'Lawn', notes: 'Chinch bugs', urgency: 'normal', scheduledServiceId: v, ...extra,
+      });
+      return { id, cust, v, res, lead: await leadFor(id) };
+    };
+
+    it('verifies a truck arrival logged 2 hours earlier', async () => {
+      const { res, lead, v } = await run({ arrivalHoursAgo: 2 });
+      expect(res.status).toBe(200);
+      expect(lead.gps_verified).toBe(true);
+      expect(lead.gps_check).toMatchObject({ result: 'verified', mode: 'customer', scheduled_service_id: v, distance_m: 40 });
+      expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Chinch bugs · GPS: verified, 40 m');
+    });
+
+    it('makes the lead, unverified, when no arrival was logged', async () => {
+      const { res, lead } = await run();
+      expect(res.status).toBe(200);
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('no_gps_arrival');
+      expect((await activityFor(lead.id)).description).toContain('GPS: not verified (no truck arrival logged at this visit)');
+    });
+
+    it('does not count an arrival 13 hours earlier', async () => {
+      const { lead } = await run({ arrivalHoursAgo: 13 });
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('no_gps_arrival');
+    });
+
+    it('counts an arrival logged on another stop of the same grouped visit', async () => {
+      const { lead } = await run({
+        mutate: async ({ id, cust, v }) => {
+          const [{ id: group }] = await trx('service_visits').insert({
+            customer_id: cust, scheduled_date: new Date().toISOString().slice(0, 10), stop_base_key: `sample-${randomUUID()}`, created_by: 'sample',
+          }).returning('id');
+          await trx('scheduled_services').where({ id: v }).update({ visit_id: group });
+          const sibling = await visit(id, cust, { visit_id: group });
+          await arrival(sibling, 1);
+          return {};
+        },
+      });
+      expect(lead.gps_verified).toBe(true);
+    });
+
+    it('does not verify with the visit of another customer or another technician', async () => {
+      const other = await tech('Sample Bravo');
+      const otherCustomer = await customer({ first_name: 'Other' });
+      const foreignVisit = await visit(other, otherCustomer);
+      await arrival(foreignVisit, 1);
+      const { lead } = await run({ mutate: async () => ({ scheduledServiceId: foreignVisit }) });
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('no_gps_arrival');
+    });
+
+    it('answers 404 for a customer on another technician\'s route, as before', async () => {
+      const mine = await tech('Sample Alpha');
+      const other = await tech('Sample Bravo');
+      const theirs = await customer({ first_name: 'Theirs' });
+      await visit(other, theirs);
+      const res = await flag({ 'x-test-tech': mine }, { customerId: theirs, leadServiceType: 'Pest' });
+      expect(res.status).toBe(404);
+      expect(await trx('leads').where({ assigned_to: mine }).first()).toBeUndefined();
+    });
+
+    it('keeps the owner alert text', async () => {
+      await run({ arrivalHoursAgo: 1 });
+      expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+      expect(TwilioService.sendSMS.mock.calls[0][1]).toBe('🔔 Field Lead: Sample Alpha flagged Lawn opportunity at Sample Customer.\nNotes: Chinch bugs');
+    });
+  });
+
+  describe('the Neighbor flag with the gate on', () => {
+    const neighbor = (id, body = {}) => flag({ 'x-test-tech': id, 'x-test-name': 'Sample Alpha' }, {
+      leadServiceType: 'Pest', notes: 'Ants', urgency: 'normal', prospect: PROSPECT, ...body,
+    });
+
+    it('verifies a truck 40 m away and stores the prospect, with distance only', async () => {
+      const id = await tech('Sample Alpha');
+      await truck(id, TRUCK_NEAR);
+      const res = await neighbor(id);
+      expect(res.status).toBe(200);
+      const lead = await leadFor(id);
+      expect(lead).toMatchObject({
+        customer_id: null, first_name: 'Neighbor', last_name: 'Sample', phone: '+19415550142', address: '12 Sample Way',
+        city: 'Bradenton', zip: '34202', assigned_to: id, gps_verified: true,
+      });
+      expect(lead.gps_check).toMatchObject({ result: 'verified', mode: 'prospect', radius_m: 300 });
+      expect(lead.gps_check.distance_m).toBeGreaterThan(30);
+      expect(lead.gps_check.distance_m).toBeLessThan(50);
+      const stored = JSON.stringify(lead.gps_check);
+      expect(stored).not.toContain('27.4');
+      expect(stored).not.toContain('82.45');
+      expect(Object.keys(lead.gps_check).sort()).toEqual([
+        'checked_at', 'distance_m', 'mode', 'radius_m', 'result', 'scheduled_service_id', 'truck_reported_at',
+      ]);
+      expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified, \d+ m$/);
+    });
+
+    it('is not verified when the truck is too far, and says how far', async () => {
+      const id = await tech('Sample Alpha');
+      await truck(id, TRUCK_FAR);
+      const res = await neighbor(id);
+      expect(res.status).toBe(200);
+      const lead = await leadFor(id);
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('too_far');
+      expect((await activityFor(lead.id)).description).toMatch(/GPS: not verified \(too far, 1\.\d km\)$/);
+    });
+
+    it('is not verified on a truck position 7 hours old', async () => {
+      const id = await tech('Sample Alpha');
+      await truck(id, TRUCK_NEAR, 7);
+      await neighbor(id);
+      expect((await leadFor(id)).gps_check.result).toBe('stale_truck_position');
+    });
+
+    it('is not verified for a technician with no truck, or a truck with no position', async () => {
+      const noTruck = await tech('Sample Alpha');
+      await neighbor(noTruck);
+      expect((await leadFor(noTruck)).gps_check.result).toBe('no_truck');
+      const noPosition = await tech('Sample Bravo');
+      await trx('technicians').where({ id: noPosition }).update({ bouncie_imei: `IMEI${Math.floor(Math.random() * 1e12)}` });
+      await neighbor(noPosition);
+      expect((await leadFor(noPosition)).gps_check.result).toBe('no_truck_position');
+    });
+
+    it('makes the lead when the address cannot be geocoded', async () => {
+      const id = await tech('Sample Alpha');
+      await truck(id, TRUCK_NEAR);
+      geocodeAddressWithStatus.mockResolvedValueOnce({ location: null, reason: 'outside_service_area' });
+      const res = await neighbor(id);
+      expect(res.status).toBe(200);
+      const lead = await leadFor(id);
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('address_not_found');
+    });
+
+    it('refuses a Neighbor with no phone, no first name, no address or no ZIP, and makes no lead', async () => {
+      const id = await tech('Sample Alpha');
+      for (const patch of [{ phone: '' }, { phone: '555' }, { firstName: ' ' }, { address: '' }, { zip: '' }]) {
+        const res = await neighbor(id, { prospect: { ...PROSPECT, ...patch } });
+        expect(res.status).toBe(400);
+      }
+      expect(await trx('leads').where({ assigned_to: id }).first()).toBeUndefined();
+    });
+
+    it('honors the radius setting, and falls back to 300 m when it is not a whole number', async () => {
+      const id = await tech('Sample Alpha');
+      await truck(id, TRUCK_FAR);
+      await trx('system_settings').insert({ key: 'field_flag.gps_radius_m', value: '1500', category: 'field_flag' });
+      await neighbor(id);
+      let lead = await leadFor(id);
+      expect(lead.gps_check).toMatchObject({ result: 'verified', radius_m: 1500 });
+      await trx('system_settings').where({ key: 'field_flag.gps_radius_m' }).update({ value: '12 km' });
+      await trx('leads').where({ assigned_to: id }).del();
+      await neighbor(id);
+      lead = await leadFor(id);
+      expect(lead.gps_check).toMatchObject({ result: 'too_far', radius_m: 300 });
+    });
+  });
+
+  describe('Sold by auto-fill', () => {
+    const fill = async (id) => {
+      const row = await estimateRow(id);
+      return autoFillSoldBy(trx, row);
+    };
+
+    it('fills from a verified flag matched by customer', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      const lead = await flagLead(t, { customer_id: cust });
+      const est = await estimate({ customer_id: cust });
+      const filled = await fill(est);
+      expect(filled).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
+      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
+      expect((await estimateRow(est)).sold_by_set_at).toBeInstanceOf(Date);
+    });
+
+    it('fills from a flag matched by the last 10 digits of the phone', async () => {
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t, { phone: '+19415550142' });
+      const est = await estimate({ customer_phone: '(941) 555-0142' });
+      expect((await fill(est)).sold_by_lead_id).toBe(lead);
+    });
+
+    it('fills from a flag whose estimate_id points at the estimate', async () => {
+      const t = await tech('Sample Alpha');
+      const est = await estimate();
+      const lead = await flagLead(t, { estimate_id: est });
+      expect((await fill(est)).sold_by_lead_id).toBe(lead);
+    });
+
+    it('ignores a flag older than 60 days, an unverified flag and a flag with another channel', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      await flagLead(t, { customer_id: cust, created_at: new Date(Date.now() - 61 * DAY) });
+      await flagLead(t, { customer_id: cust, gps_verified: false });
+      await flagLead(t, { customer_id: cust, first_contact_channel: 'web_form' });
+      const est = await estimate({ customer_id: cust });
+      expect((await fill(est)).sold_by_source).toBeFalsy();
+    });
+
+    it('ignores a 1099 technician, an inactive technician and the owner', async () => {
+      const cust = await customer();
+      for (const patch of [{ employment_type: '1099' }, { active: false }]) {
+        await flagLead(await tech(`Sample ${JSON.stringify(patch)}`, patch), { customer_id: cust });
+      }
+      await flagLead(ADMIN_ID, { customer_id: cust });
+      const est = await estimate({ customer_id: cust });
+      expect((await fill(est)).sold_by_source).toBeFalsy();
+      expect((await estimateRow(est)).sold_by_technician_id).toBeNull();
+    });
+
+    it('takes the newest of two flags', async () => {
+      const older = await tech('Sample Alpha');
+      const newer = await tech('Sample Bravo');
+      const cust = await customer();
+      await flagLead(older, { customer_id: cust, created_at: new Date(Date.now() - 5 * DAY) });
+      const newest = await flagLead(newer, { customer_id: cust, created_at: new Date(Date.now() - 1 * DAY) });
+      const est = await estimate({ customer_id: cust });
+      expect(await fill(est)).toMatchObject({ sold_by_technician_id: newer, sold_by_lead_id: newest });
+    });
+
+    it('never refills a cleared estimate or overwrites an office choice', async () => {
+      const t = await tech('Sample Alpha');
+      const chosen = await tech('Sample Bravo');
+      const cust = await customer();
+      await flagLead(t, { customer_id: cust });
+      const cleared = await estimate({ customer_id: cust, sold_by_source: 'cleared', sold_by_set_by: ADMIN_ID });
+      expect((await fill(cleared)).sold_by_technician_id).toBeFalsy();
+      const office = await estimate({ customer_id: cust, sold_by_source: 'office', sold_by_technician_id: chosen, sold_by_set_by: ADMIN_ID });
+      expect((await fill(office)).sold_by_technician_id).toBe(chosen);
+      expect((await estimateRow(office)).sold_by_technician_id).toBe(chosen);
+    });
+
+    it('does nothing once the customer accepted', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      await flagLead(t, { customer_id: cust });
+      const est = await estimate({ customer_id: cust, accepted_at: new Date() });
+      await fill(est);
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
+    });
+
+    it('does nothing with the gate off', async () => {
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      await flagLead(t, { customer_id: cust });
+      const est = await estimate({ customer_id: cust });
+      await fill(est);
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
+    });
+  });
+
+  describe('Sold by on the admin routes', () => {
+    it('lets an admin set an active W-2 technician and records one audit event', async () => {
+      const t = await tech('Sample Alpha');
+      const est = await estimate();
+      const res = await admin('PUT', `/${est}/sold-by`, { technicianId: t });
+      expect(res.status).toBe(200);
+      expect(res.body.soldBy).toEqual({ technicianId: t, source: 'office' });
+      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'office', sold_by_set_by: ADMIN_ID, sold_by_lead_id: null });
+      const events = await trx('audit_log').where({ action: 'estimate.sold_by_set', resource_id: est });
+      expect(events).toHaveLength(1);
+      expect(events[0].actor_id).toBe(ADMIN_ID);
+      expect(events[0].metadata).toEqual({ previous_technician_id: null, previous_source: null, technician_id: t, source: 'office' });
+    });
+
+    it('clears with null, and the flag does not refill it', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      await flagLead(t, { customer_id: cust });
+      const est = await estimate({ customer_id: cust });
+      await admin('PUT', `/${est}/sold-by`, { technicianId: t });
+      const res = await admin('PUT', `/${est}/sold-by`, { technicianId: null });
+      expect(res.status).toBe(200);
+      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: null, sold_by_source: 'cleared', sold_by_set_by: ADMIN_ID });
+      await autoFillSoldBy(trx, await estimateRow(est));
+      expect((await estimateRow(est)).sold_by_source).toBe('cleared');
+    });
+
+    it('refuses a 1099, an inactive or an unknown technician, and a missing field', async () => {
+      const est = await estimate();
+      const contractor = await tech('Sample Contractor', { employment_type: '1099' });
+      const gone = await tech('Sample Gone', { active: false });
+      for (const technicianId of [contractor, gone, randomUUID()]) {
+        expect((await admin('PUT', `/${est}/sold-by`, { technicianId })).status).toBe(400);
+      }
+      expect((await admin('PUT', `/${est}/sold-by`, {})).status).toBe(400);
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
+    });
+
+    it('answers 409 once the customer accepted', async () => {
+      const t = await tech('Sample Alpha');
+      const est = await estimate({ accepted_at: new Date() });
+      const res = await admin('PUT', `/${est}/sold-by`, { technicianId: t });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('Sold by is locked once the customer accepts.');
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
+      expect(await trx('audit_log').where({ action: 'estimate.sold_by_set' }).first()).toBeUndefined();
+    });
+
+    it('is admin only', async () => {
+      const t = await tech('Sample Alpha');
+      const est = await estimate();
+      const response = await fetch(`${baseUrl}/api/admin/estimates/${est}/sold-by`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-test-tech': t, 'x-test-role': 'technician' },
+        body: JSON.stringify({ technicianId: t }),
+      });
+      expect(response.status).toBe(403);
+      const options = await fetch(`${baseUrl}/api/admin/estimates/sold-by/options`, {
+        headers: { 'x-test-tech': t, 'x-test-role': 'technician' },
+      });
+      expect(options.status).toBe(403);
+    });
+
+    it('lists active W-2 technicians as the choices', async () => {
+      await tech('Sample Alpha');
+      await tech('Sample Contractor', { employment_type: '1099' });
+      await tech('Sample Gone', { active: false });
+      const res = await admin('GET', '/sold-by/options');
+      expect(res.status).toBe(200);
+      expect(res.body.technicians.map((x) => x.name)).toEqual(['Sample Alpha']);
+    });
+
+    it('answers 404 on both routes with the gate off', async () => {
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const t = await tech('Sample Alpha');
+      const est = await estimate();
+      expect((await admin('PUT', `/${est}/sold-by`, { technicianId: t })).status).toBe(404);
+      expect((await admin('GET', '/sold-by/options')).status).toBe(404);
+      expect((await estimateRow(est)).sold_by_source).toBeNull();
+    });
+  });
+
+  describe('Sold by on the estimate list', () => {
+    it('returns soldBy with the gate on, and no key with the gate off', async () => {
+      const t = await tech('Sample Alpha');
+      const cust = await customer();
+      const lead = await flagLead(t, {
+        customer_id: cust, gps_check: JSON.stringify({ result: 'verified', mode: 'prospect', distance_m: 40 }),
+      });
+      const est = await estimate({
+        customer_id: cust, sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead, sold_by_set_at: new Date(),
+      });
+      const plain = await estimate({ customer_name: 'Plain Customer' });
+      const on = await admin('GET', '?limit=all');
+      expect(on.status).toBe(200);
+      const rows = Object.fromEntries(on.body.estimates.map((e) => [e.id, e]));
+      expect(rows[est].soldBy).toMatchObject({
+        technicianId: t, name: 'Sample Alpha', source: 'flag', leadId: lead, gpsDistanceM: 40,
+      });
+      expect(rows[est].soldBy.flaggedAt).toBeTruthy();
+      expect(rows[plain].soldBy).toEqual({
+        technicianId: null, name: null, source: null, leadId: null, gpsDistanceM: null, flaggedAt: null,
+      });
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const off = await admin('GET', '?limit=all');
+      expect(off.body.estimates.every((e) => !('soldBy' in e))).toBe(true);
+      expect(await loadSoldByForList(trx, [])).toBeNull();
+    });
+  });
+
+  describe('Sold by inside the estimate save', () => {
+    const body = (patch = {}) => ({
+      address: '123 Palm Ave', customerName: 'Van Lee', customerPhone: '(941) 555-0142', customerEmail: 'van@example.invalid',
+      leadId: null, customerId: null, monthlyTotal: 125, annualTotal: 1500, onetimeTotal: 0, waveguardTier: 'Gold',
+      showOneTimeOption: false, billByInvoice: false,
+      estimateData: { inputs: { address: '123 Palm Ave' }, result: { total: 125 } }, ...patch,
+    });
+    const NO_INPUTS = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+    const create = (patch) => createOrReuseAdminEstimate({
+      database: trx, body: body(patch), technicianId: ADMIN_ID, technician: { id: ADMIN_ID, name: 'Sample Admin' }, recompute: NO_INPUTS,
+    });
+
+    it('fills a new estimate from a verified flag matched by phone, and returns it', async () => {
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t, { phone: '+19415550142' });
+      const { estimate: created } = await create();
+      expect(created).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
+      expect(await estimateRow(created.id)).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag' });
+      expect(created.created_by_technician_id).toBe(ADMIN_ID);
+    });
+
+    it('leaves a new estimate alone with the gate off', async () => {
+      delete process.env.GATE_COMMISSION_SOLD_BY;
+      const t = await tech('Sample Alpha');
+      await flagLead(t, { phone: '+19415550142' });
+      const { estimate: created } = await create();
+      expect(await estimateRow(created.id)).toMatchObject({ sold_by_technician_id: null, sold_by_source: null });
+    });
+
+    it('fills on a revision that comes after the flag, and keeps an office choice through it', async () => {
+      const { estimate: created } = await create();
+      expect(created.sold_by_source).toBeNull();
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t, { phone: '+19415550142' });
+      const revised = await reviseAdminEstimate({
+        database: trx, estimateId: created.id, body: body({ notes: 'Revised' }), technicianId: ADMIN_ID,
+        technician: { id: ADMIN_ID, name: 'Sample Admin' }, recompute: NO_INPUTS,
+      });
+      expect(revised.estimate).toMatchObject({ sold_by_technician_id: t, sold_by_source: 'flag', sold_by_lead_id: lead });
+      const chosen = await tech('Sample Bravo');
+      await admin('PUT', `/${created.id}/sold-by`, { technicianId: chosen });
+      const again = await reviseAdminEstimate({
+        database: trx, estimateId: created.id, body: body({ notes: 'Revised again' }), technicianId: ADMIN_ID,
+        technician: { id: ADMIN_ID, name: 'Sample Admin' }, recompute: NO_INPUTS,
+      });
+      expect(again.estimate).toMatchObject({ sold_by_technician_id: chosen, sold_by_source: 'office' });
+    });
+
+    it('does not change the edit version when Sold by changes', async () => {
+      const { estimateEditVersion } = require('../services/admin-estimate-persistence');
+      const { estimate: created } = await create();
+      const before = estimateEditVersion(await estimateRow(created.id));
+      const t = await tech('Sample Alpha');
+      await admin('PUT', `/${created.id}/sold-by`, { technicianId: t });
+      expect(estimateEditVersion(await estimateRow(created.id))).toBe(before);
+    });
+  });
+
+  describe('the table checks', () => {
+    const rejects = async (patch) => {
+      const sp = await trx.transaction();
+      try {
+        await sp('estimates').insert({ customer_name: 'Sample', status: 'draft', ...patch });
+        await sp.rollback();
+        return false;
+      } catch (err) {
+        await sp.rollback().catch(() => {});
+        return /check|violates/i.test(err.message);
+      }
+    };
+
+    it('rejects every invalid combination and accepts the valid ones', async () => {
+      const t = await tech('Sample Alpha');
+      const lead = await flagLead(t);
+      expect(await rejects({ sold_by_source: 'bogus' })).toBe(true);
+      expect(await rejects({ sold_by_technician_id: t })).toBe(true); // technician with no source
+      expect(await rejects({ sold_by_lead_id: lead })).toBe(true); // lead with no source
+      expect(await rejects({ sold_by_source: 'flag', sold_by_technician_id: t })).toBe(true); // flag without lead
+      expect(await rejects({ sold_by_source: 'flag', sold_by_lead_id: lead })).toBe(true); // flag without technician
+      expect(await rejects({ sold_by_source: 'office' })).toBe(true); // office without technician
+      expect(await rejects({ sold_by_source: 'cleared', sold_by_technician_id: t })).toBe(true); // cleared with technician
+      expect(await rejects({ sold_by_source: 'flag', sold_by_technician_id: t, sold_by_lead_id: lead })).toBe(false);
+      expect(await rejects({ sold_by_source: 'office', sold_by_technician_id: t })).toBe(false);
+      expect(await rejects({ sold_by_source: 'cleared' })).toBe(false);
+      expect(await rejects({})).toBe(false);
+    });
+
+    it('refuses to delete a technician who is the recorded seller of an office or flag estimate', async () => {
+      // ON DELETE SET NULL would leave source office with no technician, which the shape check forbids.
+      const t = await tech('Sample Alpha');
+      await estimate({ sold_by_source: 'office', sold_by_technician_id: t });
+      const sp = await trx.transaction();
+      await expect(sp('technicians').where({ id: t }).del()).rejects.toThrow(/estimates_sold_by_shape_check/);
+      await sp.rollback().catch(() => {});
+    });
+
+    it('lets a technician who is only the setting admin be deleted: the admin id is nulled', async () => {
+      const admin2 = await tech('Sample Admin Two', { role: 'admin' });
+      const t = await tech('Sample Alpha');
+      const est = await estimate({ sold_by_source: 'office', sold_by_technician_id: t, sold_by_set_by: admin2 });
+      await trx('technicians').where({ id: admin2 }).del();
+      expect((await estimateRow(est)).sold_by_set_by).toBeNull();
+    });
+  });
+
+  describe('describeGpsCheck', () => {
+    it('words each result', () => {
+      expect(describeGpsCheck({ result: 'verified', distance_m: 40 })).toBe('GPS: verified, 40 m');
+      expect(describeGpsCheck({ result: 'too_far', distance_m: 1234 })).toBe('GPS: not verified (too far, 1.2 km)');
+      expect(describeGpsCheck({ result: 'stale_truck_position' })).toBe('GPS: not verified (truck position too old)');
+      expect(describeGpsCheck(null)).toBeNull();
+    });
+  });
+
+  describe('setEstimateSoldBy', () => {
+    it('rejects a non-string technician id', async () => {
+      await expect(setEstimateSoldBy({ estimateId: randomUUID(), technicianId: 5, actorId: ADMIN_ID })).rejects.toMatchObject({ statusCode: 400 });
+    });
+  });
+});
