@@ -23,7 +23,7 @@ const { formatDateOnly } = require('../utils/date-only');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmailLike = (v) => typeof v === 'string' && EMAIL_RE.test(v.trim());
-const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on receipt' };
+const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', net60: 'Net 60', due_on_receipt: 'Due on receipt' };
 
 // A statement is deliverable only in a billed, owed state. `open` is still
 // accruing; `void`/`paid`/anything else must NOT be mailed as an amount due

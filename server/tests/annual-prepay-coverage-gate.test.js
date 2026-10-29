@@ -247,3 +247,17 @@ describe('seasonal mosquito is deliberately UNSUPPORTED for prepay coverage', ()
     expect(visitsPerYearForCadence('monthly')).toBe(12);
   });
 });
+
+describe('lawn_rounds_9 (lawn 9x rounds): counted as 9 visits, no prepay coverage yet', () => {
+  const { prepayCoverageCadenceForPattern, visitsPerYearForCadence } = require('../services/prepay-cadence');
+
+  test('its visit count is the 9x lawn plan\'s', () => {
+    expect(visitsPerYearForCadence('lawn_rounds_9')).toBe(9);
+    expect(visitsPerYearForCadence('every_6_weeks')).toBe(9);
+  });
+
+  test('it returns no coverage cadence (fail closed: the sale downgrades to a standard accept)', () => {
+    expect(prepayCoverageCadenceForPattern('lawn_rounds_9')).toBeNull();
+    expect(prepayCoverageCadenceForPattern('every_6_weeks')).toBe('every_6_weeks');
+  });
+});

@@ -461,13 +461,18 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
     if (live.some((row) => {
       const stored = seeder.normalizeRecurringPattern(row.recurring_pattern);
       const sameInterval = (stored === 'custom' && Number(row.recurring_interval_days) === 42 && pattern === 'every_6_weeks')
+        || (stored === LAWN_ROUNDS_9 && pattern === 'every_6_weeks')
         || (stored === 'monthly_nth_weekday' && pattern === 'monthly');
       return row.recurring_pattern && stored !== pattern && !sameInterval;
     })) {
       issues.push('cadence_differs_from_acceptance');
     }
     if (live.length < expectedVisits) issues.push('missing_applications');
-    if (hasAcceptedScheduleSpacingGap(live, pattern, seeder)) issues.push('application_spacing_needs_review');
+    // A rounds series (the same 9x plan as every_6_weeks) is dated by its fixed
+    // rounds, so its spacing is checked against them, not the acceptance's 42-day walk.
+    const spacingPattern = live.some((row) => seeder.normalizeRecurringPattern(row.recurring_pattern) === LAWN_ROUNDS_9)
+      ? LAWN_ROUNDS_9 : pattern;
+    if (hasAcceptedScheduleSpacingGap(live, spacingPattern, seeder)) issues.push('application_spacing_needs_review');
     const upcoming = live.filter((row) => formatDateOnly(row.scheduled_date) >= todayET && row.status !== 'completed');
     if (!upcoming.length && live.some((row) => row.recurring_ongoing)) issues.push('ongoing_plan_has_no_future_visit');
     if (estimate.property_id && live.some((row) => row.property_id !== estimate.property_id)) issues.push('property_link_needs_review');

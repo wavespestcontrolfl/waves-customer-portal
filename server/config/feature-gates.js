@@ -10,6 +10,7 @@
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
+ *   GATE_AI_CREDIT_KEYS=true (owner 2026-10-29: the owner's Claude Max / ChatGPT Pro plans each give a monthly API credit that lands in its own API organization. With this on and ANTHROPIC_CREDIT_KEYS / OPENAI_CREDIT_KEYS set (comma-separated, one credit-only key per organization), Anthropic and OpenAI calls that carry the main key are tried on the credit keys first, in order, and fall back to the main key when a credit key runs out of credit, is rejected or is rate limited (paused in memory 6 h, 1 h or the retry-after time). Only stateless calls move (messages, count_tokens, chat completions, embeddings, moderations, images, audio, and /v1/responses with store:false); file, container, batch, session and streamed-body calls stay on the main key. One wrapper around globalThis.fetch installed at boot by server/services/llm/credit-key-pool.js, so a flip needs a redeploy. Strict 'true', dark by default; off = nothing wrapped, every call as before. Sends nothing to a customer.)
  *   GATE_BID_KIT=true (Bid kit, admin only: one page for the documents and company facts every government bid asks for (business license copy, certified operator certificate and notarized full-time statement, employee ID cards, product list, insurance certificate, W-9, Sunbiz status, tax receipt, E-Verify, references and the company fact sheet), each with its file, limits, source document, checked-on date, expiry and the owner's sign-off, plus a facts sheet the owner copies from while filling agency forms by hand. Files sit in private storage and open only by a short signed link. Never public, never on the website, never sent to anyone, no AI. Once a day at 6:05 AM ET (the compliance slot) a job posts one admin notification per item that expired or expires within 30 days (once a week per item). Read at call time via bidKitLive(), strict 'true', dark by default; off = every /api/admin/bid-kit route answers 404, the nav entry is hidden and the daily job does nothing.)
  *   GATE_BID_KIT_PRODUCT_LIST_SYNC=true (owner 2026-10-25: once a day in the 6:05 AM ET compliance slot the Bid kit Product List PDF (every product applied on a visit in the last 12 months, with active ingredient, EPA Reg. No., Label and SDS links) is rebuilt from the visit records. A changed list replaces the file; when ONLY products bought from SiteOne changed and the list is complete (every pesticide has an EPA number, label and SDS) the kit signs it off itself and logs an automatic sign-off, otherwise the file is left NOT signed off and ONE admin bell says what changed. Needs GATE_BID_KIT too. Read at call time via bidKitProductListSyncLive(), strict 'true', dark by default; off = the job returns before any query. Sends nothing to anyone.)
  *   GATE_PRODUCT_INTAKE_GUARD=true (owner 2026-10-26 "fix a": a purchase title that carries a product-line word the catalog product's own name lacks ("Dismiss NXT" vs "Dismiss", "Gentrol Complete EC3" vs "Gentrol") no longer matches that product by name containment or by the inventory agent's "existing" answer; it goes to a person through the agent's "not added" bell and no stock moves (alias matches are never guarded). A product the agent creates for a pesticide gets its EPA registration number and EPA label link from EPA's label system when one exact brand-name match proves it, otherwise the EPA number stays blank (never "N/A"), and the "logged a purchase" bell names what is still missing. Admin inventory only; nothing reaches a customer. Read at call time via productIntakeGuardLive(), strict 'true', dark by default; off = today's behavior.)
@@ -77,7 +78,7 @@
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
- *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice as a caution only, water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%), hold above reschedule_if_rain_prob_above (80%). A caution keeps the dose on the card; only a hold withholds it. Dispatch chips name the source ("Rain hold · label", "Rain caution · Waves rule"). `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day). Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
+ *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice as a caution only, water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%). Owner 2026-10-29 ("i just want to warn techs"): at `true` no weather reading withholds a dose anywhere (tech card, tank search, Tree & Shrub guide); a reading past reschedule_if_rain_prob_above (80%) or a wind or temperature limit is a caution that names it, the guide shows its mix when only the forecast is missing (an open label review still withholds it), and the Dispatch chip names the caution and the product ("Rain warning · Celsius WG", "Wind caution · Celsius WG") ahead of "Weather unknown" and is never red. Step 2: rain past 80% is the Warning level; wind and temperature are judged at the start hour and the next one; a tank spray whose label gives no dry time gets the Waves hours; a label heat line (Celsius: no adjuvant above 90°F) is a caution; each caution carries one action. `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day); `true` keeps upserting the same row, which then counts the real rain odds. Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
  *   GATE_SATELLITE_PALM_COUNT_TYPED=true (owner 2026-10-24 "ok go", follow-up B to #6562: a never-sent estimate whose Tree & Shrub line priced a palm count read from the satellite image (palmCountFromLookup) is sent only after an admin types the palm count from the aerial photo in Review and send. Acknowledging the AI review is no longer enough; a typed count other than the priced one refuses the send with PALM_COUNT_MISMATCH, so the quote is rebuilt with the real count. Read at call time via satellitePalmCountTypedLive(), strict 'true', dark by default; off = the one-click acknowledgment as before. Never sends, never changes a price.)
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
@@ -92,7 +93,9 @@
  *   GATE_PAYROLL_FORM_FIGURES=true (basic payroll layer 3a, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Adds a Tax forms section to the Payroll tab and GET /api/admin/payroll/forms: the line-by-line figures to type onto Form 941 and the Florida RT-6 (one quarter), Form 940, and each employee's W-2 with the W-3 totals (one year), added up from finalized, not-voided pay checks by pay date, with a copy button on each amount. Rates come from the payroll calculator. Shows numbers to an admin only: no PDF is filled in, no SSN, EIN or bank number is held (those fields read "Enter from your records"), and nothing is filed, paid or sent. Read at call time via payrollFormFiguresLive(), strict 'true', dark by default; off = the route answers 404 and the section does not render. Rollback = unset.)
  *   GATE_PAYROLL_TIME_OFF=true (basic payroll, owner ruling 2026-10-26: "Paid days off. The portal's payroll cannot pay time off or holidays. Fix: add this before the tech's first day off." Needs GATE_PAYROLL. Adds paid time off and holidays to pay runs: an admin records a day per W-2 technician (kind pto or holiday, hours up to 24); the pay run pays those hours at the straight hourly rate on the same check, taxed like any wages, and never counts them toward overtime (hours not worked are not hours worked). A week with only time off still makes a check. A per-technician yearly allowance (technicians.pto_hours_per_year, a setting) only warns when paid time off passes it. A record is locked once the pay run for its week is final, whichever technician it paid; void the pay run to change it. The stub, the pay run table, the CSV and the tax package W-2 CSV show the new lines. Read at call time via payrollTimeOffLive(), strict 'true', dark by default; off = every output and route is byte for byte today's. Pays, sends and files nothing; rollback = unset.)
  *   GATE_PAYROLL_PAY_LINES=true (basic payroll, owner ruling 2026-10-29, D5 part 1 of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL (and reads paid time off when GATE_PAYROLL_TIME_OFF is also on). Adds four kinds of pay line to pay runs: a review bonus, a sales commission, a monthly health allowance and an employer HSA contribution. An admin enters a line on the Payroll tab's Pay runs section (payroll_pay_lines) and the next pay run for that technician pays it, even for a technician who has left; a bonus, commission and allowance are taxable wages, while the employer HSA contribution is Section 125 cafeteria-plan money (not wages, not net pay, not in FIT/Social Security/Medicare/FUTA/RT-6 wages). Every line, the HSA one too, counts in the federal regular rate: the extra overtime half-time it causes is paid on the same check, a commission or allowance that covers several weeks is spread equally over those workweeks (29 CFR 778.120) and paid back from each week's approved hours. A covered week with worked time not yet approved makes the technician wait, and one with an unreviewed automatic clock-out holds the check (GATE_SHIFT_CLOSE_REVIEW); once a line is paid, the weeks it priced stay closed to timesheet edits and unlocks until its pay run is voided. W-2 box 12 code TT is filled only for a technician marked FLSA-covered (technicians.flsa_overtime_covered), from qualified_overtime_cents, and code W reports the employer HSA money; Form 940 line 3 includes it and line 4 lists it as exempt fringe benefits. Read at call time via payrollPayLinesLive(), strict 'true', dark by default; off = every output and route is byte for byte today's for checks drafted with it off (the pay-lines routes answer 404), and a check drafted with it on keeps showing and reporting the figures it stored; rollback = unset. Pays, sends and files nothing; the owner makes every payment and filing himself.)
+ *   GATE_BI_TECH_SCORECARD=true (second technician build 7, owner GO 2026-10-29: the Monday BI briefing's get_operations_snapshot adds techScorecard for the last full week (Mon-Sun ET), one row per technician with a completed visit: stops a day, on-site minutes per stop against 25, drive minutes per stop (Bouncie), callbacks (credited to the technician whose visit they correct), review asks, and revenue per tech-day against the cost card's cost per tech-day. An unknown value is null with a reason, never 0. The agent prompt and the tool description gain the scorecard rules. Read at call time via biTechScorecardLive(), strict 'true', dark by default; off = the tool output and the prompt are byte for byte today's. The agent session takes its prompt and tools from the checked-in config on every run, so no agent sync is needed. Reads only; sends nothing. Rollback = unset.)
  *   GATE_TRUCK_VIEWS_PER_VEHICLE=true (tech roadmap build 6, owner "GO" 2026-10-29: "Every truck in the truck views." Today the Intelligence Bar truck answer ("what did the truck drive today?") reads one vehicle and the admin Mileage tab sums every vehicle with no split. On, get_truck_trips answers for every Bouncie vehicle, or the one named by an optional vehicle input (a nickname or a technician name), get_truck_status names each vehicle's technician, and the Mileage dashboard adds a per-vehicle list (today, month to date, live state, technician). Read-only; sends nothing to anyone. Read at call time via truckViewsPerVehicleLive(), strict 'true', dark by default; off = every response and the Mileage tab are byte for byte today's; rollback = unset.)
+ *   GATE_PAYROLL_FAMILY_EMPLOYEE=true (basic payroll, owner ruling 2026-10-29, D5 part 2 of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL. Adds a family-employee setting on a W-2 technician: the relationship (parent or spouse of the owner), the employer entity (sole proprietorship or single-member LLC with no S election) and the date it starts. A pay run dated on or after that date skips federal unemployment tax (26 U.S.C. 3306(c)(5)) and Florida reemployment tax (F.S. 443.1216(13)(d)) for that person and nothing else: income tax withholding, Social Security, Medicare, Form 941 and the W-2 stay the same. The exempt wages are reported as exempt on Form 940 line 4 (box 4e) and left out of the RT-6 wages, employee counts and wage list; they never count toward the $7,000 base. Read at call time via payrollFamilyEmployeeLive(), strict 'true', dark by default; off = every output and route is byte for byte today's for checks drafted with it off (the setting route answers 404), and a check drafted with it on keeps reporting what it stored; after it is turned off, exempt pay earlier in the year still never uses up the $7,000 base; rollback = unset. Pays, sends and files nothing; the owner makes every payment and filing himself.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
@@ -266,6 +269,8 @@
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
+ *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
+ *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -410,6 +415,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // GATE_AI_CREDIT_KEYS (credit-only API key pool for Anthropic and OpenAI calls, dark). Boot-log entry only; the wrapper is installed at boot by credit-key-pool.js.
+  aiCreditKeys: process.env.GATE_AI_CREDIT_KEYS === 'true',
   // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
   bidKit: process.env.GATE_BID_KIT === 'true',
   // GATE_BID_KIT_PRODUCT_LIST_SYNC (daily Product List rebuild in the Bid kit, dark). Boot-log entry only; the call-time reader is bidKitProductListSyncLive().
@@ -2831,6 +2838,10 @@ const gates = {
   referralInboundConfirm: process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true',
   // GATE_REFERRAL_INBOUND_BELL (a bell row with Confirm / Not a referral for each card in Referrals → Queue, dark). Boot-log entry only; the call-time reader is referralInboundBellLive().
   referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
+  // GATE_ALERT_CLOSE_BUTTONS (Handled / Called back buttons on text, follow-up and missed-call bell rows, dark). Boot-log entry only; the call-time reader is alertCloseButtonsLive().
+  alertCloseButtons: process.env.GATE_ALERT_CLOSE_BUTTONS === 'true',
+  // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
+  bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -3218,11 +3229,20 @@ const gates = {
   // Kill switch: unset GATE_PAYROLL_PAY_LINES.
   payrollPayLines: process.env.GATE_PAYROLL_PAY_LINES === 'true',
 
+  // Monday BI briefing, weekly scorecard per technician (owner GO 2026-10-29, second technician
+  // build 7). OFF in every environment; read at call time via biTechScorecardLive().
+  // Kill switch: unset GATE_BI_TECH_SCORECARD.
+  biTechScorecard: process.env.GATE_BI_TECH_SCORECARD === 'true',
   // Truck views per vehicle (owner GO 2026-10-29, tech roadmap build 6): the Intelligence Bar
   // truck answer and the Mileage tab show each vehicle and its technician. OFF in every
   // environment; read at call time via truckViewsPerVehicleLive(). Kill switch: unset
   // GATE_TRUCK_VIEWS_PER_VEHICLE.
   truckViewsPerVehicle: process.env.GATE_TRUCK_VIEWS_PER_VEHICLE === 'true',
+
+  // Payroll family employee (owner 2026-10-29, D5 part 2): a parent or spouse of the owner
+  // on payroll pays no federal or Florida unemployment tax. OFF in every environment; read
+  // at call time via payrollFamilyEmployeeLive(). Kill switch: unset GATE_PAYROLL_FAMILY_EMPLOYEE.
+  payrollFamilyEmployee: process.env.GATE_PAYROLL_FAMILY_EMPLOYEE === 'true',
 
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
@@ -3882,6 +3902,20 @@ const gates = {
   // slabBusinessSiteTaxLive(); dark by default. Off = every slab job of a
   // commercial account follows GATE_SLAB_HOME_NO_TAX exactly as before.
   slabBusinessSiteTax: gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX'),
+  // Lawn 9x rounds (owner 2026-10-28): a NEW residential lawn 9x series (9
+  // applications a year, today every-6-weeks or custom 42 days) is stored as
+  // recurring_pattern 'lawn_rounds_9' with no interval, so it books one visit
+  // in each of the nine fixed rounds a year instead of drifting on a 42-day
+  // gap. Applied where a series' pattern is WRITTEN (office create and
+  // make-recurring, estimate accept, online booking wizard, seeder follow-ups)
+  // by lawnRoundsSeriesPattern in recurring-appointment-seeder.js; quotes and
+  // cadence vocabulary stay every-6-weeks. Annual prepay is not supported on a
+  // rounds series yet: an estimate accept with annual prepay keeps the
+  // every-6-weeks series, and prepay on book downgrades to a standard accept,
+  // until the prepay coverage change ships. Read at call time via
+  // lawn9xRoundsLive(); dark by default. Off = every series is written exactly
+  // as before.
+  lawn9xRounds: gateEnvValue('GATE_LAWN_9X_ROUNDS'),
 
   // Undo last manual payment (owner 2026-10-29, built before partial payments): the office can reverse a cash,
   // check, Zelle, Venmo, PayPal or other off-Stripe entry recorded by hand, the same Eastern day, before any
@@ -6336,6 +6370,11 @@ function slabBusinessSiteTaxLive() {
   return gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX');
 }
 
+// GATE_LAWN_9X_ROUNDS read at CALL time (so a flip needs no redeploy).
+function lawn9xRoundsLive() {
+  return gateEnvValue('GATE_LAWN_9X_ROUNDS');
+}
+
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
 function lawnSprayNoTaxLive() {
   return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
@@ -6760,6 +6799,20 @@ function referralInboundConfirmLive() {
 // while referralInboundConfirmLive() is true too. Off: no row is raised, open rows serve no buttons, a tap answers 409. Kill: unset.
 function referralInboundBellLive() {
   return process.env.GATE_REFERRAL_INBOUND_BELL === 'true';
+}
+
+// GATE_ALERT_CLOSE_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the close_note
+// button kind (services/admin-alert-buttons.js): Handled on a customer's texts, Called back on a call-back follow-up
+// and a missed call. Off: those rows serve no such button and a tap answers 409. Kill: unset.
+function alertCloseButtonsLive() {
+  return process.env.GATE_ALERT_CLOSE_BUTTONS === 'true';
+}
+
+// GATE_BID_ALERT_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the bid_decision
+// button kind (services/bid-desk/alert-buttons.js): No bid on a new bid invite's bell row, Bid once its due date is
+// confirmed. Off: those rows serve no such button and a tap answers 409. Kill: unset.
+function bidAlertButtonsLive() {
+  return process.env.GATE_BID_ALERT_BUTTONS === 'true';
 }
 
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
@@ -8280,12 +8333,28 @@ function payrollPayLinesLive() {
   return process.env.GATE_PAYROLL_PAY_LINES === 'true';
 }
 
+// GATE_BI_TECH_SCORECARD read at CALL time — strict 'true' only, so an unset variable is off.
+// Gates techScorecard in get_operations_snapshot and the scorecard lines of the BI agent's
+// prompt and tool description (services/bi-agent-tools.js, bi-agent-config.js,
+// bi-tech-scorecard.js). Off = the tool output and the prompt are byte for byte today's.
+function biTechScorecardLive() {
+  return process.env.GATE_BI_TECH_SCORECARD === 'true';
+}
+
 // GATE_TRUCK_VIEWS_PER_VEHICLE read at CALL time — strict 'true' only, so an unset variable is
 // off. Gates the per-vehicle truck answers and Mileage dashboard list
 // (services/intelligence-bar/bouncie-ops-tools.js, services/bouncie-mileage.js getDashboard,
 // client MileageTab). Off = every response and the Mileage tab are byte for byte today's.
 function truckViewsPerVehicleLive() {
   return process.env.GATE_TRUCK_VIEWS_PER_VEHICLE === 'true';
+}
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE read at CALL time — strict 'true' only, so an unset variable
+// is off. Gates the family-employee setting and the unemployment tax exemption it causes
+// (services/payroll-family-employee.js, payroll-runs.js, payroll-calc.js, payroll-w4.js,
+// routes/admin-payroll.js). Off = every output and route is byte for byte today's.
+function payrollFamilyEmployeeLive() {
+  return process.env.GATE_PAYROLL_FAMILY_EMPLOYEE === 'true';
 }
 
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
@@ -8558,6 +8627,10 @@ module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
 module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 // GATE_REFERRAL_INBOUND_BELL reader, on its own line so gate PRs never conflict.
 module.exports.referralInboundBellLive = referralInboundBellLive;
+// GATE_ALERT_CLOSE_BUTTONS reader, on its own line so gate PRs never conflict.
+module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
+// GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
+module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -8722,8 +8795,12 @@ module.exports.payrollFormFiguresLive = payrollFormFiguresLive;
 module.exports.payrollTimeOffLive = payrollTimeOffLive;
 // GATE_PAYROLL_PAY_LINES reader, on its own line so gate PRs never conflict.
 module.exports.payrollPayLinesLive = payrollPayLinesLive;
+// GATE_BI_TECH_SCORECARD reader, on its own line so gate PRs never conflict.
+module.exports.biTechScorecardLive = biTechScorecardLive;
 // GATE_TRUCK_VIEWS_PER_VEHICLE reader, on its own line so gate PRs never conflict.
 module.exports.truckViewsPerVehicleLive = truckViewsPerVehicleLive;
+// GATE_PAYROLL_FAMILY_EMPLOYEE reader, on its own line so gate PRs never conflict.
+module.exports.payrollFamilyEmployeeLive = payrollFamilyEmployeeLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
@@ -9121,3 +9198,5 @@ module.exports.stockCountAwareUsageLive = stockCountAwareUsageLive;
 module.exports.taxServiceCountyLive = taxServiceCountyLive;
 // GATE_SLAB_BUSINESS_SITE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
+// GATE_LAWN_9X_ROUNDS reader, on its own line so gate PRs never conflict.
+module.exports.lawn9xRoundsLive = lawn9xRoundsLive;

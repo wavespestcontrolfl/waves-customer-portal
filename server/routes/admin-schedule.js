@@ -595,7 +595,10 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
+const { lawn9xRoundsLive } = require('../config/feature-gates');
+// GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
+const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
 const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
@@ -674,6 +677,29 @@ async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
   const cols = await conn('scheduled_services').columnInfo();
   if (!cols.recurring_round_anchor_date) return;
   await conn('scheduled_services').where({ id: parent.id }).update({ recurring_round_anchor_date: anchorDateStr });
+}
+
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the pattern + interval a NEW series is
+// written with. The shared lawnRoundsSeriesPattern decides (residential lawn
+// 9x only); this adds the catalog row's key to the identity when the booking
+// names a service id, so a lawn plan whose label does not say "lawn" still
+// reads as lawn. Gate off, or any other series: the input comes back
+// unchanged and no query runs.
+async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null, serviceKey = null }) {
+  if (!lawnRoundsGateOn()) return { pattern, intervalDays };
+  let service = null;
+  if (serviceId) {
+    try {
+      service = await conn('services').where({ id: serviceId }).first('service_key', 'name');
+    } catch (e) { logger.warn(`[schedule] lawn rounds service lookup failed (label only): ${e.message}`); }
+  }
+  return lawnRoundsSeriesPattern({
+    pattern,
+    intervalDays,
+    service_type: serviceType,
+    service_key: service?.service_key || serviceKey || undefined,
+    name: service?.name || undefined,
+  });
 }
 
 // Generate the Nth recurring occurrence date given a base date + pattern config.
@@ -8469,8 +8495,8 @@ async function scheduleCreateHandler(req, res, next) {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
-      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
-      recurringNth, recurringWeekday, recurringIntervalDays,
+      serviceType, timeWindow, notes, isRecurring, recurringCount, recurringOngoing,
+      recurringNth, recurringWeekday,
       skipWeekends, weekendShift,
       boosterMonths,
       discountId, discountType, discountAmount,
@@ -8483,6 +8509,8 @@ async function scheduleCreateHandler(req, res, next) {
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
     } = req.body;
+    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the series as rounds.
+    let { recurringPattern, recurringIntervalDays } = req.body;
 
     const separateProgram = req.body.duplicateSeriesOverride;
     if (separateProgram !== undefined) {
@@ -8541,6 +8569,16 @@ async function scheduleCreateHandler(req, res, next) {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): decided ONCE, before the prepay
+    // preflight, the date plan and every insert, so the parent and all of its
+    // children are written with the same pattern and no interval. Off, or any
+    // other service: both values stay exactly as posted.
+    if (isRecurring) {
+      ({ pattern: recurringPattern, intervalDays: recurringIntervalDays } = await lawnRoundsSeriesForBooking(db, {
+        pattern: recurringPattern, intervalDays: recurringIntervalDays, serviceType, serviceId,
+      }));
+    }
 
     // Duplicate-series guard: a second ACTIVE recurring series of the same
     // service family for one customer is almost always a booking mistake —
@@ -8791,8 +8829,14 @@ async function scheduleCreateHandler(req, res, next) {
       const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
         ? 'every_6_weeks'
         : recurringPattern;
-      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
-      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
+      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) has no prepay
+      // coverage yet: nine visits a year, but no supported coverage cadence,
+      // so it downgrades like seasonal_feb_oct (see prepayCoverageCadenceForPattern)
+      // with its own message.
+      const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern)
+        || (prepayRoundsSeries ? 9 : null);
+      const prepayCoverageCadence = prepayRoundsSeries ? null : prepayCoverageCadenceForPattern(prepayBookedPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name + cadence — sourced
@@ -8901,6 +8945,8 @@ async function scheduleCreateHandler(req, res, next) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
+      } else if (prepayRoundsSeries) {
+        downgrade('Appointment booked as standard — annual prepay isn’t available yet for the nine-round lawn program.');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
@@ -14124,7 +14170,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
       // refusal below and the propagation block after the main row update.
       priceServiceScope,
-      isRecurring, recurringPattern, recurringCount, recurringOngoing,
+      isRecurring, recurringCount, recurringOngoing,
       spawnRecurringChildren,
       // Exact plan length for a series that ALREADY exists — the Edit
       // appointment Count field. Distinct from recurringCount (which seeds a
@@ -14146,7 +14192,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // this a plan another operator flipped to fixed gets flipped back (and
       // topped up) by an unrelated save (Codex #3337 r5 P1).
       recurringOngoingBaseline,
-      recurringNth, recurringWeekday, recurringIntervalDays,
+      recurringNth, recurringWeekday,
       skipWeekends, weekendShift,
       estimatedPrice,
       primaryLinePrice,
@@ -14165,6 +14211,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       expectedTotal,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the new series as rounds.
+    let { recurringPattern, recurringIntervalDays } = req.body;
     if (expectedTotal !== undefined && expectedTotal !== null && !Number.isFinite(Number(expectedTotal))) {
       throw httpError(422, 'expectedTotal must be a number');
     }
@@ -14462,6 +14510,42 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
+      }
+    }
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS), make-this-recurring only: a visit
+    // that is not yet in a series becomes a NEW series, so the parent update
+    // and every spawned child below carry the rounds pattern and no interval.
+    // A visit already in a series keeps the pattern its rows already carry,
+    // so a series never mixes the two.
+    if (isRecurring && spawnRecurringChildren !== false && recurringPattern && lawnRoundsGateOn()) {
+      const seriesCurrent = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
+      if (seriesCurrent && !seriesCurrent.is_recurring && !seriesCurrent.recurring_parent_id) {
+        // The EFFECTIVE identity of this save, resolved the way the service
+        // change below treats the request: a posted serviceId (truthy) is the
+        // catalog row; a posted null clears it (the static-fallback pick
+        // carries postedServiceKey, else the label); a label with no
+        // serviceId is the label alone, never the stored id; nothing posted
+        // keeps the stored identity.
+        let effectiveId = seriesCurrent.service_id;
+        let effectiveKey = null;
+        let effectiveLabel = seriesCurrent.service_type;
+        if (serviceId !== undefined) {
+          effectiveId = serviceId || null;
+          effectiveKey = !serviceId ? String(postedServiceKey || '').trim().toLowerCase() || null : null;
+          effectiveLabel = serviceType;
+        } else if (serviceType !== undefined) {
+          effectiveId = null;
+          effectiveLabel = serviceType;
+        }
+        ({ pattern: recurringPattern, intervalDays: recurringIntervalDays } = await lawnRoundsSeriesForBooking(db, {
+          pattern: recurringPattern,
+          intervalDays: recurringIntervalDays,
+          serviceType: effectiveLabel,
+          serviceId: effectiveId,
+          serviceKey: effectiveKey,
+        }));
       }
     }
     let editAnchorDate = scheduledDate;
@@ -24602,8 +24686,14 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       ? 'every_6_weeks'
       : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
-    const visitsPerYear = visitsPerYearForCadence(cadence);
-    const coverageCadence = prepayCoverageCadenceForPattern(cadence);
+    // A NEW series (the draft probe) that GATE_LAWN_9X_ROUNDS will write as
+    // lawn_rounds_9 has no prepay coverage yet: refused like seasonal_feb_oct.
+    // A committed series is read as it is stored.
+    const draftWrittenAsRounds = input.mode === 'draft' && lawnRoundsSeriesPattern({
+      pattern: input.rawCadence, intervalDays: input.intervalDays, service_type: coverageServiceType,
+    }).pattern === LAWN_ROUNDS_9;
+    const visitsPerYear = visitsPerYearForCadence(cadence) || (draftWrittenAsRounds ? 9 : null);
+    const coverageCadence = draftWrittenAsRounds ? null : prepayCoverageCadenceForPattern(cadence);
     if (!visitsPerYear || !coverageCadence) {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }

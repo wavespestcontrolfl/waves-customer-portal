@@ -252,3 +252,51 @@ describe('computePaycheck: paid time off and holidays (GATE_PAYROLL_TIME_OFF)', 
     expect(() => paycheck({ holidayMinutes: 'abc' })).toThrow(/Holiday minutes/);
   });
 });
+
+describe('computePaycheck: family employee (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
+  const stripExempt = ({ unemploymentExempt, ...rest }) => rest;
+
+  test('an exempt check owes no FUTA or Florida tax and counts no unemployment wages; every other figure is unchanged', () => {
+    const normal = paycheck({ ytdGrossWages: '1200.00' });
+    const exempt = paycheck({ ytdGrossWages: '1200.00', unemploymentExempt: true });
+    expect(exempt.unemploymentExempt).toBe(true);
+    expect(exempt.futaCents).toBe(0);
+    expect(exempt.floridaReemploymentCents).toBe(0);
+    expect(exempt.taxableWages.futaCents).toBe(0);
+    expect(exempt.taxableWages.floridaReemploymentCents).toBe(0);
+    expect(normal.futaCents).toBeGreaterThan(0);
+    // Everything but the two taxes and the two taxable wage lines equals the same check not exempt.
+    const without = (check) => {
+      const copy = { ...stripExempt(check), taxableWages: { ...check.taxableWages, futaCents: 0, floridaReemploymentCents: 0 } };
+      copy.futaCents = 0;
+      copy.floridaReemploymentCents = 0;
+      return copy;
+    };
+    expect(without(exempt)).toEqual(without(normal));
+  });
+
+  test('exempt pay never uses up the $7,000 base: exempt pay earlier leaves the full base', () => {
+    // ytdGrossWages (Social Security, Medicare) counts the earlier pay; ytdUnemploymentWages (the base) does not.
+    const later = paycheck({ ytdGrossWages: '6500.00', ytdUnemploymentWages: '0.00', unemploymentExempt: false });
+    expect(later.taxableWages.futaCents).toBe(92000);
+    expect(later.futaCents).toBe(552);
+    expect(later.floridaReemploymentCents).toBe(2484);
+    // Without the new year-to-date the base is figured from all wages, as it always was.
+    expect(paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: false }).taxableWages.futaCents).toBe(50000);
+    // Social Security still follows the gross year to date.
+    expect(later.socialSecurityEmployeeCents).toBe(paycheck({ ytdGrossWages: '6500.00' }).socialSecurityEmployeeCents);
+  });
+
+  test('passing false changes nothing but the extra key; omitting both is byte for byte today', () => {
+    const plain = paycheck({ ytdGrossWages: '6500.00' });
+    expect(plain).not.toHaveProperty('unemploymentExempt');
+    expect(JSON.stringify(paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: undefined, ytdUnemploymentWages: undefined }))).toBe(JSON.stringify(plain));
+    const off = paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: false });
+    expect(off.unemploymentExempt).toBe(false);
+    expect(stripExempt(off)).toEqual(plain);
+  });
+
+  test('a mistyped year-to-date figure is refused', () => {
+    expect(() => paycheck({ unemploymentExempt: false, ytdUnemploymentWages: '-1' })).toThrow(/Year-to-date unemployment wages/);
+  });
+});

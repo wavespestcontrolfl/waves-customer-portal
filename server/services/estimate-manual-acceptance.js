@@ -1021,7 +1021,7 @@ async function winCommercialProposal(trx, updatedEstimate) {
   const winPaymentTerms = normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms;
   if (winPaymentTerms === 'autopay' && updatedEstimate.bill_by_invoice) {
     throw httpError(
-      'This proposal is on Auto Pay, which cannot be combined with Bill by invoice. Turn off Bill by invoice, or set Net-30 payment terms, then mark won again.',
+      'This proposal is on Auto Pay, which cannot be combined with Bill by invoice. Turn off Bill by invoice, or set Net-30 or Net-60 payment terms, then mark won again.',
       409,
     );
   }

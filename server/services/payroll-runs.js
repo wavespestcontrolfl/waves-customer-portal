@@ -41,6 +41,13 @@
  * paid in its own transaction; void reopens them. Gate off, every function here
  * reads and returns what it did before.
  *
+ * GATE_PAYROLL_FAMILY_EMPLOYEE (owner 2026-10-29, D5 part 2): a draft skips federal and Florida
+ * unemployment tax on the pay of a technician whose family employee setting
+ * (services/payroll-family-employee.js) starts on or before the pay date, and stores that on the
+ * check (unemployment_exempt, unemployment_wages_cents). The year-to-date toward the $7,000 base
+ * counts non-exempt pay only. Nothing else about the check changes. Gate off, every function here
+ * reads and returns what it did before.
+ *
  * Every write runs in one transaction with row locks. Audit events are
  * critical and carry ids only.
  */
@@ -64,6 +71,7 @@ const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
+const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -115,6 +123,12 @@ const PAY_LINE_KEYS = Object.keys(PAY_LINE_COLUMNS);
 // never null then). It keeps showing them after the gate is turned off, so a paid stub, run
 // and CSV still add up; a check drafted with the gate off stored none and shows none.
 const storedLines = (row) => row.qualified_overtime_cents != null;
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE: payroll_checks columns, null on a check drafted with the gate off;
+// written with the gate on, read whatever the gate says. A check that stored them keeps counting
+// them in its token after the gate is turned off, so a draft that still shows them goes stale.
+const UNEMPLOYMENT_COLUMNS = ['unemployment_exempt', 'unemployment_wages_cents'];
+const storedUnemployment = (row) => row.unemployment_exempt != null;
 
 const requireUuid = (id, what) => {
   if (!UUID_RE.test(String(id || ''))) throw new PayrollError(404, `${what} not found.`);
@@ -196,9 +210,13 @@ const hoursText = (minutes) => (Math.round((Number(minutes) || 0) / 60 * 100) / 
  * run_id) or { blocked } with a plain reason. Never throws for a calculation
  * problem: the message of computePaycheck becomes the reason.
  */
-function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
+function buildCheck({
+  tech, payDate, weekStart, w4, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt,
+}) {
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
+  const ptoMinutes = tech.pto_minutes || 0;
+  const holidayMinutes = tech.holiday_minutes || 0;
   // Open pay lines for this technician and the extra overtime they cause (evaluate()).
   const lines = (withLines && tech.pay_lines) || [];
   const linePremium = (withLines && tech.line_premium) || { extraPremiumCents: 0, weeks: [] };
@@ -210,13 +228,15 @@ function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
       hourlyRate: tech.pay_rate,
       regularMinutes: tech.regular_minutes,
       overtimeMinutes: tech.overtime_minutes,
-      ...(withTimeOff ? { ptoMinutes: tech.pto_minutes || 0, holidayMinutes: tech.holiday_minutes || 0 } : {}),
+      ...(withTimeOff ? { ptoMinutes, holidayMinutes } : {}),
       ytdGrossWages: centsText(ytdGrossCents),
       w4,
       ...(withLines ? {
         payLines: { ...totalsOf(lines), lineOvertimePremiumCents: linePremium.extraPremiumCents },
         flsaCovered: tech.flsa_overtime_covered === true,
       } : {}),
+      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided by evaluate() (undefined = not decided, today's math).
+      ...(unemploymentExempt === undefined ? {} : { unemploymentExempt, ytdUnemploymentWages: centsText(ytdUnemploymentCents) }),
     });
   } catch (err) {
     return { blocked: (err && err.message) || 'The paycheck could not be worked out' };
@@ -237,9 +257,13 @@ function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
   if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = pay[key];
+  if (unemploymentExempt !== undefined) {
+    check.unemployment_exempt = pay.unemploymentExempt;
+    check.unemployment_wages_cents = pay.taxableWages.futaCents;
+  }
   if (withTimeOff) {
-    check.pto_minutes = tech.pto_minutes || 0;
-    check.holiday_minutes = tech.holiday_minutes || 0;
+    check.pto_minutes = ptoMinutes;
+    check.holiday_minutes = holidayMinutes;
     check.pto_pay_cents = pay.ptoPayCents;
     check.holiday_pay_cents = pay.holidayPayCents;
   }
@@ -265,6 +289,7 @@ function payLinesSignature(row) {
 function tokenOf(run, rows) {
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
+  const withFamily = familyEmployeeOn();
   const parts = rows.map((row) => [
     row.technician_id,
     Number(row.hourly_rate).toFixed(2),
@@ -283,6 +308,8 @@ function tokenOf(run, rows) {
     // stored pay line figures keeps them in the token after the gate is turned off, so a draft
     // that still shows them goes stale instead of finalizing without them.
     ...(withLines || storedLines(row) ? [...PAY_LINE_KEYS.map((key) => Number(row[key] || 0)), payLinesSignature(row)] : []),
+    // The same rule for the family employee exemption: changing the setting after drafting makes the draft stale.
+    ...(withFamily || storedUnemployment(row) ? [row.unemployment_exempt === true, Number(row.unemployment_wages_cents || 0)] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
 }
@@ -311,7 +338,7 @@ const runColumns = (conn) => [
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
   ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
-  ...PAY_LINE_KEYS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
+  ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -460,10 +487,14 @@ async function timeOffByTechnician(conn, start, end) {
   return byTech;
 }
 
-// Year-to-date gross before a pay date, in cents: finalized, non-voided checks
-// of the same calendar year that sort before (payDate, weekStart).
+// Year-to-date before a pay date, in cents: finalized, non-voided checks of the same calendar
+// year that sort before (payDate, weekStart). Map of technician id -> { gross, unemployment },
+// one entry per id. `unemployment` is the gross that used up the $7,000 FUTA and RT-6 base:
+// a check that stored unemployment_exempt = true counts nothing (null, drafted with
+// GATE_PAYROLL_FAMILY_EMPLOYEE off, counts as before).
 async function ytdBefore(conn, technicianIds, payDate, weekStart) {
-  if (!technicianIds.length) return new Map();
+  const byTech = new Map(technicianIds.map((id) => [id, { gross: 0, unemployment: 0 }]));
+  if (!technicianIds.length) return byTech;
   const year = payDate.slice(0, 4);
   const rows = await conn('payroll_checks')
     .where('status', 'finalized')
@@ -476,8 +507,13 @@ async function ytdBefore(conn, technicianIds, payDate, weekStart) {
       });
     })
     .groupBy('technician_id')
-    .select('technician_id', conn.raw('SUM(gross_cents) AS ytd'));
-  return new Map(rows.map((row) => [row.technician_id, Number(row.ytd)]));
+    .select(
+      'technician_id',
+      conn.raw('SUM(gross_cents) AS ytd'),
+      conn.raw('SUM(CASE WHEN unemployment_exempt IS TRUE THEN 0 ELSE gross_cents END) AS ytd_unemployment'),
+    );
+  for (const row of rows) byTech.set(row.technician_id, { gross: Number(row.ytd), unemployment: Number(row.ytd_unemployment) });
+  return byTech;
 }
 
 /**
@@ -556,7 +592,11 @@ async function evaluate(conn, run, { lock = false } = {}) {
     .filter(({ tech }) => !haveCheck.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
   const payable = [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id));
-  const ytd = await ytdBefore(conn, payable.map((row) => row.technician_id), run.pay_date, start);
+  const payableIds = payable.map((row) => row.technician_id);
+  const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
+  // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
+  const familyLive = familyEmployeeOn();
+  const familyExempt = await familyExemptIds(conn, payableIds, run.pay_date, { lock });
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
   // cannot be paid yet. Minutes are not changed; the line is only held.
@@ -588,8 +628,18 @@ async function evaluate(conn, run, { lock = false } = {}) {
       continue;
     }
     const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
+    const yearToDate = ytd.get(tech.technician_id);
     const built = buildCheck({
-      tech, payDate: run.pay_date, weekStart: start, w4, ytdGrossCents: ytd.get(tech.technician_id) || 0,
+      tech,
+      payDate: run.pay_date,
+      weekStart: start,
+      w4,
+      ytdGrossCents: yearToDate.gross,
+      ytdUnemploymentCents: yearToDate.unemployment,
+      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
+      // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
+      unemploymentExempt: familyLive || yearToDate.unemployment !== yearToDate.gross
+        ? familyExempt.has(tech.technician_id) : undefined,
     });
     if (built.blocked) blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: built.blocked });
     else checks.push({ ...built.check, run_id: run.id });

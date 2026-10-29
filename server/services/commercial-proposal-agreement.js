@@ -130,9 +130,9 @@ function signableProposal(estimate) {
 
 // The Commercial Pest Service Agreement template FIXES its terms: a 12-month initial term that renews automatically for
 // 12-month terms unless either party gives written notice at least 30 days before the term ends, cancellation on 30 days'
-// written notice, and price adjustment at renewal or with at least 30 days' notice. Its payment paragraph is one of two
+// written notice, and price adjustment at renewal or with at least 30 days' notice. Its payment paragraph is one of three
 // (AGREEMENT_PAYMENT_TEXT): Auto Pay, the commercial default (owner 2026-10-24, GATE_COMMERCIAL_AUTOPAY), on a proposal
-// that does not bill by invoice, or Net 30. A proposal whose structured commercialTerms say anything else would sit
+// that does not bill by invoice, or Net 30 or Net 60 (owner 2026-10-29). A proposal whose structured commercialTerms say anything else would sit
 // beside a contradictory signed agreement, so online signing is offered only when EVERY structured term agrees with the
 // agreement. This is the one chokepoint (agreementTermsConflict, used through signEligibility by /data, the route, the
 // issuing re-check and the sign-time re-check); a new term never gets its own ad-hoc check.
@@ -144,7 +144,8 @@ function signableProposal(estimate) {
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
 const {
-  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText,
+  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, INVOICE_PAYMENT_TERM_CHOICES,
+  NET60_PAYMENT_TERMS, normalizeTermText,
 } = require('../../shared/commercial-agreement-terms.cjs');
 
 const commercialAutopayLive = () => require('../config/feature-gates').commercialAutopayLive();
@@ -162,15 +163,18 @@ const TERM_RULES = Object.freeze({
   accessRequirements: { detail: 'site access', allowed: () => true },
 });
 
-// The payment term is REQUIRED (a proposal silent on it has not agreed to a payment paragraph): Net 30, or Auto Pay while
-// GATE_COMMERCIAL_AUTOPAY is on and the proposal does not bill by invoice (an invoice-mode proposal bills its first
-// invoice on its terms; Auto Pay charges each completed service). The save, the Bill-by-invoice switch and the win
-// enforce the same pairing; this re-check keeps a stale pairing from reaching a signature.
+// The payment term is REQUIRED (a proposal silent on it has not agreed to a payment paragraph): Net 30 or Net 60, or
+// Auto Pay while GATE_COMMERCIAL_AUTOPAY is on and the proposal does not bill by invoice (an invoice-mode proposal bills
+// its first invoice on its terms; Auto Pay charges each completed service). The save, the Bill-by-invoice switch and the
+// win enforce the same pairing; this re-check keeps a stale pairing from reaching a signature.
 function paymentTermsConflict(paymentTerms, { billByInvoice = false } = {}) {
-  if (paymentTerms === INVOICE_PAYMENT_TERMS) return null;
+  if (INVOICE_PAYMENT_TERM_CHOICES.includes(paymentTerms)) return null;
   const autopayOn = commercialAutopayLive();
   if (paymentTerms === AUTOPAY_PAYMENT_TERMS && autopayOn && billByInvoice !== true) return null;
-  return { field: 'paymentTerms', detail: autopayOn ? 'payment terms Auto Pay, or Net 30 with Bill by invoice' : 'payment terms Net 30' };
+  return {
+    field: 'paymentTerms',
+    detail: autopayOn ? 'payment terms Auto Pay, or Net 30 or Net 60 with Bill by invoice' : 'payment terms Net 30 or Net 60',
+  };
 }
 
 // null = every structured term except payment agrees with the agreement; else { field, detail } for the first conflict.
@@ -505,6 +509,7 @@ async function refuseStaleSignature({ trx, contract, estimateLock, req = {} }) {
 async function paymentSentence(snapshotEstimate, customerId, database) {
   const paymentTerms = snapshotEstimate.proposal?.commercialTerms?.paymentTerms;
   if (paymentTerms === INVOICE_PAYMENT_TERMS) return 'Payment: Net 30 by invoice. ';
+  if (paymentTerms === NET60_PAYMENT_TERMS) return 'Payment: Net 60 by invoice. ';
   if (paymentTerms !== AUTOPAY_PAYMENT_TERMS) return '';
   let on = false;
   let chargesEachService = false;

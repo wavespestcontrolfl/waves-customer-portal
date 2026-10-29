@@ -11,14 +11,49 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { buttonViolations } = require('./admin-alert-compose');
 
-// kind -> its handler { live() -> boolean, run({ row, item, technicianId }) }. A run answers
-// { ok: true, message, resolution } or { ok: false, code, message, close? }, where `close` is the resolution
-// for a row whose record was already answered elsewhere. Required at call time: serving the bell list loads no
-// emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
+// kind -> its handler { live() -> boolean, run({ row, item, technicianId, claimedVersion }), visibleItems? }. A run
+// answers { ok: true, message, resolution, closed? } or { ok: false, code, message, close? }: `closed` says the step
+// already closed the row itself (fenced), `close` is the resolution for a row whose record was already
+// answered elsewhere. The optional `visibleItems(rows)` answers, when the bell list is served, which of each row's
+// stored buttons its record allows now (Map row id -> item ids; a row it leaves out serves none); the tap still
+// checks again. Required at call time: serving the bell list loads no emitter. A kind whose step texts or emails a customer, moves money or flips a gate needs the owner's ruling
 // for that kind first (section 2, part 9).
 const KINDS = {
   // Owner 2026-10-29 "ok go": Confirm is offered only when the tap sends nothing and moves no money.
   referral_inbound: () => require('./referral-inbound-bell').buttonHandler,
+  // Owner 2026-10-29 "ok go" (PR 2): close-only buttons. The step is the bell's own Done with the button's note.
+  close_note: () => closeNoteHandler,
+  // Owner 2026-10-29 "bid buttons, as a trial": No bid, and Bid once the due date is confirmed. The Bid desk's save step.
+  bid_decision: () => require('./bid-desk/alert-buttons').buttonHandler,
+};
+
+// Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back
+// follow-up and a missed call. A tap sends no reply and places no call.
+const CLOSE_NOTES = { handled: 'Handled', called_back: 'Called back' };
+const closeNoteButtons = (id) => ({ kind: 'close_note', items: [{ id, label: CLOSE_NOTES[id] }] });
+
+// The bell's own Done (PUT /api/admin/notifications/:id/done), with the button's label as the resolution: the
+// row is marked done by the person, then a text follow-up it speaks for is settled, as Done settles it. Fenced
+// like Done: only while the row is still the version this tap claimed, so a new text that rewrote the row
+// meanwhile is never marked handled unseen.
+const closeNoteHandler = {
+  live: () => require('../config/feature-gates').alertCloseButtonsLive(),
+  async run({ row, item, technicianId, claimedVersion }) {
+    const resolution = Object.hasOwn(CLOSE_NOTES, item.id) ? CLOSE_NOTES[item.id] : null;
+    if (!resolution) return { ok: false, code: 'unknown_action', message: 'This button is not known.' };
+    const updated = await NotificationService.markAdminDone([row.id], {
+      by: String(technicianId), resolution, role: 'admin', expectedVersion: claimedVersion,
+    });
+    if (!updated) return { ok: false, code: 'changed' };
+    try {
+      await require('./sms-operational-actions').settleCommitmentsForDoneAlert(db, row.id, { reviewedBy: technicianId });
+    } catch (err) {
+      logger.warn(`[alert-buttons] follow-up not settled for alert ${row.id}: ${err.message}`);
+    }
+    // Closed above on the claimed version: the runner must not close it again unfenced, or a new text that
+    // reopened the row since would be closed unseen.
+    return { ok: true, closed: true, message: `Marked ${resolution.toLowerCase()}.`, resolution };
+  },
 };
 
 function parseMetadata(value) {
@@ -44,16 +79,39 @@ function kindLive(kind) {
 
 // The bell list with each open row's `actions` ({ id, label, prompt? }) added: for the admin role only, never on
 // a `live:` overlay row, and only while the row's kind is on. A tap sends back only the action id.
-function withAlertButtons(rows, { role } = {}) {
+async function withAlertButtons(rows, { role } = {}) {
   if (role !== 'admin' || !Array.isArray(rows)) return rows;
   const live = new Map();
-  return rows.map((row) => {
-    if (row?.done_at != null || String(row?.id || '').startsWith('live:')) return row;
+  const byKind = new Map();
+  const served = rows.map((row) => {
+    if (row?.done_at != null || String(row?.id || '').startsWith('live:')) return null;
     const buttons = storedButtons(row);
-    if (!buttons) return row;
+    if (!buttons) return null;
     if (!live.has(buttons.kind)) live.set(buttons.kind, kindLive(buttons.kind));
-    if (!live.get(buttons.kind)) return row;
-    return { ...row, actions: buttons.items.map(({ id, label, prompt }) => ({ id, label, ...(prompt ? { prompt } : {}) })) };
+    if (!live.get(buttons.kind)) return null;
+    if (!byKind.has(buttons.kind)) byKind.set(buttons.kind, []);
+    byKind.get(buttons.kind).push({ id: row.id, metadata: parseMetadata(row.metadata) });
+    return buttons;
+  });
+  // kind -> Map(row id -> item ids) for a kind that checks its records at serve time; no entry = every stored button.
+  const allowed = new Map();
+  for (const [kind, kindRows] of byKind) {
+    const { visibleItems } = KINDS[kind]();
+    if (typeof visibleItems !== 'function') continue;
+    try {
+      allowed.set(kind, await visibleItems(kindRows));
+    } catch (err) {
+      logger.warn(`[alert-buttons] ${kind} button check failed: ${err.message}`);
+      allowed.set(kind, new Map());
+    }
+  }
+  return rows.map((row, i) => {
+    const buttons = served[i];
+    if (!buttons) return row;
+    const ids = allowed.get(buttons.kind)?.get(row.id);
+    const items = allowed.has(buttons.kind) ? buttons.items.filter((item) => (ids || []).includes(item.id)) : buttons.items;
+    if (!items.length) return row;
+    return { ...row, actions: items.map(({ id, label, prompt }) => ({ id, label, ...(prompt ? { prompt } : {}) })) };
   });
 }
 
@@ -61,16 +119,17 @@ function withAlertButtons(rows, { role } = {}) {
 const CLAIM_TTL_SECONDS = 120;
 
 // Claim the row for one tap, in one conditional write: only while the row is open, still the version the bell
-// served, and not claimed by another tap. Of two taps at once, one runs and the other answers 409. Returns
-// true when this tap holds the row.
+// served, and not claimed by another tap. Of two taps at once, one runs and the other answers 409. Returns the
+// row's version after the claim (the claim changes it; a step that writes the row fences on it), or null when
+// this tap does not hold the row.
 async function claimTap(id, version, { by, action }) {
-  const claimed = await db('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version])
-    .whereRaw("(metadata->'buttonClaim' IS NULL OR (metadata->'buttonClaim'->>'at')::timestamptz < now() - (? * interval '1 second'))", [CLAIM_TTL_SECONDS])
-    .update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonClaim', jsonb_build_object('by', ?::text, 'action', ?::text, 'at', now()))", [by, action]),
-    });
-  return Number(claimed) > 0;
+  const VERSION = NotificationService._private.NOTIFICATION_VERSION_SQL;
+  const result = await db.raw(`UPDATE notifications
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('buttonClaim', jsonb_build_object('by', ?::text, 'action', ?::text, 'at', now()))
+     WHERE id = ? AND recipient_type = 'admin' AND done_at IS NULL AND ${VERSION} = ?
+       AND (metadata->'buttonClaim' IS NULL OR (metadata->'buttonClaim'->>'at')::timestamptz < now() - (? * interval '1 second'))
+     RETURNING ${VERSION} AS version`, [by, action, id, version, CLAIM_TTL_SECONDS]);
+  return result?.rows?.[0]?.version || null;
 }
 
 // The tap's record, appended to the row's `buttonTaps` (a later tap never erases an earlier one), and the claim
@@ -114,24 +173,26 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   if (!kindLive(buttons.kind)) return reply(409, { error: 'off', message: 'These buttons are turned off. Open the alert to act on it.' });
 
   const by = String(technicianId);
-  if (!(await claimTap(notificationId, version, { by, action: item.id }))) return lostClaim(notificationId);
+  const claimedVersion = await claimTap(notificationId, version, { by, action: item.id });
+  if (!claimedVersion) return lostClaim(notificationId);
   const tap = { action: item.id, by, at: new Date().toISOString() };
   let result;
   try {
-    result = await KINDS[buttons.kind]().run({ row, item, technicianId });
+    result = await KINDS[buttons.kind]().run({ row, item, technicianId, claimedVersion });
   } catch (err) {
     await finishTap(notificationId, { ...tap, outcome: 'error' });
     throw err;
   }
   await finishTap(notificationId, { ...tap, outcome: result.ok ? 'done' : result.code });
   if (result.ok) {
-    // The step's own close may have marked the row done first; this keeps that close (markAdminDone writes only
-    // an open row).
-    await NotificationService.markAdminDone([notificationId], { by, resolution: result.resolution, role });
+    // A step that answered its record elsewhere (the referral's own close) may have closed the row already;
+    // this keeps that close (markAdminDone writes only an open row). A step that closed the row itself, fenced,
+    // is not closed again.
+    if (!result.closed) await NotificationService.markAdminDone([notificationId], { by, resolution: result.resolution, role });
     return reply(200, { success: true, message: result.message });
   }
   if (result.close) await NotificationService.markAdminDone([notificationId], { by: 'alert-button', resolution: result.close });
   return reply(409, { error: result.code, message: result.message });
 }
 
-module.exports = { withAlertButtons, runAlertButton, _private: { KINDS, storedButtons } };
+module.exports = { withAlertButtons, runAlertButton, closeNoteButtons, _private: { KINDS, storedButtons, CLOSE_NOTES } };

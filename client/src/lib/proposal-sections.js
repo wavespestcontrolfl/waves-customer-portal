@@ -16,6 +16,7 @@ export const PAYMENT_TERM_LABELS = {
   due_on_receipt: 'Due on receipt',
   net15: 'Net-15',
   net30: 'Net-30',
+  net60: 'Net-60',
 };
 
 // The four fixed agreement terms (initial term, renewal, price adjustment, cancellation) apply to a recurring
