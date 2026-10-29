@@ -284,6 +284,22 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect(fs.readdirSync(outDir).length).toBe(filesBefore);
   });
 
+  test('rollback leaves a visit moved to another day, and a day the original technician cannot take, with the hire', async () => {
+    const w = await world();
+    const result = await go(w, { refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+    expect(result).toMatchObject({ visits: 4 });
+    // Since the run: Tuesday's visit was moved to another day, and the owner is marked out on Wednesday.
+    await knex('scheduled_services').where({ id: w.tue.id }).update({ scheduled_date: '2099-07-14' });
+    await knex('technician_absences').insert({ technician_id: w.ownerId, absence_date: '2099-07-08', reason: 'synthetic' });
+
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+
+    expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 2 });
+    expect(undo.skipped.visits.sort()).toEqual([w.tue.id, w.wed.id].sort());
+    for (const v of [w.mon, w.thu]) expect((await get(v.id)).technician_id).toBe(w.ownerId);
+    for (const v of [w.tue, w.wed]) expect((await get(v.id)).technician_id).toBe(w.hireId);
+  });
+
   test('a failure after the first update rolls the whole run back', async () => {
     const w = await world();
     const plan = await dryRun(w);

@@ -39,6 +39,10 @@
 //   6. The rollback file is written and synced BEFORE the first update. Ids and counts only.
 //      A run that then fails leaves a file that restores nothing (no row holds --to).
 //
+// ROLLBACK restores a series only while its template still reads (--to, override) and a visit only
+// while it is still open, still held by --to, still on the day the run moved it, and the original
+// technician can still take that day (assertAssignableTechnician). Everything else is listed.
+//
 // SENDERS (rule 12), checked against the save path (dispatch-assignment assignDispatchJob):
 //   NOT CALLED: tech-visit-notifications notifyAssignmentChange (the per-visit visit_assigned /
 //   visit_unassigned cards and pushes), emitDispatchJobUpdate (the dispatch board socket and
@@ -209,8 +213,16 @@ async function executeHandover(db, opts) {
 
       const seriesIds = plan.ids.retemplate;
       const visitIds = plan.ids.moves.map((m) => m.visit_id);
+      // Lock the parents and confirm each template still gives new children to --from (the plan's ON FROM rule):
+      // an office change to any other technician since the plan was read must not be overwritten.
       const oldSeries = seriesIds.length
-        ? await trx('scheduled_services').whereIn('id', seriesIds).select('id', 'recurring_technician_id', 'recurring_technician_override') : [];
+        ? await trx('scheduled_services').whereIn('id', seriesIds).forUpdate()
+          .select('id', 'technician_id', 'recurring_technician_id', 'recurring_technician_override') : [];
+      for (const r of oldSeries) {
+        if (planner.seriesTechnicianId(r) !== from) {
+          throw new Error(`series ${r.id}: its template no longer gives new visits to --from (changed since the plan was read; rolled back)`);
+        }
+      }
       const oldVisits = visitIds.length
         ? await trx('scheduled_services').whereIn('id', visitIds).select('id', 'technician_id', 'route_order', 'customer_id') : [];
       const visitById = new Map(oldVisits.map((v) => [v.id, v]));
@@ -230,15 +242,16 @@ async function executeHandover(db, opts) {
       // Before the first update, so a crash after commit still leaves the way back.
       const rollbackFile = writeRollbackFile(outDir, record);
 
-      for (const id of seriesIds) {
+      for (const old of oldSeries) {
         const n = await trx('scheduled_services')
-          .where({ id })
-          .where(function differs() {
-            this.whereRaw('recurring_technician_id IS DISTINCT FROM ?', [to]).orWhere({ recurring_technician_override: false });
-          })
+          .where({ id: old.id })
+          .whereRaw('recurring_technician_id IS NOT DISTINCT FROM ?', [old.recurring_technician_id || null])
+          .whereRaw('recurring_technician_override IS NOT DISTINCT FROM ?', [old.recurring_technician_override])
+          .whereRaw('technician_id IS NOT DISTINCT FROM ?', [old.technician_id || null])
           .update({ recurring_technician_id: to, recurring_technician_override: true, updated_at: new Date() });
-        if (n !== 1) throw new Error(`series ${id}: template already changed since the plan was read (rolled back)`);
+        if (n !== 1) throw new Error(`series ${old.id}: template changed since the plan was read (rolled back)`);
       }
+      if (oldSeries.length !== seriesIds.length) throw new Error('a planned series row is missing (rolled back)');
       for (const m of plan.ids.moves) {
         const n = await trx('scheduled_services')
           .where({ id: m.visit_id, technician_id: from })
@@ -317,11 +330,25 @@ async function rollbackHandover(db, opts) {
           .update({ recurring_technician_id: s.recurring_technician_id, recurring_technician_override: s.recurring_technician_override, updated_at: new Date() });
         if (n === 1) seriesRestored += 1; else skipped.series.push(s.id);
       }
+      // The original technician must still be able to take each day (the app's save-time check);
+      // a day it cannot take keeps its visits with --to and lists them.
+      const fromCanTake = new Map();
+      for (const date of [...new Set(record.visits.map((v) => v.date))]) {
+        try {
+          await assertAssignableTechnician(from, { conn: trx, date });
+          fromCanTake.set(date, true);
+        } catch (err) {
+          fromCanTake.set(date, false);
+        }
+      }
       for (const v of record.visits) {
+        if (!fromCanTake.get(v.date)) { skipped.visits.push(v.id); continue; }
+        // Only a visit still on the day the run moved it (the day this rollback locked) goes back.
         const n = await trx('scheduled_services')
           .where({ id: v.id, technician_id: to })
           .whereIn('status', OPEN_STATUSES)
           .where(function notStopped() { this.whereNull('track_state').orWhereNotIn('track_state', STOPPED_TRACK_STATES); })
+          .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [v.date])
           .update({ technician_id: v.technician_id, route_order: null, updated_at: trx.fn.now() });
         if (n === 1) visitsRestored += 1; else skipped.visits.push(v.id);
       }
