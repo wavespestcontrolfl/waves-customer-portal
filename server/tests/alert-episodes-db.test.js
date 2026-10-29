@@ -282,6 +282,25 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect((await get(row.id)).metadata.dedupeVersion).toBe('ev2::g1');
   });
 
+  test('the accepted-plan finding version (GATE_ACCEPTED_PLAN_RING_ON_CHANGE): an evidence-versioned row moves over quietly and keeps a person\'s Done; only a new finding rings', async () => {
+    const { _findingVersion: findingVersion } = require('../services/schedule-integrity-watchdog');
+    const row = await bell('finding', { read: true, meta: { dedupeVersion: 'ev-routine-1' } });
+    await db('notifications').where({ id: row.id }).update({ done_at: new Date('2026-09-02T12:00:00Z'), done_by: '42', resolution: 'Checked the plan' });
+    // First run after the flip: the stored version becomes the finding's, with no ring; read and Done stand.
+    expect(await raise('finding', { refreshOnDedupe: true, ...findingVersion('f1') })).toMatchObject({ deduped: true, refreshed: true, rang: false });
+    let after = await get(row.id);
+    expect(after.metadata.dedupeVersion).toBe('finding:f1');
+    expect([after.done_by, after.resolution, new Date(after.read_at).toISOString()]).toEqual(['42', 'Checked the plan', '2026-09-01T12:00:00.000Z']);
+    expect(after.metadata.rungAt).toBeUndefined();
+    // The same finding again: a silent dedupe.
+    expect(await raise('finding', { refreshOnDedupe: true, ...findingVersion('f1') })).toMatchObject({ deduped: true, rang: false });
+    // A changed finding rings: unread, Done cleared.
+    expect(await raise('finding', { refreshOnDedupe: true, ...findingVersion('f2') })).toMatchObject({ refreshed: true, rang: true });
+    after = await get(row.id);
+    expect(after.metadata.dedupeVersion).toBe('finding:f2');
+    expect([after.read_at, after.done_at, after.done_by]).toEqual([null, null, null]);
+  });
+
   test('notifyAdmin\'s own dedupe lookup and the reopen probe both read the NEWEST row of a key', async () => {
     // Two rows under one key (an aged-out window, or a leftover duplicate): an old auto-cleared one and a newer standing one.
     const older = await bell('newest', { meta: { autoCleared: true, recurrenceGeneration: 3, dedupeVersion: 'ev0::g3' } });

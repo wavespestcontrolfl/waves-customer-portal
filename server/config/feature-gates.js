@@ -86,6 +86,7 @@
  *   GATE_BID_DESK=true (Bid Desk, PR 1: every 15 minutes a job reads new rows of the emails table and files bid invites (BuildingConnected, Procore, bid portals, government RFP/RFQ mail) as bid opportunities with their due dates read from the fixed provider templates only, posts ONE admin notification per new bid, one when an addendum arrives on an open bid, and reminders 7 and 2 days before a due date the operator CONFIRMED; the admin Bid Desk page lists them and lets the operator confirm the date and set bid / no bid / submitted / won / lost. No AI call, no change to leads or the classifier, and it sends nothing to a buyer, contractor or customer. Read at call time via bidDeskLive(), strict 'true', dark by default; off = no job work, the routes answer 404 and the nav entry is hidden.)
  *   GATE_BID_DESK_SAM=true (Bid Desk, PR 2: once a day at 7:25 AM ET a job reads new federal notices from the official SAM.gov Opportunities API (NAICS 561710 pest control and 561730 landscaping, Florida, solicitations, combined synopses, presolicitations and sources sought) whose place of performance is in the Tampa Bay to Southwest Florida ZIP areas, and files each as a bid opportunity (source sam_gov, one per notice id) with its SAM.gov link and response deadline (never confirmed until the operator confirms it), posting ONE admin notification per new bid. Needs GATE_BID_DESK and SAM_GOV_API_KEY. No AI call; it sends nothing to an agency, contractor or customer. Read at call time via bidDeskSamLive(), strict 'true', dark by default; off = the job returns before any request.)
  *   GATE_BID_CHECKLIST=true (Bid Desk PR B, needs GATE_BID_DESK: each bid also carries its solicitation type, scored or pass/fail, a questions-due date, a mandatory job walk, a link to its estimate and proposal, its documents (the attachments of its emails), a per-bid checklist built from templates, and a submission record; adds a 14-day reminder before a confirmed due date, one reminder 2 days before the questions date and one 2 days before the job walk. Admin bell only: nothing goes to a buyer, contractor or agency. Read at call time via bidChecklistLive(), strict 'true', dark by default; off = the new fields are hidden and refused, no new reminder fires, and the Bid Desk works as before.)
+ *   GATE_BID_DESK_AUTO_DATES=true (Bid Desk, needs GATE_BID_DESK: a due date read from a provider's fixed email template, or a SAM.gov response deadline, counts as confirmed when the bid is first filed, so the 7-day and 2-day reminders start by themselves; and an open bid still marked new, with no submission, closes itself as no bid once its due date is more than a day past (a date still waiting on an addendum check waits 30 days), with a note saying so. A date from a later email, an addendum or a SAM.gov deadline move still waits for the operator. Admin portal only: it sends nothing to a buyer, contractor, agency or customer and rings no new bell. Read at call time via bidDeskAutoDatesLive(), strict 'true', dark by default; off = the Bid Desk works as before.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
@@ -96,6 +97,7 @@
  *   GATE_BI_TECH_SCORECARD=true (second technician build 7, owner GO 2026-10-29: the Monday BI briefing's get_operations_snapshot adds techScorecard for the last full week (Mon-Sun ET), one row per technician with a completed visit: stops a day, on-site minutes per stop against 25, drive minutes per stop (Bouncie), callbacks (credited to the technician whose visit they correct), review asks, and revenue per tech-day against the cost card's cost per tech-day. An unknown value is null with a reason, never 0. The agent prompt and the tool description gain the scorecard rules. Read at call time via biTechScorecardLive(), strict 'true', dark by default; off = the tool output and the prompt are byte for byte today's. The agent session takes its prompt and tools from the checked-in config on every run, so no agent sync is needed. Reads only; sends nothing. Rollback = unset.)
  *   GATE_TRUCK_VIEWS_PER_VEHICLE=true (tech roadmap build 6, owner "GO" 2026-10-29: "Every truck in the truck views." Today the Intelligence Bar truck answer ("what did the truck drive today?") reads one vehicle and the admin Mileage tab sums every vehicle with no split. On, get_truck_trips answers for every Bouncie vehicle, or the one named by an optional vehicle input (a nickname or a technician name), get_truck_status names each vehicle's technician, and the Mileage dashboard adds a per-vehicle list (today, month to date, live state, technician). Read-only; sends nothing to anyone. Read at call time via truckViewsPerVehicleLive(), strict 'true', dark by default; off = every response and the Mileage tab are byte for byte today's; rollback = unset.)
  *   GATE_PAYROLL_FAMILY_EMPLOYEE=true (basic payroll, owner ruling 2026-10-29, D5 part 2 of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL. Adds a family-employee setting on a W-2 technician: the relationship (parent or spouse of the owner), the employer entity (sole proprietorship or single-member LLC with no S election) and the date it starts. A pay run dated on or after that date skips federal unemployment tax (26 U.S.C. 3306(c)(5)) and Florida reemployment tax (F.S. 443.1216(13)(d)) for that person and nothing else: income tax withholding, Social Security, Medicare, Form 941 and the W-2 stay the same. The exempt wages are reported as exempt on Form 940 line 4 (box 4e) and left out of the RT-6 wages, employee counts and wage list; they never count toward the $7,000 base. Read at call time via payrollFamilyEmployeeLive(), strict 'true', dark by default; off = every output and route is byte for byte today's for checks drafted with it off (the setting route answers 404), and a check drafted with it on keeps reporting what it stored; after it is turned off, exempt pay earlier in the year still never uses up the $7,000 base; rollback = unset. Pays, sends and files nothing; the owner makes every payment and filing himself.)
+ *   GATE_PAYROLL_REVIEW_BONUS_IMPORT=true (basic payroll, owner ruling 2026-10-29, D5 part 3a of the first-technician pay plan: "Build the payroll pieces now, switched off". Needs GATE_PAYROLL and GATE_PAYROLL_PAY_LINES. Each time a pay run is drafted, recomputed or finalized, every earned Google review bonus (review_incentive_payouts) of a W-2 technician, earned on or before the run's week end, becomes an open review bonus pay line (source_type review_incentive_payout) that the run pays; finalizing the run marks the payout paid and voiding it puts the payout back to earned. While GATE_PAYROLL_PAY_LINES is on, an imported line whose payout was marked paid by hand or moved to another technician is dropped at the next draft, recompute or finalize; finalize and void keep the payouts in step with the lines they paid whatever the gates say. Read at call time via payrollReviewBonusImportLive(), strict 'true', dark by default; off = nothing is imported, every open imported line comes off the next run, and every pay run output is byte for byte today's; rollback = unset. Pays, sends and files nothing; the owner makes every payment himself.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
@@ -135,6 +137,7 @@
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
@@ -2321,6 +2324,8 @@ const gates = {
   bidDeskSam: process.env.GATE_BID_DESK_SAM === 'true',
   // GATE_BID_CHECKLIST (Bid Desk checklist, dark). Boot-log entry only; the call-time reader is bidChecklistLive().
   bidChecklist: process.env.GATE_BID_CHECKLIST === 'true',
+  // GATE_BID_DESK_AUTO_DATES (Bid Desk template dates + auto-close, dark). Boot-log entry only; the call-time reader is bidDeskAutoDatesLive().
+  bidDeskAutoDates: process.env.GATE_BID_DESK_AUTO_DATES === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -3243,6 +3248,11 @@ const gates = {
   // on payroll pays no federal or Florida unemployment tax. OFF in every environment; read
   // at call time via payrollFamilyEmployeeLive(). Kill switch: unset GATE_PAYROLL_FAMILY_EMPLOYEE.
   payrollFamilyEmployee: process.env.GATE_PAYROLL_FAMILY_EMPLOYEE === 'true',
+
+  // Payroll review bonus import (owner 2026-10-29, D5 part 3a): earned Google review bonuses
+  // become pay lines on pay runs. OFF in every environment; read at call time via
+  // payrollReviewBonusImportLive(). Kill switch: unset GATE_PAYROLL_REVIEW_BONUS_IMPORT.
+  payrollReviewBonusImport: process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT === 'true',
 
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
@@ -4889,6 +4899,10 @@ const gates = {
   // Admin alert retention (owner 2026-10-26). Registered for logGateStatus only; the sweep reads
   // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
   alertRetention: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase()),
+
+  // Admin alert catalog watch (owner 2026-10-29). Registered for logGateStatus only; NotificationService.create reads
+  // alertCatalogMode() at CALL time. 'watch' records muted alerts, no refusal. Kill switch: unset.
+  alertCatalog: String(process.env.GATE_ALERT_CATALOG || '').trim().toLowerCase() === 'watch',
 
   // Promise record evidence (owner 2026-10-29). Registered for logGateStatus only; consumers read
   // promiseRecordEvidenceMode() at CALL time. 'shadow' records, 'true' applies. Kill switch: unset.
@@ -6912,6 +6926,13 @@ function alertRetentionMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_ALERT_CATALOG read at CALL time: 'watch' or 'off' (NotificationService.create). 'watch' (trimmed, any
+// case) writes one audit_log row per Eastern day per distinct admin alert the bell policy silences, and
+// refuses nothing. Anything else is off: no read, no write. Unset is the kill.
+function alertCatalogMode() {
+  return String(process.env.GATE_ALERT_CATALOG || '').trim().toLowerCase() === 'watch' ? 'watch' : 'off';
+}
+
 // GATE_PROMISE_RECORD_EVIDENCE read at CALL time: 'shadow', 'true' or 'off' (services/sms-commitment-fulfillment.js
 // and sms-operational-actions.js). 'shadow' (trimmed, any case) records what would change and changes nothing;
 // 'true' applies it. Anything else is off. Unset is the kill.
@@ -8368,6 +8389,14 @@ function payrollFamilyEmployeeLive() {
   return process.env.GATE_PAYROLL_FAMILY_EMPLOYEE === 'true';
 }
 
+// GATE_PAYROLL_REVIEW_BONUS_IMPORT read at CALL time — strict 'true' only, so an unset variable
+// is off. Gates the import of earned review bonus payouts as pay lines on pay runs
+// (services/payroll-review-bonuses.js, payroll-runs.js). Needs GATE_PAYROLL_PAY_LINES. Off = nothing
+// is imported and every pay run output is byte for byte today's.
+function payrollReviewBonusImportLive() {
+  return process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -8814,6 +8843,8 @@ module.exports.biTechScorecardLive = biTechScorecardLive;
 module.exports.truckViewsPerVehicleLive = truckViewsPerVehicleLive;
 // GATE_PAYROLL_FAMILY_EMPLOYEE reader, on its own line so gate PRs never conflict.
 module.exports.payrollFamilyEmployeeLive = payrollFamilyEmployeeLive;
+// GATE_PAYROLL_REVIEW_BONUS_IMPORT reader, on its own line so gate PRs never conflict.
+module.exports.payrollReviewBonusImportLive = payrollReviewBonusImportLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
@@ -8952,6 +8983,17 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
+// GATE_ACCEPTED_PLAN_RING_ON_CHANGE read at CALL time, strict `=== 'true'`, dark in every environment
+// (owner 2026-10-29, "go"). On, the schedule-integrity watchdog versions its "Accepted recurring plan
+// needs schedule review" bell by the finding (issues, pattern, planned and recorded counts) instead of
+// every visit row's revision and date, so a routine visit edit no longer rings a standing bell again
+// or undoes a person's Done; a changed finding still rings. Off = today's behavior, byte for byte.
+function acceptedPlanRingOnChangeLive() {
+  return process.env.GATE_ACCEPTED_PLAN_RING_ON_CHANGE === 'true';
+}
+// GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
+module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
+
 // GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
 // On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is
 // 'person') or one of our own engineering faults (the classes in services/admin-alert-routing.js) is written Activity-only
@@ -8961,6 +9003,8 @@ function alertClaudeQueueLive() {
 }
 // GATE_ALERT_CLAUDE_QUEUE reader, on its own line so gate PRs never conflict.
 module.exports.alertClaudeQueueLive = alertClaudeQueueLive;
+// GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
+module.exports.alertCatalogMode = alertCatalogMode;
 
 // GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
 // the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation
@@ -9061,11 +9105,21 @@ function bidDeskSamLive() {
 function bidChecklistLive() {
   return bidDeskLive() && process.env.GATE_BID_CHECKLIST === 'true';
 }
+// GATE_BID_DESK_AUTO_DATES read at CALL time, strict `=== 'true'`, dark by default. It also needs the Bid Desk itself on.
+// Off: every bid is filed with an unconfirmed date and nothing closes itself, exactly as before. On: a template or SAM.gov
+// date counts as confirmed when the bid is first filed, and a bid still marked new closes as no bid one day after its
+// due date (30 days when the date is flagged for confirmation). A bid marked bid never closes by itself.
+// Admin bell only (no new bell); nothing goes to a buyer, contractor, agency or customer. Kill: unset.
+function bidDeskAutoDatesLive() {
+  return bidDeskLive() && process.env.GATE_BID_DESK_AUTO_DATES === 'true';
+}
 
 // GATE_BID_DESK_SAM reader, on its own line so gate PRs never conflict.
 module.exports.bidDeskSamLive = bidDeskSamLive;
 // GATE_BID_CHECKLIST reader, on its own line so gate PRs never conflict.
 module.exports.bidChecklistLive = bidChecklistLive;
+// GATE_BID_DESK_AUTO_DATES reader, on its own line so gate PRs never conflict.
+module.exports.bidDeskAutoDatesLive = bidDeskAutoDatesLive;
 // GATE_CALL_LEAD_LAZY_STRIPE read at CALL time, strict `=== 'true'`, dark in every environment.
 // services/call-recording-processor.js: a customer created from a call no longer gets a Stripe profile at once
 // (every card-save and payment path creates it on demand), so a lead that never pays leaves no empty profile to

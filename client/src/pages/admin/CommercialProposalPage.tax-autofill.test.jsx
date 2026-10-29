@@ -139,6 +139,7 @@ it('a line the operator adds starts Taxable by the rule, and the rate fills; the
 it('a program the operator adds follows its service until its switch is touched; a saved program keeps its switch', async () => {
   await mount({ programs: [{ id: 'saved-program', service: 'pest', label: 'Saved program', frequencyPerYear: 4, pricePerApplication: 100, taxable: false }] });
   fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Blank program' }));
   const added = () => screen.getAllByRole('switch', { name: 'Taxable program' })[1];
   const addedService = () => screen.getAllByLabelText('Service family')[1];
   expect(added()).toHaveAttribute('aria-checked', 'true');
