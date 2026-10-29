@@ -257,6 +257,20 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(body).toBe("“please call me back about the gate” (Sep 29) — can't tell if it was done.");
   });
 
+  test('a call-back promise carries the Called back button; other kinds carry none', async () => {
+    await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] } });
+    expect(lastCall()[3].metadata.buttons).toEqual({ kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] });
+    await ring({ row: { kind: 'send_estimate', evidence: [{ quote: 'send me the price for the lawn' }] } });
+    expect(lastCall()[3].metadata).not.toHaveProperty('buttons');
+  });
+
+  test('the text and missed-call bells carry Handled and Called back', () => {
+    expect(TRIGGER_REGISTRY.sms_reply.build({ threadId: CUSTOMER_ID, message: 'Is Friday still on?' }).alert)
+      .toEqual({ buttons: { kind: 'close_note', items: [{ id: 'handled', label: 'Handled' }] } });
+    expect(TRIGGER_REGISTRY.customer_missed_call.build({ name: 'Albert Clark', phone: '+19415550188' }).alert)
+      .toEqual({ buttons: { kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] } });
+  });
+
   test('scheduling kinds land in Schedule', async () => {
     await ring({ row: { kind: 'schedule_visit', evidence: [{ quote: 'can you come Friday morning' }] } });
     expect(lastCall()[1]).toBe("Schedule — schedule Albert Clark's visit");

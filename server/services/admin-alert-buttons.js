@@ -19,6 +19,32 @@ const { buttonViolations } = require('./admin-alert-compose');
 const KINDS = {
   // Owner 2026-10-29 "ok go": Confirm is offered only when the tap sends nothing and moves no money.
   referral_inbound: () => require('./referral-inbound-bell').buttonHandler,
+  // Owner 2026-10-29 "ok go" (PR 2): close-only buttons. The step is the bell's own Done with the button's note.
+  close_note: () => closeNoteHandler,
+};
+
+// Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back
+// follow-up and a missed call. A tap sends no reply and places no call.
+const CLOSE_NOTES = { handled: 'Handled', called_back: 'Called back' };
+const closeNoteButtons = (id) => ({ kind: 'close_note', items: [{ id, label: CLOSE_NOTES[id] }] });
+
+// The bell's own Done (PUT /api/admin/notifications/:id/done), with the button's label as the resolution: the
+// row is marked done by the person, then a text follow-up it speaks for is settled, as Done settles it.
+const closeNoteHandler = {
+  live: () => require('../config/feature-gates').alertCloseButtonsLive(),
+  async run({ row, item, technicianId }) {
+    const resolution = Object.hasOwn(CLOSE_NOTES, item.id) ? CLOSE_NOTES[item.id] : null;
+    if (!resolution) return { ok: false, code: 'unknown_action', message: 'This button is not known.' };
+    const updated = await NotificationService.markAdminDone([row.id], { by: String(technicianId), resolution, role: 'admin' });
+    if (updated > 0) {
+      try {
+        await require('./sms-operational-actions').settleCommitmentsForDoneAlert(db, row.id, { reviewedBy: technicianId });
+      } catch (err) {
+        logger.warn(`[alert-buttons] follow-up not settled for alert ${row.id}: ${err.message}`);
+      }
+    }
+    return { ok: true, message: `Marked ${resolution.toLowerCase()}.`, resolution };
+  },
 };
 
 function parseMetadata(value) {
@@ -134,4 +160,4 @@ async function runAlertButton({ notificationId, actionId, version, technicianId,
   return reply(409, { error: result.code, message: result.message });
 }
 
-module.exports = { withAlertButtons, runAlertButton, _private: { KINDS, storedButtons } };
+module.exports = { withAlertButtons, runAlertButton, closeNoteButtons, _private: { KINDS, storedButtons, CLOSE_NOTES } };

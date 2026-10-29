@@ -94,6 +94,13 @@ Kinds today:
   the tap sends nothing and moves no money: the $25 credits and the referrer's 9:00 AM email follow
   the first plan visit. The confirm step itself (`deferredOnly`) checks each of these again under its
   locks and saves nothing when one fails. Any other case is answered in the Queue.
+- `close_note` (`server/services/admin-alert-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`): close-only
+  buttons. **Handled** on a customer's texts (the `sms_reply` thread row), **Called back** on a
+  call-back follow-up (an `sms_operational_followup` row for a call-back promise; other promise
+  kinds get no button) and on a missed call (`customer_missed_call`). The step is the bell's own
+  Done with the button's label as the note, and it settles a text follow-up the row speaks for, as
+  Done does. It sends no reply and places no call. The emitters set the button when they raise the
+  row (`closeNoteButtons`), so rows raised before the change carry none.
 
 ## 3. Never in a headline or a why
 

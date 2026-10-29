@@ -8,6 +8,8 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/referral-inbound-bell', () => ({
   buttonHandler: { live: jest.fn(() => true), run: jest.fn() },
 }));
+jest.mock('../config/feature-gates', () => ({ alertCloseButtonsLive: jest.fn(() => true) }));
+jest.mock('../services/sms-operational-actions', () => ({ settleCommitmentsForDoneAlert: jest.fn(async () => 1) }));
 
 let mockRow;
 let mockReread; // the row a lost claim reads back: every read after the first
@@ -33,8 +35,10 @@ jest.mock('../models/db', () => {
 });
 
 const NotificationService = require('../services/notification-service');
+const gates = require('../config/feature-gates');
+const { settleCommitmentsForDoneAlert } = require('../services/sms-operational-actions');
 const { buttonHandler } = require('../services/referral-inbound-bell');
-const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
+const { withAlertButtons, runAlertButton, closeNoteButtons } = require('../services/admin-alert-buttons');
 
 const ID = '00000000-0000-4000-8000-0000000000a1';
 const VERSION = 'a'.repeat(32);
@@ -176,5 +180,45 @@ describe('runAlertButton: one tap', () => {
     buttonHandler.live.mockReturnValue(false);
     await expect(tap()).resolves.toMatchObject({ status: 409, body: { error: 'off' } });
     expect(buttonHandler.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('close-only buttons (close_note): the bell\'s own Done with the button\'s note', () => {
+  const CLOSE = closeNoteButtons('called_back');
+  const closeRow = (over = {}) => row({ metadata: { buttons: CLOSE, dedupeKey: 'sms-commitment:c-9', customerId: 'c-1' }, ...over });
+
+  beforeEach(() => {
+    gates.alertCloseButtonsLive.mockReturnValue(true);
+    mockRow = closeRow();
+  });
+
+  test('served while the gate is on, never while it is off', () => {
+    expect(withAlertButtons([closeRow()], { role: 'admin' })[0].actions).toEqual([{ id: 'called_back', label: 'Called back' }]);
+    gates.alertCloseButtonsLive.mockReturnValue(false);
+    expect(withAlertButtons([closeRow()], { role: 'admin' })[0]).not.toHaveProperty('actions');
+  });
+
+  test('a tap marks the row done by the person with the note, then settles the follow-up it speaks for', async () => {
+    await expect(tap({ actionId: 'called_back' })).resolves.toEqual({ status: 200, body: { success: true, message: 'Marked called back.' } });
+    expect(NotificationService.markAdminDone).toHaveBeenNthCalledWith(1, [ID], { by: 't-1', resolution: 'Called back', role: 'admin' });
+    expect(settleCommitmentsForDoneAlert).toHaveBeenCalledWith(expect.anything(), ID, { reviewedBy: 't-1' });
+    expect(tapOf()).toMatchObject({ action: 'called_back', outcome: 'done' });
+  });
+
+  test('a row that was already done settles nothing', async () => {
+    NotificationService.markAdminDone.mockResolvedValueOnce(0);
+    await expect(tap({ actionId: 'called_back' })).resolves.toMatchObject({ status: 200 });
+    expect(settleCommitmentsForDoneAlert).not.toHaveBeenCalled();
+  });
+
+  test('a failed settle never undoes the Done', async () => {
+    settleCommitmentsForDoneAlert.mockRejectedValueOnce(new Error('lock timeout'));
+    await expect(tap({ actionId: 'called_back' })).resolves.toMatchObject({ status: 200 });
+  });
+
+  test('a stored button with an unknown note id runs nothing', async () => {
+    mockRow = closeRow({ metadata: { buttons: { kind: 'close_note', items: [{ id: 'refunded', label: 'Refunded' }] } } });
+    await expect(tap({ actionId: 'refunded' })).resolves.toMatchObject({ status: 409, body: { error: 'unknown_action' } });
+    expect(NotificationService.markAdminDone).not.toHaveBeenCalled();
   });
 });
