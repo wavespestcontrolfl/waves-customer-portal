@@ -465,6 +465,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('payroll-tax-calendar'))");
     const checks = await trx('payroll_checks').where({ status: 'finalized' }).select(
       'id', trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), ...DIGEST_COLUMNS, 'calc_snapshot',
+      'unemployment_exempt', 'unemployment_wages_cents',
     );
     const hires = await trx('technicians')
       .where({ employment_type: 'w2' })

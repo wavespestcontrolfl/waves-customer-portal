@@ -1514,6 +1514,15 @@ const EDIT_FREQUENCIES = [
   { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct, monthly)" },
   { value: "custom", label: "Custom (every N days)" },
 ];
+// A lawn 9x rounds series (lawn_rounds_9) shows and keeps its own pattern in the
+// select, so a save does not overwrite it with the first option. It is offered
+// only to a series already on it, never as a choice for other series.
+const LAWN_ROUNDS_FREQUENCY = { value: "lawn_rounds_9", label: "Lawn rounds (9 a year)" };
+function editFrequenciesFor(storedPattern) {
+  if (storedPattern !== LAWN_ROUNDS_FREQUENCY.value) return EDIT_FREQUENCIES;
+  const customAt = EDIT_FREQUENCIES.findIndex((f) => f.value === "custom");
+  return [...EDIT_FREQUENCIES.slice(0, customAt), LAWN_ROUNDS_FREQUENCY, ...EDIT_FREQUENCIES.slice(customAt)];
+}
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: "1st" },
   { value: 2, label: "2nd" },
@@ -6175,7 +6184,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         className="font-medium"
                         style={inputStyle}
                       >
-                        {EDIT_FREQUENCIES.map((f) => (
+                        {editFrequenciesFor(
+                          service.recurringPattern || service.recurring_pattern,
+                        ).map((f) => (
                           <option key={f.value} value={f.value}>
                             {f.label}
                           </option>

@@ -10,6 +10,7 @@ const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = req
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
+const { LAWN_ROUNDS_9 } = require('./lawn-rounds');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { convertToOz, normalizeQuantityToOz } = require('./product-costing');
 const {
@@ -1565,7 +1566,8 @@ function findNutrientProductsMissingConversions(items) {
 // The applications a year of a lawn visit's series, from the recurrence the
 // scheduler places its visits by (`recurring_pattern`, plus `recurring_interval_days`
 // for a 'custom' gap; every_6_weeks is the 42-day gap). null for any other recurrence.
-const RECURRENCE_VISITS = { every_6_weeks: 9, monthly: 12, monthly_nth_weekday: 12, bimonthly: 6 };
+// lawn_rounds_9 (nine fixed rounds a year) is the same 9x plan as every_6_weeks.
+const RECURRENCE_VISITS = { every_6_weeks: 9, [LAWN_ROUNDS_9]: 9, monthly: 12, monthly_nth_weekday: 12, bimonthly: 6 };
 function lawnVisitsFromRecurrence(pattern, intervalDays) {
   const key = String(pattern || '').toLowerCase();
   if (RECURRENCE_VISITS[key]) return RECURRENCE_VISITS[key];

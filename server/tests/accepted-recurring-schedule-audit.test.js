@@ -75,6 +75,26 @@ test('lawn cadence comes from its sold applications, not monthly billing selecti
   expect(gap.issues).toContain('cadence_differs_from_acceptance');
 });
 
+// Lawn 9x rounds: the same plan as every_6_weeks, dated by nine fixed rounds.
+const lawn9x = () => estimate({ estimate_data: { customerSelection: { frequency: 'monthly' },
+  result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9 }] } } } });
+const roundsSeries = () => series('lawn_rounds_9', 9)
+  .map((row) => ({ ...row, service_type: 'Lawn Care', catalog_service_key: 'lawn_program', service_key_snapshot: 'lawn_program' }));
+
+test('a correct lawn rounds series accepted as every_6_weeks is the same plan, with no cadence or spacing finding', () => {
+  const rows = roundsSeries();
+  expect(rows.every((row) => row.recurring_pattern === 'lawn_rounds_9')).toBe(true);
+  expect(check(lawn9x(), rows)).toEqual([]);
+});
+
+test('a lawn rounds series with a visit outside its round still raises the spacing issue, and only that', () => {
+  const rows = roundsSeries();
+  rows[4] = { ...rows[4], scheduled_date: etDateString(addETDays(parseETDateTime(`${rows[4].scheduled_date}T12:00`), 60)) };
+  const [gap] = check(lawn9x(), rows);
+  expect(gap.expectedVisits).toBe(9);
+  expect(gap.issues).toEqual(['application_spacing_needs_review']);
+});
+
 test('monthly metadata cannot disguise quarterly dates', () => {
   const rows = series('quarterly', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
   expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
