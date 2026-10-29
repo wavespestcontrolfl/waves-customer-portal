@@ -6304,8 +6304,9 @@ error code, limiter or token changes, and no message is sent.
   No pin, a list that did not build in about 1.5 seconds (3 seconds for a
   text quote), or any error serves the old list.
 - The assistant's list is also filtered against `confirmBooking`'s own commit
-  constraints (closed day, notice window, last start, and its technician-blind
-  occupancy probe with the travel gap), so a time the assistant offers is a
+  constraints (closed day, notice window, last start, its zone occupied set
+  including unlinked legacy self-bookings, and its technician-blind occupancy
+  probe with the travel gap), so a time the assistant offers is a
   time `book_appointment` accepts. A start that only one technician has free,
   while another technician's visit overlaps it, is not offered. A filter that
   fails or takes over 1 second, or that leaves no time at all, serves the old
@@ -6319,8 +6320,9 @@ error code, limiter or token changes, and no message is sent.
   conflict checks. With the gate `true`, the new visit is also numbered in its
   technician's day by the staff placement helper, inside the same transaction;
   a visit with no technician is left as it was.
-- Cost: no Google call (drive times are the default route-optimizer estimate;
-  the pin is read from the customer row, never geocoded).
+- Cost: no Google call (drive times are the default route-optimizer estimate,
+  asked with `providerTravel: false` so capacity mode buys no road times; the
+  pin is read from the customer row, never geocoded).
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

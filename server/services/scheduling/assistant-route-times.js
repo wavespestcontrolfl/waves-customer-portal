@@ -124,7 +124,9 @@ async function buildRouteDays({ customerId, serviceKey }) {
   const customer = await booking.bookableOfferCustomer(customerId);
   const pin = customer ? booking.storedBookingPin(customer) : null;
   if (!pin) return { days: null, reason: 'no_stored_pin' };
-  const availability = await booking.availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey });
+  // providerTravel: false: the model-only road clock. This path never buys Google road times
+  // (capacity mode would otherwise draw on the allowance customer booking shares).
+  const availability = await booking.availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey, providerTravel: false });
   return availability ? { days: availability.days || [], customer } : { days: null, reason: 'unavailable' };
 }
 
@@ -146,19 +148,41 @@ async function commitContext({ customer, estimateId }) {
   const expected = require('./travel-gap').travelGapEnabled()
     ? await require('./expected-service-minutes').expectedServiceMinutes(db, { serviceType, windowMinutes: slotDuration })
     : null;
-  return { db, slotDuration, pin: { lat: customer.latitude ?? null, lng: customer.longitude ?? null }, expected, closedDays: new Map() };
+  // confirmBooking's zone check applies when the customer's city is in a service zone.
+  const zone = await require('../availability').resolveZone(customer.city);
+  return {
+    db, slotDuration, zone, pin: { lat: customer.latitude ?? null, lng: customer.longitude ?? null }, expected,
+    closedDays: new Map(), zoneOccupied: new Map(),
+  };
+}
+
+function minutes24(start24) {
+  return Number(start24.slice(0, 2)) * 60 + Number(start24.slice(3, 5));
+}
+
+// confirmBooking's zone check: the zone's occupied set (zone visits, UNLINKED legacy
+// self-bookings, live estimate holds), loaded by the very loader confirmBooking calls,
+// once per date; the start's window must not overlap any of it.
+async function zoneRefuses(ctx, date, start24) {
+  if (!ctx.zone) return false;
+  if (!ctx.zoneOccupied.has(date)) ctx.zoneOccupied.set(date, require('../availability').loadZoneOccupied(ctx.db, ctx.zone, date));
+  const occupied = await ctx.zoneOccupied.get(date);
+  const startMin = minutes24(start24);
+  const endMin = startMin + ctx.slotDuration;
+  return occupied.some((b) => b.start < endMin && b.end > startMin);
 }
 
 // Would confirmBooking refuse this start? The same functions, in its order: the
-// closed-day check, the self-serve notice window, the last customer start, then
-// the TECHNICIAN-BLIND occupancy probe (findConflictingVisits with no technicianId,
+// closed-day check, the self-serve notice window, the last customer start, the
+// zone occupied set (zoneRefuses), then the TECHNICIAN-BLIND occupancy probe (findConflictingVisits with no technicianId,
 // interviews included, and the travel gap when its gate is on). Nothing here is a
 // copy of those rules.
 async function commitRefuses(ctx, date, start24) {
   if (!ctx.closedDays.has(date)) ctx.closedDays.set(date, require('./blackout-dates').isBlackoutDate(date));
   if (await ctx.closedDays.get(date)) return true;
   if (require('./self-serve-notice').violatesSelfServeNotice({ date, startTime: start24 })) return true;
-  if (require('./customer-windows').pastCustomerLastStart(Number(start24.slice(0, 2)) * 60 + Number(start24.slice(3, 5)))) return true;
+  if (require('./customer-windows').pastCustomerLastStart(minutes24(start24))) return true;
+  if (await zoneRefuses(ctx, date, start24)) return true;
   const clash = await require('./occupancy').findConflictingVisits({
     db: ctx.db,
     includeInterviews: true,

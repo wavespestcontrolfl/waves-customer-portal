@@ -1633,7 +1633,7 @@ function detachVoiceRouteCheck(plan, candidates) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel }) {
   config = applySchedulingPolicy(config);
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
@@ -1742,6 +1742,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     bookArrivalGrace: graceBuild,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // `false` = the model-only road clock, no paid road times (GATE_ASSISTANT_ROUTE_TIMES alone
+    // passes it, through availabilityForPin); undefined = today's allowance for every other caller.
+    providerTravel,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
     // against neighbouring stops; 0 when the gate is off.
     bufferMinutes: customerFacingBufferMinutes(),
@@ -2182,7 +2185,7 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, providerTravel }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2206,6 +2209,7 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
     // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
+    providerTravel,
   });
 }
 

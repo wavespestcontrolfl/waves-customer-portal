@@ -45,6 +45,8 @@ let bookableOfferCustomer;
 let geocoders;
 let visits;
 let findConflictingVisits;
+let zoneOccupied;
+let resolveZone;
 let isBlackoutDate;
 let violatesSelfServeNotice;
 const NO_PIN_CUSTOMER = { id: 'cust-1', latitude: null, longitude: null, address_line1: '1 Main St', city: 'Venice', state: 'FL', zip: '34285' };
@@ -74,7 +76,10 @@ beforeEach(() => {
   funnelKeyForEstimateId = jest.fn().mockResolvedValue('lawn_care');
   placeMovedVisit = jest.fn().mockResolvedValue([]);
   jest.doMock('../services/logger', () => logger);
-  jest.doMock('../services/availability', () => ({ getAvailableSlots: oldFinder }));
+  // The zone check's occupied set, loaded by confirmBooking's own loader (shared as loadZoneOccupied).
+  zoneOccupied = jest.fn(async () => []);
+  resolveZone = jest.fn(async () => null);
+  jest.doMock('../services/availability', () => ({ getAvailableSlots: oldFinder, resolveZone, loadZoneOccupied: zoneOccupied }));
   jest.doMock('../services/scheduling/text-offer-times', () => ({ resolveTextOfferPin: geocoders.resolveTextOfferPin, textOfferDays: jest.fn() }));
   jest.doMock('../services/scheduling/day-stops', () => ({ resolveServiceLocation: geocoders.resolveServiceLocation }));
   jest.doMock('../services/customer-geocode-review', () => ({ reviewedServiceLocation: geocoders.reviewedServiceLocation }));
@@ -168,7 +173,7 @@ describe('serveAssistantTimes — the assistant', () => {
     expect(out.engine).toBe('old');
     expect(out.result).toEqual({ zone: 'Zone A', days: OLD_DAYS });
     await out.settled;
-    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control' });
+    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false });
     // old: 11/02 09:00, 11/02 14:00, 11/03 10:00. new: 11/02 09:00, 11/02 11:00, 11/04 13:00.
     const lines = infoLines();
     expect(lines).toHaveLength(1);
@@ -508,7 +513,7 @@ describe('no geocode, ever: a customer without a stored pin is served the old li
     process.env[GATE] = 'true';
     const out = await routeTimes.serveAssistantTimes({ customerId: 'cust-1', loadOld: () => oldFinder() });
     expect(out.engine).toBe('route_times');
-    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control' });
+    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control', providerTravel: false });
     Object.values(geocoders).forEach((spy) => expect(spy).not.toHaveBeenCalled());
   });
 });
@@ -600,6 +605,57 @@ describe('offer == commit: the assistant\'s list is filtered against confirmBook
     const pending = run();
     await jest.advanceTimersByTimeAsync(3000);
     expect((await pending).engine).toBe('old');
+  });
+
+  describe('the unlinked self-booking (confirmBooking\'s zone check)', () => {
+    const ZONE = { id: 'zone-1', zone_name: 'Zone A', cities: ['Venice'] };
+    const minutes = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+    beforeEach(() => {
+      visits.length = 0;
+      bookableOfferCustomer.mockResolvedValue({ id: 'cust-1', latitude: '27.1', longitude: '-82.4', city: 'Venice' });
+      resolveZone.mockResolvedValue(ZONE);
+      // A legacy self_booked_appointments row with no dispatch visit, 10:00-11:00 on 11/02, in the zone.
+      // Only the zone loader sees it; the technician-blind visit probe does not.
+      zoneOccupied.mockImplementation(async (conn, zone, date) => (zone === ZONE && date === '2026-11-02'
+        ? [{ start: minutes('10:00'), end: minutes('11:00') }] : []));
+      availabilityForPin.mockResolvedValue({ days: [{
+        date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, month: 'Nov', fullDate: 'Monday, November 2',
+        slots: [slot('09:00', '10:00', '9:00 AM', '10:00 AM', 'tA'), slot('10:00', '11:00', '10:00 AM', '11:00 AM', 'tB'), slot('13:00', '14:00', '1:00 PM', '2:00 PM', 'tB')],
+      }] });
+    });
+
+    test('true: 10:00 is not offered (the commit would answer SLOT_TAKEN); other starts stay; the loader is confirmBooking\'s own', async () => {
+      process.env[GATE] = 'true';
+      const out = await run();
+      expect(out.engine).toBe('route_times');
+      expect(startsOf(out.result)).toEqual([['2026-11-02', ['09:00', '13:00']]]);
+      expect(resolveZone).toHaveBeenCalledWith('Venice');
+      expect(zoneOccupied).toHaveBeenCalledTimes(1); // once per date
+      expect(zoneOccupied).toHaveBeenCalledWith(expect.anything(), ZONE, '2026-11-02');
+    });
+
+    test('shadow: counted in commit_dropped, old list served', async () => {
+      process.env[GATE] = 'shadow';
+      const out = await run();
+      await out.settled;
+      expect(out.engine).toBe('old');
+      expect(infoLines()[0]).toMatch(/new=3 .*commit_dropped=1 ms=\d+$/);
+    });
+
+    test('a customer outside every zone skips the zone check, as confirmBooking does', async () => {
+      process.env[GATE] = 'true';
+      resolveZone.mockResolvedValue(null);
+      const out = await run();
+      expect(startsOf(out.result)).toEqual([['2026-11-02', ['09:00', '10:00', '13:00']]]);
+      expect(zoneOccupied).not.toHaveBeenCalled();
+    });
+
+    test('a zone loader failure serves the old list', async () => {
+      process.env[GATE] = 'true';
+      zoneOccupied.mockRejectedValue(new Error('db down'));
+      expect((await run()).engine).toBe('old');
+    });
   });
 
   test('shadow: serves the old list and logs how many starts the commit filter would drop', async () => {
