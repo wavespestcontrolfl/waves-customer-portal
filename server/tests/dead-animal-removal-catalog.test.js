@@ -240,6 +240,9 @@ describe('20261029130100 pricing_config seed', () => {
     // This file is frozen (it ran in production on 2026-10-29). Its riding prices were retired the same day.
     expect(seedMigration.SEED).toEqual(onePrice.OLD_SEED);
     expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED)).toMatchObject({ ok: false, error: expect.stringMatching(/riding is retired/) });
+    // Read as a stored row (the db-bridge sync), the old shape still applies its price and minutes, riding ignored.
+    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED, { stored: true }))
+      .toEqual({ ok: true, value: { reachable: { alone: 169, durationMin: 45 }, attic: { alone: 269, durationMin: 90 } } });
     expect(onePrice.NEW_ROW).toEqual(config.defaultDeadAnimalRemovalData());
     expect(config.normalizeDeadAnimalRemovalConfig(onePrice.NEW_ROW)).toMatchObject({ ok: true });
   });

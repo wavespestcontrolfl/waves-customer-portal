@@ -280,6 +280,15 @@ describe('the DB-editable row (pricing_config rodent_dead_animal_removal)', () =
     expect(RODENT.deadAnimalRemoval.attic.durationMin).toBe(100);
   });
 
+  test('a stored row saved under the old two-price rule keeps its prices and minutes: the retired riding key is ignored', async () => {
+    await sync({ reachable: { alone: 179, riding: 129, on_site_min: 60 }, attic: { alone: 289, riding: 239, on_site_min: 100 } });
+    expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 179, durationMin: 60 });
+    expect(price({ rodentTrapping: true, deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 289, durationMin: 100 });
+    // A SAVE of the same row is refused: riding may only repeat the price there.
+    const save = config.normalizeDeadAnimalRemovalConfig({ reachable: { alone: 179, riding: 129, on_site_min: 60 }, attic: { alone: 289, on_site_min: 100 } });
+    expect(save).toMatchObject({ ok: false, error: expect.stringMatching(/riding is retired/) });
+  });
+
   test('a stored row may still carry the retired riding key, only equal to the price (production on 2026-10-29)', async () => {
     await sync({ reachable: { alone: 199, riding: 199, on_site_min: 45 }, attic: { alone: 299, riding: 299, on_site_min: 90 } });
     expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 199, durationMin: 45 });
@@ -292,8 +301,8 @@ describe('the DB-editable row (pricing_config rodent_dead_animal_removal)', () =
     ['a negative price', { ...seed(), reachable: { alone: -1, on_site_min: 45 } }],
     ['a zero price', { ...seed(), attic: { alone: 0, on_site_min: 90 } }],
     ['a price above the bound', { ...seed(), attic: { alone: 5000, on_site_min: 90 } }],
-    ['a retired riding price below the price (the 10-29 seed shape)', { ...seed(), reachable: { alone: 199, riding: 119, on_site_min: 45 } }],
-    ['a retired riding price above the price', { ...seed(), reachable: { alone: 99, riding: 149, on_site_min: 45 } }],
+    ['a retired riding key that is not a number', { ...seed(), reachable: { alone: 199, riding: '119', on_site_min: 45 } }],
+    ['a retired riding key out of bounds', { ...seed(), reachable: { alone: 199, riding: 0, on_site_min: 45 } }],
     ['fractional minutes', { ...seed(), reachable: { alone: 149, on_site_min: 45.5 } }],
     ['zero minutes', { ...seed(), reachable: { alone: 149, on_site_min: 0 } }],
     ['a missing tier', { reachable: seed().reachable }],
