@@ -110,16 +110,18 @@ execute the workflows they describe.
   route served with no session auth (unauthenticated or token-only;
   customer-JWT `authenticate` routes are not public) and the guards each
   one carries. A new public route not added to that document in the same
-  PR is P0.
+  PR is P0, and so is a change to a LISTED route's auth, gate, rate limit,
+  payload, or headers that leaves its entry stale — a widened auth
+  payload, a raised payload cap, an expiry override, a changed webhook
+  response.
   Every token route keeps a token format gate before any DB read, a
   generic 404 (unknown, malformed, dark-gated and ineligible rows
   indistinguishable), a rate limit, and privacy headers; a dark `GATE_*`
   route skips its limiter so a probe never sees a revealing 429. That
-  baseline applies where a route's entry says nothing else; where the entry
-  records a different or narrower set, it is authoritative — flag
-  drift from the entry, never the entry itself; flag a NEW route or
-  widened payload adopting less than the baseline unless its entry says
-  why. Writes on the `/api/reports/:token/*` family gate on
+  baseline holds where an entry says nothing else; a different or narrower
+  entry is authoritative — flag drift from it, never the entry itself, and
+  flag a new route or widened payload below the baseline unless its entry
+  says why. Writes on the `/api/reports/:token/*` family gate on
   `service_report_v1` + the token format check, use atomic conditional
   updates for one-shot guards (409 on 0 rows), mirror the read-side
   eligibility check, validate bodies before `Number()` coercion, and ride
@@ -127,12 +129,10 @@ execute the workflows they describe.
   estimate `ask` and `find-slots` routes keep the estimate token gate, the
   short-lived signed `askToken`, terminal/expired rejection, their rate
   limits, no raw question/query logging, and never book. The commit path
-  re-checks the preflight read: a live gate re-read there (no row lock
-  stabilizes an env flip — `validateBookingSlotGeometry` vs
-  `customerWindowAdmits`), row-derived eligibility on the locked row
-  (`reserveSlot`). Skipping either is P0 unless the entry records the
-  exception. Any change to a listed route's auth, gate, payload, or
-  headers that the document does not describe is P0.
+  re-checks the preflight read: a live gate re-read (no row lock stabilizes
+  an env flip — `validateBookingSlotGeometry` vs `customerWindowAdmits`)
+  and row-derived eligibility on the locked row (`reserveSlot`). Skipping
+  either is P0 unless the entry records the exception.
 - **`/receipt/:token` permanence.** The receipt token is `invoices.token`
   and is intentionally permanent — customers re-share receipt links with
   bookkeepers months later. A `used` / `viewed_count` / `expires_at` gate
