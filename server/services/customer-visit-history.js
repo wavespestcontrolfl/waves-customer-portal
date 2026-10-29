@@ -10,10 +10,12 @@ async function isFirstServiceVisit(customerId, serviceDate, conn = db) {
   if (!customerId || !date) return false;
   try {
     const [report, visit] = await Promise.all([
-      // A prior visit is a COMPLETED record: an incomplete one (the tech
-      // could not finish) is not the customer's first service.
+      // A prior visit is a COMPLETED record (NULL is the column default's
+      // legacy shape: completed): an incomplete one (the tech could not
+      // finish) is not the customer's first service.
       conn('service_records')
-        .where({ customer_id: customerId, status: 'completed' })
+        .where({ customer_id: customerId })
+        .where(builder => builder.where('status', 'completed').orWhereNull('status'))
         .where('service_date', '<', date)
         .first('id')
         .timeout(1500, { cancel: true }),

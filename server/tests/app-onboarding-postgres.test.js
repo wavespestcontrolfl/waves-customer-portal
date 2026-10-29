@@ -104,6 +104,11 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
     expect(await isFirstServiceVisit(customerId, day, db)).toBe(false);
   });
 
+  test('a legacy NULL-status record still counts as a prior visit', async () => {
+    await db('service_records').insert({ customer_id: customerId, service_date: '2030-01-01', status: null });
+    expect(await isFirstServiceVisit(customerId, day, db)).toBe(false);
+  });
+
   test('cancelled history and another customer do not disqualify a first visit', async () => {
     await db('service_records').insert([
       { customer_id: customerId, service_date: '2030-01-01', status: 'cancelled' },

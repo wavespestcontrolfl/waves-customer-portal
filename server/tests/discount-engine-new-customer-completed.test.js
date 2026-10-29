@@ -20,6 +20,7 @@ function wire(records) {
     const q = {};
     for (const m of ['whereNotIn', 'select', 'whereNull', 'orWhere']) q[m] = jest.fn(() => q);
     q.where = jest.fn((arg) => { if (arg && typeof arg === 'object') filters.push(arg); return q; });
+    q.whereRaw = jest.fn((sql) => { if (/COALESCE\(status, 'completed'\) = 'completed'/.test(sql)) filters.push({ status: 'completed' }); return q; });
     q.orderBy = jest.fn(async () => (table === 'discounts' ? [NEW_CUSTOMER] : []));
     q.countDistinct = jest.fn(() => q);
     q.count = jest.fn(() => q);
@@ -27,7 +28,7 @@ function wire(records) {
     q.first = jest.fn(async () => {
       if (table === 'customers') return { id: 'cust-1', active: true };
       if (table === 'service_records') {
-        const n = records.filter((r) => filters.every((f) => Object.entries(f).every(([k, v]) => k === 'customer_id' || r[k] === v))).length;
+        const n = records.filter((r) => filters.every((f) => Object.entries(f).every(([k, v]) => k === 'customer_id' || (r[k] ?? 'completed') === v))).length;
         return { cnt: String(n), count: String(n) };
       }
       return { cnt: '0', count: '0' };
@@ -44,6 +45,12 @@ test('an earlier incomplete visit keeps the customer new', async () => {
   expect(result.discounts.map((d) => d.discount_key || d.key || d.name)).toEqual(
     expect.arrayContaining([expect.stringMatching(/new_customer|New Customer Special/)]),
   );
+});
+
+test('a legacy NULL-status record still ends new-customer status', async () => {
+  wire([{ status: null }]);
+  const result = await DiscountEngine.calculateDiscounts('cust-1', { subtotal: 149 });
+  expect(result.discounts).toEqual([]);
 });
 
 test('a completed visit ends new-customer status', async () => {
