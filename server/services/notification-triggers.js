@@ -1294,6 +1294,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
     if (policySilenced) {
       logger.info('[bell-policy] silenced (bell + push)', { triggerKey, category: trigger.category });
+      // GATE_ALERT_CATALOG=watch: this return skips NotificationService.create, so the muted record is left here,
+      // by the same helper (it reads the gate). A failure costs the record, never the silence; the log has no title.
+      try {
+        await require('./audit-log').auditBellPolicyMuted({ category: trigger.category, triggerKey, title: built.title });
+      } catch (err) {
+        logger.warn(`[notification-triggers] muted-alert audit failed: ${err?.code || 'error'}`);
+      }
       return { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true };
     }
 

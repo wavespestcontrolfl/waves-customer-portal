@@ -553,12 +553,16 @@ async function auditAlertWouldClose({ items, et_day, trx = null }) {
  * trace. One row per Eastern day per distinct alert (category + trigger key + title stem),
  * deduped in memory: a restart may write a second row for the same alert that day. The
  * title stem has every digit run as '#', whitespace collapsed, cut at 80 characters.
- * Always the module's own db, never a caller's transaction (it may roll back). Resolves to
- * the number of rows written; a failed insert throws and the caller catches.
+ * Always the module's own db, never a caller's transaction (it may roll back). Reads
+ * GATE_ALERT_CATALOG itself: anything but `watch` reads and writes nothing. Both silence points
+ * call it: NotificationService.create, and triggerNotification, which checks the policy itself
+ * and returns before create(). Resolves to the number of rows written; a failed insert throws
+ * and the caller catches.
  */
 const BELL_POLICY_MUTED_ACTION = 'notification.bell_policy.muted';
 const mutedSeen = new Map();
 async function auditBellPolicyMuted({ category, triggerKey = null, title = '' }) {
+  if (require('../config/feature-gates').alertCatalogMode?.() !== 'watch') return 0;
   const etDay = etDateString();
   const titleStem = String(title || '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 80);
   for (const day of mutedSeen.keys()) if (day !== etDay) mutedSeen.delete(day);
