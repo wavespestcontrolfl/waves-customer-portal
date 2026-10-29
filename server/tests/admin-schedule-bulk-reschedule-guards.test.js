@@ -1134,6 +1134,8 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(placeSpy).toHaveBeenCalledTimes(1);
     expect(placeSpy.mock.calls[0][0]).toBe(trx);
     expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, source: 'bulk_reschedule' });
+    // Placement first, then the route warning (Codex P1 on 9837f0c3d4): the check reads the row where it is saved.
+    expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(routeSpy.mock.invocationCallOrder[0]);
   });
 
   test('gate on: a row whose slot did not change is not route-checked or numbered', async () => {

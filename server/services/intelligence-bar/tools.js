@@ -4051,20 +4051,22 @@ async function createAppointment(input, actionContext = {}) {
     }).returning('*');
     appointment = created;
     // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-    // when off): the booked visit gets the arrival-window check Edit's save
-    // runs, on the road times the pickers already bought, and its technician's
-    // day is numbered in the order that check certified (inside this
-    // transaction; needs GATE_STAFF_ROUTE_INSERTION too). ADVISORY ONLY: its
-    // result is a warning in the tool result and is kept out of the pinned
-    // "no overlap" comparison above, so it can never refuse or roll back the
-    // booking; only a real overlap refuses, as before.
+    // when off): the booked visit's technician day is numbered first in the
+    // order the arrival-window check certifies (inside this transaction; needs
+    // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
+    // save runs, on the road times the pickers already bought. Placement
+    // first: the check reads the visit where it is saved, so an unplaced visit
+    // can read late in a stale order. ADVISORY ONLY: its result is a warning in
+    // the tool result and is kept out of the pinned "no overlap" comparison
+    // above, so it can never refuse or roll back the booking; only a real
+    // overlap refuses, as before.
     {
       const routeCheck = require('../scheduling/staff-save-route-check');
+      await routeCheck.placeStaffSavedVisit(trx, { serviceId: created.id, source: 'intelligence_bar' });
       routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
         serviceId: created.id, date: dateStr, windowStart: created.window_start, windowEnd: created.window_end,
         technicianId: created.technician_id,
       });
-      await routeCheck.placeStaffSavedVisit(trx, { serviceId: created.id, source: 'intelligence_bar' });
     }
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
@@ -4581,19 +4583,21 @@ async function rescheduleAppointment(input, actionContext = {}) {
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
       // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-      // when off): the moved visit gets the arrival-window check Edit's save
-      // runs, on the road times the pickers already bought, and its
-      // technician's day is numbered in the order that check certified (inside
-      // this transaction; needs GATE_STAFF_ROUTE_INSERTION too). ADVISORY
+      // when off): the moved visit's technician day is numbered first in the
+      // order the arrival-window check certifies (inside this transaction;
+      // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
+      // Edit's save runs, on the road times the pickers already bought.
+      // Placement first: the check reads the visit where it is saved, so a
+      // moved visit not yet placed can read late in a stale order. ADVISORY
       // ONLY: a route result is a warning in the tool result and never
       // refuses the move.
       if (updatedRows && probeWindowStart && probeWindowEnd) {
         const routeCheck = require('../scheduling/staff-save-route-check');
+        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appointment_id, source: 'intelligence_bar' });
         routeAdvisories = await routeCheck.staffSaveRouteWarnings(trx, {
           serviceId: appointment_id, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
           technicianId: committedTechId,
         });
-        await routeCheck.placeStaffSavedVisit(trx, { serviceId: appointment_id, source: 'intelligence_bar' });
       }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.

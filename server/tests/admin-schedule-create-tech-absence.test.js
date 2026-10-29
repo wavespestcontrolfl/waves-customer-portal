@@ -601,6 +601,18 @@ describe('POST / — admin create — GATE_ROUTE_CHECK_STAFF_SAVES route check',
     expect(arrivalCalls()).toHaveLength(0);
   });
 
+  test('gate on, GATE_NEW_APPT_STOP_ORDER on: the stop-order placement runs before the route check (Codex P1 on 9837f0c3d4)', async () => {
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    gateOn();
+    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings).toContain(ROUTE_WARNING);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    const arrivalIdx = findConflictingVisits.mock.calls.findIndex(([a]) => a.arrivalWindow);
+    expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+  });
+
   test('gate on, GATE_NEW_APPT_STOP_ORDER off: the stop-order writer is untouched (this gate numbers nothing here)', async () => {
     const { placeMovedVisit } = require('../services/scheduling/arrival-route');
     gateOn();

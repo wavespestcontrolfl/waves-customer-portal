@@ -10163,10 +10163,12 @@ async function scheduleCreateHandler(req, res, next) {
         await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true });
       }
       // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-      // when off): the booked visit gets the same arrival-window check Edit's
-      // save runs, on the road times the pickers already bought. WARN ONLY, in
-      // its own savepoint: it never blocks or fails the booking. The overlap
-      // probe above is unchanged.
+      // when off): AFTER the stop-order placement above (the check reads the
+      // visit where it is saved, so it must see the placed order), the booked
+      // visit gets the same arrival-window check Edit's save runs, on the road
+      // times the pickers already bought. WARN ONLY, in its own savepoint: it
+      // never blocks or fails the booking. The overlap probe above is
+      // unchanged.
       bookingWarnings.push(...await require('../services/scheduling/staff-save-route-check').staffSaveRouteWarnings(trx, {
         serviceId: svc.id, date: dateOnly(svc.scheduled_date), windowStart: svc.window_start, windowEnd: svc.window_end,
         technicianId: svc.technician_id,
@@ -11429,20 +11431,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   pendingOverlapWarning = again.length ? { id, warning: slotOverlapWarning(bulkTargetDate) } : null;
                 }
                 // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a
-                // no-op when off): a row whose slot moved gets the arrival-window
-                // check Edit's save runs, on the road times the pickers already
-                // bought, and its technician's day is numbered in the order that
-                // check certified (inside this transaction; needs
-                // GATE_STAFF_ROUTE_INSERTION too). ADVISORY ONLY: the notes ride
-                // the same warnings list as the overlap note; the move never
-                // fails on a route result.
+                // no-op when off): a row whose slot moved has its technician's
+                // day numbered first in the order the arrival-window check
+                // certifies (inside this transaction; needs
+                // GATE_STAFF_ROUTE_INSERTION too), THEN gets the check Edit's
+                // save runs, on the road times the pickers already bought.
+                // Placement first: the check reads the row where it is saved, so
+                // a moved row not yet placed can read late in a stale order.
+                // ADVISORY ONLY: the notes ride the same warnings list as the
+                // overlap note; the move never fails on a route result.
                 if (bulkProbedSlot) {
                   const routeCheck = require('../services/scheduling/staff-save-route-check');
+                  await routeCheck.placeStaffSavedVisit(trx, { serviceId: id, source: 'bulk_reschedule' });
                   pendingRouteWarnings = await routeCheck.staffSaveRouteWarnings(trx, {
                     serviceId: id, date: bulkTargetDate, windowStart: bulkProbedSlot.effStart, windowEnd: bulkProbedSlot.effEnd,
                     technicianId: committedTechId,
                   });
-                  await routeCheck.placeStaffSavedVisit(trx, { serviceId: id, source: 'bulk_reschedule' });
                 }
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
                 const nextEndRaw = updates.window_end !== undefined ? updates.window_end : svc.window_end;

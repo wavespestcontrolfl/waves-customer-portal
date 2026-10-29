@@ -1443,6 +1443,8 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
       expect(placeSpy).toHaveBeenCalledTimes(1);
       expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
       expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', source: 'lead_appointment' });
+      // Placement first, then the route warning (Codex P1 on 9837f0c3d4): the check reads the visit where it is saved.
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(warningsSpy.mock.invocationCallOrder[0]);
     });
   });
 

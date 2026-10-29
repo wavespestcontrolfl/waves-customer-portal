@@ -2610,4 +2610,59 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(placeSpy).not.toHaveBeenCalled();
     });
   });
+
+  // Placement first, then the route warning (Codex P1 on 9837f0c3d4). The REAL
+  // arrival evaluator on an in-memory route (helpers/in-memory-route.js): read
+  // where it is saved the visit misses a promise that the staff placement then
+  // fixes, so a warning collected before placement would reach staff.
+  describe('placement runs before the route warning (real evaluator, in-memory route)', () => {
+    const { createRoute } = require('./helpers/in-memory-route');
+    let route;
+    beforeEach(() => {
+      gateOn();
+      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+      route = createRoute();
+      occupancy.findConflictingVisits.mockImplementation((args) => (args && args.arrivalWindow
+        ? Promise.resolve(route.conflictRows()) : actualOccupancy.findConflictingVisits(args)));
+      placeSpy.mockImplementation(async () => route.place());
+    });
+    afterEach(() => { delete process.env.GATE_STAFF_ROUTE_INSERTION; });
+
+    test('premise: unplaced, the saved visit reads infeasible', () => {
+      expect(route.savedFit().feasible).toBe(false);
+    });
+
+    test('create_appointment: the visit is placed, then checked, and no stale warning is returned', async () => {
+      const created = { id: 'appt-1', technician_id: 'tech-1', window_start: '09:00:00', window_end: '10:00:00' };
+      const insertChain = chain({ returning: jest.fn().mockResolvedValue([created]) });
+      const cust = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+      wireDb({ customers: [cust(), cust()], scheduled_services: [chain(), insertChain] });
+      const result = await executeTool('create_appointment', {
+        customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+      });
+      expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+      expect(result.warning).toBeUndefined();
+      expect(route.state.target.route_order).toBe(1);
+      const arrivalIdx = occupancy.findConflictingVisits.mock.calls.findIndex(([a]) => a && a.arrivalWindow);
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(occupancy.findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+    });
+
+    test('reschedule_appointment: the moved visit is placed, then checked, and no stale warning is returned', async () => {
+      const appt = {
+        id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+        window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control',
+      };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), chain()],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '9:00 AM' });
+      expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+      expect(result.warning).toBeUndefined();
+      expect(route.state.target.route_order).toBe(1);
+      const arrivalIdx = occupancy.findConflictingVisits.mock.calls.findIndex(([a]) => a && a.arrivalWindow);
+      expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(occupancy.findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+    });
+  });
 });
