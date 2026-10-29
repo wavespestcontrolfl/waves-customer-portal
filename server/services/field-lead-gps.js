@@ -90,7 +90,7 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
   }
   check.scheduled_service_id = serviceId;
   const visit = await database('scheduled_services').where({ id: serviceId })
-    .first('id', 'technician_id', 'customer_id', 'visit_id', 'service_address_line1', 'service_address_city', 'service_address_zip');
+    .first('id', 'technician_id', 'customer_id', 'visit_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
   if (!visit
     || String(visit.technician_id || '') !== String(technicianId || '')
     || String(visit.customer_id || '') !== String(customerId || '')) {
@@ -127,10 +127,13 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
 async function visitedPremise(database, visit) {
   const customerId = String(visit.customer_id);
   if (visit.service_address_line1) {
-    return { customer_id: customerId, address: visit.service_address_line1, city: visit.service_address_city || null, zip: visit.service_address_zip || null };
+    return {
+      customer_id: customerId, address: visit.service_address_line1, unit: visit.service_address_line2 || null,
+      city: visit.service_address_city || null, zip: visit.service_address_zip || null,
+    };
   }
-  const row = await database('customers').where({ id: visit.customer_id }).first('address_line1', 'city', 'zip');
-  return { customer_id: customerId, address: row?.address_line1 || null, city: row?.city || null, zip: row?.zip || null };
+  const row = await database('customers').where({ id: visit.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
+  return { customer_id: customerId, address: row?.address_line1 || null, unit: row?.address_line2 || null, city: row?.city || null, zip: row?.zip || null };
 }
 
 // Prospect mode: the typed address against the technician's truck.

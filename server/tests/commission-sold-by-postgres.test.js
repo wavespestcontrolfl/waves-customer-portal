@@ -205,7 +205,7 @@ postgres('commission sold by', () => {
       expect(res.status).toBe(200);
       expect(lead.gps_verified).toBe(true);
       expect(lead.gps_check).toMatchObject({ result: 'verified', mode: 'customer', scheduled_service_id: v, distance_m: 40 });
-      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '1 Sample St', city: 'Bradenton', zip: '34202' });
+      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '1 Sample St', unit: null, city: 'Bradenton', zip: '34202' });
       expect((await activityFor(lead.id)).description).toBe('Field lead created by Sample Alpha: Lawn — Chinch bugs · GPS: verified, 40 m');
     });
 
@@ -235,7 +235,7 @@ postgres('commission sold by', () => {
         },
       });
       expect(lead.gps_verified).toBe(true);
-      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '77 Rental Ave', city: 'Bradenton', zip: '34205' });
+      expect(lead.gps_check.premise).toEqual({ customer_id: lead.customer_id, address: '77 Rental Ave', unit: null, city: 'Bradenton', zip: '34205' });
       // The rental's estimate fills; the primary home's does not.
       const rental = await estimate({ customer_id: lead.customer_id, address: '77 Rental Ave, Bradenton, FL 34205' });
       const home = await estimate({ customer_id: lead.customer_id });
@@ -483,6 +483,31 @@ postgres('commission sold by', () => {
       const nLead = await flagLead(t, { estimate_id: far, ...NEIGHBOR(t) });
       await trx('leads').where({ id: nLead }).update({ address: '480 Faraway Rd' });
       expect((await fill(far)).sold_by_source).toBeFalsy();
+    });
+
+    it('keeps apartments apart: a flag for one unit never fills another unit', async () => {
+      const t = await tech('Sample Alpha');
+      const unitFlag = (est, address) => flagLead(t, {
+        estimate_id: est, address,
+        gps_check: { result: 'verified', mode: 'prospect', technician_id: t, premise: { address, city: 'Bradenton', zip: '34202' } },
+      });
+      const apt2 = await estimate({ address: '12 Sample Way Apt 2, Bradenton, FL 34202' });
+      await unitFlag(apt2, '12 Sample Way Apt 1');
+      expect((await fill(apt2)).sold_by_source).toBeFalsy();
+      const noUnit = await estimate({ address: '12 Sample Way, Bradenton, FL 34202' });
+      await unitFlag(noUnit, '12 Sample Way Apt 1');
+      expect((await fill(noUnit)).sold_by_source).toBeFalsy();
+      const apt1 = await estimate({ address: '12 Sample Way, Unit 1, Bradenton, FL 34202' });
+      const lead = await unitFlag(apt1, '12 Sample Way #1');
+      expect((await fill(apt1)).sold_by_lead_id).toBe(lead);
+      // A visit flag: the customer's unit is address_line2.
+      const cust = await customer({ address_line2: 'Apt 5' });
+      const estOther = await estimate({ customer_id: cust, address: '1 Sample St Apt 6, Bradenton, FL 34202' });
+      await flagLead(t, {
+        customer_id: cust, estimate_id: estOther,
+        gps_check: { result: 'verified', mode: 'customer', technician_id: t, premise: { customer_id: cust, address: '1 Sample St', unit: 'Apt 5', city: 'Bradenton', zip: '34202' } },
+      });
+      expect((await fill(estOther)).sold_by_source).toBeFalsy();
     });
 
     it('credits the technician who flagged, not the one the lead was reassigned to', async () => {

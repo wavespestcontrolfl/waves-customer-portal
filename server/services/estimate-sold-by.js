@@ -84,9 +84,13 @@ function flagProvesPremise(flag, estimate) {
   if (flag.gps_mode === 'customer' && String(premise.customer_id || '') !== String(estimate.customer_id || '')) return false;
   if (!['customer', 'prospect'].includes(flag.gps_mode) || !premise.address || !estimate.address) return false;
   const { parseDisplayAddress, flagCoversAddress } = require('./lead-address-unverified');
+  const { unitKey } = require('./customer-property-address-keys');
   const place = parseDisplayAddress(estimate.address);
+  // The unit counts too ("Apt 1" is not "Apt 2"): the stored unit, or one typed inside the street line.
+  const proved = parseDisplayAddress(premise.address);
+  if (unitKey(premise.unit || proved.unit) !== unitKey(place.unit)) return false;
   return flagCoversAddress(
-    { address_line1: premise.address, city: premise.city, zip: premise.zip },
+    { address_line1: proved.line1, city: premise.city, zip: premise.zip },
     { line1: place.line1, city: place.city, state: place.state, zip: place.zip },
   );
 }
