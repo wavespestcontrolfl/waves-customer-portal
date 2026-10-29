@@ -236,12 +236,11 @@ describe('20261029130000 catalog row, completion profile and taxability', () => 
 });
 
 describe('20261029130100 pricing_config seed', () => {
-  test('the 10-29 seed is the old two-price shape; the one-price migration turns it into the code table, which the validator accepts', () => {
+  test('the 10-29 seed is the old two-price shape; the one-price migration turns it into the code table', () => {
     // This file is frozen (it ran in production on 2026-10-29). Its riding prices were retired the same day.
     expect(seedMigration.SEED).toEqual(onePrice.OLD_SEED);
-    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED)).toMatchObject({ ok: false, error: expect.stringMatching(/riding is retired/) });
-    // Read as a stored row (the db-bridge sync), the old shape still applies its price and minutes, riding ignored.
-    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED, { stored: true }))
+    // Read as is, the old shape still applies its price and minutes (riding ignored); the migration moves the exact seed.
+    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED))
       .toEqual({ ok: true, value: { reachable: { alone: 169, durationMin: 45 }, attic: { alone: 269, durationMin: 90 } } });
     expect(onePrice.NEW_ROW).toEqual(config.defaultDeadAnimalRemovalData());
     expect(config.normalizeDeadAnimalRemovalConfig(onePrice.NEW_ROW)).toMatchObject({ ok: true });
@@ -374,11 +373,23 @@ describe('the admin Pricing Logic route', () => {
     expect(validatePricingConfigFor('rodent_dead_animal_removal', partial).error).toMatch(/^rodent_dead_animal_removal: /);
     const slow = whole(); slow.attic.on_site_min = 1000;
     expect(validatePricingConfigFor('rodent_dead_animal_removal', slow).error).toMatch(/on_site_min/);
-    const lower = whole(); lower.reachable.riding = 119;
-    expect(validatePricingConfigFor('rodent_dead_animal_removal', lower).error).toMatch(/riding is retired/);
-    const same = whole(); same.reachable.riding = same.reachable.alone;
-    expect(validatePricingConfigFor('rodent_dead_animal_removal', same)).toEqual({ ok: true });
+    const badRiding = whole(); badRiding.reachable.riding = 'cheap';
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', badRiding).error).toMatch(/riding \(retired, ignored\)/);
     expect(validatePricingConfigFor('rodent_dead_animal_removal', { ...whole(), in_wall: { alone: 1, on_site_min: 1 } }).ok).toBe(false);
+  });
+
+  test('an inline edit of production\'s row saves: the PUT strips the retired riding key, then validates (Codex #7004 r1)', () => {
+    const { normalizeIncomingConfigData } = require('../routes/admin-pricing-config');
+    // Production on 2026-10-29 carries riding equal to the price; the panel saves one changed field at a time.
+    const edited = { reachable: { alone: 209, riding: 199, on_site_min: 45 }, attic: { alone: 299, riding: 299, on_site_min: 90 } };
+    const saved = normalizeIncomingConfigData('rodent_dead_animal_removal', edited);
+    expect(saved).toEqual({ reachable: { alone: 209, on_site_min: 45 }, attic: { alone: 299, on_site_min: 90 } });
+    expect(edited.reachable.riding).toBe(199);
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', saved)).toEqual({ ok: true });
+    // A one-path pricing proposal (jsonb_set, no strip) on the same row still validates: riding is ignored.
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', edited)).toEqual({ ok: true });
+    // Other keys are untouched.
+    expect(normalizeIncomingConfigData('rodent_sanitation', { riding: 1 })).toEqual({ riding: 1 });
   });
 
   test('the route seeds the row with the code defaults and gates its availability with the gate', () => {

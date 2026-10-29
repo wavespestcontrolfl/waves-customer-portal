@@ -284,12 +284,11 @@ describe('the DB-editable row (pricing_config rodent_dead_animal_removal)', () =
     await sync({ reachable: { alone: 179, riding: 129, on_site_min: 60 }, attic: { alone: 289, riding: 239, on_site_min: 100 } });
     expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 179, durationMin: 60 });
     expect(price({ rodentTrapping: true, deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 289, durationMin: 100 });
-    // A SAVE of the same row is refused: riding may only repeat the price there.
-    const save = config.normalizeDeadAnimalRemovalConfig({ reachable: { alone: 179, riding: 129, on_site_min: 60 }, attic: { alone: 289, on_site_min: 100 } });
-    expect(save).toMatchObject({ ok: false, error: expect.stringMatching(/riding is retired/) });
+    expect(config.normalizeDeadAnimalRemovalConfig({ reachable: { alone: 179, riding: 129, on_site_min: 60 }, attic: { alone: 289, on_site_min: 100 } }))
+      .toEqual({ ok: true, value: { reachable: { alone: 179, durationMin: 60 }, attic: { alone: 289, durationMin: 100 } } });
   });
 
-  test('a stored row may still carry the retired riding key, only equal to the price (production on 2026-10-29)', async () => {
+  test('production\'s row on 2026-10-29 (riding equal to the price) applies', async () => {
     await sync({ reachable: { alone: 199, riding: 199, on_site_min: 45 }, attic: { alone: 299, riding: 299, on_site_min: 90 } });
     expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 199, durationMin: 45 });
     expect(price({ rodentTrapping: true, deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 299, durationMin: 90 });

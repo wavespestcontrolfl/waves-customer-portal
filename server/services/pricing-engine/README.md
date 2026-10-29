@@ -376,9 +376,9 @@ perk; no bundle). The two prices and the two on-site minutes are DB-editable as
 `pricing_config.rodent_dead_animal_removal` (`dead-animal-removal-config.js` is the one
 validator for the admin PUT and the db-bridge sync: plain JSON numbers, prices $1 to
 $2,000, whole minutes 1 to 480, the whole row or nothing; the retired `riding` key never
-prices anything: a save may carry it only equal to `alone`, and the sync ignores it on a
-stored row so an earlier admin edit keeps its prices and minutes; a malformed or deleted
-row leaves the code defaults on the next sync). Migration `20261029160100` brings a row
+prices anything: a row may still carry an in-bounds value (ignored, so an earlier admin
+edit keeps its prices and minutes and the panel's inline edits save), and a Pricing Logic
+save strips it; a malformed or deleted row leaves the code defaults on the next sync). Migration `20261029160100` brings a row
 still holding the 10-29 seed, and the catalog's three price cells, to the one price.
 
 **Gate rule: NEW QUOTES ONLY.** With the gate off the estimator does not offer the
