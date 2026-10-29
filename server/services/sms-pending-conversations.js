@@ -13,6 +13,8 @@ const {
 const { personCallBackSql } = require('./staff-contact');
 const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 const { POST_CALL_ROW_SOURCES, TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
+const { staffActionAnswersMode } = require('../config/feature-gates');
+const { staffActionExistsSql } = require('./sms-staff-action-answers');
 
 // Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
 // Unanswered-filtered inbox only count inbound texts from this instant
@@ -112,6 +114,19 @@ async function loadPendingSmsConversations({
   // sides of that link fall in or out of the window together.
   const inSinceWindow = (column) => `(CAST(:since AS timestamptz) IS NULL
     OR ${column} > CAST(:since AS timestamptz) - ${REPLY_LOOKBACK})`;
+  // GATE_SMS_STAFF_ACTION_ANSWERS=true only (read at call time): a text is also answered once a
+  // person booked a visit or recorded a payment for the text's customer within 24 hours after it
+  // (sms-staff-action-answers.js, by customer id and never by phone). In every other mode the
+  // CTE, its join and its filter are absent: the SQL below is byte-identical to before.
+  const staffAnswers = staffActionAnswersMode() === 'true';
+  const staffActionCte = staffAnswers ? `, staff_action_inbound AS MATERIALIZED (
+      SELECT li.id AS inbound_id
+      FROM enriched_inbound li
+      WHERE li.customer_id IS NOT NULL
+        AND ${staffActionExistsSql('li.customer_id', 'li.created_at')}
+    )` : '';
+  const staffActionJoin = staffAnswers ? '\n    LEFT JOIN staff_action_inbound staff_action ON staff_action.inbound_id = li.id' : '';
+  const staffActionFilter = staffAnswers ? '\n      AND staff_action.inbound_id IS NULL' : '';
   const { rows = [] } = await db.raw(`
     WITH canonical_sms AS MATERIALIZED (
       SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,
@@ -268,7 +283,7 @@ async function loadPendingSmsConversations({
           AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
             OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
       ) call ON call.peer = li.peer AND call.ended_at > li.created_at
-    ), all_stop_events AS MATERIALIZED (
+    )${staffActionCte}, all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
                THEN LEAST(stop_message.created_at, stop_receipt.applied_at)
@@ -334,7 +349,7 @@ async function loadPendingSmsConversations({
     LEFT JOIN prior_context ON prior_context.id = li.id
     LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
     LEFT JOIN latest_stop stop ON stop.peer = li.peer
-    LEFT JOIN spoken_inbound spoken ON spoken.inbound_id = li.id
+    LEFT JOIN spoken_inbound spoken ON spoken.inbound_id = li.id${staffActionJoin}
     LEFT JOIN LATERAL (
       SELECT candidate_customer.id, candidate_customer.first_name, candidate_customer.last_name
       FROM customers candidate_customer
@@ -349,7 +364,7 @@ async function loadPendingSmsConversations({
       LIMIT 1
     ) customer_match ON true
     WHERE answered.inbound_id IS NULL
-      AND spoken.inbound_id IS NULL
+      AND spoken.inbound_id IS NULL${staffActionFilter}
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
       AND (CAST(:includeLegacyOnly AS boolean) OR li.source = 'canonical')
   `, {

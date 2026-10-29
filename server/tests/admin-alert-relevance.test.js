@@ -151,7 +151,7 @@ const {
   runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, judge,
 } = require('../services/admin-alert-relevance');
 const {
-  adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode,
+  adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode,
 } = require('../config/feature-gates');
 
 const TODAY = '2026-09-28';
@@ -179,6 +179,7 @@ beforeEach(() => {
   delete process.env.GATE_ALERT_CONTACT_CLOSE;
   delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
   delete process.env.GATE_LEAD_CONTACTED_CLOSE;
+  delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
   mockBundles = new Map();
   mockTables = { notifications: [], scheduled_services: [], 'scheduled_services as ss': [], leads: [], estimates: [] };
   mockQueries = [];
@@ -1514,6 +1515,89 @@ describe('customer-contact classes', () => {
         expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ rearmed: 1 });
         expect(row.done_at ?? null).toBeNull();
         expect(JSON.parse(row.metadata).retired).toBeUndefined();
+      });
+    });
+
+    describe('a text: a staff action answers it (GATE_SMS_STAFF_ACTION_ANSWERS)', () => {
+      beforeEach(() => gate('true'));
+      const f1 = (mode) => { if (mode === undefined) delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS; else process.env.GATE_SMS_STAFF_ACTION_ANSWERS = mode; };
+      const booked = { staffActionAt: at(10), staffActionKind: 'visit' };
+      const paid = { staffActionAt: at(10), staffActionKind: 'payment' };
+
+      test.each([
+        [undefined, 'off'], ['', 'off'], ['on', 'off'], ['1', 'off'], ['false', 'off'], [' Shadow', 'shadow'], ['TRUE ', 'true'], ['true', 'true'],
+      ])('GATE_SMS_STAFF_ACTION_ANSWERS = %j -> %s', (value, mode) => {
+        f1(value);
+        expect(staffActionAnswersMode()).toBe(mode);
+      });
+
+      test('off: no reason and the witnesses are not asked; shadow: would only, with the action named; true: closes with the action named', async () => {
+        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ cls: 'inbound_sms', reason: null, would: null });
+        await loadSubjects([smsThread()]);
+        expect(mockLoadContactBundles.mock.calls[0][1].staffActions).toBe(false);
+        f1('shadow');
+        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ reason: null, would: 'A visit was booked' });
+        expect(await judged(smsThread(), { pending: true, ...paid })).toMatchObject({ reason: null, would: 'A payment was recorded' });
+        mockLoadContactBundles.mockClear();
+        await loadSubjects([smsThread()]);
+        expect(mockLoadContactBundles.mock.calls[0][1].staffActions).toBe(true);
+        f1('true');
+        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ reason: 'A visit was booked', would: null });
+        expect(await judged(smsThread(), { pending: true, ...paid })).toMatchObject({ reason: 'A payment was recorded', would: null });
+        // The contact gate caps it: in shadow the staff reason is a would-close even with its own gate true.
+        gate('shadow');
+        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ reason: null, would: 'A visit was booked' });
+      });
+
+      test('nothing before the text counts, and no action keeps a pending text; a text with no customer-id action stays', async () => {
+        f1('true');
+        expect((await judged(smsThread(), { pending: true, staffActionAt: at(-5), staffActionKind: 'visit' })).reason).toBeNull();
+        expect((await judged(smsThread(), { pending: true, staffActionAt: T0, staffActionKind: 'visit' })).reason).toBeNull();
+        expect((await judged(smsThread(), { pending: true, staffActionAt: null, staffActionKind: null })).reason).toBeNull();
+        expect((await judged(smsThread(), { pending: true, staffActionAt: at(10), staffActionKind: 'unknown' })).reason).toBeNull();
+      });
+
+      test('a shared phone: the customer-id action closes it; with none it stays, and a text or call still comes first', async () => {
+        f1('true');
+        expect((await judged(smsThread(), { shared: true, pending: false })).reason).toBeNull();
+        expect((await judged(smsThread(), { shared: true, pending: true, ...booked })).reason).toBe('A visit was booked');
+        expect((await judged(smsThread(), { shared: true, pending: false, ...paid })).reason).toBe('A payment was recorded');
+        expect((await judged(smsThread(), { shared: true, pending: false, textAt: at(5), ...booked })).reason).toBe('Answered by text');
+        expect((await judged(smsThread(), { shared: true, pending: false, backAt: at(5), ...booked })).reason).toBe('Answered by a call');
+        f1('shadow');
+        expect(await judged(smsThread(), { shared: true, pending: false, ...booked })).toMatchObject({ reason: null, would: 'A visit was booked' });
+      });
+
+      test('the plain fallback: a text or call comes first, the action next (true), the plain words last; in shadow the real close keeps its plain reason', async () => {
+        f1('true');
+        expect((await judged(smsThread(), { pending: false, textAt: at(5), ...booked })).reason).toBe('Answered by text');
+        expect((await judged(smsThread(), { pending: false, inAt: at(5), ...booked })).reason).toBe('Answered by a call');
+        expect((await judged(smsThread(), { pending: false, ...booked })).reason).toBe('A visit was booked');
+        expect((await judged(smsThread(), { pending: false, ...paid })).reason).toBe('A payment was recorded');
+        expect((await judged(smsThread(), { pending: false })).reason).toBe('Answered, or no reply needed');
+        f1('shadow');
+        expect(await judged(smsThread(), { pending: false, ...booked })).toMatchObject({ reason: 'Answered, or no reply needed', would: null });
+        f1(undefined);
+        expect(await judged(smsThread(), { pending: false, ...booked })).toMatchObject({ reason: 'Answered, or no reply needed', would: null });
+      });
+
+      test('the sweep: shadow records it and closes nothing; true closes with the wording; the gate switched off puts the bell back', async () => {
+        const NOW_AFTER_F1 = new Date('2026-09-28T16:00:00Z');
+        const row = smsThread();
+        mockTables.notifications = [row];
+        mockBundles = new Map([[String(row.id), bundle({ pending: true, ...booked })]]);
+        f1('shadow');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER_F1 })).toMatchObject({ retired: 0, wouldClose: 1 });
+        expect(mockAuditWouldClose.mock.calls[0][0].items).toEqual([
+          { notification_id: row.id, alert_class: 'inbound_sms', reason: 'A visit was booked', judged_at: NOW_AFTER_F1.toISOString() },
+        ]);
+        expect(row.done_at ?? null).toBeNull();
+        f1('true');
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER_F1 })).toMatchObject({ retired: 1, byClass: { inbound_sms: 1 } });
+        expect(row).toMatchObject({ done_by: 'relevance', resolution: 'A visit was booked' });
+        f1(undefined);
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER_F1 })).toMatchObject({ rearmed: 1 });
+        expect(row.done_at ?? null).toBeNull();
       });
     });
 
