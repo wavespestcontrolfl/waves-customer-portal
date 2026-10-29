@@ -18,7 +18,11 @@
  */
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 
-const COUNT_SOURCES = new Set(['owner_count', 'owner_count_via_claude', 'admin_product_create']);
+// admin_inline_stock_edit = an absolute on-hand number typed on the Inventory page (the route calls it a count).
+const COUNT_SOURCES = new Set(['owner_count', 'owner_count_via_claude', 'admin_product_create', 'admin_inline_stock_edit']);
+// The Intelligence Bar's set_total is "what is physically on the shelf" (procurement-tools.js adjust_stock), so a
+// correction from it that carries setTotal is a count even with no reason typed.
+const SET_TOTAL_COUNT_SOURCES = new Set(['intelligence_bar_adjust_stock']);
 const COUNT_SOURCE_PREFIX = 'video_inventory_intake';
 // Corrections that move stock for another reason. Checked first, so a stray
 // setTotal or a reason that mentions "count" never makes them a count.
@@ -59,6 +63,7 @@ function isCountCorrection(movement) {
   if (NOT_COUNT_SOURCES.has(source)) return false;
   if (validDate(meta.countedAt)) return true;
   if (sourceIsCount(source)) return true;
+  if (SET_TOTAL_COUNT_SOURCES.has(source) && meta.setTotal != null && Number.isFinite(Number(meta.setTotal))) return true;
   return typeof meta.reason === 'string' && COUNT_REASON_RE.test(meta.reason);
 }
 

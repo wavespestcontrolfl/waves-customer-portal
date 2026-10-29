@@ -24,14 +24,23 @@ describe('isCountCorrection — production fixtures', () => {
     ['owner_count', '', {}],
     ['owner_count_via_claude', 'Owner count 2026-10-26: two full 96 fl o...', {}],
     ['admin_manual_adjustment', 'Count correction', {}],
+    // An absolute on-hand number typed on the Inventory page.
+    ['admin_inline_stock_edit', 'Inline product stock edit', {}],
+    // Intelligence Bar set_total = what is physically on the shelf, even with no reason typed.
+    ['intelligence_bar_adjust_stock', null, { setTotal: 12 }],
+    ['intelligence_bar_adjust_stock', 'Moved to the van', { setTotal: 0 }],
   ];
   const NOT_COUNTS = [
     ['inventory_unit_review_fix', 'Inventory unit normalization', {}],
     ['siteone_invoice', '', { setTotal: 40 }],
     ['admin_manual_adjustment', 'Sticker Mule order R625853227 (500) appr...', {}],
     ['admin_manual_adjustment', 'Duplicate receipt', {}],
-    ['admin_inline_stock_edit', 'Inline product stock edit', {}],
     [null, 'Unrecorded restock correction 2026-08-13', {}],
+    // An Intelligence Bar signed quantity (no setTotal) is a change, not a shelf total.
+    ['intelligence_bar_adjust_stock', 'Found two more', { quantity: 2 }],
+    ['intelligence_bar_adjust_stock', null, { setTotal: 'lots' }],
+    // The stock-double-take-watch put-back (no count words in its reason).
+    ['admin_manual_adjustment', 'double_take_add_back', { addsBackMovementIds: ['m1'] }],
   ];
 
   test.each(COUNTS)('count: %s | %s', (source, reason, extra) => {
