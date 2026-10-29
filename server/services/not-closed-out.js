@@ -189,7 +189,7 @@ async function lockLog(t, logId) {
   return t('reschedule_log')
     .where({ id: logId, reason_code: 'customer_noshow' })
     .forUpdate()
-    .first('id', 'scheduled_service_id', 'customer_id', 'resolved_at', 'miss_confirmed_at', 'original_date', 'original_window');
+    .first('id', 'scheduled_service_id', 'customer_id', 'resolved_at', 'resolution', 'miss_confirmed_at', 'original_date', 'original_window');
 }
 
 // Every decision takes the VISIT's row lock before the log row's — the order a
@@ -212,6 +212,9 @@ function loggedSlot(log) {
   return { scheduled_date: dateOnly(log && log.original_date), window_start: start || null, window_end: end || null };
 }
 
+// The repair's guard (confirmMiss `onlyIf`): true when it says this row needs nothing.
+const guardRefuses = async (onlyIf, ctx) => !!onlyIf && !(await onlyIf(ctx));
+
 /**
  * "This was a miss": the row stays open (it still needs rebooking) and is now a
  * confirmed miss. The card is replaced by one that says so, through the alert
@@ -225,14 +228,17 @@ function loggedSlot(log) {
  * A reopen runs after the no-show transition committed, so it holds only while the
  * visit, read under its own lock, is still that no-show occurrence: one that was
  * rebooked or completed in between keeps the settlement it got (`visit_moved_on`).
+ * `onlyIf({ t, visit, log })`: the nightly repair's guard (reopenUnconfirmedNoShows),
+ * asked under both locks before anything is written; false = `not_needed`.
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
+async function confirmMiss({ logId, confirmedBy = null, reopen = false, onlyIf = null } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
     const { visit, log } = await lockVisitThenLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
+    if (await guardRefuses(onlyIf, { t, visit, log })) return { ok: false, reason: 'not_needed' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
     if (log.resolved_at) {
       if (!isSameNoShowOccurrence(visit, { date: log.original_date, window: log.original_window })) {
@@ -368,14 +374,73 @@ async function markHandled({ logId, handledBy = null } = {}) {
 // closed visit by its status; a still-open visit that left the flagged slot was
 // moved. null = the row stays open (same slot still open, or a no_show visit,
 // which only a person's "Done" settles).
-function settlementFromVisit(visit, log) {
+// `startedVisits` (nightly repair, gate on): a moved visit that has since reached
+// en_route, on_site or no_show also counts as moved, so its old card does not stay
+// when the settling write failed before the visit started. A no_show visit's
+// person-CONFIRMED row still waits for "Done": the person's call is not undone.
+const MOVABLE_STATUSES = Object.freeze(['pending', 'confirmed', 'rescheduled']);
+const STARTED_STATUSES = Object.freeze(['en_route', 'on_site', 'no_show']);
+function settlementFromVisit(visit, log, { startedVisits = false } = {}) {
   if (!visit) return null;
   if (RESOLUTION_BY_STATUS[visit.status]) return RESOLUTION_BY_STATUS[visit.status];
-  if (!['pending', 'confirmed', 'rescheduled'].includes(visit.status) || !log.original_date) return null;
+  const statuses = startedVisits ? [...MOVABLE_STATUSES, ...STARTED_STATUSES] : MOVABLE_STATUSES;
+  if (!statuses.includes(visit.status) || !log.original_date) return null;
+  if (visit.status === 'no_show' && log.miss_confirmed_at) return null;
   const visitWindow = visit.window_start ? `${visit.window_start}-${visit.window_end}` : null;
   const moved = dateOnly(log.original_date) !== dateOnly(visit.scheduled_date)
     || (!!log.original_window && log.original_window !== visitWindow);
   return moved ? 'rebooked' : null;
+}
+
+// Retry of a dispatch no-show's reopen (confirmMiss `reopen`) whose replacement card
+// insert failed: that rolls the whole reopen back, leaving a settled row with no
+// card, and nothing else would look at it again. The evidence is the visit's own
+// history: a PERSON (transitioned_by) marked it no_show AFTER the row was settled,
+// and it is still that no-show occurrence. A "Not a miss" given after the mark is
+// newer than the mark, so it stands. Only rows settled as the reopen is meant for
+// (`not_a_miss`, the migration's `backlog`) and never confirmed. Bound: no-show marks
+// of the last 14 days, so a transient failure is retried for two weeks of nights,
+// then left (the set is a handful of rows). Every condition is re-checked under the
+// visit and row locks, and a reopened row is open and confirmed, so a second run, or
+// the dispatch path racing it, finds nothing to do.
+const REOPENABLE = Object.freeze(['backlog', 'not_a_miss']);
+const REOPEN_REPAIR_DAYS = 14;
+async function reopenUnconfirmedNoShows() {
+  let reopened = 0;
+  try {
+    const marks = await db('job_status_history')
+      .where({ to_status: 'no_show' })
+      .whereNotNull('transitioned_by')
+      .where('transitioned_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [REOPEN_REPAIR_DAYS]))
+      .select('job_id');
+    const personMarkedAfterSettling = async ({ t, log }) => REOPENABLE.includes(log.resolution)
+      && !log.miss_confirmed_at
+      && !!(await t('job_status_history')
+        .where({ job_id: log.scheduled_service_id, to_status: 'no_show' })
+        .whereNotNull('transitioned_by')
+        .where('transitioned_at', '>', log.resolved_at)
+        .first('id'));
+    for (const jobId of new Set((Array.isArray(marks) ? marks : []).map((m) => String(m.job_id)))) {
+      try {
+        const rows = await db('reschedule_log')
+          .where({ scheduled_service_id: jobId, reason_code: 'customer_noshow' })
+          .whereNotNull('resolved_at')
+          .whereNull('miss_confirmed_at')
+          .whereIn('resolution', REOPENABLE)
+          .select('id');
+        const outs = [];
+        for (const { id } of Array.isArray(rows) ? rows : []) {
+          outs.push(await confirmMiss({ logId: id, confirmedBy: 'dispatch', reopen: true, onlyIf: personMarkedAfterSettling }));
+        }
+        reopened += outs.filter((o) => o.ok).length;
+      } catch (err) {
+        logger.warn(`[not-closed-out] reopen of visit ${jobId} not repaired: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[not-closed-out] reopen repair failed: ${err.message}`);
+  }
+  return { reopened };
 }
 
 /**
@@ -389,17 +454,21 @@ function settlementFromVisit(visit, log) {
  *     settled from the visit's state (runs with the queue gate on or off);
  *   - an open row with no card gets one (gate on only).
  * Each repair runs under the visit's lock and re-reads the row.
+ * With the gate on it also settles a moved visit that has since started (see
+ * settlementFromVisit) and retries a reopen that failed (reopenUnconfirmedNoShows;
+ * the replacement card it raises counts in `raised`).
  * @returns {Promise<{raised: number, settled: number}>}
  */
 async function reconcileOpenRows() {
   let raised = 0;
   let settled = 0;
+  const startedVisits = queueEnabled();
   try {
     const open = await db('reschedule_log')
       .where({ reason_code: 'customer_noshow' })
       .whereNull('resolved_at')
       .orderBy('created_at', 'desc')
-      .select('id', 'scheduled_service_id', 'original_date', 'original_window');
+      .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'miss_confirmed_at');
     const seen = new Set();
     for (const row of Array.isArray(open) ? open : []) {
       const visitId = row.scheduled_service_id;
@@ -409,11 +478,11 @@ async function reconcileOpenRows() {
         // unlocked look first: most rows need nothing
         const glance = await db('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
         const hasCard = await db('dispatch_alerts').where({ type: ALERT_TYPE, job_id: visitId }).whereNull('resolved_at').first('id');
-        if (!settlementFromVisit(glance, row) && (hasCard || !queueEnabled())) continue;
+        if (!settlementFromVisit(glance, row, { startedVisits }) && (hasCard || !queueEnabled())) continue;
         const result = await db.transaction(async (t) => {
           const { visit, log } = await lockVisitThenLog(t, row.id);
           if (!log || log.resolved_at) return {};
-          const resolution = settlementFromVisit(visit, log);
+          const resolution = settlementFromVisit(visit, log, { startedVisits });
           if (resolution) {
             return { settled: (await resolveForService({ serviceId: visitId, resolution, resolvedBy: 'system', trx: t })).resolved };
           }
@@ -433,6 +502,7 @@ async function reconcileOpenRows() {
   } catch (err) {
     logger.warn(`[not-closed-out] repair pass failed: ${err.message}`);
   }
+  if (queueEnabled()) raised += (await reopenUnconfirmedNoShows()).reopened;
   return { raised, settled };
 }
 
@@ -451,6 +521,7 @@ module.exports = {
   confirmMiss,
   dismiss,
   markHandled,
+  reopenUnconfirmedNoShows,
   reconcileOpenRows,
   queueEnabled,
 };
