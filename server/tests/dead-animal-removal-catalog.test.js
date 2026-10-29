@@ -274,6 +274,18 @@ describe('20261029130100 pricing_config seed', () => {
     expect(edited.pricing_config_audit).toHaveLength(1);
   });
 
+  test('down() leaves a row with the seeded values that another writer created (no tagged audit record)', async () => {
+    const db = emptyDb();
+    // The admin route's seed (or a race winner) wrote the same values first: up() skips it and records nothing.
+    db.pricing_config.push({ config_key: seedMigration.KEY, data: JSON.stringify(seedMigration.SEED) });
+    const knex = fakeKnex(db);
+    await seedMigration.up(knex);
+    expect(db.pricing_config_audit).toHaveLength(0);
+    await seedMigration.down(knex);
+    expect(db.pricing_config).toHaveLength(1);
+    expect(JSON.parse(db.pricing_config[0].data)).toEqual(seedMigration.SEED);
+  });
+
   test('both migration files exist and the catalog row is created before the price seed', () => {
     const dir = path.join(__dirname, '..', 'models', 'migrations');
     const mine = ['20261029130000_dead_rodent_removal_catalog.js', '20261029130100_dead_rodent_removal_pricing_config.js'];

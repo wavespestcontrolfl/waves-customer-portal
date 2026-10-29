@@ -161,6 +161,7 @@ describe('the engine decides riding from its own priced rodent lines', () => {
     ['V2 exclusion', { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2 } }],
     ['wire mesh', { rodentWireMesh: { meshLinearFeet: 20, meshSubstrate: 'wood_soft' } }],
     ['bird box', { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 1 } }],
+    ['rodent guarantee combo (its price carries the exclusion work)', { rodentGuaranteeCombo: { guaranteeTerm: 12 } }],
   ])('a priced %s line makes it ride', (_label, extra) => {
     const estimate = generateEstimate({ ...HOME, services: { ...extra, deadAnimalRemoval: { tier: 'reachable' } } });
     expect(lineOf(estimate)).toMatchObject({ price: 119, riding: true });

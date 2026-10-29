@@ -17,8 +17,9 @@
  *
  * Insert-if-missing: an existing row is never overwritten (an admin may already have edited it). The insert also writes one
  * pricing_config_audit row and one pricing_changelog row (tagged), so the seed has a reason in the admin history.
- * down() deletes the row only while it still holds exactly the seeded data (an operator-edited row is left alone), and only
- * the audit and changelog records this migration wrote.
+ * down() deletes the row only while it still holds exactly the seeded data (an operator-edited row is left alone) AND this
+ * migration's tagged audit record proves it inserted the row (a row another writer created with the same values, such as the
+ * admin route's seed, has none and stays), and only the audit and changelog records this migration wrote.
  */
 const { isDeepStrictEqual } = require('util');
 
@@ -88,10 +89,13 @@ exports.down = async function down(knex) {
   const row = await knex('pricing_config').where({ config_key: KEY }).first('data');
   // jsonb does not keep key order: compare the values. An edited row is the operator's and stays.
   if (!row || !isDeepStrictEqual(parse(row.data), SEED)) return;
+  // Ownership: up() writes the tagged audit record only when it inserted the row. Without it (another writer's row with the
+  // seeded values, or an install that had no audit table) the row is not this migration's to delete.
+  if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
+  const owned = await knex('pricing_config_audit').where({ config_key: KEY, changed_by: TAG }).first('id');
+  if (!owned) return;
   await knex('pricing_config').where({ config_key: KEY }).del();
-  if (await knex.schema.hasTable('pricing_config_audit')) {
-    await knex('pricing_config_audit').where({ config_key: KEY, changed_by: TAG }).del();
-  }
+  await knex('pricing_config_audit').where({ config_key: KEY, changed_by: TAG }).del();
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG).del();
   }

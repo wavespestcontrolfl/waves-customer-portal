@@ -363,7 +363,8 @@ is not evaluated at quote time:
 | `attic` | 90 min | $15 | (90 + 20) min: $64.17 + $15 + $8 = $87.17 / 0.40 = $217.92 -> $219 -> **$269** | 90 min, no drive, no admin: $67.50 / 0.40 = $168.75 -> $169 -> **$219** |
 
 "Riding" means the SAME estimate already carries another PRICED rodent one-time
-line: trapping, exclusion (V1, the V2 section rows or `exclusion_v2`), wire mesh,
+line: trapping, exclusion (V1, the V2 section rows, `exclusion_v2` or the rodent
+guarantee combo, whose price carries the exclusion work), wire mesh,
 bird box, sanitation or the rodent inspection (`DEAD_ANIMAL_RIDING_HOST_SERVICES`
 in `service-pricing.js`). A custom-quote or commercial manual-quote line is never a
 host, and recurring bait, fees, riders, bundle or discount rows are not hosts. The

@@ -6247,14 +6247,17 @@ function assertDeadAnimalRemovalEnabled() {
 }
 
 // Rodent one-time line keys that count as "the crew is already on site": trapping, exclusion
-// (V1, V2 sections, the alternate sqft-tiered exclusion), wire mesh, bird box, sanitation and
-// the paid rodent inspection. A line counts only when it is PRICED (not a custom or manual
-// quote, price above zero). Nothing recurring (bait), no fee, bond, rider or discount row.
+// (V1, V2 sections, the alternate sqft-tiered exclusion, and the rodent guarantee combo, whose
+// price carries the exclusion work: calculateRodentGuaranteeCombo), wire mesh, bird box,
+// sanitation and the paid rodent inspection. A line counts only when it is PRICED (not a custom
+// or manual quote, price above zero). Nothing recurring (bait), no fee, bond, payment-only rider
+// (rodent_guarantee) or discount row.
 const DEAD_ANIMAL_RIDING_HOST_SERVICES = new Set([
   'rodent_trapping',
   'exclusion',
   'rodent_exclusion',
   'exclusion_v2',
+  'rodent_guarantee_combo',
   'rodent_wire_mesh',
   'rodent_bird_box',
   'rodent_sanitation',
