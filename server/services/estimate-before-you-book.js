@@ -95,9 +95,10 @@ const COMMERCIAL_SECTIONS = [
     lines: [
       { rank: 1, text: 'We set your service day and time with you, around your business hours.' },
       { rank: 1, text: 'There is no deposit.' },
-      // Only while the proposal's own term, renewal and cancellation agree with the agreement (or are blank): a
-      // proposal with authored custom terms (24 months, month-to-month) must not contradict itself, so the line drops.
-      { rank: 2, when: (s) => s.termsMatchAgreement === true, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
+      // Only for a proposal with a recurring service (a one-time-only proposal has no agreement term), and only while
+      // the proposal's own term, renewal and cancellation agree with the agreement (or are blank): a proposal with
+      // authored custom terms (24 months, month-to-month) must not contradict itself, so the line drops.
+      { rank: 2, when: (s) => s.termsMatchAgreement === true && s.recurring === true, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
       { rank: 3, text: 'We can send a certificate of insurance and name your business as an additional insured on request.' },
     ],
   },
@@ -222,9 +223,21 @@ function termsMatchAgreement(proposal) {
   }
 }
 
+// The proposal prices a recurring service (the figure online signing keys on). Fails closed: an unreadable answer is false.
+function proposalIsRecurring(proposal) {
+  try {
+    return Number(require('./estimate-proposal').computeProposalTotals(proposal).annualRecurring) > 0;
+  } catch {
+    return false;
+  }
+}
+
 function estimateSignals(estimate, proposal) {
   if (isKnownCommercial(proposal)) {
-    return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal), termsMatchAgreement: termsMatchAgreement(proposal) };
+    return {
+      planTerms: false, commercial: true, families: proposalServiceFamilies(proposal),
+      termsMatchAgreement: termsMatchAgreement(proposal), recurring: proposalIsRecurring(proposal),
+    };
   }
   return { planTerms: planTermsApply(estimate, proposal) };
 }

@@ -152,9 +152,11 @@ const programFrequencyChoice = (p) => {
   return p.freqCustom || !preset ? 'custom' : String(preset.perYear);
 };
 
-// Standard / Not stated / Custom for each fixed agreement term (owner 2026-10-28 builder scope). Standard is the
-// agreement's own text, compared the way online signing compares it; Not stated leaves it blank so the agreement
-// governs. Both sign online. Custom is typed wording, which online signing refuses.
+// Standard / Custom for each fixed agreement term (owner 2026-10-28 builder scope, plans-only follow-up). Standard is the
+// agreement's own text, compared the way online signing compares it, and signs online. Custom is typed wording, which
+// online signing refuses. A blank term (an older proposal) is not a choice any more: the select shows "Not stated (old
+// proposal)" until the operator picks Standard or Custom. The four terms only apply to a proposal with a recurring
+// service, so the picks are hidden (values kept) when annual recurring is 0.
 const TERM_CHOICE_KEYS = ['initialTermMonths', 'renewal', 'priceAdjustment', 'cancellation'];
 const standardTermText = (key) => String(AGREEMENT_TERMS[key]);
 function termChoiceOf(key, value) {
@@ -654,10 +656,13 @@ function CommercialProposalEditor() {
     : 'None';
   const responsibilityCount = responsibilitiesText.split('\n').filter((line) => line.trim()).length;
   const responsibilitiesSummary = responsibilityCount ? plural(responsibilityCount, 'line') : 'None';
+  // The fixed terms apply to a recurring program only (same number the sidebar shows as "Annual recurring").
+  const hasRecurring = Number(totals.annualRecurring) > 0;
   const termKinds = Object.values(termChoices);
   const termsSummary = [
     PAYMENT_TERM_LABELS[commercialTerms.paymentTerms] || 'Payment not set',
-    termKinds.includes('custom') ? 'Custom terms' : termKinds.every((kind) => kind === 'none') ? 'Terms not stated' : 'Standard terms',
+    !hasRecurring ? 'One-time work, no term'
+      : termKinds.includes('custom') ? 'Custom terms' : termKinds.every((kind) => kind === 'none') ? 'Terms not stated' : 'Standard terms',
     validThrough ? `Valid through ${validThrough}` : null,
   ].filter(Boolean).join(' · ');
 
@@ -978,16 +983,16 @@ function CommercialProposalEditor() {
     }]);
     setOpenSections((prev) => ({ ...prev, programs: true }));
   };
-  // Standard / Not stated / Custom for one fixed term. Custom starts from the
-  // current wording (the standard text when there was none), so the operator
-  // edits it instead of retyping it.
+  // Standard / Custom for one fixed term (a blank old term is the only 'none',
+  // and only until this pick). Custom starts from the current wording (the
+  // standard text when there was none), so the operator edits it instead of
+  // retyping it.
   const chooseTerm = (key, choice) => {
     markEdit();
     setTermChoices((prev) => ({ ...prev, [key]: choice }));
     setCommercialTerms((prev) => {
       const standard = standardTermText(key);
       if (choice === 'standard') return { ...prev, [key]: standard };
-      if (choice === 'none') return { ...prev, [key]: '' };
       return { ...prev, [key]: prev[key] || standard };
     });
   };
@@ -2064,7 +2069,12 @@ function CommercialProposalEditor() {
               {/* maxLength mirrors normalizeCommercialTerms' clamps so a
                   contractual sentence can never silently truncate on save
                   (codex #3297 r2). */}
-              {[
+              {!hasRecurring && (
+                <p className="text-12 text-zinc-500 sm:col-span-2">
+                  One-time work: no term applies. Term picks show when the proposal has a recurring program.
+                </p>
+              )}
+              {hasRecurring && [
                 ['initialTermMonths', 'Initial term', undefined],
                 ['renewal', 'Renewal', 120],
                 ['priceAdjustment', 'Price adjustment', 160],
@@ -2078,7 +2088,7 @@ function CommercialProposalEditor() {
                       <Select size="sm" className="mt-1" value={choice} disabled={!!locked}
                         onChange={(e) => chooseTerm(key, e.target.value)}>
                         <option value="standard">{key === 'initialTermMonths' ? `${AGREEMENT_TERMS.initialTermMonths} months (standard)` : 'Standard'}</option>
-                        <option value="none">Not stated</option>
+                        {choice === 'none' && <option value="none">Not stated (old proposal)</option>}
                         <option value="custom">Custom</option>
                       </Select>
                     </label>
@@ -2087,7 +2097,7 @@ function CommercialProposalEditor() {
                     )}
                     {choice === 'none' && (
                       <p className="mt-1 text-12 text-zinc-500">
-                        Left off the proposal.{commercialAgreement ? ' The agreement the customer signs online still states its own.' : ''}
+                        Not on the proposal. Pick Standard or Custom.
                       </p>
                     )}
                     {choice === 'custom' && (key === 'initialTermMonths' ? (

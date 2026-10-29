@@ -6973,7 +6973,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ['Price adjustment', proposalForCard.commercialTerms.priceAdjustment],
         ['Cancellation', proposalForCard.commercialTerms.cancellation],
         ['Property access', proposalForCard.commercialTerms.accessRequirements],
-      ].filter(([, value]) => value != null) : [];
+      ].filter(([label, value]) => value != null
+        // One-time-only proposal: the four fixed agreement terms do not apply (owner 2026-10-28).
+        && (Number(proposalCardTotals.annualRecurring) > 0
+          || !['Initial term', 'Renewal', 'Price adjustment', 'Cancellation'].includes(label))) : [];
       const proposalStructuredTermsHtml = proposalTermRows.length ? `
     <div class="proposal-section-title">Service terms</div>
     <div class="proposal-structured-terms">
