@@ -228,6 +228,17 @@ describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner 
     expect(proposalPrintsCannedTerms(null)).toBe(false);
     expect(commercialTermLines({ paymentTerms: 'net15', renewal: 'Auto-renews yearly' })).toEqual(['Payment: Net-15', 'Renewal: Auto-renews yearly']);
     expect(commercialTermLines(null)).toEqual([]);
+    // A one-time-only proposal (recurring: false) drops the four fixed terms and keeps Payment and Property access.
+    const all = {
+      paymentTerms: 'net30', initialTermMonths: 12, renewal: 'Auto-renews yearly', priceAdjustment: 'At renewal',
+      cancellation: '30 days notice', accessRequirements: 'Keys at the desk',
+    };
+    expect(commercialTermLines(all, { recurring: false })).toEqual(['Payment: Net-30', 'Property access: Keys at the desk']);
+    // No second argument, or recurring true / undefined: exactly as today.
+    expect(commercialTermLines(all)).toHaveLength(6);
+    expect(commercialTermLines(all, { recurring: true })).toEqual(commercialTermLines(all));
+    expect(commercialTermLines(all, {})).toEqual(commercialTermLines(all));
+    expect(commercialTermLines(null, { recurring: false })).toEqual([]);
     mockEstimateMakesNoGuaranteeClaim.mockReset();
   });
 

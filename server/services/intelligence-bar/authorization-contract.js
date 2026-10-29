@@ -95,6 +95,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // The Dispatch board has no Reopen for a resolved Action Queue card.
+  'resolve_dispatch_alert',
   // An email cannot be unsent.
   'compose_email',
   // An invoice sent to the customer cannot be unsent.
@@ -170,6 +172,10 @@ CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 // The Agent Review draft cards: their card lines come from their own preview (agent-review-tools.js cardLines).
 for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
+// unblock-sender-tools.js cardLines). Neither sends anything.
+CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
+CURATED_PREVIEW_TOOL_NAMES.add('unblock_sender');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -258,6 +264,8 @@ const ACTION_LABELS = {
   approve_agent_review_draft: 'Send an Agent Review draft as written',
   revise_agent_review_draft: 'Send an edited Agent Review draft',
   ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
+  resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
+  unblock_sender: 'Unblock an email sender (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -957,6 +965,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // The Agent Review draft cards: the exact text, the recipient (name and masked number) and the message it answers.
   if (['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].includes(toolName) && preview?.preview === true) {
     for (const line of require('./agent-review-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // resolve_dispatch_alert: the alert, when it was raised, the visit, customer and technician, and every effect of the Resolve.
+  if (toolName === 'resolve_dispatch_alert' && preview?.preview === true) {
+    for (const line of require('./dispatch-alert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
+  if (toolName === 'unblock_sender' && preview?.preview === true) {
+    for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {
