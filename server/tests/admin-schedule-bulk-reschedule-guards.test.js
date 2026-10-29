@@ -1110,21 +1110,23 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     return bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload }).then((res) => ({ ...res, trx, updateChain }));
   };
 
-  test('gate off: no route check, no route number, no extra warning', async () => {
+  test('gate off: no route check, no route number, no routeWarnings key', async () => {
     const { body } = await run({ technician_id: 'tech-1' });
     expect(body.updated).toEqual(['svc-1']);
     expect(body.overlapWarnings).toEqual([]);
+    expect(body).not.toHaveProperty('routeWarnings');
     expect(routeSpy).not.toHaveBeenCalled();
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: the moved row is checked on cached road times, the warning joins overlapWarnings, the move commits, the row is numbered in the transaction', async () => {
+  test('gate on: the moved row is checked on cached road times, the warning comes back as routeWarnings (never as an overlap), the move commits, the row is numbered in the transaction', async () => {
     process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { body, trx, updateChain } = await run({ technician_id: 'tech-1' });
     expect(body.updated).toEqual(['svc-1']);
     expect(body.failed).toEqual([]);
-    expect(body.overlapWarnings).toEqual([{ id: 'svc-1', warning: ROUTE_WARNING }]);
+    expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([{ id: 'svc-1', warning: ROUTE_WARNING }]);
     expect(updateChain.update).toHaveBeenCalled();
     expect(routeSpy).toHaveBeenCalledTimes(1);
     expect(routeSpy.mock.calls[0][0]).toMatchObject({
@@ -1144,6 +1146,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     const { body } = await run({ technician_id: 'tech-1', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00' });
     expect(body.updated).toEqual(['svc-1']);
     expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([]);
     expect(routeSpy).not.toHaveBeenCalled();
     expect(placeSpy).not.toHaveBeenCalled();
   });
@@ -1156,5 +1159,26 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(body.updated).toEqual(['svc-1']);
     expect(body.failed).toEqual([]);
     expect(body.overlapWarnings).toEqual([]);
+    expect(body.routeWarnings).toEqual([]);
+  });
+
+  test('gate on: a real overlap and a route result on the same row stay in their own lists', async () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const updateChain = chain();
+    wireTrx({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', technician_id: 'tech-1' }) }),
+        chain({ select: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue([{
+          id: 'svc-other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00',
+          status: 'confirmed', technician_id: null, service_type: 'Pest Control',
+        }]) }),
+        updateChain,
+      ],
+      reschedule_log: [chain()],
+    });
+    const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15', windowStart: '10:00' } });
+    expect(body.overlapWarnings).toEqual([{ id: 'svc-1', warning: expect.stringContaining('overlaps another appointment') }]);
+    expect(body.routeWarnings).toEqual([{ id: 'svc-1', warning: ROUTE_WARNING }]);
   });
 });
