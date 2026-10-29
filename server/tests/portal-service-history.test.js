@@ -25,7 +25,7 @@ function wire() {
 
 const statusFilters = (builders) => builders
   .filter((b) => b.table === 'service_records')
-  .map((b) => b.where.mock.calls.filter(([col, val]) => col === 'service_records.status' && val === 'completed').length);
+  .map((b) => b.whereRaw.mock.calls.filter(([sql]) => /^COALESCE\(service_records\.status, 'completed'\) = 'completed'$/.test(sql)).length);
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -45,6 +45,12 @@ test('without completedOnly every record is listed', async () => {
   await listPortalServiceHistory('cust-1', { limit: 20 });
   expect(statusFilters(builders)).toEqual([0, 0]);
   expect(siblingFilters(builders)).toEqual([0, 0]);
+});
+
+test('a legacy NULL-status record counts as completed in the list, the total and the sibling pick', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../services/portal-service-history.js'), 'utf8');
+  expect(source).toMatch(/COMPLETED_RECORD = "COALESCE\(service_records\.status, 'completed'\) = 'completed'"/);
+  expect(source).toMatch(/AND COALESCE\(sib\.status, 'completed'\) = 'completed'/);
 });
 
 test('GET /api/services asks for completed visits only', () => {

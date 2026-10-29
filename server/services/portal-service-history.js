@@ -50,12 +50,16 @@ function suppressesCustomerArtifacts(structuredNotes = {}) {
 // (completion-record-invariants CANONICAL_SIBLING) with visibility in front.
 // A record with no appointment link predates the back-link and is its own
 // visit.
+// A completed record; NULL is the column default's legacy shape (default
+// 'completed'), so a legacy row keeps showing.
+const COMPLETED_RECORD = "COALESCE(service_records.status, 'completed') = 'completed'";
+
 const ONE_RECORD_PER_APPOINTMENT = `(
   service_records.scheduled_service_id IS NULL
   OR service_records.id = (
     SELECT sib.id FROM service_records sib
      WHERE sib.scheduled_service_id = service_records.scheduled_service_id
-       AND sib.status = 'completed'
+       AND COALESCE(sib.status, 'completed') = 'completed'
      ORDER BY (COALESCE(sib.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send') DESC,
               (sib.id = (SELECT a.service_record_id FROM service_completion_attempts a
                           WHERE a.service_id = sib.scheduled_service_id AND a.status = 'succeeded'
@@ -90,7 +94,7 @@ async function listPortalServiceHistory(customerId, {
     query = query.where('service_records.service_type', 'ilike', `%${type}%`);
   }
   if (scope) query = scopeRecordsToProperty(query, scope);
-  if (completedOnly) query = query.where('service_records.status', 'completed').whereRaw(ONE_RECORD_PER_APPOINTMENT);
+  if (completedOnly) query = query.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
 
   const services = await query;
 
@@ -176,7 +180,7 @@ async function listPortalServiceHistory(customerId, {
       scope,
     );
   }
-  if (completedOnly) totalQuery = totalQuery.where('service_records.status', 'completed').whereRaw(ONE_RECORD_PER_APPOINTMENT);
+  if (completedOnly) totalQuery = totalQuery.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
   const total = await totalQuery.count('service_records.id as count').first();
   return { services: enriched, total: parseInt(total.count) };
 }

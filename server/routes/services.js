@@ -205,7 +205,7 @@ router.get('/stats/summary', async (req, res, next) => {
     // before.
     const servicesYTD = await records()
       .where('service_records.service_date', '>=', etYearStart)
-      .where('service_records.status', 'completed')
+      .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'") // NULL = legacy completed
       .countDistinct('service_records.service_date as count')
       .first();
 

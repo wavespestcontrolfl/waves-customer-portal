@@ -1417,7 +1417,7 @@ function applyCustomerListFilters(query, filters, healthColumns) {
     if (lastVisited === 'never') {
       query = query.whereNotExists(function () {
         this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id')
-          .where('service_records.status', 'completed');
+          .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'");
       });
     } else {
       const days = parseInt(lastVisited, 10);
@@ -1426,7 +1426,7 @@ function applyCustomerListFilters(query, filters, healthColumns) {
           // Last COMPLETED visit, the same rule as the list's last_service_date.
           this.select('customer_id').from('service_records')
             .whereRaw('service_records.customer_id = customers.id')
-            .where('service_records.status', 'completed')
+            .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'")
             .groupBy('customer_id')
             .havingRaw('MAX(service_date) >= ?::date - (? * INTERVAL \'1 day\')', [etDateString(), days]);
         });
@@ -2575,8 +2575,8 @@ router.get('/', async (req, res, next) => {
       'customers.*',
       // Completed visits (days) only, like the customer-detail visitStats: an
       // incomplete record is not a visit and not the customer's last visit.
-      db.raw("(SELECT COUNT(DISTINCT service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_records.status = 'completed') as services_count"),
-      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_records.status = 'completed') as last_service_date"),
+      db.raw("(SELECT COUNT(DISTINCT service_date) FROM service_records WHERE service_records.customer_id = customers.id AND COALESCE(service_records.status, 'completed') = 'completed') as services_count"),
+      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND COALESCE(service_records.status, 'completed') = 'completed') as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= ? AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date", [etDateString()]),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
@@ -3556,7 +3556,8 @@ router.get('/:id', async (req, res, next) => {
       // not visits. A completed record per ET service day is one visit, over
       // the whole history (the `services` list above is capped at 20).
       db('service_records')
-        .where({ customer_id: c.id, status: 'completed' })
+        .where({ customer_id: c.id })
+        .whereRaw("COALESCE(service_records.status, 'completed') = 'completed'") // NULL = legacy completed
         .whereNotNull('service_date')
         .first(
           db.raw('COUNT(DISTINCT service_date)::int AS count'),
