@@ -495,12 +495,14 @@ async function evaluate(conn, run, { lock = false } = {}) {
     .where('t.employment_type', 'w2')
     .orderBy([{ column: 't.name' }, { column: 'w.technician_id' }])
     .select('w.technician_id', 'w.regular_minutes', 'w.overtime_minutes', 't.name', 't.pay_rate', 't.pay_method',
-      ...(payLinesOn() ? ['t.flsa_overtime_covered'] : []));
+      't.flsa_overtime_covered');
   if (lock) approvedQuery.forUpdate('w');
   const approved = await approvedQuery;
   const approvedIds = new Set(approved.map((row) => row.technician_id));
 
   const worked = (await workedTechnicianIds(conn, start, end)).filter((id) => !approvedIds.has(id));
+  // Technicians who get no check on this run because hours they worked are not approved yet.
+  const waitingIds = new Set(worked);
   const waitingRows = worked.length
     ? await conn('technicians').whereIn('id', worked).where({ employment_type: 'w2' }).orderBy('name').select('id', 'name')
     : [];
@@ -515,7 +517,6 @@ async function evaluate(conn, run, { lock = false } = {}) {
   let timeOffOnlyRows = [];
   if (timeOffOn()) {
     const timeOff = await timeOffByTechnician(conn, start, end);
-    const waitingIds = new Set(worked);
     withHours = workedRows.map((row) => {
       const off = timeOff.get(row.technician_id);
       return { ...row, pto_minutes: off ? off.pto : 0, holiday_minutes: off ? off.holiday : 0 };
@@ -525,7 +526,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
     if (offOnlyIds.length) {
       const techs = await conn('technicians').whereIn('id', offOnlyIds).where({ employment_type: 'w2' })
         .orderBy([{ column: 'name' }, { column: 'id' }])
-        .select('id', 'name', 'pay_rate', 'pay_method', ...(payLinesOn() ? ['flsa_overtime_covered'] : []));
+        .select('id', 'name', 'pay_rate', 'pay_method', 'flsa_overtime_covered');
       timeOffOnlyRows = techs.map((row) => ({
         technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
         flsa_overtime_covered: row.flsa_overtime_covered,
@@ -538,15 +539,13 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // with lines and no hours (one who has left too) gets a check for the lines alone,
   // unless their worked time is still waiting for approval.
   const lineMap = payLinesOn() ? await openLinesFor(conn, end, { lock }) : new Map();
-  const priced = lineMap.size ? await priceLines(conn, lineMap, { lock }) : new Map();
+  const priced = await priceLines(conn, lineMap, { lock });
   const haveCheck = new Set([...withHours, ...timeOffOnlyRows].map((row) => row.technician_id));
-  const waitingTechIds = new Set(worked);
   // A line that covers an earlier week whose worked time is not approved yet cannot be
   // priced: the technician waits, and gets no check on this run until that week is approved.
-  const lineWait = priced.size ? await lineWeeksWaiting(conn, priced) : new Map();
-  for (const [technicianId, week] of lineWait) {
-    if (waitingTechIds.has(technicianId)) continue;
-    waitingTechIds.add(technicianId);
+  for (const [technicianId, week] of await lineWeeksWaiting(conn, priced)) {
+    if (waitingIds.has(technicianId)) continue;
+    waitingIds.add(technicianId);
     waiting.push({
       technicianId,
       name: lineMap.get(technicianId).tech.name,
@@ -554,9 +553,10 @@ async function evaluate(conn, run, { lock = false } = {}) {
     });
   }
   const linesOnlyRows = [...lineMap.values()]
-    .filter(({ tech }) => !haveCheck.has(tech.technician_id) && !waitingTechIds.has(tech.technician_id))
+    .filter(({ tech }) => !haveCheck.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
-  const ytd = await ytdBefore(conn, [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].map((row) => row.technician_id), run.pay_date, start);
+  const payable = [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id));
+  const ytd = await ytdBefore(conn, payable.map((row) => row.technician_id), run.pay_date, start);
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
   // cannot be paid yet. Minutes are not changed; the line is only held.
@@ -570,24 +570,21 @@ async function evaluate(conn, run, { lock = false } = {}) {
       .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
       .distinct('technician_id')).map((row) => row.technician_id))
     : new Set();
-  // The same hold for every earlier week a pay line takes its overtime from.
-  const lineUnreviewed = shiftCloseReviewLive() && priced.size ? await lineWeeksUnreviewed(conn, priced) : new Map();
+  // The same hold for every earlier week a pay line takes its overtime from. One reason
+  // per technician; the run's own week comes last, so its reason wins.
+  const lineUnreviewed = shiftCloseReviewLive() ? await lineWeeksUnreviewed(conn, priced) : new Map();
+  const holds = new Map([
+    ...[...lineUnreviewed].map(([id, week]) => [id, `${AUTO_CLOSE_BLOCK_REASON} in the week of ${week}, which a pay line covers`]),
+    ...[...unreviewed].map((id) => [id, AUTO_CLOSE_BLOCK_REASON]),
+  ]);
   const checks = [];
   const blocked = [];
-  for (const row of [...withHours, ...timeOffOnlyRows, ...linesOnlyRows]) {
-    if (lineWait.has(row.technician_id)) continue;
+  for (const row of payable) {
     const held = lineMap.get(row.technician_id);
     const tech = held ? { ...row, pay_lines: held.lines, line_premium: priced.get(row.technician_id) } : row;
-    if (unreviewed.has(tech.technician_id)) {
-      blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: AUTO_CLOSE_BLOCK_REASON });
-      continue;
-    }
-    if (lineUnreviewed.has(tech.technician_id)) {
-      blocked.push({
-        technicianId: tech.technician_id,
-        name: tech.name,
-        reason: `${AUTO_CLOSE_BLOCK_REASON} in the week of ${lineUnreviewed.get(tech.technician_id)}, which a pay line covers`,
-      });
+    const hold = holds.get(tech.technician_id);
+    if (hold) {
+      blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: hold });
       continue;
     }
     const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
