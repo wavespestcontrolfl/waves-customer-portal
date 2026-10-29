@@ -21064,6 +21064,16 @@ function findInitialRoachItem(_pestTiers, estData) {
   return null;
 }
 
+// Dead Rodent Removal & Odor Treatment rows carry the sold access tier and its on-site minutes (the booking's
+// duration floor) in two shapes: the legacy mapper's (deadAnimalTier, onSiteMinutes) and the raw engine line
+// item's (tier, durationMin), which is what an estimate whose only container is engineResult holds. Both are read.
+const DEAD_ANIMAL_TIERS = new Set(['reachable', 'attic', 'in_wall']);
+function deadAnimalBreakdownFields(item) {
+  const tier = [item.deadAnimalTier, item.tier].find((value) => DEAD_ANIMAL_TIERS.has(value)) || null;
+  const minutes = Number(item.onSiteMinutes ?? item.durationMin);
+  return { deadAnimalTier: tier, onSiteMinutes: minutes > 0 ? minutes : null };
+}
+
 function normalizeOneTimeBreakdown(estData) {
   // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
   const result = storedEstimateContainer(estData);
@@ -21165,10 +21175,7 @@ function normalizeOneTimeBreakdown(estData) {
           includedCallbacks: item.includedCallbacks ?? null,
           unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
         } : {}),
-        ...(service === 'rodent_dead_animal_removal' ? {
-          deadAnimalTier: item.deadAnimalTier || null,
-          onSiteMinutes: Number(item.onSiteMinutes) > 0 ? Number(item.onSiteMinutes) : null,
-        } : {}),
+        ...(service === 'rodent_dead_animal_removal' ? deadAnimalBreakdownFields(item) : {}),
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
@@ -28876,11 +28883,12 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // boundary keeps the review lane server-side. Quote-required items keep the
 // full set: quoteRequiredReasonCandidates humanizes them into the customer's
 // reason note (client lib quoteDisplay.js).
-// onSiteMinutes (area add-on rows) is the engine's internal labor estimate: the
-// booking path reads it from the unsanitized breakdown, the customer never sees it.
+// onSiteMinutes (area add-on and Dead Rodent Removal rows) is the engine's internal labor estimate: the
+// booking path reads it from the unsanitized breakdown, the customer never sees it. deadAnimalTier (a Dead
+// Rodent Removal row's access tier) is internal the same way.
 // pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
 // them from the stored estimate); the customer never sees them either.
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs'];
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs', 'deadAnimalTier'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {

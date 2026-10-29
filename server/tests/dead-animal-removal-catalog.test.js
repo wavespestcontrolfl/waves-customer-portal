@@ -347,6 +347,37 @@ describe('the sold line through the stored estimate: identity, copy and the slot
       process.env.GATE_DEAD_ANIMAL_REMOVAL = 'true';
     }
   });
+
+  test('an estimate whose only container is the raw engine result keeps the tier and its minutes (tier, durationMin)', () => {
+    const engineResult = generateEstimate(translateV2CallToV1Input(HOME, ['RODENT_DEAD_ANIMAL'], { deadAnimalAccess: 'attic' }));
+    const row = estimatePublic.normalizeOneTimeBreakdown({ engineResult }).items.find((i) => i.service === KEY);
+    expect(row).toMatchObject({ amount: 269, deadAnimalTier: 'attic', onSiteMinutes: 90 });
+    const profile = availability._internals.oneTimeProfileServices({ id: 'est-raw', pricing_authority: null }, { engineResult });
+    expect(profile.find((s) => s.engineKey === KEY)).toMatchObject({ durationMinutes: 90 });
+  });
+
+  test('the public breakdown never carries the access tier or the on-site minutes', () => {
+    const items = estimatePublic.normalizeOneTimeBreakdown({ result: storedResult('attic') }).items;
+    const row = estimatePublic.sanitizePublicOneTimeBreakdown({ items }).items.find((i) => i.service === KEY);
+    expect(row).toMatchObject({ amount: 269 });
+    expect(row).not.toHaveProperty('deadAnimalTier');
+    expect(row).not.toHaveProperty('onSiteMinutes');
+  });
+
+  test.each([
+    ['attic', 90],
+    ['reachable', 60],
+  ])('with the scheduling-capacity gate off, a %s removal books at least its on-site minutes (%i)', (tier, minutes) => {
+    const prior = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'false';
+    try {
+      const estimate = { id: `est-slot-${tier}`, pricing_authority: null, estimate_data: JSON.stringify({ result: storedResult(tier) }) };
+      expect(availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' }).durationMinutes).toBe(minutes);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = prior;
+    }
+  });
 });
 
 describe('customer estimate copy', () => {

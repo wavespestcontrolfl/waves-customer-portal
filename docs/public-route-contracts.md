@@ -5779,6 +5779,11 @@ and rodent-trapping rows may carry the sold allowance used to render that
 copy: `includedFollowUps` / `includedCallbacks` (number, `'unlimited'`, or
 null), `unlimitedCallbacks` (boolean or null), and `includedScope` (string or
 null). These are terms from the saved pricing snapshot, not live job counts.
+Dead Rodent Removal & Odor Treatment rows (`rodent_dead_animal_removal`, dark behind
+`GATE_DEAD_ANIMAL_REMOVAL`) never carry `deadAnimalTier` or `onSiteMinutes`: the sold access
+tier and its on-site minutes stay in the unsanitized breakdown the booking path reads
+(`sanitizePublicOneTimeBreakdown` strips both), and the row shows its label, price and copy like
+the other rodent one-time rows.
 A one-time-ONLY estimate whose billable rows all resolve to one copy
 pack may carry `pricing.oneTimeServiceCopy` — `{ key, hero: { eyebrow, h1,
 sub }, aiTitle?, aiBody?, askChips[] }` (hero strings keep `{first}`/`{city}`
