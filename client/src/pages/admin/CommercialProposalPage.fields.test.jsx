@@ -19,7 +19,7 @@ const makeFixture = ({ programs } = {}) => ({
   suggestedTaxSource: 'Manatee County',
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office' },
   proposal: {
-    enabled: true, title: 'Synthetic proposal', taxRate: 0.07,
+    enabled: true, buildingUse: 'nonresidential', title: 'Synthetic proposal', taxRate: 0.07,
     buildings: programs ? [] : [{ name: 'Office', lineItems: [{ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable: false }] }],
     ...(programs ? { programs } : {}),
   },

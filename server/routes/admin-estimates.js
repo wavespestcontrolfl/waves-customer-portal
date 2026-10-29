@@ -4734,6 +4734,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
       }
     }
+    // Building use (owner 2026-10-28): residential, nonresidential or unset. An unknown value gets a 400 rather than
+    // a silent drop, since it decides which rows the builder taxes.
+    if (incoming.buildingUse != null && String(incoming.buildingUse).trim() !== ''
+      && require('../services/estimate-proposal').normalizeBuildingUse(incoming.buildingUse) === null) {
+      return res.status(400).json({ error: 'Building use must be residential or nonresidential.' });
+    }
     // Present-but-invalid term numbers get a 400, not a silent normalize:
     // cleanBoundedInt rounds fractions and drops out-of-range values, so
     // without this the operator could see "1.5" or "61" months while the

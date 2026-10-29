@@ -9,10 +9,11 @@ import CommercialProposalPage from './CommercialProposalPage';
 // The tax rate is a SUGGESTION from GET /proposal (suggestedTaxRate + suggestedTaxSource, the server's canonical
 // county/exemption resolver). It shows as a read-only chip with its source and fills a zero rate when something
 // taxable exists. Override, a saved rate that differs, or a failed lookup opens the box; operator input and locked
-// proposals always win. Rows the operator adds start Taxable by their service's rule (the served family registry).
+// proposals always win. Rows the operator adds follow the building use: a business building starts each on its
+// service's rule (the served family registry); a residential community, or no pick yet, starts them not taxable.
 const line = (taxable) => ({ description: 'Monthly service', quantity: 1, unitPrice: 116.3, frequency: 'monthly', taxable });
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
-const makeFixture = ({ taxable = false, taxRate = 0, suggestedTaxRate = 0.07, suggestedTaxSource = 'Manatee County', status = 'draft', programs } = {}) => ({
+const makeFixture = ({ taxable = false, taxRate = 0, suggestedTaxRate = 0.07, suggestedTaxSource = 'Manatee County', status = 'draft', programs, buildings, buildingUse = 'nonresidential' } = {}) => ({
   bidToolsEnabled: true,
   suggestedTaxRate,
   suggestedTaxSource,
@@ -20,17 +21,19 @@ const makeFixture = ({ taxable = false, taxRate = 0, suggestedTaxRate = 0.07, su
   estimate: { id: 'synthetic-proposal', status, editVersion: 'loaded-version', customerName: 'Synthetic Office' },
   proposal: {
     enabled: true, title: 'Synthetic proposal', taxRate,
-    buildings: programs ? [] : [{ name: 'Office', lineItems: [line(taxable)] }],
+    ...(buildingUse ? { buildingUse } : {}),
+    buildings: buildings || (programs ? [] : [{ name: 'Office', lineItems: [line(taxable)] }]),
     ...(programs ? { programs } : {}),
   },
 });
-let fixture; let puts;
+let fixture; let puts; let generatedDraft;
 beforeEach(() => {
-  puts = [];
+  puts = []; generatedDraft = null;
   localStorage.setItem('waves_admin_token', 'synthetic-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     if (options.method === 'PUT') puts.push(JSON.parse(options.body));
-    return { ok: true, status: 200, json: async () => structuredClone(fixture), clone() { return this; } };
+    const data = String(url).endsWith('/proposal/generated') ? { draft: generatedDraft } : fixture;
+    return { ok: true, status: 200, json: async () => structuredClone(data), clone() { return this; } };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
@@ -117,7 +120,7 @@ it('with no county lookup, the box shows and says the rate must be entered', asy
   expect(screen.getByText('The county rate could not be looked up. Enter the rate.')).toBeInTheDocument();
 });
 
-// Owner 2026-10-28 builder scope: a row the operator adds starts Taxable by its service's rule; saved rows keep theirs.
+// A business building (the fixture's pick): a row the operator adds starts on its service's rule; saved rows keep theirs.
 it('a line the operator adds starts Taxable by the rule, and the rate fills; the saved line keeps its switch', async () => {
   await mount({ taxable: false });
   fireEvent.click(screen.getByRole('button', { name: 'Add line item' }));
@@ -146,4 +149,62 @@ it('a program the operator adds follows its service until its switch is touched;
   expect(added()).toHaveAttribute('aria-checked', 'false');
   fireEvent.change(screen.getAllByLabelText('Service family')[0], { target: { value: 'other' } });
   expect(screen.getAllByRole('switch', { name: 'Taxable program' })[0]).toHaveAttribute('aria-checked', 'false');
+});
+
+// Owner 2026-10-28 proposal defaults check: Florida does not tax pest work at homes and their common areas (Rule
+// 12A-1.009), so the building use is picked before saving and sets each row's Taxable switch.
+const useSelect = () => screen.getByLabelText('Building use');
+const lineSwitches = () => screen.getAllByRole('switch', { name: 'Taxable line' }).map((s) => s.getAttribute('aria-checked'));
+
+it('with no building use picked, a row the operator adds starts not taxable and Save asks for the pick', async () => {
+  await mount({ buildingUse: null });
+  expect(useSelect()).toHaveValue('');
+  expect(screen.getByText('Pick before saving. It sets which rows carry sales tax.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add line item' }));
+  expect(lineSwitches()).toEqual(['false', 'false']);
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  expect(await screen.findByText(/Pick the building use before saving/)).toBeInTheDocument();
+  expect(puts).toHaveLength(0);
+});
+
+it('Residential turns every row off and Business puts each back; the pick saves with the proposal', async () => {
+  await mount({ buildingUse: null, taxable: true });
+  fireEvent.click(screen.getByRole('button', { name: 'Add line item' }));
+  // Not picked yet: the saved line keeps its switch, the added one starts off.
+  expect(lineSwitches()).toEqual(['true', 'false']);
+  fireEvent.change(useSelect(), { target: { value: 'residential' } });
+  expect(lineSwitches()).toEqual(['false', 'false']);
+  expect(screen.getByText('Homes, apartments, condos and HOA common areas. Florida does not tax pest work here.')).toBeInTheDocument();
+  expect(screen.queryByText(TAX_ROW)).not.toBeInTheDocument();
+  fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
+  expect(lineSwitches()).toEqual(['true', 'true']);
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await waitFor(() => expect(puts).toHaveLength(1));
+  expect(puts[0].proposal.buildingUse).toBe('nonresidential');
+  // The added line has no description, so only the saved line saves; the kept flag never does.
+  expect(puts[0].proposal.buildings[0].lineItems).toHaveLength(1);
+  expect(puts[0].proposal.buildings[0].lineItems[0]).toMatchObject({ taxable: true });
+  expect(puts[0].proposal.buildings[0].lineItems[0]).not.toHaveProperty('bizTaxable');
+});
+
+it('a proposal saved as residential puts each program on its service rule when switched to Business', async () => {
+  await mount({ buildingUse: 'residential', programs: [
+    { id: 'pest-program', service: 'pest', label: 'Pest program', frequencyPerYear: 4, pricePerApplication: 100, taxable: false },
+    { id: 'lawn-program', service: 'lawn', label: 'Lawn program', frequencyPerYear: 12, pricePerApplication: 50, taxable: false },
+  ] });
+  const programSwitches = () => screen.getAllByRole('switch', { name: 'Taxable program' }).map((s) => s.getAttribute('aria-checked'));
+  expect(useSelect()).toHaveValue('residential');
+  expect(programSwitches()).toEqual(['false', 'false']);
+  fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
+  expect(programSwitches()).toEqual(['true', 'false']);
+});
+
+it('rows that Generate from estimate installs follow the pick, and Business restores the server rule', async () => {
+  generatedDraft = { programs: [{ service: 'pest', label: 'Quarterly pest program', frequencyPerYear: 4, pricePerApplication: 100, taxable: true, inclusions: [], exclusions: [] }] };
+  await mount({ buildingUse: 'residential', buildings: [] });
+  fireEvent.click(screen.getByRole('button', { name: /Generate from estimate/ }));
+  const program = async () => (await screen.findAllByRole('switch', { name: 'Taxable program' }))[0];
+  expect(await program()).toHaveAttribute('aria-checked', 'false');
+  fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
+  expect(await program()).toHaveAttribute('aria-checked', 'true');
 });
