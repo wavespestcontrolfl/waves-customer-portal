@@ -509,4 +509,21 @@ describe('a 9x rounds visit takes the step of its round on the tank sheet', () =
     expect(itemFor(before, F24).jobMix.ratePer1000).toBeCloseTo(4.1667, 3);
     expect(codes(before)).not.toContain('lawn_rounds_north_port_nitrogen');
   });
+
+  test('North Port, round 2 on Feb 20 and Mar 10: the April Dimension row\'s stored northPortBlocked gate gives no note (the ban starts Apr 1); a legacy 9x April visit still gets it', async () => {
+    operatingLayer.summarizeProtocolContext.mockReturnValue({
+      ...V13_SUMMARY, products: V13_SUMMARY.products.map((row) => (row.productId === 'dim' ? { ...row, gates: { northPortBlocked: true } } : row)),
+    });
+    const noteKeys = (body) => (itemFor(body, DIMENSION).gateNotes || []).map((note) => note.key);
+    for (const date of ['2027-02-20', '2027-03-10']) {
+      visitRows = [visit(date, { service_address_city: 'North Port' })];
+      const body = await lawnMix({ month: '2', track: 'st_augustine', scheduledServiceId: VISIT });
+      expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
+      expect(noteKeys(body)).not.toContain('northPortBlocked');
+      expect(JSON.stringify(body.warnings)).not.toMatch(/Not allowed in North Port/);
+    }
+    visitRows = [visit('2027-04-09', { service_address_city: 'North Port', recurring_pattern: 'custom', recurring_interval_days: 42 })];
+    const legacy = await lawnMix({ month: '4', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(noteKeys(legacy)).toContain('northPortBlocked');
+  });
 });

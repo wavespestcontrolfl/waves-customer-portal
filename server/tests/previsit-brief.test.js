@@ -873,6 +873,16 @@ describe('lawn bounded product section', () => {
       }
     });
 
+    test('the stored northPortBlocked gate (the April month\'s) is left off a rounds visit dated before Apr 1 and kept inside the ban', async () => {
+      const april = { ...febWindow({ ...STORED }), window: { key: 'apr_v13_spreader_feeding', month: 4, title: 'April', visitType: 'granular', goal: 'g' } };
+      april.products[0] = { ...april.products[0], gates: { targetN: '0.5 lb N/1000', northPortBlocked: true } };
+      const gatesOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === F24).gates;
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20' }, april))).not.toHaveProperty('northPortBlocked');
+      // A 12x or legacy visit keeps the stored gate whatever the date.
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20', recurring_pattern: 'monthly' }, april))).toHaveProperty('northPortBlocked', true);
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-04-05', recurring_pattern: 'lawn_rounds_9' }, april))).toHaveProperty('northPortBlocked', true);
+    });
+
     test('North Port, round 3 on Apr 5: the 24-0-11 is a hold with the ban text and no dose; on Mar 25 it is guidance', async () => {
       const held = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'North Port' });
       expect(held.held_products).toHaveLength(1);

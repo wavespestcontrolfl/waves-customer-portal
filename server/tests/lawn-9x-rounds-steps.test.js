@@ -268,7 +268,8 @@ function protocolTables(track = 'st_augustine') {
     row(3, NAMES.NT, { default_in_plan: true, rate_per_1000: 6, rate_unit: 'fl oz', carrier_gal_per_1000: 1 }),
     ...weedMix(3),
     // April: the 12x polymer bag is not in the fixture; the 9x Dimension row and spots are.
-    row(4, NAMES.DIM, { role: 'nutrition', default_in_plan: true, rate_unit: 'lb_n', gates: { targetN: '0.5 lb N/1000', planVisitsPerYear: 9 } }),
+    // The stored gate is the April month's (North Port bans N and P Apr 1 to Sep 30), copied onto the 9x Dimension row.
+    row(4, NAMES.DIM, { role: 'nutrition', default_in_plan: true, rate_unit: 'lb_n', gates: { targetN: '0.5 lb N/1000', planVisitsPerYear: 9, northPortBlocked: true } }),
     row(4, NAMES.ART, { role: 'fungicide_spot', application_mode: 'spot', rate_unit: 'label_rate', gates: { trigger: 'mapped_take_all_spring_2' }, sort_order: 20 }),
     row(8, NAMES.NT, { default_in_plan: true, rate_per_1000: 12, rate_unit: 'fl oz', carrier_gal_per_1000: 1, gates: { requiresZeroNP: true } }),
     row(8, NAMES.K20, { role: 'potassium', default_in_plan: true, rate_per_1000: 5, rate_unit: 'fl oz', carrier_gal_per_1000: 1, gates: { requiresZeroNP: true, northPortProductWindow: true } }),
@@ -556,6 +557,36 @@ describe('North Port holds the round-3 nitrogen bag from April 1', () => {
   test('a 12x visit in North Port on Apr 5 is not touched by the rounds hold (April is its own step)', async () => {
     const plan = await planFor({ date: '2027-04-05', city: 'North Port', pattern: 'monthly' });
     expect(plan.propertyGate.warnings.find((w) => w.code === 'lawn_rounds_north_port_nitrogen')).toBeUndefined();
+  });
+
+  const notesOf = (plan, name) => (itemFor(plan, name).gateNotes || []).map((note) => note.key);
+
+  test.each(['2027-02-20', '2027-03-10'])('North Port, round 2 on %s: the Dimension bag is planned with NO North Port note (the ban starts Apr 1)', async (date) => {
+    const plan = await planFor({ date, city: 'North Port' });
+    const bag = itemFor(plan, NAMES.DIM);
+    expect(bag.selected).toBe(true);
+    expect(bag.mix.ratePer1000).toBeCloseTo(2.78, 2);
+    expect(notesOf(plan, NAMES.DIM)).not.toContain('northPortBlocked');
+    expect(plan.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_rounds_north_port_nitrogen');
+    expect(JSON.stringify(plan.propertyGate.warnings)).not.toMatch(/Not allowed in North Port/);
+  });
+
+  test('a legacy 9x (custom 42 days) North Port visit on Apr 9 keeps the stored gate note, as before', async () => {
+    const plan = await planFor({ date: '2027-04-09', city: 'North Port', pattern: 'custom', interval: 42 });
+    expect(notesOf(plan, NAMES.DIM)).toContain('northPortBlocked');
+  });
+
+  test('the ban test is one helper: the stored-gate note and the round-3 hold read the same months', () => {
+    for (let month = 1; month <= 12; month += 1) {
+      const inBan = month >= 4 && month <= 9;
+      expect(engine.northPortNpBanMonth(month)).toBe(inBan);
+      expect(engine.v13GateNotes({ northPortBlocked: true }, { municipality: 'North Port', monthNumber: 4, realMonthNumber: month }).length).toBe(inBan ? 1 : 0);
+      expect(engine.roundsNitrogenHold({ round: 3, realMonth: month }, 'North Port')).toBe(inBan);
+    }
+    // No real month (not a rounds visit): the stored gate fires for North Port in any month, and never elsewhere.
+    expect(engine.v13GateNotes({ northPortBlocked: true }, { municipality: 'North Port', monthNumber: 2 })).toHaveLength(1);
+    expect(engine.v13GateNotes({ northPortBlocked: true }, { municipality: 'Sarasota', monthNumber: 5, realMonthNumber: 5 })).toEqual([]);
+    expect(engine.roundsNitrogenHold({ round: 2, realMonth: 5 }, 'North Port')).toBe(false);
   });
 
   test('Dismiss novToMarOnly follows the REAL date on a rounds visit', () => {

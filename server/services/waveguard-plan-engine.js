@@ -621,13 +621,18 @@ function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
 // production mode. Keys not in the table carry no field text. Order is display order.
 const NOV_TO_MAR = (month) => month > 3 && month < 11;
 const isNorthPort = (municipality) => /north\s*port/i.test(String(municipality || ''));
+// North Port bans nitrogen and phosphorus from April 1 to September 30: is this calendar month (1-12) inside that span? The ONE test for
+// the stored northPortBlocked note of a rounds visit and for the round-3 nitrogen hold (roundsNitrogenHold), so the two never disagree.
+const northPortNpBanMonth = (month) => Number(month) >= 4 && Number(month) <= 9;
 const V13_GATE_NOTES = [
   { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
   { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
   // A rounds visit judges the weed and spot rule by the real date (`spotMonthNumber`); every other visit by the service month.
   { key: 'novToMarOnly', required: true, when: (ctx) => (ctx.spotMonthNumber ?? ctx.monthNumber) != null && NOV_TO_MAR(ctx.spotMonthNumber ?? ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
-  { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
+  // The stored gate was written for the step's own month (North Port bans N and P Apr 1 to Sep 30). A rounds visit can read a step of
+  // another season (round 2 reads April's Dimension row in Feb and Mar), so it judges the ban by the REAL date (`realMonthNumber`).
+  { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality) && (ctx.realMonthNumber == null || northPortNpBanMonth(ctx.realMonthNumber)), text: () => 'Not allowed in North Port this month; skip this product.' },
   { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
   { key: 'ownPass', text: () => 'Apply as its own spreader pass: do not blend with the month\'s granular or any other product.' },
@@ -2056,7 +2061,7 @@ function v13NorthPortHold(row, municipality) {
 const NORTH_PORT_ROUNDS_N_REASON = 'north_port_rounds_nitrogen';
 const holdsRoundsNitrogen = (item, product = item?.product) => item?.role === 'base' && Number(product?.analysis_n) > 0;
 function roundsNitrogenHold(routing, municipality) {
-  return !!routing && routing.round === 3 && routing.realMonth >= 4 && isNorthPort(municipality);
+  return !!routing && routing.round === 3 && northPortNpBanMonth(routing.realMonth) && isNorthPort(municipality);
 }
 
 // The rounds routing of a booked visit: its round's step month and variant, and the month its weed and spot rows come from (the real
@@ -2532,7 +2537,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const gateContext = {
     monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
     // A rounds visit: the weed and spot rules (Dismiss, November to March) are judged by the real date, not the step month.
-    ...(rounds ? { spotMonthNumber: rounds.spotMonth } : {}),
+    ...(rounds ? { spotMonthNumber: rounds.spotMonth, realMonthNumber: rounds.realMonth } : {}),
     ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}),
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
@@ -2915,6 +2920,7 @@ module.exports = {
   holdNorthPortProducts,
   roundRouting,
   roundsNitrogenHold,
+  northPortNpBanMonth,
   lawnV13InactiveProductNotices,
   v13NorthPortHold,
   loadVisitCity,

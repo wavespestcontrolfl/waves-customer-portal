@@ -416,6 +416,19 @@ function statedRoundsNitrogen(entries, rounds, trackKey) {
   }
 }
 
+// The stored gate northPortBlocked ("not allowed in North Port this month") was written for the step's own month (the ban runs Apr 1 to
+// Sep 30). A rounds visit can read a step of another season (round 2 reads April's Dimension row in Feb and Mar), so the brief leaves
+// the key off while the REAL date is outside the ban, as the plan's note does (v13GateNotes). Every other visit: the entries as they are.
+function withoutOffSeasonNorthPortBlock(entries, rounds) {
+  if (!rounds || require('./waveguard-plan-engine').northPortNpBanMonth(rounds.realMonth)) return;
+  for (const entry of entries) {
+    if (!('northPortBlocked' in entry.gates)) continue;
+    const rest = { ...entry.gates };
+    delete rest.northPortBlocked;
+    entry.gates = rest;
+  }
+}
+
 // GATE_LAWN_DEC_LARGE_PATCH_K: for a visit where the plan swaps the whole-lawn bag (waveguard-plan-engine troubleProductSwap, the plan's
 // own decision) the brief says the swapped product replaces the normal bag, so the pocket reference agrees with the plan. Gate off, not
 // v13 or no swap: the entries are left as they are (no read). Strict, like projectFungusNitrogenCut.
@@ -584,6 +597,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       }))
       .filter((p) => p.shapedEntry.name);
     statedRoundsNitrogen(shaped, rounds, grass.trackKey);
+    withoutOffSeasonNorthPortBlock(shaped, rounds);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);
     await projectChinchTetrinoRate(dbh, svc, shaped, summary);

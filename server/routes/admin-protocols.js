@@ -1050,6 +1050,29 @@ function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment
   return seesPricing ? payload : deepStripPriceTokens(payload);
 }
 
+// A 9x rounds visit on the tank sheet (lib: waveguard-plan-engine roundRouting; null for every other visit, which these leave as they were):
+// the month of the appointment's own date (what Bermuda removal reads), the round's program recipe, the gate-context fields and the staged
+// rows (the round window's, with the weed rows of the real date's window and Bermuda removal's step rows of the appointment month's window).
+const roundsAppointmentMonth = (rounds, month) => (rounds ? MONTH_ABBR[rounds.realMonth - 1] : month);
+function roundsRecipe(rounds, track, month, recipeVisit) {
+  if (!rounds) return { month, recipeVisit };
+  const stepMonth = MONTH_ABBR[rounds.month - 1];
+  return { month: stepMonth, recipeVisit: track.visits?.find((v) => v.month === stepMonth) || recipeVisit };
+}
+const roundsGateContext = (rounds, holdRoundsNitrogen) => ({
+  ...(rounds ? { spotMonthNumber: rounds.spotMonth, realMonthNumber: rounds.realMonth } : {}),
+  ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}),
+});
+async function loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions, stepActive }) {
+  if (!rounds) return loadV13RowsForMonth(db, trackKey, month, rowOptions);
+  const rows = await loadV13RowsForMonth(db, trackKey, month, { ...rowOptions, spotMonth: rounds.spotMonth });
+  if (!stepActive || appointmentMonth === month) return rows;
+  // Round 3 in April reads February's window: the step's rows are the APPOINTMENT month's window's, in place of the round window's own
+  // step rows (as the plan reads them, withStepProducts).
+  const stepRows = [...new Set((await loadV13RowsForMonth(db, trackKey, appointmentMonth, rowOptions)).values())].filter(bermudaRemoval.isStepRow);
+  return bermudaRemoval.rowsByProduct(bermudaRemoval.withStepProducts([...new Set(rows.values())], stepRows));
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
@@ -1067,10 +1090,10 @@ router.get('/lawn-mix', async (req, res, next) => {
     // A visit on a 9x rounds series (scheduledServiceId) takes the step of its ROUND whatever month the client sent (the schedule page
     // sends the calendar month): the sheet reads the round's step and its rows, with the weed and spot rows of the real date.
     const rounds = roundRouting(scheduled, trackKey);
-    if (rounds) {
-      month = MONTH_ABBR[rounds.month - 1];
-      recipeVisit = track.visits?.find((v) => v.month === month) || recipeVisit;
-    }
+    // The appointment's own month (real date) is kept apart for the flows that follow the date, Bermuda removal's eligibility and its
+    // rows: only the program recipe uses the round's month.
+    const appointmentMonth = roundsAppointmentMonth(rounds, month);
+    ({ month, recipeVisit } = roundsRecipe(rounds, track, month, recipeVisit));
     const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear, { track, trackKey });
     // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
     // with the cut nitrogen or the swapped bag stated, so the line text, the objective and the amount agree. Only a visit the planner would also
@@ -1088,9 +1111,9 @@ router.get('/lawn-mix', async (req, res, next) => {
     // one projection (lawn-bermuda-removal.js openStep) shared with the plan and the
     // completion actions; off, every part of it is a no-op and the sheet is the old one.
     const bermuda = await bermudaRemoval.openStep(db, {
-      loadVisit: async () => scheduled, trackKey, month,
+      loadVisit: async () => scheduled, trackKey, month: appointmentMonth,
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
-      loadRows: (options) => loadV13RowsForMonth(db, trackKey, month, options),
+      loadRows: (options) => loadV13RowsForMonth(db, trackKey, appointmentMonth, options),
       probeLimits: (probe) => v13VisitLimits(db, scheduled, probe, v13Rows),
       productOf: (id) => products.find((p) => String(p.id) === String(id)) || null,
     });
@@ -1113,7 +1136,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     let v13Rows;
     try {
       // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
-      v13Rows = chinchRateRows(await loadV13RowsForMonth(db, trackKey, month, rounds ? { ...bermuda.rowOptions, spotMonth: rounds.spotMonth } : bermuda.rowOptions), chinchRate ?? null);
+      v13Rows = chinchRateRows(await loadSheetRows(trackKey, month, { rounds, appointmentMonth, rowOptions: bermuda.rowOptions, stepActive: bermuda.info.active }), chinchRate ?? null);
     } catch (err) {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
@@ -1125,7 +1148,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     const holdRoundsNitrogen = roundsNitrogenHold(rounds, municipality);
     let resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
     const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
-    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...(rounds ? { spotMonthNumber: rounds.spotMonth } : {}), ...(holdRoundsNitrogen ? { holdRoundsNitrogen: true } : {}), municipality };
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...roundsGateContext(rounds, holdRoundsNitrogen), municipality };
     const areaContext = {
       plan: req.query.plan,
       weedPressure: req.query.weedPressure,
@@ -1260,6 +1283,8 @@ router.get('/completion-actions', async (req, res, next) => {
     let visit;
     let track = null;
     let month = null;
+    // The appointment's own month (real date): Bermuda removal's eligibility and rows follow it, not the round's recipe month.
+    let appointmentMonth = null;
 
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
@@ -1274,6 +1299,7 @@ router.get('/completion-actions', async (req, res, next) => {
       track = await bermudaRemoval.trackForVisit(db, visitOnce, lawnTrackFromInput(lawnInputs.find(Boolean)));
       program = lawnProtocols()?.[track];
       month = monthAbbr(req.query.month);
+      appointmentMonth = month;
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
       // A visit on a 9x rounds series (scheduledServiceId) takes the step of its ROUND, with the round's variant (April's 9x bag, February's
       // 1.0 lb N bag) and the real date's weed and spot lines: the chips state what the plan and the tank sheet state. Every other visit
@@ -1282,6 +1308,7 @@ router.get('/completion-actions', async (req, res, next) => {
       const rounds = roundRouting(roundsVisit, track);
       if (rounds) {
         month = MONTH_ABBR[rounds.month - 1];
+        appointmentMonth = MONTH_ABBR[rounds.realMonth - 1];
         const stepVisit = program?.visits?.find((v) => v.month === month) || visit;
         ({ visit } = stepVisit ? await visitForPlan(db, stepVisit, roundsVisit, null, { track: program, trackKey: track }) : { visit });
       }
@@ -1313,9 +1340,9 @@ router.get('/completion-actions', async (req, res, next) => {
     // (with a warning). Off, every part of it is a no-op.
     const bermuda = await bermudaRemoval.openStep(db, {
       loadVisit: visitOnce,
-      trackKey: track, month,
+      trackKey: track, month: appointmentMonth ?? month,
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
-      loadRows: (options) => loadV13RowsForMonth(db, track, month, options),
+      loadRows: (options) => loadV13RowsForMonth(db, track, appointmentMonth ?? month, options),
       probeLimits: async (probe, rows) => v13VisitLimits(db, await visitOnce(), probe, rows || new Map()),
       productOf: (id) => serializeProtocolProduct(products.find((p) => String(p.id) === String(id)) || null),
       reportLimitWarnings: true,
