@@ -257,6 +257,39 @@ postgres('payroll commission ledger', () => {
       expect(await entries()).toHaveLength(3);
     });
 
+    it('counts the price top-up of a sold visit as the visit\'s: $50 primary + $47.20 top-up earns $9.72', async () => {
+      const { cust, est } = await soldWorld();
+      const v = await visit(cust, est);
+      const inv = await invoice(cust, {
+        subtotal: '97.20', scheduled_service_id: v,
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${v}_primary`, description: 'Pest control', amount: 50 },
+          { client_id: `scheduled_price_topup_${v}`, description: 'Scheduled price adjustment', amount: 47.2, category: null },
+        ]),
+      });
+      await payment(cust, inv, '2026-09-16', '97.20');
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(972);
+      expect((await entries()).map((e) => [e.share_own_cents, e.share_all_cents].map(Number))).toEqual([[9720, 9720]]);
+    });
+
+    it('takes a visit\'s scheduled price adjustment off that visit\'s lines only', async () => {
+      const { cust, est } = await soldWorld();
+      const sold = await visit(cust, est);
+      const other = await visit(cust, null);
+      // One invoice for two visits: the sold one at $100, another at $100 brought down $50 to its stamped price.
+      const inv = await invoice(cust, {
+        subtotal: '200.00', discount_amount: '50.00', total: '150.00', scheduled_service_id: sold,
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${sold}_primary`, description: 'Sold service', amount: 100 },
+          { client_id: `scheduled_${other}_primary`, description: 'Other service', amount: 100 },
+          { client_id: `discount_scheduled_price_${other}`, _kind: 'discount', discount_for: null, description: 'Scheduled price adjustment', amount: -50 },
+        ]),
+      });
+      await payment(cust, inv, '2026-09-16', '150.00');
+      // The sold visit is $100 of $150, not $75 (the $50 spread over the document).
+      expect(commissionOf((await draft(W1)).body.run, 'Sample Alpha')).toBe(1000);
+    });
+
     it('takes sales tax out of a commercial invoice', async () => {
       const { cust, est } = await soldWorld();
       const inv = await mintedInvoice(cust, est, { subtotal: '1000.00', tax_amount: '70.00' });
@@ -513,6 +546,34 @@ postgres('payroll commission ledger', () => {
       const [run] = await trx('payroll_runs').select('id');
       expect((await recompute(run.id)).status).toBe(200);
       expect((await sales())[0]).toMatchObject({ id: sale.id, technician_id: sale.technician_id });
+    });
+
+    it('lets a customer merge move a sale to the account that survives, and its revert move it back', async () => {
+      const { tech, cust, est } = await soldWorld();
+      const inv = await mintedInvoice(cust, est, { subtotal: '600.00', total: '600.00' });
+      await payment(cust, inv, '2026-09-16', '600.00');
+      await draft(W1);
+      const [sale] = await sales();
+      const survivor = await customer('Pat', 'Merged');
+      const attempt = (fn) => trx.transaction(fn).then(() => null, (err) => err);
+      // customer-dedupe.js executeMerge repoints every customer_id column; its revert repoints the same rows back.
+      const repoint = (from, to) => attempt(async (inner) => {
+        for (const table of ['commission_sales', 'estimates', 'invoices', 'payments']) {
+          await inner(table).where({ customer_id: from }).update({ customer_id: to });
+        }
+      });
+      expect(await repoint(cust, survivor)).toBeNull();
+      expect((await sales())[0]).toMatchObject({ id: sale.id, customer_id: survivor, technician_id: tech, estimate_id: est });
+      // The ledger follows the sale to the survivor: no payment is lost or counted twice.
+      const [run] = await trx('payroll_runs').select('id');
+      expect(commissionOf((await recompute(run.id)).body.run, 'Sample Alpha')).toBe(6000);
+      expect(await entries()).toHaveLength(1);
+      expect(await repoint(survivor, cust)).toBeNull();
+      expect((await sales())[0].customer_id).toBe(cust);
+      // Only the customer may move: a change of any other column with it is still refused.
+      expect((await attempt((inner) => inner('commission_sales').where({ id: sale.id })
+        .update({ customer_id: survivor, technician_id: tech, accepted_on: '2026-08-11' })))?.message)
+        .toMatch(/cannot be changed or deleted/);
     });
   });
 
@@ -839,6 +900,69 @@ postgres('payroll commission ledger', () => {
         description: 'Orphan discount', amount: -72,
       }], { discount_amount: '72.00', total: '768.00' });
       expect(await paidCommission(cust, inv, '768.00')).toBe(2194);
+    });
+  });
+
+  describe('a payer statement', () => {
+    // A NET-terms payer statement: settleStatementPaid writes ONE payments row for it (customer_id NULL, statement_id
+    // set) and marks its child invoices paid. Returns the statement id and a way to put an invoice on it.
+    const statementWorld = async () => {
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Property Group', payment_terms: 'net30' }).returning('id');
+      const [statement] = await trx('payer_statements').insert({
+        payer_id: idOf(payer), period_start: '2026-09-01', period_end: '2026-09-30', status: 'paid', terms_snapshot: 'net30',
+        token: randomUUID().replace(/-/g, ''), total: '400.00', subtotal: '400.00', invoice_count: 3,
+      }).returning('id');
+      const statementId = idOf(statement);
+      const child = (customerId, visitId, amount, patch = {}) => invoice(customerId, {
+        subtotal: amount, total: amount, status: 'paid', scheduled_service_id: visitId, payer_statement_id: statementId, ...patch,
+      });
+      const settle = (amount, patch = {}) => trx('payments').insert({
+        customer_id: null, payer_id: idOf(payer), statement_id: statementId, payment_date: '2026-09-16', amount, status: 'paid',
+        base_amount_cents: Math.round(Number(amount) * 100), description: `Payer statement S-${statementId} settlement (ach)`,
+        metadata: JSON.stringify({ statement_id: statementId, payer_id: idOf(payer), payment_method: 'ach', source: 'test' }),
+        ...patch,
+      }).returning('id').then(([row]) => idOf(row));
+      return { statementId, child, settle };
+    };
+
+    it('pays each sold invoice its part of the statement payment, and nothing for another home\'s invoice', async () => {
+      const { tech, cust, est } = await soldWorld();
+      const { child, settle } = await statementWorld();
+      const first = await child(cust, await visit(cust, est), '100.00');
+      const second = await child(cust, await visit(cust, est, { scheduled_date: '2026-09-03' }), '100.00');
+      const neighbor = await customer('Lee', 'Sample');
+      await child(neighbor, await visit(neighbor, null), '200.00');
+      const paid = await settle('400.00');
+
+      const created = await draft(W1);
+      expect(created.status).toBe(201);
+      // $100 + $100 of the $400 statement payment: $200 counts, $20 commission.
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(2000);
+      const rows = await trx('commission_entries').orderBy('invoice_id');
+      expect(rows.map((e) => [e.payment_id, e.invoice_id, e.technician_id])).toEqual(
+        [[paid, first, tech], [paid, second, tech]].sort((a, b) => (a[1] < b[1] ? -1 : 1)),
+      );
+      expect(rows.map((e) => [e.statement_part_cents, e.statement_total_cents, e.counted_cents].map(Number)))
+        .toEqual([[10000, 40000, 10000], [10000, 40000, 10000]]);
+      // A second sync never adds the same payment and invoice again.
+      expect((await recompute(created.body.run.id)).status).toBe(200);
+      expect(await entries()).toHaveLength(2);
+    });
+
+    it('spreads the statement payment over the invoices that are not void, and follows a refund of it', async () => {
+      const { cust, est } = await soldWorld();
+      const { child, settle } = await statementWorld();
+      await child(cust, await visit(cust, est), '100.00');
+      const neighbor = await customer('Lee', 'Sample');
+      await child(neighbor, await visit(neighbor, null), '300.00');
+      await child(neighbor, await visit(neighbor, null), '50.00', { status: 'void' });
+      const paid = await settle('400.00');
+      const created = await draft(W1);
+      expect(commissionOf(created.body.run, 'Sample Alpha')).toBe(1000);
+      // A quarter of the statement payment is refunded: each invoice loses its part of the refund.
+      await trx('payments').where({ id: paid }).update({ refund_amount: '100.00', refund_status: 'partial' });
+      expect(commissionOf((await recompute(created.body.run.id)).body.run, 'Sample Alpha')).toBe(750);
+      expect(Number((await entries())[0].refund_counted_cents)).toBe(10000);
     });
   });
 

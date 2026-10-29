@@ -34,17 +34,25 @@
  * rows with new ids, and a later edit of the visits or lines must not move money already counted or paid). A line
  * not yet counted is matched to a sold add-on by its row id, or by the pair (host visit in its client_id, service key)
  * of a current add-on row of the estimate, and invoices are searched by the add-on rows' host visits too, so an invoice
- * billed before a row was replaced and paid after is still found.
+ * billed before a row was replaced and paid after is still found. A sold visit's lines are its primary line and its
+ * scheduled price top-up (scheduled_price_topup_<visit>, invoice.js), which brings a stale primary price up to the fee.
  *
  * Discounts: an invoice line's value is its amount less its discounts (invoice.js negative lines). A discount_for
- * line comes off its parent line; any other negative line (document-wide, a referral or deposit credit, a
- * discount_for naming a line that is gone) is spread over every positive line, or only the lines its service key or
- * category scope names, in proportion to their values. The sold lines' share of the invoice is their value over all.
+ * line comes off its parent line. A visit's scheduled price adjustment (discount_scheduled_price_<visit>) comes off
+ * that visit's lines. Any other negative line (document-wide, a referral or deposit credit, a discount_for naming a
+ * line that is gone) is spread over every positive line, or only the lines its service key or category scope names,
+ * in proportion to their values. The sold lines' share of the invoice is their value over all.
  *
- * Tables (migration 20261029200000): commission_sales (one per accepted estimate sold by a W-2
- * technician, insert-only) and commission_entries (one per sale and payment: what counted and what
- * it earns). The pay lines are payroll_pay_lines of kind 'commission', source_type
- * 'commission_payment', source_id '<entry id>:<n>'.
+ * Payer statements (GATE_PAYER_STATEMENTS): settleStatementPaid writes ONE payment row for a whole NET-terms statement
+ * (customer_id NULL, statement_id set) and marks the statement's child invoices paid. That row pays each child invoice
+ * the invoice's total over the positive totals of the statement's invoices that are not void, so a sold invoice on a
+ * statement gets its own entry (statement_part_cents over statement_total_cents), fixed like the rest of the snapshot.
+ *
+ * Tables (migrations 20261029200000 and 20261029203000): commission_sales (one per accepted estimate
+ * sold by a W-2 technician; insert-only, except a customer merge moves its customer_id) and
+ * commission_entries (one per sale, payment and invoice: what counted and what it earns). The pay
+ * lines are payroll_pay_lines of kind 'commission', source_type 'commission_payment', source_id
+ * '<entry id>:<n>'.
  *
  * syncCommissionLines runs where syncReviewBonusLines runs (start of draft, recompute and finalize,
  * under the payroll lock, before the run is worked out). It is derived data: the open ledger lines
@@ -71,6 +79,10 @@ const INVOICE_NUMBER_RE = /^[A-Za-z0-9-]+$/;
 const DESCRIPTION_RE = /^Invoice ([A-Za-z0-9-]+) — /;
 const ADDON_CLIENT_RE = /^scheduled_([0-9a-f-]+)_addon_(.+)$/i;
 const PRIMARY_CLIENT_RE = /^scheduled_([0-9a-f-]+)_primary$/i;
+// invoice.js buildScheduledServiceInvoiceLines: the line that tops a visit's stale primary price up to its fee, and
+// the negative line that brings the visit's lines down to its stamped price.
+const TOPUP_CLIENT_RE = /^scheduled_price_topup_([0-9a-f-]+)$/i;
+const VISIT_ADJUSTMENT_RE = /^discount_scheduled_price_([0-9a-f-]+)$/i;
 
 // The typeof guards keep a test mock of feature-gates that lacks a reader working (off).
 const payLinesOn = () => typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
@@ -136,7 +148,7 @@ async function candidateInvoiceIds(trx, sale, lineage) {
   const estimateId = String(sale.estimate_id);
   const visitIds = [...lineage.visitIds];
   const clientIds = [
-    ...visitIds.map((v) => `scheduled_${v}_primary`),
+    ...visitIds.flatMap((v) => [`scheduled_${v}_primary`, `scheduled_price_topup_${v}`]),
     ...[...lineage.addonIds].map((a) => `scheduled_%_addon_${a}`),
     ...lineage.addonHosts.map((host) => `scheduled_${host}_addon_%`),
   ];
@@ -162,10 +174,13 @@ async function candidateInvoiceIds(trx, sale, lineage) {
   return [...found];
 }
 
-/** True when the invoice line is one of the estimate's: its visit's primary line, or its add-on's line (by row id or by host visit and service key). */
+/**
+ * True when the invoice line is one of the estimate's: its visit's primary line or price top-up, or its add-on's line
+ * (by row id or by host visit and service key).
+ */
 function lineBelongs(net, lineage) {
-  const primary = PRIMARY_CLIENT_RE.exec(net.clientId);
-  if (primary) return lineage.visitIds.has(primary[1]);
+  const visitLine = PRIMARY_CLIENT_RE.exec(net.clientId) || TOPUP_CLIENT_RE.exec(net.clientId);
+  if (visitLine) return lineage.visitIds.has(visitLine[1]);
   const addon = ADDON_CLIENT_RE.exec(net.clientId);
   if (!addon) return false;
   // The row id of today, or the pair a replaced row still carries (host visit from the client id, the line's service key).
@@ -189,21 +204,28 @@ function shareOf(invoice, minted, lineage, linkedVisitIds) {
   return whole ? { own: 1n, all: 1n } : { own: 0n, all: 1n };
 }
 
+/** The visit a line's client_id names: a primary line, an add-on line or a price top-up. */
+function visitOfClient(clientId) {
+  const match = clientId && (PRIMARY_CLIENT_RE.exec(clientId) || ADDON_CLIENT_RE.exec(clientId) || TOPUP_CLIENT_RE.exec(clientId));
+  return match ? match[1] : null;
+}
+
 /**
  * What each positive line of an invoice is worth after its discounts, in cents (invoice.js discount lines are negative
- * lines). A negative line whose discount_for names a positive line comes off that line. Any other negative line (no
- * discount_for, a referral or deposit credit, a discount_for naming a line that is gone) reaches the whole document: it
- * is spread over its pool in proportion to the lines' nets, in whole cents, and the pool is every positive line, or only
- * the lines matching document_scope_service_key / document_scope_service_category when either is set (and some line
- * carries a key or category at all). A net never goes below 0.
+ * lines). A negative line whose discount_for names a positive line comes off that line. Any other negative line is
+ * spread over its pool (poolOf) in proportion to the lines' nets, in whole cents. A net never goes below 0.
  */
 function netLines(lines) {
-  const nets = lines.filter((line) => payrollUnits(line.amount) > 0n).map((line) => ({
-    clientId: typeof line.client_id === 'string' && line.client_id ? line.client_id : null,
-    serviceKey: line.service_key || null,
-    serviceCategory: line.service_category || null,
-    net: payrollUnits(line.amount),
-  }));
+  const nets = lines.filter((line) => payrollUnits(line.amount) > 0n).map((line) => {
+    const clientId = typeof line.client_id === 'string' && line.client_id ? line.client_id : null;
+    return {
+      clientId,
+      visitId: visitOfClient(clientId),
+      serviceKey: line.service_key || null,
+      serviceCategory: line.service_category || null,
+      net: payrollUnits(line.amount),
+    };
+  });
   const byId = new Map(nets.filter((net) => net.clientId).map((net) => [net.clientId, net]));
   const wide = [];
   for (const line of lines) {
@@ -213,8 +235,21 @@ function netLines(lines) {
     if (parent) parent.net += amount; else wide.push(line);
   }
   for (const net of nets) if (net.net < 0n) net.net = 0n;
-  for (const line of wide) spreadOver(documentPool(nets, line), -payrollUnits(line.amount));
+  for (const line of wide) spreadOver(poolOf(nets, line), -payrollUnits(line.amount));
   return nets;
+}
+
+/**
+ * The lines a negative line with no parent line comes off. A visit's scheduled price adjustment
+ * (discount_scheduled_price_<visit>) brings that visit's own lines down to its stamped price, so it comes off them.
+ * Any other one (no discount_for, a referral or deposit credit, a discount_for naming a line that is gone) reaches the
+ * whole document: every positive line, or only the lines matching document_scope_service_key /
+ * document_scope_service_category when either is set (and some line carries a key or category at all).
+ */
+function poolOf(nets, line) {
+  const adjusted = VISIT_ADJUSTMENT_RE.exec(String(line.client_id || ''));
+  const visitLines = adjusted ? nets.filter((net) => net.visitId === adjusted[1]) : [];
+  return visitLines.length ? visitLines : documentPool(nets, line);
 }
 
 function documentPool(nets, line) {
@@ -241,7 +276,8 @@ async function estimateInvoices(trx, sale, lineage) {
   const ids = await candidateInvoiceIds(trx, sale, lineage);
   if (!ids.length || !lineage.customerIds.length) return new Map();
   const invoices = await trx('invoices').whereIn('id', ids).whereIn('customer_id', lineage.customerIds)
-    .select('id', 'customer_id', 'invoice_number', 'notes', 'line_items', 'scheduled_service_id', 'subtotal', 'discount_amount', 'tax_amount');
+    .select('id', 'customer_id', 'invoice_number', 'notes', 'line_items', 'scheduled_service_id', 'subtotal', 'discount_amount', 'tax_amount',
+      'total', 'status', 'payer_statement_id');
   const packetRows = await trx('visit_completion_packet_items').whereIn('invoice_id', invoices.map((i) => i.id)).select('invoice_id', 'scheduled_service_id');
   const [claims, terms] = await Promise.all([
     trx('setup_fee_claims').where({ estimate_id: String(sale.estimate_id) }).select('invoice_id'),
@@ -257,9 +293,25 @@ async function estimateInvoices(trx, sale, lineage) {
     const linked = [invoice.scheduled_service_id, ...packetRows.filter((p) => p.invoice_id === invoice.id).map((p) => p.scheduled_service_id)].filter(Boolean);
     const share = shareOf(invoice, minted, lineage, linked);
     if (share.own <= 0n || share.all <= 0n) continue;
-    result.set(invoice.id, { ...invoice, preTax, tax: payrollUnits(invoice.tax_amount), share });
+    result.set(invoice.id, { ...invoice, preTax, tax: payrollUnits(invoice.tax_amount), totalCents: payrollUnits(invoice.total), share });
   }
   return result;
+}
+
+/**
+ * Per payer statement, what its one settlement payment is spread over: the sum of the positive totals of its child
+ * invoices that are not void, in cents. Map statement id (text) -> cents.
+ */
+async function statementTotals(trx, statementIds) {
+  const totals = new Map();
+  if (!statementIds.length) return totals;
+  const rows = await trx('invoices').whereIn('payer_statement_id', statementIds).whereNot('status', 'void').where('total', '>', 0)
+    .select('payer_statement_id', 'total');
+  for (const row of rows) {
+    const id = String(row.payer_statement_id);
+    totals.set(id, (totals.get(id) || 0n) + payrollUnits(row.total));
+  }
+  return totals;
 }
 
 // ---- 3. Payments to invoices (one invoice per payment row) and what counts
@@ -281,6 +333,25 @@ function invoiceOfPayment(payment, customerInvoices) {
   if (!described || !INVOICE_NUMBER_RE.test(described[1])) return null;
   const byNumber = sameCustomer.filter((invoice) => invoice.invoice_number === described[1]);
   return byNumber.length === 1 ? byNumber[0] : null;
+}
+
+/**
+ * The estimate's invoices one payment row pays, each as { invoice, part, of }: the invoice gets part / of of the
+ * payment. A payer statement's settlement row (statement_id set) pays each of the statement's child invoices that is not
+ * void its total over the statement's total (statementTotals); a part above its total is no match. Any other row pays
+ * the one invoice invoiceOfPayment names, whole (part and of null).
+ */
+function paidInvoices(payment, invoices, customerInvoices, totals) {
+  if (payment.statement_id) {
+    const of = totals.get(String(payment.statement_id)) || 0n;
+    return [...invoices.values()]
+      .filter((invoice) => String(invoice.payer_statement_id) === String(payment.statement_id) && invoice.status !== 'void'
+        && invoice.totalCents > 0n && invoice.totalCents <= of)
+      .map((invoice) => ({ invoice, part: invoice.totalCents, of }));
+  }
+  const linked = invoiceOfPayment(payment, customerInvoices);
+  const invoice = linked && invoices.get(linked.id);
+  return invoice ? [{ invoice, part: null, of: null }] : [];
 }
 
 // Payment statuses that are cash Waves collected (a disputed row counts as refunded in full until the dispute is won,
@@ -312,29 +383,38 @@ function countedRefund(payment, previous, sale, today) {
 }
 
 /**
- * counted = (base - counted refund) x cash factor x share, half-up in one division; commission = counted x rate, half-up.
- * `snap` is the invoice's cash and share figures { preTax, tax, own, all } as they were when the payment was first counted.
+ * counted = (base - counted refund) x statement part x cash factor x share, half-up in one division; commission = counted
+ * x rate, half-up. `snap` is the invoice's cash and share figures { preTax, tax, own, all } and its part of a statement
+ * payment { part, of } (null for a payment of one invoice) as they were when the payment was first counted.
  */
 function commissionOf(payment, refund, snap, rateBps) {
   const net = BigInt(payment.base_cents) - refund;
-  const denominator = (snap.preTax + snap.tax) * snap.all;
-  const counted = denominator > 0n && net > 0n ? roundDiv(net * snap.preTax * snap.own, denominator) : 0n;
+  const part = snap.part == null ? 1n : snap.part;
+  const of = snap.of == null ? 1n : snap.of;
+  const denominator = (snap.preTax + snap.tax) * snap.all * of;
+  const counted = denominator > 0n && net > 0n ? roundDiv(net * part * snap.preTax * snap.own, denominator) : 0n;
   return { counted, commission: roundDiv(counted * BigInt(rateBps), 10000n) };
 }
 
-const paymentColumns = (trx) => ['p.id', 'p.customer_id', 'p.status', 'p.description', 'p.refund_amount', 'p.stripe_payment_intent_id',
+const paymentColumns = (trx) => ['p.id', 'p.customer_id', 'p.statement_id', 'p.status', 'p.description', 'p.refund_amount', 'p.stripe_payment_intent_id',
   trx.raw('COALESCE(p.refunded_surcharge_cents, 0) as refunded_surcharge_cents'),
   trx.raw("NULLIF(p.metadata->>'invoice_id', '') as metadata_invoice_id"),
   trx.raw("to_char(p.payment_date, 'YYYY-MM-DD') as payment_on"),
   trx.raw("to_char((p.updated_at AT TIME ZONE ?)::date, 'YYYY-MM-DD') as updated_on", [STAFF_TIME_ZONE]),
   trx.raw('COALESCE(p.base_amount_cents, ROUND(p.amount * 100))::bigint as base_cents')];
 
-/** The payments of the sale's customers inside its window (up to the run's week) that have no entry yet. */
-async function loadNewPayments(trx, customerIds, sale, weekEnd, skipIds) {
+/**
+ * The payments inside the sale's window (up to the run's week) that have no entry yet: the sale's customers' payments,
+ * and the settlement rows of the payer statements that carry its invoices (those rows have no customer).
+ */
+async function loadNewPayments(trx, { customerIds, statementIds }, sale, weekEnd, skipIds) {
   const to = sale.window_end < weekEnd ? sale.window_end : weekEnd;
   if (sale.accepted_on > to) return [];
   return trx('payments as p')
-    .whereIn('p.customer_id', customerIds)
+    .where(function paidForSale() {
+      this.whereIn('p.customer_id', customerIds);
+      if (statementIds.length) this.orWhereIn('p.statement_id', statementIds);
+    })
     .whereBetween('p.payment_date', [sale.accepted_on, to])
     .whereIn('p.status', COUNTED_STATUSES)
     .whereNotIn('p.id', skipIds)
@@ -342,44 +422,51 @@ async function loadNewPayments(trx, customerIds, sale, weekEnd, skipIds) {
 }
 
 /**
- * The entries to write for payments seen for the first time: every payment inside the sale's window that belongs to one of
- * the estimate's invoices, with the invoice, its share and its cash figures as they are NOW. Map payment id -> figures.
+ * The entries to write for payments seen for the first time: every payment inside the sale's window that pays one of the
+ * estimate's invoices (a statement payment can pay several), one figure per payment and invoice, with the invoice, its
+ * share, its cash figures and its part of the payment as they are NOW.
  */
 async function newFigures(trx, sale, weekEnd, skipIds, today) {
   const lineage = await lineageOf(trx, sale);
   const invoices = await estimateInvoices(trx, sale, lineage);
-  const figures = new Map();
-  if (!invoices.size) return figures;
-  const payments = await loadNewPayments(trx, lineage.customerIds, sale, weekEnd, skipIds);
-  if (!payments.length) return figures;
+  if (!invoices.size) return [];
+  const statementIds = [...new Set([...invoices.values()].map((invoice) => invoice.payer_statement_id).filter(Boolean).map(String))];
+  const payments = await loadNewPayments(trx, { customerIds: lineage.customerIds, statementIds }, sale, weekEnd, skipIds);
+  if (!payments.length) return [];
   const customerInvoices = await trx('invoices').whereIn('customer_id', lineage.customerIds)
     .select('id', 'customer_id', 'invoice_number', 'stripe_payment_intent_id');
+  const totals = await statementTotals(trx, statementIds);
+  const figures = [];
   for (const payment of payments) {
-    const linked = invoiceOfPayment(payment, customerInvoices);
-    const invoice = linked && invoices.get(linked.id);
-    if (!invoice) continue;
-    const snap = { preTax: invoice.preTax, tax: invoice.tax, own: invoice.share.own, all: invoice.share.all };
     const refund = countedRefund(payment, 0n, sale, today);
-    figures.set(payment.id, { paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
+    for (const { invoice, part, of } of paidInvoices(payment, invoices, customerInvoices, totals)) {
+      const snap = { preTax: invoice.preTax, tax: invoice.tax, own: invoice.share.own, all: invoice.share.all, part, of };
+      figures.push({ paymentId: payment.id, paymentOn: payment.payment_on, invoiceId: invoice.id, snap, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) });
+    }
   }
   return figures;
 }
 
+const bigOrNull = (value) => (value == null ? null : BigInt(value));
+
 /**
  * The new figures of the entries a sale already has, from the snapshot each stored when its payment was first counted,
- * never from the current visits, add-on rows or invoice lines. Only the payment's own status and refunds move them. A
- * payment that is gone, or has an uncounted status, counts 0 with the refund it deducted left as it was.
+ * never from the current visits, add-on rows, invoice lines or statements. Only the payment's own status and refunds
+ * move them. A payment that is gone, or has an uncounted status, counts 0 with the refund it deducted left as it was.
  */
 async function entryFigures(trx, sale, entries, weekEnd, today) {
   const due = entries.filter((entry) => entry.payment_on <= weekEnd);
   const payments = due.length
-    ? await trx('payments as p').whereIn('p.id', due.map((entry) => entry.payment_id)).select(paymentColumns(trx)) : [];
+    ? await trx('payments as p').whereIn('p.id', [...new Set(due.map((entry) => entry.payment_id))]).select(paymentColumns(trx)) : [];
   const byId = new Map(payments.map((payment) => [payment.id, payment]));
   return due.map((entry) => {
     const previous = BigInt(entry.refund_counted_cents);
     const payment = byId.get(entry.payment_id);
     if (!payment || !COUNTED_STATUSES.includes(payment.status)) return { entry, counted: 0n, commission: 0n, refund: previous };
-    const snap = { preTax: BigInt(entry.pre_tax_cents), tax: BigInt(entry.tax_cents), own: BigInt(entry.share_own_cents), all: BigInt(entry.share_all_cents) };
+    const snap = {
+      preTax: BigInt(entry.pre_tax_cents), tax: BigInt(entry.tax_cents), own: BigInt(entry.share_own_cents), all: BigInt(entry.share_all_cents),
+      part: bigOrNull(entry.statement_part_cents), of: bigOrNull(entry.statement_total_cents),
+    };
     const refund = countedRefund(payment, previous, sale, today);
     return { entry, refund, ...commissionOf(payment, refund, snap, sale.rate_bps) };
   });
@@ -387,24 +474,27 @@ async function entryFigures(trx, sale, entries, weekEnd, today) {
 
 // ---- 4. Entries
 
-const entryRow = (sale, paymentId, figure) => ({
-  sale_id: sale.id, payment_id: paymentId, technician_id: sale.technician_id, payment_on: figure.paymentOn,
+const textOrNull = (value) => (value == null ? null : value.toString());
+
+const entryRow = (sale, figure) => ({
+  sale_id: sale.id, payment_id: figure.paymentId, technician_id: sale.technician_id, payment_on: figure.paymentOn,
   counted_cents: figure.counted.toString(), commission_cents: figure.commission.toString(), refund_counted_cents: figure.refund.toString(),
   invoice_id: figure.invoiceId, share_own_cents: figure.snap.own.toString(), share_all_cents: figure.snap.all.toString(),
   pre_tax_cents: figure.snap.preTax.toString(), tax_cents: figure.snap.tax.toString(),
+  statement_part_cents: textOrNull(figure.snap.part), statement_total_cents: textOrNull(figure.snap.of),
 });
 
 /**
- * Writes the entries of one sale. A payment seen late still gets its entry, with the invoice and shares it has then;
+ * Writes the entries of one sale. A payment seen late still gets its entries, with the invoices and shares it has then;
  * that attribution is fixed from then on. An entry follows its payment row (see countedRefund for which refunds count),
  * so a refund inside the 12 months comes off the next commission.
  */
 async function syncEntries(trx, sale, weekEnd, today) {
   const existing = await trx('commission_entries').where({ sale_id: sale.id })
     .select('id', 'payment_id', 'counted_cents', 'commission_cents', 'refund_counted_cents', 'share_own_cents', 'share_all_cents',
-      'pre_tax_cents', 'tax_cents', trx.raw("to_char(payment_on, 'YYYY-MM-DD') as payment_on"));
-  const figures = await newFigures(trx, sale, weekEnd, existing.map((entry) => entry.payment_id), today);
-  const inserts = [...figures].filter(([, figure]) => figure.counted > 0n).map(([paymentId, figure]) => entryRow(sale, paymentId, figure));
+      'pre_tax_cents', 'tax_cents', 'statement_part_cents', 'statement_total_cents', trx.raw("to_char(payment_on, 'YYYY-MM-DD') as payment_on"));
+  const figures = await newFigures(trx, sale, weekEnd, [...new Set(existing.map((entry) => entry.payment_id))], today);
+  const inserts = figures.filter((figure) => figure.counted > 0n).map((figure) => entryRow(sale, figure));
   if (inserts.length) await trx('commission_entries').insert(inserts);
   let updated = 0;
   for (const { entry, counted, commission, refund } of await entryFigures(trx, sale, existing, weekEnd, today)) {
