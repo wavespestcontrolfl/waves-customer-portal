@@ -745,14 +745,17 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
 }
 
 /** One on-the-hour enumeration for the staff finder and read-only gap
- * measurements. Both evaluate the order the existing save would produce. */
-function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin, latestServiceEndMin = 20 * 60, ...limits }) {
+ * measurements. Both evaluate the order the existing save would produce.
+ * `startsOnly` (a Set of 'HH:MM' window starts; the pickers' Google band,
+ * find-time.js preloadBandLegs) evaluates those hours alone. */
+function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin, latestServiceEndMin = 20 * 60, startsOnly = null, ...limits }) {
   const placements = [];
   const rejections = {};
   let evaluated = 0;
   for (let start = Math.ceil(earliestStartMin / 60) * 60; start + durationMinutes <= latestServiceEndMin; start += 60) {
-    evaluated++;
     const windowStart = hhmm(start);
+    if (startsOnly && !startsOnly.has(windowStart)) continue;
+    evaluated++;
     const windowEnd = hhmm(start + durationMinutes);
     const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, ...limits });
     if (fit.feasible) placements.push({ windowStart, windowEnd, fit });

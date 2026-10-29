@@ -170,7 +170,51 @@ test('the picker road check: Google on the road days, later days the model', asy
     expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
     // Three passes over the road days' routes, nothing more.
     expect(roadTravel.preload).toHaveBeenCalledTimes(3);
+    // GATE_PICKER_ROAD_BAND off: every hour of a road day is driven.
+    expect(enumerateArrivalPlacements.mock.calls.every(([, opts]) => opts.startsOnly === undefined)).toBe(true);
   } finally {
+    spy.mockRestore();
+  }
+});
+
+// GATE_PICKER_ROAD_BAND (owner 2026-10-28 cost plan, step 2: "Google only for
+// near-best hours"): a road day buys Google only for its hours within 5
+// minutes of its best (always its 3 best); a later day is untouched.
+test('the picker road band: Google only for the hours near a road day\'s best', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  // Added drive per hour: 9:00 is the best; 10:00 and 11:00 are within 5 minutes.
+  const added = { '09:00': 4, '10:00': 8, '11:00': 9, '13:00': 20, '15:00': 30 };
+  enumerateArrivalPlacements.mockImplementation((context, opts) => {
+    const starts = Object.keys(added).filter((start) => !opts.startsOnly || opts.startsOnly.has(start));
+    if (opts.collectLegs) opts.collectLegs.push(...starts.map((start) => ({ date: context.date, start })));
+    return {
+      placements: starts.map((start) => ({ windowStart: start, windowEnd: start, fit: { ...fit, detourMinutes: added[start] } })),
+      evaluated: starts.length, rejections: {},
+    };
+  });
+  const [near, far] = [ymd(1), ymd(10)];
+  process.env.GATE_PICKER_ROAD_BAND = 'true';
+  try {
+    const result = await findAvailableSlots({ ...BASE, dateFrom: near, dateTo: far, pickerRoadCheck: true, roadSpender: 'staff-1' });
+    const passes = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => opts.collectLegs);
+    // One purchase (three passes) on each road day's band: Google answered no
+    // hour outside it ahead of the band, so the band never widened.
+    expect(roadTravel.preload).toHaveBeenCalledTimes(3);
+    const asked = roadTravel.preload.mock.calls.flatMap(([legs]) => legs);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((leg) => ['09:00', '10:00', '11:00'].includes(leg.start) && leg.date !== far)).toBe(true);
+    expect(passes.every(([, opts]) => [...opts.startsOnly].sort().join() === '09:00,10:00,11:00')).toBe(true);
+    // Every hour is still listed, on both days.
+    expect(result.slots.filter((slot) => slot.date === near)).toHaveLength(5);
+    expect(result.slots.filter((slot) => slot.date === far)).toHaveLength(5);
+  } finally {
+    delete process.env.GATE_PICKER_ROAD_BAND;
     spy.mockRestore();
   }
 });

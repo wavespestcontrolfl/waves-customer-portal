@@ -122,6 +122,48 @@ async function preloadRouteLegs(travel, items, collect) {
   }
 }
 
+// GATE_PICKER_ROAD_BAND (owner 2026-10-28 cost plan, step 2: "Google only
+// for near-best hours"): each road day's route buys Google road times only for
+// its hours near its best. The hours are ranked first on what is already known
+// (the road times cached for them, else the model); those within BAND_MINUTES
+// of the route's least added drive, and always its BAND_MIN_HOURS best, are
+// driven on Google (three passes, as above). When Google then leaves an hour
+// outside the band ahead of every hour in it, that hour joins the band and is
+// driven too (at most BAND_ROUNDS purchases), so a day's best hour is never one
+// the band skipped. Every other hour keeps the model ("~"); an hour the model
+// refuses is not driven.
+const BAND_MINUTES = 5;
+const BAND_MIN_HOURS = 3;
+const BAND_ROUNDS = 3;
+
+const detourOf = (placement) => (Number.isFinite(placement.fit.detourMinutes) ? placement.fit.detourMinutes : Infinity);
+
+function nearBestStarts(placements) {
+  const ranked = [...placements].sort((a, b) => detourOf(a) - detourOf(b) || a.windowStart.localeCompare(b.windowStart));
+  const best = ranked.length ? detourOf(ranked[0]) : Infinity;
+  return new Set(ranked.filter((p, i) => i < BAND_MIN_HOURS || detourOf(p) <= best + BAND_MINUTES).map((p) => p.windowStart));
+}
+
+// Adds to `band` every hour outside it that now leads every hour in it; true
+// when one did.
+function widenBand(band, placements) {
+  const inside = Math.min(Infinity, ...placements.filter((p) => band.has(p.windowStart)).map(detourOf));
+  const ahead = placements.filter((p) => !band.has(p.windowStart) && detourOf(p) < inside);
+  ahead.forEach((p) => band.add(p.windowStart));
+  return ahead.length > 0;
+}
+
+async function preloadBandLegs(travel, routes) {
+  const bands = new Map(routes.map((route) => [route, nearBestStarts(enumerateArrivalPlacements(route.context, route.limits).placements)]));
+  let pending = routes;
+  for (let round = 1; pending.length; round++) {
+    await preloadRouteLegs(travel, pending,
+      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs, startsOnly: bands.get(route) }));
+    if (round >= BAND_ROUNDS) return;
+    pending = pending.filter((route) => widenBand(bands.get(route), enumerateArrivalPlacements(route.context, route.limits).placements));
+  }
+}
+
 // A fit whose every leg came back from Google (with or without traffic).
 const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
 
@@ -202,11 +244,15 @@ async function findArrivalWindowSlots(opts) {
       routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES } });
     }
   }
-  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK).
+  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK):
+  // every hour, or only each route's hours near its best (GATE_PICKER_ROAD_BAND).
   const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
-  await preloadRouteLegs(roadTravel, onRoads,
-    (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
+  if (onRoads.length && gateEnvValue('GATE_PICKER_ROAD_BAND')) await preloadBandLegs(roadTravel, onRoads);
+  else {
+    await preloadRouteLegs(roadTravel, onRoads,
+      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
+  }
   for (const route of routes) {
     const { date, tech, context, limits } = route;
     const candidates = enumerateArrivalPlacements(context, limits);
@@ -1621,5 +1667,7 @@ module.exports = {
     // EXACT same entity shape the offer side does, never a hand-rolled one.
     expandRowsWithCredit,
     capacityNeighbourEntity,
+    // GATE_PICKER_ROAD_BAND: the road days' Google purchase, near each route's best.
+    preloadBandLegs,
   },
 };
