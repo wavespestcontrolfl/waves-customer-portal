@@ -55,7 +55,12 @@ router.get('/', async (req, res, next) => {
     // the holder's stays customer-wide unless asked.
     const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped ? await resolveSessionScope(req) : null);
 
-    const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    // Completed visits only, one record per appointment: the Completed tab
+    // and Home's Last Visit card showed incomplete records as completed
+    // visits and a visit's sibling records as extra visits.
+    const { services: listed, total } = await listPortalServiceHistory(req.customerId, {
+      limit, offset, type, scope, completedOnly: true,
+    });
     // A contact the rule withholds from gets no artifact; an allowed contact
     // gets the visit without the public report bearers (the authenticated
     // contact-safe PDF route carries the report).

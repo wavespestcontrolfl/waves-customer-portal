@@ -28,6 +28,7 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
         t.uuid('customer_id').notNullable();
         t.date(dateColumn).notNullable();
         t.string('status');
+        if (table === 'service_records') t.uuid('scheduled_service_id');
       });
     }
     await db.schema.createTable('audit_log', t => {
@@ -87,6 +88,19 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
 
   test.each(['completed', 'on_site'])('legacy %s appointments count without any report', async status => {
     await db('scheduled_services').insert({ customer_id: customerId, scheduled_date: '2030-01-01', status });
+    expect(await isFirstServiceVisit(customerId, day, db)).toBe(false);
+  });
+
+  test('an earlier incomplete visit does not disqualify the first completed one', async () => {
+    const [prior] = await db('scheduled_services')
+      .insert({ customer_id: customerId, scheduled_date: '2030-01-01', status: 'completed' }).returning('id');
+    await db('service_records').insert({
+      customer_id: customerId, service_date: '2030-01-01', status: 'incomplete', scheduled_service_id: prior.id,
+    });
+    expect(await isFirstServiceVisit(customerId, day, db)).toBe(true);
+    await db('service_records').insert({
+      customer_id: customerId, service_date: '2030-01-01', status: 'completed', scheduled_service_id: prior.id,
+    });
     expect(await isFirstServiceVisit(customerId, day, db)).toBe(false);
   });
 

@@ -183,7 +183,9 @@ const DiscountEngine = {
     }
 
     if (customerId && discount.requires_new_customer) {
-      const completed = await database('service_records').where({ customer_id: customerId }).count('* as count').first();
+      // Completed visits only: an incomplete first visit (rained out, locked
+      // gate) must not cost the customer the new-customer discount.
+      const completed = await database('service_records').where({ customer_id: customerId, status: 'completed' }).count('* as count').first();
       if (Number(completed?.count || 0) > 0) failures.push('new-customer status');
     } else if (discount.requires_new_customer) {
       failures.push('new-customer status');
@@ -252,7 +254,7 @@ const DiscountEngine = {
 
     // Check if new customer (no completed services)
     const completedServices = customer
-      ? Number((await db('service_records').where({ customer_id: customerId }).count('* as cnt').first())?.cnt || 0)
+      ? Number((await db('service_records').where({ customer_id: customerId, status: 'completed' }).count('* as cnt').first())?.cnt || 0)
       : 0;
     const isNewCustomer = completedServices === 0;
 

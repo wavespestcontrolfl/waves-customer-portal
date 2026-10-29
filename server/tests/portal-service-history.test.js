@@ -1,6 +1,6 @@
-// listPortalServiceHistory's completedOnly option: the assistant's recent
-// visits read filters to status 'completed' before the limit and in the
-// total; GET /api/services leaves it off and lists every record.
+// listPortalServiceHistory's completedOnly option: GET /api/services and the
+// assistant's recent-visits read filter to status 'completed' and one record
+// per appointment, before the limit and in the total.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/context-aggregator', () => ({ customerSafeVisitNotes: jest.fn(() => null) }));
@@ -13,7 +13,7 @@ function wire() {
   const builders = [];
   db.mockImplementation((table) => {
     const b = { table };
-    for (const m of ['where', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count']) b[m] = jest.fn(() => b);
+    for (const m of ['where', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count', 'whereRaw']) b[m] = jest.fn(() => b);
     b.first = jest.fn(async () => ({ count: '0' }));
     b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     builders.push(b);
@@ -29,14 +29,25 @@ const statusFilters = (builders) => builders
 
 beforeEach(() => jest.clearAllMocks());
 
-test('completedOnly filters the list and the total to completed records', async () => {
+const siblingFilters = (builders) => builders
+  .filter((b) => b.table === 'service_records')
+  .map((b) => b.whereRaw.mock.calls.filter(([sql]) => /sib\.scheduled_service_id = service_records\.scheduled_service_id/.test(sql)).length);
+
+test('completedOnly filters the list and the total to completed records, one per appointment', async () => {
   const builders = wire();
   await listPortalServiceHistory('cust-1', { limit: 3, completedOnly: true });
   expect(statusFilters(builders)).toEqual([1, 1]);
+  expect(siblingFilters(builders)).toEqual([1, 1]);
 });
 
-test('the default lists every record, as the Completed tab does', async () => {
+test('without completedOnly every record is listed', async () => {
   const builders = wire();
   await listPortalServiceHistory('cust-1', { limit: 20 });
   expect(statusFilters(builders)).toEqual([0, 0]);
+  expect(siblingFilters(builders)).toEqual([0, 0]);
+});
+
+test('GET /api/services asks for completed visits only', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/services.js'), 'utf8');
+  expect(source).toMatch(/listPortalServiceHistory\(req\.customerId, \{\s*limit, offset, type, scope, completedOnly: true,/);
 });

@@ -10,16 +10,24 @@ async function isFirstServiceVisit(customerId, serviceDate, conn = db) {
   if (!customerId || !date) return false;
   try {
     const [report, visit] = await Promise.all([
+      // A prior visit is a COMPLETED record: an incomplete one (the tech
+      // could not finish) is not the customer's first service.
       conn('service_records')
-        .where({ customer_id: customerId })
-        .where(builder => builder.whereNot('status', 'cancelled').orWhereNull('status'))
+        .where({ customer_id: customerId, status: 'completed' })
         .where('service_date', '<', date)
         .first('id')
         .timeout(1500, { cancel: true }),
+      // A legacy appointment with no record at all still counts; one that has
+      // records is decided by them above (its row reads 'completed' even when
+      // the only record is incomplete).
       conn('scheduled_services')
         .where({ customer_id: customerId })
         .whereIn('status', ['completed', 'on_site'])
         .where('scheduled_date', '<', date)
+        .whereNotExists(function anyRecord() {
+          this.select(1).from('service_records')
+            .whereRaw('service_records.scheduled_service_id = scheduled_services.id');
+        })
         .first('id')
         .timeout(1500, { cancel: true }),
     ]);

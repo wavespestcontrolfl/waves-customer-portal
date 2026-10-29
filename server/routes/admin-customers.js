@@ -1416,14 +1416,17 @@ function applyCustomerListFilters(query, filters, healthColumns) {
   if (lastVisited && lastVisited !== 'all') {
     if (lastVisited === 'never') {
       query = query.whereNotExists(function () {
-        this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id');
+        this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id')
+          .where('service_records.status', 'completed');
       });
     } else {
       const days = parseInt(lastVisited, 10);
       if (Number.isFinite(days) && days >= 0) {
         query = query.whereExists(function () {
+          // Last COMPLETED visit, the same rule as the list's last_service_date.
           this.select('customer_id').from('service_records')
             .whereRaw('service_records.customer_id = customers.id')
+            .where('service_records.status', 'completed')
             .groupBy('customer_id')
             .havingRaw('MAX(service_date) >= ?::date - (? * INTERVAL \'1 day\')', [etDateString(), days]);
         });
@@ -2570,8 +2573,10 @@ router.get('/', async (req, res, next) => {
     // The directory columns, shared by the exact rows and the approximate (sound-alike) rows below.
     const withListColumns = (base) => base.select(
       'customers.*',
-      db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
-      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
+      // Completed visits (days) only, like the customer-detail visitStats: an
+      // incomplete record is not a visit and not the customer's last visit.
+      db.raw("(SELECT COUNT(DISTINCT service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_records.status = 'completed') as services_count"),
+      db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_records.status = 'completed') as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= ? AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date", [etDateString()]),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
