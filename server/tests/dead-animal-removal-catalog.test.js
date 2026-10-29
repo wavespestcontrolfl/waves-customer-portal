@@ -256,22 +256,15 @@ describe('20261029130100 pricing_config seed', () => {
     expect(edited.pricing_config_audit).toHaveLength(0);
   });
 
-  test('down() deletes the row only while it is the seed, and only its own audit records', async () => {
+  test('down() is a documented no-op: the seeded row and its audit and changelog records all stay', async () => {
     const db = emptyDb();
     const knex = fakeKnex(db);
     await seedMigration.up(knex);
     await seedMigration.down(knex);
-    expect(db.pricing_config).toHaveLength(0);
-    expect(db.pricing_config_audit).toHaveLength(0);
-    expect(db.pricing_changelog).toHaveLength(0);
-
-    const edited = emptyDb();
-    const k2 = fakeKnex(edited);
-    await seedMigration.up(k2);
-    edited.pricing_config[0].data = JSON.stringify({ ...seedMigration.SEED, reachable: { alone: 159, riding: 109, on_site_min: 45 } });
-    await seedMigration.down(k2);
-    expect(edited.pricing_config).toHaveLength(1);
-    expect(edited.pricing_config_audit).toHaveLength(1);
+    expect(db.pricing_config).toHaveLength(1);
+    expect(JSON.parse(db.pricing_config[0].data)).toEqual(seedMigration.SEED);
+    expect(db.pricing_config_audit).toHaveLength(1);
+    expect(db.pricing_changelog).toHaveLength(1);
   });
 
   test('down() leaves a row with the seeded values that another writer created (no tagged audit record)', async () => {

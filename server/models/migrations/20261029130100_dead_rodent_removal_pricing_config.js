@@ -17,12 +17,9 @@
  *
  * Insert-if-missing: an existing row is never overwritten (an admin may already have edited it). The insert also writes one
  * pricing_config_audit row and one pricing_changelog row (tagged), so the seed has a reason in the admin history.
- * down() deletes the row only while it still holds exactly the seeded data (an operator-edited row is left alone) AND this
- * migration's tagged audit record proves it inserted the row (a row another writer created with the same values, such as the
- * admin route's seed, has none and stays), and only the audit and changelog records this migration wrote.
+ * down() is a documented no-op (waves-db SKILL.md section 4: a seed whose up() keeps admin edits never rolls back
+ * destructively).
  */
-const { isDeepStrictEqual } = require('util');
-
 const KEY = 'rodent_dead_animal_removal';
 const TAG = 'migration:20261029130100_dead_rodent_removal_pricing_config';
 const SEED = {
@@ -36,11 +33,6 @@ const CHANGELOG = {
   changed_by: TAG,
   category: 'rule',
   summary: 'Add Dead Rodent Removal & Odor Treatment pricing (pricing_config rodent_dead_animal_removal).',
-};
-
-const parse = (data) => {
-  if (typeof data !== 'string') return data;
-  try { return JSON.parse(data); } catch { return null; }
 };
 
 exports.KEY = KEY;
@@ -84,19 +76,9 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('pricing_config'))) return;
-  const row = await knex('pricing_config').where({ config_key: KEY }).first('data');
-  // jsonb does not keep key order: compare the values. An edited row is the operator's and stays.
-  if (!row || !isDeepStrictEqual(parse(row.data), SEED)) return;
-  // Ownership: up() writes the tagged audit record only when it inserted the row. Without it (another writer's row with the
-  // seeded values, or an install that had no audit table) the row is not this migration's to delete.
-  if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
-  const owned = await knex('pricing_config_audit').where({ config_key: KEY, changed_by: TAG }).first('id');
-  if (!owned) return;
-  await knex('pricing_config').where({ config_key: KEY }).del();
-  await knex('pricing_config_audit').where({ config_key: KEY, changed_by: TAG }).del();
-  if (await knex.schema.hasTable('pricing_changelog')) {
-    await knex('pricing_changelog').where(CHANGELOG).del();
-  }
+exports.down = async function down() {
+  // Non-destructive on purpose (Codex #6975 r1): neither the stored values nor this migration's audit record can prove
+  // the row is still the untouched seed. An admin who edits it and later saves the seeded values again would lose that
+  // choice, and a row another writer created with the same values has no record at all. The key is inert to code that
+  // does not read it, so rollback leaves the row, and its audit and changelog records stay true.
 };
