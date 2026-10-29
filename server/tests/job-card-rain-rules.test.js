@@ -33,14 +33,21 @@ describe('label rain rules config', () => {
   test('every rule carries its label file and page, and quotes the label', () => {
     for (const [reg, entry] of Object.entries(LABEL_RAIN_RULES)) {
       expect(reg).toMatch(/^\d+-\d+(-\d+)?$/);
-      expect(entry.label).toMatch(/^\d{6}-\d{5}-\d{8}\.pdf$/);
-      const rules = ['duringRain', 'dryBeforeRain', 'waterIn'].filter((k) => entry[k]);
+      // The EPA PPLS file, or the company's current label URL with the day it was read.
+      if (/^https:\/\//.test(entry.label)) expect(entry.read).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      else expect(entry.label).toMatch(/^\d{6}-\d{5}-\d{8}\.pdf$/);
+      const rules = ['duringRain', 'dryBeforeRain', 'waterIn', 'heat'].filter((k) => entry[k]);
       expect(rules.length).toBeGreaterThan(0);
       for (const k of rules) {
         expect(Number.isInteger(entry[k].page)).toBe(true);
         expect(entry[k].quote.length).toBeGreaterThan(20);
       }
       if (entry.dryBeforeRain) expect(entry.dryBeforeRain.hours).toBeGreaterThan(0);
+      if (entry.heat) {
+        expect(entry.heat.aboveF).toBeGreaterThan(0);
+        expect(entry.heat.text.length).toBeGreaterThan(5);
+        expect(entry.heat.action.length).toBeGreaterThan(10);
+      }
     }
   });
 
@@ -69,14 +76,22 @@ describe('the Waves rule of a service (reschedule-rules.js)', () => {
 });
 
 describe('buildSprayCheck with rain rules', () => {
-  test('"Do not make applications during rain": the start hour, a caution above 60%, still a caution above 80%', () => {
+  test('"Do not make applications during rain": the start hour, a caution above 60%, the Warning level above 80%', () => {
+    const SPRAY_AROUND = 'Spray before the rain starts, or after it stops.';
     expect(verdict(talak, [60, 0, 0])).toEqual({ productId: 't', verdict: 'ok', reason: null });
-    expect(verdict(talak, [61, 0, 0])).toEqual({ productId: 't', verdict: 'caution', reason: 'rain 61% at 2 pm — label: no spraying during rain', kind: 'rain', source: 'label', at: '2 pm' });
-    expect(verdict(talak, [81, 0, 0])).toEqual({ productId: 't', verdict: 'caution', reason: 'rain 81% at 2 pm — label: no spraying during rain', kind: 'rain', source: 'label', at: '2 pm' });
-    // Only the start hour counts: rain at 3 pm is not "during" a 2 pm application.
-    expect(verdict(talak, [10, 95, 95]).verdict).toBe('ok');
+    expect(verdict(talak, [61, 0, 0])).toEqual({ productId: 't', verdict: 'caution', reason: 'rain 61% at 2 pm — label: no spraying during rain', kind: 'rain', source: 'label', at: '2 pm', action: SPRAY_AROUND });
+    expect(verdict(talak, [81, 0, 0])).toEqual({ productId: 't', verdict: 'caution', reason: 'rain 81% at 2 pm — label: no spraying during rain', kind: 'rain', source: 'label', at: '2 pm', level: 'warning', action: SPRAY_AROUND });
+    // Rain at 3 pm is not "during" a 2 pm application, but it is inside the Waves rule's 2 dry hours (step 2).
+    expect(verdict(talak, [10, 95, 95])).toMatchObject({ verdict: 'caution', level: 'warning', source: 'Waves rule', reason: 'rain 95% inside 2 h — Waves rule', action: 'Skip it today and note why, or plan a re-treat.' });
+    expect(verdict(talak, [10, 10, 95]).verdict).toBe('ok');
     // No reading for the start hour is unknown, never a pass.
-    expect(verdict(talak, [null, 0, 0])).toEqual({ productId: 't', verdict: 'unknown', reason: 'No rain forecast', forecastGap: true });
+    expect(verdict(talak, [null, 0, 0])).toEqual({ productId: 't', verdict: 'unknown', reason: 'No rain / rain 2 h forecast', forecastGap: true });
+  });
+
+  test('a dust with a "during rain" label gets the start hour only, no Waves dry time', () => {
+    const deltaDust = { id: 'd', name: 'Delta Dust', category: 'insecticide', epa_reg_number: '101563-6' };
+    expect(verdict(deltaDust, [10, 95, 95]).verdict).toBe('ok');
+    expect(verdict(deltaDust, [65, 0, 0])).toMatchObject({ verdict: 'caution', source: 'label' });
   });
 
   test('a label dry-before-rain advice is a caution only, and a gap in it is not "unknown"', () => {
@@ -117,18 +132,52 @@ describe('buildSprayCheck with rain rules', () => {
     expect(verdict(unverified, [0, 0, 0, 65], lawn)).toMatchObject({ verdict: 'caution', source: 'Waves rule' });
   });
 
-  test('temperature and wind limits are a caution, named as weather, and a breach still outranks a missing hour', () => {
+  test('wind and temperature are a caution at the start hour and the next one, naming the reading and its hour', () => {
     const windy = { ...celsius, max_wind_mph: 10 };
     const out = buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }).verdicts[0];
-    expect(out).toMatchObject({ verdict: 'caution', kind: 'wind', source: 'product limit', reason: 'wind over 10 mph' });
-    const hot = { ...celsius, max_temp_f: 95 };
-    expect(buildSprayCheck({ products: [hot], hourly: hours([0, 0, 0], { temperatureF: 97 }), now: NOW, rainRules: rulesOn([hot], PEST) }).verdicts[0])
-      .toMatchObject({ verdict: 'caution', kind: 'temperature', reason: 'over 95°F' });
+    expect(out).toMatchObject({ verdict: 'caution', kind: 'wind', source: 'product limit', reason: 'wind 14 mph at 2 pm — over the 10 mph limit', action: 'Check the wind at the nozzle. Do not spray if it drifts onto beds.' });
+    expect(out).not.toHaveProperty('level');
+    // Wind past the limit at 4 pm is past the tech's two hours on site.
+    const later = hours([0, 0, 0, 0]).map((h, i) => (i === 2 ? { ...h, windMph: 20 } : h));
+    expect(buildSprayCheck({ products: [windy], hourly: later, now: NOW, rainRules: rulesOn([windy], PEST) }).verdicts[0].verdict).toBe('ok');
+    // A catalog maximum with no label heat line names its own limit.
+    const cooled = { id: 'k', name: 'Catalog Limit Spray', category: 'herbicide', max_temp_f: 95, label_verified_at: '2026-05-28' };
+    expect(buildSprayCheck({ products: [cooled], hourly: hours([0, 0, 0, 0], { temperatureF: 97 }), now: NOW, rainRules: rulesOn([cooled], PEST) }).verdicts[0])
+      .toMatchObject({ verdict: 'caution', kind: 'temperature', source: 'product limit', reason: '97°F at 2 pm — over the 95°F limit' });
     // One hour of the window has no reading: the known breach is still said, not "unknown".
     const gappy = hours([0, 0, 0], { windMph: 14 }).map((h, i) => (i === 1 ? { ...h, windMph: null } : h));
     expect(buildSprayCheck({ products: [windy], hourly: gappy, now: NOW, rainRules: rulesOn([windy], PEST) }).verdicts[0]).toMatchObject({ verdict: 'caution', kind: 'wind' });
     // Today's check still holds the same reading.
     expect(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW }).verdicts[0].verdict).toBe('hold');
+  });
+
+  test('a mid-hour start reads the hour it starts in and the next one, never a third (pre-push audit P1)', () => {
+    const windy = { ...celsius, max_wind_mph: 15 };
+    const at201 = new Date(NOW.getTime() + 60000); // 2:01 pm ET
+    const rows = (winds) => winds.map((windMph, i) => ({ startTime: new Date(NOW.getTime() + i * 3600000).toISOString(), temperatureF: 85, windMph, rainChance: 0 }));
+    const judgeAt = (hourly) => buildSprayCheck({ products: [windy], hourly, now: at201, rainRules: rulesOn([windy], PEST) }).verdicts[0];
+    // Wind at 4 pm only: outside the 2 pm and 3 pm periods.
+    expect(judgeAt(rows([5, 5, 20, 5])).verdict).toBe('ok');
+    expect(judgeAt(rows([5, 20, 5, 5]))).toMatchObject({ verdict: 'caution', reason: 'wind 20 mph at 3 pm — over the 15 mph limit' });
+    // The 2 pm and 3 pm periods are enough; no 4 pm row is needed (Celsius's 3 h rain window is, so it reads 3 rows).
+    expect(buildSprayCheck({ products: [{ id: 'w', name: 'Wind Only Spray', category: 'herbicide', max_wind_mph: 15, label_verified_at: '2026-05-28' }],
+      hourly: rows([5, 5]), now: at201, rainRules: rulesOn([], 'Interior Pest Treatment') }).verdicts[0].verdict).toBe('ok');
+  });
+
+  test('Celsius heat: the label line (no surfactant above 90°F) is a caution with its action, and replaces the catalog 95°F', () => {
+    const hotCelsius = { ...celsius, max_temp_f: 95, min_temp_f: 50 };
+    const at = (temps) => buildSprayCheck({ products: [hotCelsius], hourly: hours([0, 0, 0, 0]).map((h, i) => ({ ...h, temperatureF: temps[i] ?? 85 })), now: NOW, rainRules: rulesOn([hotCelsius], PEST) }).verdicts[0];
+    expect(at([88, 90, 99])).toEqual({ productId: 'c', verdict: 'ok', reason: null });
+    expect(at([88, 92])).toEqual({
+      productId: 'c', verdict: 'caution', reason: '92°F at 3 pm — label: no surfactant above 90°F', kind: 'temperature', source: 'label', at: null,
+      action: 'Leave the NIS out of the tank. Spot sprays on St. Augustine may slow its growth for a while (label).',
+    });
+    // Above the catalog's 95°F too: one line, the label's.
+    expect(at([97]).reason).toBe('97°F at 2 pm — label: no surfactant above 90°F');
+    // The catalog minimum still names its own limit.
+    expect(at([45]).reason).toBe('45°F at 2 pm — under the 50°F limit');
+    // Off: today's check, the catalog limits on the 4-hour window.
+    expect(buildSprayCheck({ products: [hotCelsius], hourly: hours([0, 0, 0, 0], { temperatureF: 92 }), now: NOW }).verdicts[0].verdict).toBe('ok');
   });
 
   test('a reviewed label with only conditional restrictions stays unknown when nothing else applies', () => {
@@ -169,17 +218,22 @@ describe('the Dispatch weather chip', () => {
     expect(weatherIssue({ hold: false, verdicts: [{ verdict: 'ok' }] }, true)).toBeNull();
   });
 
-  test('with rain rules the chip names the caution that fired and is never a hold', () => {
-    expect(chip([talak], [85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm · label: no spraying in rain' });
-    expect(chip([talak], [65])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm · label: no spraying in rain' });
-    expect(chip([alpine], [0, 85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution · Waves rule' });
-    expect(chip([alpine], [0, 65])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution · Waves rule' });
-    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution · label advice' });
-    expect(chip([celsius], [0, 85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+  test('with rain rules the chip names the caution, its level and the product, and is never a hold', () => {
+    expect(chip([talak], [85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 2 pm' });
+    expect(chip([talak], [65, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm' });
+    expect(chip([alpine], [0, 85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
+    expect(chip([alpine], [0, 65])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([celsius], [0, 85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
+    // The product goes on the chip, and a Warning beats an earlier product's caution.
+    const names = new Map([['a', 'Alpine WSG'], ['s', 'Sedgehammer Plus']]);
+    expect(weatherIssue(check([sedgehammer, alpine], [0, 85, 95]), true, names)).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Alpine WSG' });
     const windy = { ...celsius, max_wind_mph: 10 };
     const hot = { ...celsius, max_temp_f: 95 };
     expect(weatherIssue(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }), true))
       .toEqual({ kind: 'weather', status: 'caution', label: 'Wind caution' });
+    expect(weatherIssue(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }), true, new Map([['c', 'Celsius WG']])))
+      .toEqual({ kind: 'weather', status: 'caution', label: 'Wind caution · Celsius WG' });
     expect(weatherIssue(buildSprayCheck({ products: [hot], hourly: hours([0, 0, 0], { temperatureF: 97 }), now: NOW, rainRules: rulesOn([hot], PEST) }), true))
       .toEqual({ kind: 'weather', status: 'caution', label: 'Temperature caution' });
     expect(chip([talak, alpine], [10, 10])).toBeNull();
@@ -187,7 +241,7 @@ describe('the Dispatch weather chip', () => {
 
   test('a caution comes before "Weather unknown" (a missing forecast), and other days wait', () => {
     // Talak has no start-hour reading (unknown); Sedgehammer's rain is still said.
-    expect(chip([talak, sedgehammer], [null, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution · label advice' });
+    expect(chip([talak, sedgehammer], [null, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
     expect(chip([talak], [null])).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
     expect(chip([talak], [10], false)).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
   });
@@ -214,10 +268,10 @@ describe('the tank search follows the same rule', () => {
   test('on: every reading keeps the dose, above 80% too (owner 2026-10-29); off: today\'s check', async () => {
     process.env.GATE_SPRAY_RAIN_RULES = 'true';
     const caution = await mix(65);
-    expect(caution.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 65% at 2 pm — label: no spraying during rain' });
+    expect(caution.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 65% at 2 pm — label: no spraying during rain', action: 'Spray before the rain starts, or after it stops.' });
     expect(caution.amount).not.toBeNull();
     const likely = await mix(85);
-    expect(likely.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 85% at 2 pm — label: no spraying during rain' });
+    expect(likely.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 85% at 2 pm — label: no spraying during rain', level: 'warning', action: 'Spray before the rain starts, or after it stops.' });
     expect(likely.amount).not.toBeNull();
     delete process.env.GATE_SPRAY_RAIN_RULES;
     const legacy = await mix(85);
@@ -240,11 +294,12 @@ describe('the tank search follows the same rule', () => {
     tables.scheduled_service_addons = [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }];
     protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' };
     const viaAddon = await search();
-    expect(viaAddon.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule' });
+    const SKIP = 'Skip it today and note why, or plan a re-treat.';
+    expect(viaAddon.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule', level: 'warning', action: SKIP });
     expect(viaAddon.amount).not.toBeNull();
     // Named by both, the stricter rule judges it.
     protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' };
-    expect((await search()).sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule' });
+    expect((await search()).sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule', level: 'warning', action: SKIP });
   });
 });
 
@@ -280,6 +335,9 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     const [sql, bindings] = raw.mock.calls[0];
     expect(sql).toMatch(/ON CONFLICT \(scheduled_service_id, visit_date\) DO UPDATE SET/);
     expect(sql).toMatch(/shadow_status = CASE WHEN .* THEN EXCLUDED\.shadow_status ELSE spray_rain_rule_shadow\.shadow_status END/);
+    // A Warning ranks above a plain caution inside the 'caution' status (step 2), on both sides of the comparison.
+    expect(sql).toMatch(/jsonb_array_elements\(EXCLUDED\.products\) AS e WHERE e->>'level' = 'warning'/);
+    expect(sql).toMatch(/jsonb_array_elements\(spray_rain_rule_shadow\.products\) AS e WHERE e->>'level' = 'warning'/);
     // The start time and service are the peak read's: they move only with it (Codex P2).
     expect(sql).toMatch(/start_at = CASE WHEN .* THEN EXCLUDED\.start_at ELSE spray_rain_rule_shadow\.start_at END/);
     expect(sql).toMatch(/service_type = CASE WHEN .* THEN EXCLUDED\.service_type ELSE spray_rain_rule_shadow\.service_type END/);
@@ -288,6 +346,14 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     expect(sql).toMatch(/OR spray_rain_rule_shadow\.last_seen_at < now\(\) - interval '10 minutes'/);
     expect(bindings).toEqual(['svc1', '2026-09-04', NOW.toISOString(), 'Quarterly Pest Control', 'Weather unknown', false, 'ok', null, 70, 85, false,
       JSON.stringify([{ name: 'Atticus Talak 7.9 F', verdict: 'ok', reason: null, source: null }])]);
+  });
+
+  test('a Warning keeps its level in the row, so warnings stay countable', () => {
+    const row = shadowTest.shadowRow(input([{ productId: 'a', verdict: 'caution', level: 'warning', reason: 'rain 85% inside 2 h — Waves rule', source: 'Waves rule' }],
+      { kind: 'weather', status: 'caution', label: 'Rain warning · Alpine WSG' }));
+    expect(row.shadow_status).toBe('caution');
+    expect(row.dose_hidden).toBe(false);
+    expect(JSON.parse(row.products)).toEqual([{ name: 'Alpine WSG', verdict: 'caution', level: 'warning', reason: 'rain 85% inside 2 h — Waves rule', source: 'Waves rule' }]);
   });
 
   test('no visit id or date writes nothing', async () => {
