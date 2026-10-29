@@ -69,23 +69,25 @@ async function findMatchingFlag(trx, estimate, now) {
     .orderBy('leads.created_at', 'desc')
     .orderBy('leads.id', 'desc')
     .forUpdate('leads')
-    .select('leads.id as lead_id', 'technicians.id as technician_id', 'leads.customer_id',
-      'leads.address', 'leads.city', 'leads.zip', trx.raw("leads.gps_check->>'mode' as gps_mode"));
+    .select('leads.id as lead_id', 'technicians.id as technician_id',
+      trx.raw("leads.gps_check->>'mode' as gps_mode"), trx.raw("leads.gps_check->'premise' as premise"));
   return candidates.find((flag) => flagProvesPremise(flag, estimate)) || null;
 }
 
-// Was the truck at the place this estimate is for? A visit flag proved the visited customer's
-// property; a Neighbor flag proved the typed address.
+// Was the truck at the place this estimate is for? The premise is the one the GPS check stored
+// when the flag was made (gps_check.premise), never the lead's editable columns: a visit flag
+// proved the visited customer's property, a Neighbor flag the typed address.
 function flagProvesPremise(flag, estimate) {
+  const premise = flag.premise && typeof flag.premise === 'object' ? flag.premise : {};
   if (flag.gps_mode === 'customer') {
-    return Boolean(flag.customer_id) && String(flag.customer_id) === String(estimate.customer_id || '');
+    return Boolean(premise.customer_id) && String(premise.customer_id) === String(estimate.customer_id || '');
   }
-  if (flag.gps_mode !== 'prospect' || !flag.address || !estimate.address) return false;
+  if (flag.gps_mode !== 'prospect' || !premise.address || !estimate.address) return false;
   const { parseDisplayAddress, flagCoversAddress } = require('./lead-address-unverified');
-  const premise = parseDisplayAddress(estimate.address);
+  const place = parseDisplayAddress(estimate.address);
   return flagCoversAddress(
-    { address_line1: flag.address, city: flag.city, zip: flag.zip },
-    { line1: premise.line1, city: premise.city, state: premise.state, zip: premise.zip },
+    { address_line1: premise.address, city: premise.city, zip: premise.zip },
+    { line1: place.line1, city: place.city, state: place.state, zip: place.zip },
   );
 }
 

@@ -12,9 +12,10 @@
  *  - prospect ("Neighbor"): no customer yet. The typed address is geocoded and the
  *    technician's truck must sit within the radius of it, on a position under 6 hours old.
  *
- * The result goes on leads.gps_check. It holds a distance, never the truck's coordinates, and
- * the flagging technician (technician_id): the seller, even if the office later reassigns the
- * lead (leads.assigned_to).
+ * The result goes on leads.gps_check. It holds a distance, never the truck's coordinates, the
+ * flagging technician (technician_id: the seller, even if the office later reassigns the lead)
+ * and the premise the check proved (the visited customer, or the typed address), so an office
+ * edit to the lead's customer or address never moves the proof.
  * Nothing here throws for a failed check: a failed check is a result, and the lead is made
  * either way.
  */
@@ -50,11 +51,14 @@ function describeGpsCheck(check) {
   return `GPS: not verified (${reason}${check.result === 'too_far' && distance ? `, ${distance}` : ''})`;
 }
 
-function blankCheck(mode, now, technicianId) {
+// `premise` is the place the check is about, kept with the result so it never follows an edit
+// to the lead: the visited customer (customer mode) or the typed address (prospect mode).
+function blankCheck(mode, now, technicianId, premise) {
   return {
     result: null,
     mode,
     technician_id: technicianId ? String(technicianId) : null,
+    premise,
     scheduled_service_id: null,
     distance_m: null,
     radius_m: null,
@@ -78,7 +82,8 @@ async function loadRadiusMeters(database = db) {
 
 // Customer mode. `scheduledServiceId` is the visit the flag was opened from.
 async function checkCustomerArrival({ database = db, technicianId, customerId, scheduledServiceId, now = new Date() }) {
-  const check = blankCheck('customer', now, technicianId);
+  // The route checks only with a customer id (customer mode).
+  const check = blankCheck('customer', now, technicianId, { customer_id: String(customerId) });
   const serviceId = typeof scheduledServiceId === 'string' ? scheduledServiceId.trim() : '';
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(serviceId)) {
     return { ...check, result: 'no_gps_arrival' };
@@ -111,7 +116,8 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
 
 // Prospect mode: the typed address against the technician's truck.
 async function checkProspectLocation({ database = db, technicianId, prospect, now = new Date(), geocode = null, radiusMeters = null }) {
-  const check = blankCheck('prospect', now, technicianId);
+  // normalizeProspect has already required the address and the ZIP (the city may be '').
+  const check = blankCheck('prospect', now, technicianId, { address: prospect.address, city: prospect.city, zip: prospect.zip });
   const radius = radiusMeters || await loadRadiusMeters(database);
   check.radius_m = radius;
 
