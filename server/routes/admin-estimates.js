@@ -3792,6 +3792,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 router.sendEstimateNow = sendEstimateNow;
 
 // GET /api/admin/estimates/lead-auto-send/preview — read-only dry-run audit.
+// Uses the same config as the scan, including the created-after cutoff
+// (LEAD_ESTIMATE_AUTO_SEND_CREATED_AFTER, read from the environment only, never
+// from the query string): unset or unparseable lists no candidates.
 router.get('/lead-auto-send/preview', async (req, res, next) => {
   try {
     const config = leadEstimateAutoSendConfigFromEnv({
