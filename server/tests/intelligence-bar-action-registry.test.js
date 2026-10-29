@@ -386,6 +386,8 @@ const SCOPE_SNAPSHOT = {
     'create_payment_plan', 'cancel_payment_plan',
     // create_invoice carries customer_id: the draft invoice is that customer's own.
     'create_invoice',
+    // compose_email carries customer_id when it names a customer (validateRecordTarget); a typed address is held to the task customer's own by validateComposeRecipient.
+    'compose_email',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
