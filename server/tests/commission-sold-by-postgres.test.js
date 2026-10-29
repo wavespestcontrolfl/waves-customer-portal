@@ -74,9 +74,9 @@ postgres('commission sold by', () => {
     });
     return id;
   };
-  const arrival = (visitId, hoursAgo, distance = 40) => trx('audit_log').insert({
+  const arrival = (visitId, hoursAgo, techId, distance = 40) => trx('audit_log').insert({
     actor_type: 'system:gps-arrival', action: 'gps_arrival.mark_on_property', resource_type: 'scheduled_service',
-    resource_id: visitId, metadata: { distance_meters: distance }, created_at: new Date(Date.now() - hoursAgo * HOUR),
+    resource_id: visitId, metadata: { tech_id: techId, distance_meters: distance }, created_at: new Date(Date.now() - hoursAgo * HOUR),
   });
   const truck = async (technicianId, position, hoursAgo = 0.1) => {
     const imei = `IMEI${Math.floor(Math.random() * 1e12)}`;
@@ -89,7 +89,8 @@ postgres('commission sold by', () => {
   const flagLead = async (technicianId, patch = {}) => {
     const [row] = await trx('leads').insert({
       first_name: 'Sample', lead_type: 'field_observation', first_contact_channel: 'field_observation', status: 'new',
-      assigned_to: technicianId, gps_verified: true, created_at: new Date(Date.now() - 2 * DAY), ...patch,
+      assigned_to: technicianId, gps_verified: true, gps_check: { result: 'verified', technician_id: technicianId },
+      created_at: new Date(Date.now() - 2 * DAY), ...patch,
     }).returning('id');
     return row.id || row;
   };
@@ -182,7 +183,7 @@ postgres('commission sold by', () => {
       const id = await tech('Sample Alpha');
       const cust = await customer();
       const v = await visit(id, cust);
-      if (arrivalHoursAgo !== undefined) await arrival(v, arrivalHoursAgo);
+      if (arrivalHoursAgo !== undefined) await arrival(v, arrivalHoursAgo, id);
       const extra = mutate ? await mutate({ id, cust, v }) : {};
       const res = await flag({ 'x-test-tech': id, 'x-test-name': 'Sample Alpha' }, {
         customerId: cust, leadServiceType: 'Lawn', notes: 'Chinch bugs', urgency: 'normal', scheduledServiceId: v, ...extra,
@@ -220,7 +221,7 @@ postgres('commission sold by', () => {
           }).returning('id');
           await trx('scheduled_services').where({ id: v }).update({ visit_id: group });
           const sibling = await visit(id, cust, { visit_id: group });
-          await arrival(sibling, 1);
+          await arrival(sibling, 1, id);
           return {};
         },
       });
@@ -231,8 +232,20 @@ postgres('commission sold by', () => {
       const other = await tech('Sample Bravo');
       const otherCustomer = await customer({ first_name: 'Other' });
       const foreignVisit = await visit(other, otherCustomer);
-      await arrival(foreignVisit, 1);
+      await arrival(foreignVisit, 1, other);
       const { lead } = await run({ mutate: async () => ({ scheduledServiceId: foreignVisit }) });
+      expect(lead.gps_verified).toBe(false);
+      expect(lead.gps_check.result).toBe('no_gps_arrival');
+    });
+
+    it("does not count another technician's arrival on a visit reassigned to this technician", async () => {
+      const { lead } = await run({
+        mutate: async ({ v }) => {
+          const before = await tech('Sample Bravo');
+          await arrival(v, 1, before); // Bravo's truck arrived; the visit was then given to Alpha
+          return {};
+        },
+      });
       expect(lead.gps_verified).toBe(false);
       expect(lead.gps_check.result).toBe('no_gps_arrival');
     });
@@ -276,8 +289,9 @@ postgres('commission sold by', () => {
       expect(stored).not.toContain('27.4');
       expect(stored).not.toContain('82.45');
       expect(Object.keys(lead.gps_check).sort()).toEqual([
-        'checked_at', 'distance_m', 'mode', 'radius_m', 'result', 'scheduled_service_id', 'truck_reported_at',
+        'checked_at', 'distance_m', 'mode', 'radius_m', 'result', 'scheduled_service_id', 'technician_id', 'truck_reported_at',
       ]);
+      expect(lead.gps_check.technician_id).toBe(id);
       expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified, \d+ m$/);
       // The owner's alert names the Neighbor (first name, last initial), not "Unknown customer".
       expect(TwilioService.sendSMS.mock.calls.at(-1)[1]).toBe('🔔 Field Lead: Sample Alpha flagged Pest opportunity at Neighbor S. (neighbor).\nNotes: Ants');
@@ -343,6 +357,19 @@ postgres('commission sold by', () => {
       await neighbor(id);
       lead = await leadFor(id);
       expect(lead.gps_check).toMatchObject({ result: 'too_far', radius_m: 300 });
+    });
+  });
+
+  describe('Sold by auto-fill, lead reassigned by the office', () => {
+    it('credits the technician who flagged, not the one the lead was reassigned to', async () => {
+      const flagger = await tech('Sample Alpha');
+      const other = await tech('Sample Bravo');
+      const cust = await customer();
+      await flagLead(flagger, { customer_id: cust });
+      await trx('leads').where({ customer_id: cust }).update({ assigned_to: other });
+      const est = await estimate({ customer_id: cust });
+      await autoFillSoldBy(trx, await estimateRow(est));
+      expect(await estimateRow(est)).toMatchObject({ sold_by_technician_id: flagger, sold_by_source: 'flag' });
     });
   });
 

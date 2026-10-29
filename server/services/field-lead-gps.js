@@ -6,11 +6,15 @@
  *
  * Two modes:
  *  - customer: the flag came from a visit. Verified when this technician's visit for that
- *    customer has a gps_arrival.mark_on_property audit row in the 12 hours before the flag.
+ *    customer has a gps_arrival.mark_on_property audit row in the 12 hours before the flag,
+ *    logged for THIS technician's truck (metadata.tech_id): a visit reassigned after another
+ *    technician's arrival does not verify.
  *  - prospect ("Neighbor"): no customer yet. The typed address is geocoded and the
  *    technician's truck must sit within the radius of it, on a position under 6 hours old.
  *
- * The result goes on leads.gps_check. It holds a distance, never the truck's coordinates.
+ * The result goes on leads.gps_check. It holds a distance, never the truck's coordinates, and
+ * the flagging technician (technician_id): the seller, even if the office later reassigns the
+ * lead (leads.assigned_to).
  * Nothing here throws for a failed check: a failed check is a result, and the lead is made
  * either way.
  */
@@ -46,10 +50,11 @@ function describeGpsCheck(check) {
   return `GPS: not verified (${reason}${check.result === 'too_far' && distance ? `, ${distance}` : ''})`;
 }
 
-function blankCheck(mode, now) {
+function blankCheck(mode, now, technicianId) {
   return {
     result: null,
     mode,
+    technician_id: technicianId ? String(technicianId) : null,
     scheduled_service_id: null,
     distance_m: null,
     radius_m: null,
@@ -73,7 +78,7 @@ async function loadRadiusMeters(database = db) {
 
 // Customer mode. `scheduledServiceId` is the visit the flag was opened from.
 async function checkCustomerArrival({ database = db, technicianId, customerId, scheduledServiceId, now = new Date() }) {
-  const check = blankCheck('customer', now);
+  const check = blankCheck('customer', now, technicianId);
   const serviceId = typeof scheduledServiceId === 'string' ? scheduledServiceId.trim() : '';
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(serviceId)) {
     return { ...check, result: 'no_gps_arrival' };
@@ -93,6 +98,7 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
   const arrival = await database('audit_log')
     .where({ action: 'gps_arrival.mark_on_property', resource_type: 'scheduled_service' })
     .whereIn('resource_id', visitIds)
+    .whereRaw("metadata->>'tech_id' = ?", [String(technicianId || '')])
     .where('created_at', '>=', new Date(now.getTime() - ARRIVAL_WINDOW_MS))
     .where('created_at', '<=', now)
     .orderBy('created_at', 'desc')
@@ -104,7 +110,7 @@ async function checkCustomerArrival({ database = db, technicianId, customerId, s
 
 // Prospect mode: the typed address against the technician's truck.
 async function checkProspectLocation({ database = db, technicianId, prospect, now = new Date(), geocode = null, radiusMeters = null }) {
-  const check = blankCheck('prospect', now);
+  const check = blankCheck('prospect', now, technicianId);
   const radius = radiusMeters || await loadRadiusMeters(database);
   check.radius_m = radius;
 

@@ -36,13 +36,15 @@ const SOLD_BY_COLUMNS = [
 ];
 
 // The newest qualifying field flag for the estimate, or null. Matches by customer, by the last
-// ten digits of the phone, or by the lead already linked to the estimate.
+// ten digits of the phone, or by the lead already linked to the estimate. The seller is the
+// technician who flagged (gps_check.technician_id, written once by the flag), never
+// leads.assigned_to, which the office may reassign.
 async function findMatchingFlag(trx, estimate, now) {
   const since = new Date(now.getTime() - FLAG_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const phoneDigits = String(estimate.customer_phone || '').replace(/\D/g, '');
   const phoneKey = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : null;
   const query = trx('leads')
-    .join('technicians', 'technicians.id', 'leads.assigned_to')
+    .joinRaw("JOIN technicians ON technicians.id::text = leads.gps_check->>'technician_id'")
     .where('leads.gps_verified', true)
     .where('leads.first_contact_channel', 'field_observation')
     .whereNull('leads.deleted_at')
@@ -62,7 +64,7 @@ async function findMatchingFlag(trx, estimate, now) {
     })
     .orderBy('leads.created_at', 'desc')
     .orderBy('leads.id', 'desc');
-  return query.first('leads.id as lead_id', 'leads.assigned_to as technician_id');
+  return query.first('leads.id as lead_id', 'technicians.id as technician_id');
 }
 
 /**
