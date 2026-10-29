@@ -630,3 +630,83 @@ describe('pay lines on the forms', () => {
     expect(line(out.f940, '4')).toEqual({ line: '4', label: 'Payments exempt from FUTA tax', kind: 'cents', value: 0 });
   });
 });
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE (owner 2026-10-29, D5 part 2): the forms read the stored
+// unemployment_exempt column whatever the gate says now.
+describe('family employee on the forms', () => {
+  const OLD = process.env.GATE_PAYROLL_FAMILY_EMPLOYEE;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_PAYROLL_FAMILY_EMPLOYEE; else process.env.GATE_PAYROLL_FAMILY_EMPLOYEE = OLD;
+  });
+  // March: the week of March 9 holds the 12th (RT-6 month 3, Form 941 line 1).
+  const buildQ1 = (rowList, extra = {}) => buildFormFigures({ year: 2026, quarter: 1, rows: rowList, ...extra });
+  const exempt = { unemployment_exempt: true, unemployment_wages_cents: 0 };
+  const rows = () => [
+    check('2026-03-02', '2026-03-13', { tech: 1, employee_name: 'Sample Parent', ...taxed(), ...exempt }),
+    check('2026-03-09', '2026-03-20', { tech: 1, employee_name: 'Sample Parent', ...taxed(), ...exempt }),
+    check('2026-03-09', '2026-03-20', {
+      tech: 2, employee_name: 'Sample Technician', ...taxed(), futa_cents: 600, fl_reemployment_cents: 2700, hsa_employer_cents: 20000,
+      unemployment_exempt: false, unemployment_wages_cents: 100000, qualified_overtime_cents: 0,
+    }),
+  ];
+  const periodRows = () => rows().map((r) => ({ technician_id: r.technician_id, week_start: r.week_start, unemployment_exempt: r.unemployment_exempt }));
+
+  test('Form 940: line 3 holds all pay, line 4 adds the exempt pay (boxes 4a and 4e), line 5 ignores it', () => {
+    const f940 = buildQ1(rows()).f940;
+    expect(line(f940, '3').value).toBe(300000 + 20000);
+    expect(line(f940, '4').value).toBe(20000 + 200000);
+    expect(line(f940, '4').note).toMatch(/box 4a.*box 4e/);
+    expect(line(f940, '5').value).toBe(0);
+    expect(line(f940, '6').value).toBe(220000);
+    expect(line(f940, '7').value).toBe(100000);
+    expect(line(f940, '8').value).toBe(600);
+  });
+
+  test('Form 940 line 5: exempt pay never counts toward the $7,000, and the box 4e note stands alone without HSA money', () => {
+    const big = [
+      check('2026-03-02', '2026-03-13', { tech: 1, gross_cents: 900000, ...exempt }),
+      check('2026-03-09', '2026-03-20', { tech: 1, gross_cents: 100000, unemployment_exempt: false, unemployment_wages_cents: 100000 }),
+    ];
+    const f940 = buildQ1(big).f940;
+    expect(line(f940, '4')).toMatchObject({ value: 900000 });
+    expect(line(f940, '4').note).toBe('Pay to your parent or spouse: check box 4e, other. It is also in line 3.');
+    expect(line(f940, '5').value).toBe(0);
+    expect(line(f940, '7').value).toBe(100000);
+  });
+
+  test('RT-6 leaves her out: wages, tax, monthly counts and the wage list; Form 941 still counts her', () => {
+    const out = buildQ1(rows(), { periodRows: periodRows() });
+    expect(line(out.rt6, '2').value).toBe(100000);
+    expect(line(out.rt6, '3').value).toBe(0);
+    expect(line(out.rt6, '4').value).toBe(100000);
+    expect(line(out.rt6, '5').value).toBe(2700);
+    expect(line(out.rt6, '1 month 3').value).toBe(1);
+    expect(out.rt6.employees.map((e) => e.name)).toEqual(['Sample Technician']);
+    expect(line(out.f941, '1').value).toBe(2);
+    // Income tax, Social Security, Medicare and the W-2 count her pay like any wages.
+    expect(line(out.f941, '2').value).toBe(300000);
+    expect(out.w2.find((f) => f.name === 'Sample Parent')).toMatchObject({ box1: 200000, box3: 200000, box5: 200000 });
+  });
+
+  test('the gate does not change what stored checks report', () => {
+    delete process.env.GATE_PAYROLL_FAMILY_EMPLOYEE;
+    const off = buildQ1(rows(), { periodRows: periodRows() });
+    process.env.GATE_PAYROLL_FAMILY_EMPLOYEE = 'true';
+    expect(buildQ1(rows(), { periodRows: periodRows() })).toEqual(off);
+  });
+
+  test('no exempt check: every form is what it was, with the columns stored or not', () => {
+    const legacy = [
+      check('2026-03-02', '2026-03-13', { tech: 1, ...taxed(), futa_cents: 600, fl_reemployment_cents: 2700 }),
+      check('2026-03-09', '2026-03-20', { tech: 2, ...taxed(), ytd_gross_before_cents: 650000, futa_cents: 300, fl_reemployment_cents: 1350 }),
+    ];
+    const stored = [
+      { ...legacy[0], unemployment_exempt: false, unemployment_wages_cents: 100000 },
+      { ...legacy[1], unemployment_exempt: false, unemployment_wages_cents: 50000 },
+    ];
+    const plain = buildQ1(legacy);
+    expect(buildQ1(stored)).toEqual(plain);
+    expect(line(plain.f940, '4')).toEqual({ line: '4', label: 'Payments exempt from FUTA tax', kind: 'cents', value: 0 });
+    expect(line(plain.rt6, '3').value).toBe(50000);
+  });
+});
