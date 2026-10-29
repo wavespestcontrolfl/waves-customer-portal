@@ -126,6 +126,14 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+// customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
+const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
+// Reasons the office prices by hand: a keyed quote-on-request product and top
+// dressing (quote-only since 2026-10-29, owner). Both reuse the existing
+// quote_on_request customer message and office notice; no new copy.
+function isPricedByTeamReason(reason) {
+  return reason === 'quote_on_request' || reason === TOP_DRESSING_QUOTE_ONLY_REASON;
+}
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -2114,6 +2122,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
       || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
+    const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     // `let`: a ZERO rodent-setup decision (decided under the draft row lock
@@ -3557,10 +3566,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       await NotificationService.notifyAdmin(
         'new_lead',
         quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
+          ? (quoteIsPricedByTeam ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
           : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         `${quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request'
+          ? (quoteIsPricedByTeam
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
@@ -4169,7 +4178,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: quoteRequiredReason === 'quote_on_request'
+        message: quoteIsPricedByTeam
           ? (keyedService?.service_key === 'mosquito_misting_system'
             ? 'Mosquito misting systems are designed and priced on site — we\'ll call to schedule your free design visit.'
             : `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`)
@@ -4439,6 +4448,7 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
+  isPricedByTeamReason,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,

@@ -1365,7 +1365,13 @@ function mapV1ToLegacyShape(v1Result) {
   const quoteRequired = quoteRequiredItems.length > 0;
 
   const topDressingLI = lineItems.find(l => l.service === 'top_dressing');
-  if (topDressingLI) {
+  // A quote-only top dressing line (owner 2026-10-29) maps to a null-price
+  // Quote Required row above, so no depth tier may carry a number the office
+  // could read as a sendable price: R.td / R.tdTiers stay unset. Lines saved
+  // before the rule carry no flag and keep their stored tiers.
+  const topDressingQuoteOnly = !!(topDressingLI
+    && (topDressingLI.quoteRequired === true || topDressingLI.requiresCustomQuote === true));
+  if (topDressingLI && !topDressingQuoteOnly) {
     const pricedLawnSqFt = Number(topDressingLI.lawnSqFt || 0);
     const eighth = priceTopDressing(pricedLawnSqFt, 'eighth', true);
     const quarter = priceTopDressing(pricedLawnSqFt, 'quarter', true);

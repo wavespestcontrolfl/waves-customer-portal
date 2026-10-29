@@ -8998,7 +8998,7 @@ export default function EstimateToolViewV2({
                                       key={j}
                                       name={t.name}
                                       detail={t.detail}
-                                      price={fmtInt(t.price)}
+                                      price={t.quoteRequired ? "Quote Required" : fmtInt(t.price)}
                                     />
                                   ))}
                                 </TierGridV2>{" "}
