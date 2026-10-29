@@ -8,12 +8,15 @@
  * db-bridge sync both call it) and the one place that turns it into constants.
  *
  *   {
- *     "reachable": { "alone": 169, "riding": 119, "on_site_min": 45 },
- *     "attic":     { "alone": 269, "riding": 219, "on_site_min": 90 }
+ *     "reachable": { "alone": 199, "on_site_min": 45 },
+ *     "attic":     { "alone": 299, "on_site_min": 90 }
  *   }
  *
- *   alone / riding   dollars, a plain JSON number from 1 to 2000 (riding = no drive, no admin; it may not exceed alone)
- *   on_site_min      whole minutes from 1 to 480: the tech's time on site; it also sizes the booked slot
+ *   alone         the tier's ONE price in dollars, a plain JSON number from 1 to 2000 (owner 2026-10-29: one price per
+ *                 tier; other rodent work on the estimate does not lower it, staff discount on the estimate)
+ *   on_site_min   whole minutes from 1 to 480: the tech's time on site; it also sizes the booked slot
+ *   riding        RETIRED 2026-10-29 (it was the lower price when the estimate had other rodent work). A stored row
+ *                 may still carry it, but only equal to `alone`, so it can never price anything lower; it is ignored.
  *
  * The in_wall tier has no price (a custom quote) and no knob. Fail closed: any known field outside its bounds, or not a
  * plain JSON number, or any unknown key, makes the WHOLE row unusable and the code defaults stand (never a half-applied
@@ -32,12 +35,11 @@ function defaultDeadAnimalRemovalData(block) {
   const source = block || require('./constants').RODENT.deadAnimalRemoval;
   return Object.fromEntries(TIERS.map((tier) => [tier, {
     alone: source[tier].alone,
-    riding: source[tier].riding,
     on_site_min: source[tier].durationMin,
   }]));
 }
 
-// { ok: true, value: { reachable: { alone, riding, durationMin }, attic: {...} } } or { ok: false, error }.
+// { ok: true, value: { reachable: { alone, durationMin }, attic: {...} } } or { ok: false, error }.
 function normalizeDeadAnimalRemovalConfig(data) {
   if (!isPlain(data)) return { ok: false, error: 'must be an object with reachable and attic' };
   const unknown = Object.keys(data).filter((key) => !TIERS.includes(key));
@@ -45,20 +47,20 @@ function normalizeDeadAnimalRemovalConfig(data) {
   const value = {};
   for (const tier of TIERS) {
     const row = data[tier];
-    if (!isPlain(row)) return { ok: false, error: `${tier} must be an object with alone, riding and on_site_min` };
+    if (!isPlain(row)) return { ok: false, error: `${tier} must be an object with alone and on_site_min` };
     const extra = Object.keys(row).filter((key) => !['alone', 'riding', 'on_site_min'].includes(key));
     if (extra.length) return { ok: false, error: `${tier}.${extra[0]} is not a knob` };
-    for (const field of ['alone', 'riding']) {
-      if (!isNum(row[field]) || row[field] < PRICE_BOUNDS[0] || row[field] > PRICE_BOUNDS[1]) {
-        return { ok: false, error: `${tier}.${field} must be a number from ${PRICE_BOUNDS[0]} to ${PRICE_BOUNDS[1]}` };
-      }
+    if (!isNum(row.alone) || row.alone < PRICE_BOUNDS[0] || row.alone > PRICE_BOUNDS[1]) {
+      return { ok: false, error: `${tier}.alone must be a number from ${PRICE_BOUNDS[0]} to ${PRICE_BOUNDS[1]}` };
     }
-    if (row.riding > row.alone) return { ok: false, error: `${tier}.riding may not be more than ${tier}.alone` };
+    if ('riding' in row && row.riding !== row.alone) {
+      return { ok: false, error: `${tier}.riding is retired (one price per tier since 2026-10-29): remove it or set it equal to ${tier}.alone` };
+    }
     if (!isNum(row.on_site_min) || !Number.isInteger(row.on_site_min)
       || row.on_site_min < MINUTE_BOUNDS[0] || row.on_site_min > MINUTE_BOUNDS[1]) {
       return { ok: false, error: `${tier}.on_site_min must be a whole number of minutes from ${MINUTE_BOUNDS[0]} to ${MINUTE_BOUNDS[1]}` };
     }
-    value[tier] = { alone: row.alone, riding: row.riding, durationMin: row.on_site_min };
+    value[tier] = { alone: row.alone, durationMin: row.on_site_min };
   }
   return { ok: true, value };
 }

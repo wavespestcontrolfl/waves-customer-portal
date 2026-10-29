@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const catalog = require('../models/migrations/20261029130000_dead_rodent_removal_catalog');
 const seedMigration = require('../models/migrations/20261029130100_dead_rodent_removal_pricing_config');
+const onePrice = require('../models/migrations/20261029160100_dead_rodent_removal_one_price');
 const constants = require('../services/pricing-engine/constants');
 const config = require('../services/pricing-engine/dead-animal-removal-config');
 const { classifyCatalogRow } = require('../config/completion-lane-registry');
@@ -43,6 +44,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     });
     const q = {
       where(cond) { filters.push(cond); return q; },
+      forUpdate() { return q; },
       whereIn(col, values) { filters.push({ in: { col, values } }); return q; },
       whereRaw(sql, bindings) {
         const lower = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(sql);
@@ -109,11 +111,16 @@ describe('20261029130000 catalog row, completion profile and taxability', () => 
     expect(row.price_range_max).toBe(269);
   });
 
-  test('the catalog name is the pricer line name verbatim, and the base price is the easy-reach own-visit price', () => {
+  test('the catalog name is the pricer line name verbatim; the 10-29 prices are the ones the one-price migration moves', () => {
     expect(catalog.SERVICE.name).toBe(NAME);
-    expect(catalog.SERVICE.base_price).toBe(constants.RODENT.deadAnimalRemoval.reachable.alone);
-    expect(catalog.SERVICE.price_range_min).toBe(constants.RODENT.deadAnimalRemoval.reachable.riding);
-    expect(catalog.SERVICE.price_range_max).toBe(constants.RODENT.deadAnimalRemoval.attic.alone);
+    // This file is frozen (it ran in production on 2026-10-29); 20261029160100 moves its three price cells.
+    expect({ base_price: catalog.SERVICE.base_price, price_range_min: catalog.SERVICE.price_range_min, price_range_max: catalog.SERVICE.price_range_max })
+      .toEqual(onePrice.OLD_CATALOG);
+    expect(onePrice.NEW_CATALOG).toEqual({
+      base_price: constants.RODENT.deadAnimalRemoval.reachable.alone,
+      price_range_min: constants.RODENT.deadAnimalRemoval.reachable.alone,
+      price_range_max: constants.RODENT.deadAnimalRemoval.attic.alone,
+    });
     expect(catalog.SERVICE.default_duration_minutes).toBe(constants.RODENT.deadAnimalRemoval.reachable.durationMin);
     expect(catalog.SERVICE.max_duration_minutes).toBe(constants.RODENT.deadAnimalRemoval.attic.durationMin);
   });
@@ -229,13 +236,12 @@ describe('20261029130000 catalog row, completion profile and taxability', () => 
 });
 
 describe('20261029130100 pricing_config seed', () => {
-  test('the seed equals the in-code table and passes the one validator', () => {
-    expect(seedMigration.SEED).toEqual(config.defaultDeadAnimalRemovalData());
-    expect(seedMigration.SEED).toEqual({
-      reachable: { alone: constants.RODENT.deadAnimalRemoval.reachable.alone, riding: constants.RODENT.deadAnimalRemoval.reachable.riding, on_site_min: constants.RODENT.deadAnimalRemoval.reachable.durationMin },
-      attic: { alone: constants.RODENT.deadAnimalRemoval.attic.alone, riding: constants.RODENT.deadAnimalRemoval.attic.riding, on_site_min: constants.RODENT.deadAnimalRemoval.attic.durationMin },
-    });
-    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED)).toMatchObject({ ok: true });
+  test('the 10-29 seed is the old two-price shape; the one-price migration turns it into the code table, which the validator accepts', () => {
+    // This file is frozen (it ran in production on 2026-10-29). Its riding prices were retired the same day.
+    expect(seedMigration.SEED).toEqual(onePrice.OLD_SEED);
+    expect(config.normalizeDeadAnimalRemovalConfig(seedMigration.SEED)).toMatchObject({ ok: false, error: expect.stringMatching(/riding is retired/) });
+    expect(onePrice.NEW_ROW).toEqual(config.defaultDeadAnimalRemovalData());
+    expect(config.normalizeDeadAnimalRemovalConfig(onePrice.NEW_ROW)).toMatchObject({ ok: true });
   });
 
   test('up() inserts the row once, with one audit row and one changelog row; never overwrites an edited row', async () => {
@@ -281,9 +287,76 @@ describe('20261029130100 pricing_config seed', () => {
 
   test('both migration files exist and the catalog row is created before the price seed', () => {
     const dir = path.join(__dirname, '..', 'models', 'migrations');
-    const mine = ['20261029130000_dead_rodent_removal_catalog.js', '20261029130100_dead_rodent_removal_pricing_config.js'];
+    const mine = ['20261029130000_dead_rodent_removal_catalog.js', '20261029130100_dead_rodent_removal_pricing_config.js',
+      '20261029160100_dead_rodent_removal_one_price.js'];
     for (const file of mine) expect(fs.existsSync(path.join(dir, file))).toBe(true);
-    expect(mine[0] < mine[1]).toBe(true);
+    expect([...mine].sort()).toEqual(mine);
+  });
+});
+
+describe('20261029160100 one price per access tier', () => {
+  const seeded = async () => {
+    const db = emptyDb();
+    const knex = fakeKnex(db);
+    await catalog.up(knex);
+    await seedMigration.up(knex);
+    return { db, knex };
+  };
+  const cfg = (db) => db.pricing_config.find((r) => r.config_key === KEY);
+  const parse = (data) => (typeof data === 'string' ? JSON.parse(data) : data);
+
+  test('a fresh database: the untouched seed row and the catalog cells move to the one price, with audit and changelog rows', async () => {
+    const { db, knex } = await seeded();
+    await onePrice.up(knex);
+    expect(parse(cfg(db).data)).toEqual(onePrice.NEW_ROW);
+    expect(svc(db)).toMatchObject(onePrice.NEW_CATALOG);
+    const own = db.pricing_config_audit.filter((r) => r.changed_by === onePrice.TAG);
+    expect(own.map((r) => r.config_key).sort()).toEqual([KEY, 'services_rodent_dead_animal_removal']);
+    expect(db.pricing_changelog.filter((r) => r.changed_by === onePrice.TAG)).toHaveLength(1);
+    expect(config.normalizeDeadAnimalRemovalConfig(parse(cfg(db).data))).toMatchObject({ ok: true });
+  });
+
+  test('production on 2026-10-29: a row already at 199 / 199 and 299 / 299 stays as it is; only the catalog cells move', async () => {
+    const { db, knex } = await seeded();
+    const live = { reachable: { alone: 199, riding: 199, on_site_min: 45 }, attic: { alone: 299, riding: 299, on_site_min: 90 } };
+    cfg(db).data = live;
+    await onePrice.up(knex);
+    expect(cfg(db).data).toEqual(live);
+    expect(svc(db)).toMatchObject(onePrice.NEW_CATALOG);
+    expect(db.pricing_config_audit.filter((r) => r.changed_by === onePrice.TAG).map((r) => r.config_key)).toEqual(['services_rodent_dead_animal_removal']);
+  });
+
+  test('an admin-edited row or catalog cell is left alone, and nothing moved means no changelog row', async () => {
+    const { db, knex } = await seeded();
+    const edited = { reachable: { alone: 179, riding: 179, on_site_min: 45 }, attic: { alone: 289, riding: 289, on_site_min: 90 } };
+    cfg(db).data = edited;
+    svc(db).base_price = 185;
+    await onePrice.up(knex);
+    expect(cfg(db).data).toEqual(edited);
+    expect(svc(db).base_price).toBe(185);
+    expect(db.pricing_config_audit.filter((r) => r.changed_by === onePrice.TAG)).toHaveLength(0);
+    expect(db.pricing_changelog.filter((r) => r.changed_by === onePrice.TAG)).toHaveLength(0);
+  });
+
+  test('a second run changes nothing and writes nothing', async () => {
+    const { db, knex } = await seeded();
+    await onePrice.up(knex);
+    const before = JSON.stringify(db);
+    await onePrice.up(knex);
+    expect(JSON.stringify(db)).toBe(before);
+  });
+
+  test('missing tables are skipped, never an error', async () => {
+    const db = emptyDb();
+    await expect(onePrice.up(fakeKnex(db, { missingTables: ['pricing_config', 'services', 'pricing_config_audit', 'pricing_changelog'] }))).resolves.toBeUndefined();
+  });
+
+  test('down() is a documented no-op', async () => {
+    const { db, knex } = await seeded();
+    await onePrice.up(knex);
+    const before = JSON.stringify(db);
+    await onePrice.down(knex);
+    expect(JSON.stringify(db)).toBe(before);
   });
 });
 
@@ -298,9 +371,11 @@ describe('the admin Pricing Logic route', () => {
     expect(validatePricingConfigFor('rodent_dead_animal_removal', partial).error).toMatch(/^rodent_dead_animal_removal: /);
     const slow = whole(); slow.attic.on_site_min = 1000;
     expect(validatePricingConfigFor('rodent_dead_animal_removal', slow).error).toMatch(/on_site_min/);
-    const inverted = whole(); inverted.reachable.riding = 500;
-    expect(validatePricingConfigFor('rodent_dead_animal_removal', inverted).error).toMatch(/riding may not be more than/);
-    expect(validatePricingConfigFor('rodent_dead_animal_removal', { ...whole(), in_wall: { alone: 1, riding: 1, on_site_min: 1 } }).ok).toBe(false);
+    const lower = whole(); lower.reachable.riding = 119;
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', lower).error).toMatch(/riding is retired/);
+    const same = whole(); same.reachable.riding = same.reachable.alone;
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', same)).toEqual({ ok: true });
+    expect(validatePricingConfigFor('rodent_dead_animal_removal', { ...whole(), in_wall: { alone: 1, on_site_min: 1 } }).ok).toBe(false);
   });
 
   test('the route seeds the row with the code defaults and gates its availability with the gate', () => {
@@ -345,9 +420,9 @@ describe('the sold line through the stored estimate: identity, copy and the slot
     delete process.env.GATE_DEAD_ANIMAL_REMOVAL;
     try {
       const rows = estimatePublic.normalizeOneTimeBreakdown({ result }).items;
-      expect(rows.find((i) => i.service === KEY)).toMatchObject({ amount: 269, deadAnimalTier: 'attic', onSiteMinutes: 90 });
+      expect(rows.find((i) => i.service === KEY)).toMatchObject({ amount: 299, deadAnimalTier: 'attic', onSiteMinutes: 90 });
       expect(availability._internals.oneTimeProfileServices({ id: 'est-3', pricing_authority: null }, { result }).find((s) => s.engineKey === KEY)).toMatchObject({ durationMinutes: 90 });
-      expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 269 })).toBe(KEY);
+      expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 299 })).toBe(KEY);
     } finally {
       process.env.GATE_DEAD_ANIMAL_REMOVAL = 'true';
     }
@@ -356,7 +431,7 @@ describe('the sold line through the stored estimate: identity, copy and the slot
   test('an estimate whose only container is the raw engine result keeps the tier and its minutes (tier, durationMin)', () => {
     const engineResult = generateEstimate(translateV2CallToV1Input(HOME, ['RODENT_DEAD_ANIMAL'], { deadAnimalAccess: 'attic' }));
     const row = estimatePublic.normalizeOneTimeBreakdown({ engineResult }).items.find((i) => i.service === KEY);
-    expect(row).toMatchObject({ amount: 269, deadAnimalTier: 'attic', onSiteMinutes: 90 });
+    expect(row).toMatchObject({ amount: 299, deadAnimalTier: 'attic', onSiteMinutes: 90 });
     const profile = availability._internals.oneTimeProfileServices({ id: 'est-raw', pricing_authority: null }, { engineResult });
     expect(profile.find((s) => s.engineKey === KEY)).toMatchObject({ durationMinutes: 90 });
   });
@@ -364,7 +439,7 @@ describe('the sold line through the stored estimate: identity, copy and the slot
   test('the public breakdown never carries the access tier or the on-site minutes', () => {
     const items = estimatePublic.normalizeOneTimeBreakdown({ result: storedResult('attic') }).items;
     const row = estimatePublic.sanitizePublicOneTimeBreakdown({ items }).items.find((i) => i.service === KEY);
-    expect(row).toMatchObject({ amount: 269 });
+    expect(row).toMatchObject({ amount: 299 });
     expect(row).not.toHaveProperty('deadAnimalTier');
     expect(row).not.toHaveProperty('onSiteMinutes');
   });
@@ -389,7 +464,7 @@ describe('customer estimate copy', () => {
   const entry = copyPack[KEY];
 
   test('the pack has the entry in the rodent_sanitation shape and the line resolves to it', () => {
-    expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 169 })).toBe(KEY);
+    expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 199 })).toBe(KEY);
     expect(Object.keys(entry).sort()).toEqual(Object.keys(copyPack.rodent_sanitation).sort());
     expect(Object.keys(entry.hero).sort()).toEqual(Object.keys(copyPack.rodent_sanitation.hero).sort());
     expect(entry.includes.length).toBeGreaterThanOrEqual(3);
