@@ -331,11 +331,12 @@ describe('rain-out service', () => {
     });
     let finder;
     let blackoutSpy;
-    const sameDay = async () => {
+    // A visit not under way by default: the stop the tech is at keeps the guesses.
+    const sameDay = async (overrides = {}) => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
       wireDb({
         scheduled_services: [
-          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
           chain({ rows: [] }),
         ],
       });
@@ -387,7 +388,8 @@ describe('rain-out service', () => {
       // The finder is asked for this visit's technician, today, one-hour blocks, the free estimate only.
       expect(finder).toHaveBeenCalledWith(expect.objectContaining({
         technicianId: 'tech-1', dateFrom: '2026-06-11', dateTo: '2026-06-11', durationMinutes: 60,
-        excludeServiceIds: ['svc-1'], arrivalWindow: { serviceId: 'svc-1' }, providerTravel: false,
+        excludeServiceIds: ['svc-1'], arrivalWindow: { serviceId: 'svc-1', unit: true }, providerTravel: false,
+        includeWeekends: true,
         // Every hourly start from the lead-time floor, continuing from the current stop.
         everyStepStart: true, earliestStartMin: expect.any(Number), fromActiveStop: true,
       }));
@@ -416,10 +418,25 @@ describe('rain-out service', () => {
       expect(finder).not.toHaveBeenCalled();
     });
 
-    test('gate on: the route keeps no hour today, so no same-day hour is offered (no unchecked guess)', async () => {
+    test('gate on: the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
       process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
-      finder.mockResolvedValue({ slots: [] });
+      finder.mockResolvedValue({ slots: [], rejections_by_date: { '2026-06-11': { arrival_window: 2, route_unverified: 1 } } });
       expect(await sameDay()).toEqual([]);
+    });
+
+    test.each([
+      ['no refusal at all', { slots: [] }],
+      ['only route_unverified refusals', { slots: [], rejections_by_date: { '2026-06-11': { route_unverified: 3 } } }],
+    ])('gate on: no hour with %s, so the route was not judged and the guesses stay', async (_name, answer) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      finder.mockResolvedValue(answer);
+      expect((await sameDay()).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+    });
+
+    test.each(['on_site', 'en_route'])('gate on: moving the stop the tech is at (%s) keeps the guesses and asks no finder', async (status) => {
+      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+      expect((await sameDay({ status })).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
+      expect(finder).not.toHaveBeenCalled();
     });
 
     test.each([

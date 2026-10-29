@@ -914,6 +914,9 @@ function sameDayOptions(now = new Date()) {
 // times (those stay staff-only, GATE_PICKER_ROAD_CHECK).
 const TECH_MOVE_ROUTE_MAX_OPTIONS = 4;
 const SAME_DAY_LEAD_MINUTES = 60;
+// The stop the tech is at or driving to cannot be routed from itself
+// (arrival-route resolvePlacementOrigin refuses an active target).
+const ACTIVE_TARGET_STATUSES = new Set(['en_route', 'on_site']);
 
 function techMoveRouteTimesLive() {
   return require('../config/feature-gates').gateEnvValue('GATE_TECH_MOVE_ROUTE_TIMES');
@@ -955,10 +958,20 @@ function routeHourOption({ start, drive }, todayStr) {
   };
 }
 
-// null = no route answer (the finder threw): the caller falls back to
-// sameDayOptions(). [] = the route keeps no hour today, so the sheet offers no
-// same-day hour rather than an unchecked guess the route cannot keep.
+// True when the finder judged today's route and refused every hour for a
+// real reason (arrival window, return time, an overcommitted day); only
+// route_unverified refusals (or none) mean it could not judge the route.
+function routeJudgedFull(result, todayStr) {
+  const reasons = Object.keys(result?.rejections_by_date?.[todayStr] || {});
+  return reasons.some((reason) => reason !== 'route_unverified');
+}
+
+// null = no route answer (an active target, the finder threw or answered
+// with an error, or it could not verify the route): the caller falls back to
+// sameDayOptions(). [] = the route was judged and keeps no hour today, so the
+// sheet offers no same-day hour rather than an unchecked guess.
 async function routeSameDayOptions(service, now = new Date()) {
+  if (ACTIVE_TARGET_STATUSES.has(service.status)) return null;
   const parts = etParts(now);
   const todayStr = etDateString(now);
   const firstStart = Math.max(
@@ -975,7 +988,11 @@ async function routeSameDayOptions(service, now = new Date()) {
       dateTo: todayStr,
       ...(service.technician_id ? { technicianId: service.technician_id } : {}),
       excludeServiceIds: [service.id],
-      arrivalWindow: { serviceId: service.id },
+      // The whole visit for a shared stop (GATE_COMBO_ROUTE_CHECK; ignored off).
+      arrivalWindow: { serviceId: service.id, unit: true },
+      // Today is the only date: a Sunday route is searched too (the blackout
+      // check above already covers a closed day).
+      includeWeekends: true,
       // The sheet commits on-the-hour one-hour blocks; rank every hour.
       slotStepMinutes: 60,
       everyStepStart: true,
@@ -992,7 +1009,8 @@ async function routeSameDayOptions(service, now = new Date()) {
       return null;
     }
     const picked = pickRouteHours(Array.isArray(result?.slots) ? result.slots : [], { todayStr, firstStart });
-    return picked.map((hour) => routeHourOption(hour, todayStr));
+    if (picked.length) return picked.map((hour) => routeHourOption(hour, todayStr));
+    return routeJudgedFull(result, todayStr) ? [] : null;
   } catch (err) {
     logger.warn(`[rain-out] tech route hours failed for ${service.id}, using the +2h/+4h guesses: ${err.message}`);
     return null;
