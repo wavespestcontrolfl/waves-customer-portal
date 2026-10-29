@@ -182,16 +182,6 @@ const ALLOWLIST = [
     reason: 'same one-off historical backfill script as the total-count query above (the paged batch read).',
   },
   {
-    file: 'services/customer-intelligence/signal-detector.js',
-    snippet: 'const recentInbound = await db(\'sms_log\')',
-    reason: 'inbound-only count (direction: \'inbound\') — a send reservation is always an outbound row; the outbound-count query a few lines below already uses the helper.',
-  },
-  {
-    file: 'services/customer-intelligence/signal-detector.js',
-    snippet: 'const smsMessages = await db(\'sms_log\')',
-    reason: 'inbound-only message read (direction: \'inbound\') feeding sentiment mining — a send reservation is always an outbound row.',
-  },
-  {
     file: 'services/recipient-optin.js',
     snippet: 'const lastAsk = await db(\'sms_log\')',
     reason: 'single-row lookup (.first(\'status\')) — not a list read; the .limit( this scan\'s window sees belongs to the enclosing, unrelated recipient_optin sweep query above it.',

@@ -163,6 +163,28 @@ const SHAPES = {
   },
   // admin-discounts.js:36 `{ enabled }`.
   '/admin/discounts/stacking': { body: { enabled: false }, kept: { enabled: false } },
+  // admin-kpi-targets.js GET /: kpi_targets mapped to { metric, target, amberBandPct, lowerIsBetter, updatedBy, updatedAt }.
+  '/admin/kpi-targets': {
+    body: { targets: [{ metric: 'revenue_per_job', target: 210, amberBandPct: 10, lowerIsBetter: false, updatedBy: 'Owner', updatedAt: '2026-10-01T00:00:00Z' }] },
+    kept: { 'targets.0.metric': 'revenue_per_job', 'targets.0.target': 210 },
+  },
+  // admin-schedule.js GET /blackout-dates: blackouts[{ id, date, reason, createdAt }] (reason is staff-typed), weeklyDaysOff
+  // (day numbers), holidays (holidays.js upcomingHolidays: key, name, date, observed, plus closed).
+  '/admin/schedule/blackout-dates': {
+    body: {
+      blackouts: [{ id: 1, date: '2026-11-27', reason: PASSWORD_NOTE, createdAt: '2026-10-01T00:00:00Z' }],
+      weeklyDaysOff: [0],
+      holidays: [{ key: 'thanksgiving', name: 'Thanksgiving', date: '2026-11-26', closed: true }],
+    },
+    withheld: ['blackouts.0.reason'],
+    kept: { 'blackouts.0.date': '2026-11-27', 'holidays.0.closed': true },
+  },
+  // admin-settings.js GET /call-routing/status: booleans, the mode, decideVoiceRoute's fixed reason code and two numbers.
+  '/admin/settings/call-routing/status': {
+    body: { gateEnabled: true, agentConfigured: true, effectiveMode: 'backstop_on_no_answer', answersFirstActiveNow: false, answersFirstReason: 'ring_staff_first', noAnswerBackstopEnabled: true, ringTimeoutSec: 30 },
+    kept: { effectiveMode: 'backstop_on_no_answer', ringTimeoutSec: 30 },
+    content: { answersFirstReason: 'ring_staff_first' },
+  },
   // admin-discounts.js:190-195 selects id, name, discount_key, times_applied, total_discount_given, is_active.
   '/admin/discounts/stats': {
     body: { discounts: [{ id: 1, name: 'Spring offer', discount_key: 'spring', times_applied: 3, total_discount_given: '30.00', is_active: true }], totalApplied: 3, totalGiven: 30 },
@@ -351,6 +373,37 @@ const SHAPES = {
     kept: { name: 'Tech A', 'today.total': 3, 'route.0.status': 'confirmed' },
   },
   // admin-dispatch.js:6935-7010: { alerts[{ id, type, severity, tech_name, job_id, address, payload, ... }] }; payload is system-written.
+  // admin-email-templates.js GET /: email_templates rows (select *: metadata, no wording) plus three counts and can_delete.
+  '/admin/email-templates': {
+    body: {
+      templates: [{
+        id: UUID, template_key: 'autopay.setup_link', name: 'Auto Pay setup link', description: 'Sent with the 30-day setup link.', mode: 'service', purpose: 'billing',
+        audience: 'customer', status: 'published', from_name: 'Waves', default_cta_label: 'Set up Auto Pay', last_published_at: '2026-10-01T00:00:00Z',
+        version_count: 3, draft_count: 0, automation_count: 1,
+        legal_classification: 'transactional_relationship', from_email: 'service@example.com', reply_to: 'office@example.com', active_version_id: UUID, created_by: UUID, can_delete: false,
+      }],
+    },
+    dropped: ['templates.0.template_key', 'templates.0.legal_classification', 'templates.0.from_email', 'templates.0.reply_to', 'templates.0.active_version_id', 'templates.0.created_by', 'templates.0.can_delete'],
+    kept: { 'templates.0.status': 'published', 'templates.0.automation_count': 1 },
+    content: { 'templates.0.description': 'Sent with the 30-day setup link.' },
+  },
+  // admin-email-templates.js GET /automations: email_template_automations rows (a.*) with the template's name/mode/status,
+  // the active version number, parsed JSON settings and the 30-day counts.
+  '/admin/email-templates/automations': {
+    body: {
+      automations: [{
+        automation_key: 'autopay_setup_followup', name: 'Auto Pay follow-up', description: 'Reminds the customer once.', trigger_event_key: 'autopay.link_sent', trigger_description: 'When a setup link goes out.',
+        template_key: 'autopay.setup_link', template_name: 'Auto Pay setup link', template_status: 'published', delay_minutes: 2880, audience: 'customer', status: 'active',
+        frequency_cap: 'once_per_entity', timezone: 'America/New_York', send_count_30d: 4, would_send_30d: 0, would_block_30d: 0, last_published_at: '2026-10-01T00:00:00Z',
+        id: UUID, conditions: { min_days: 2 }, exit_conditions: {}, retry_policy: {}, quiet_hours: { start: 21 }, idempotency_key_template: 'k:{id}', owner: 'ops', dry_run_notes: LINK_NOTE,
+        template_mode: 'service', active_version_id: UUID, active_version_number: 3, can_delete: false,
+      }],
+    },
+    dropped: ['automations.0.automation_key', 'automations.0.trigger_event_key', 'automations.0.template_key', 'automations.0.id', 'automations.0.conditions.min_days', 'automations.0.quiet_hours.start', 'automations.0.idempotency_key_template', 'automations.0.owner', 'automations.0.dry_run_notes',
+      'automations.0.template_mode', 'automations.0.active_version_id', 'automations.0.active_version_number', 'automations.0.can_delete'],
+    kept: { 'automations.0.status': 'active', 'automations.0.delay_minutes': 2880 },
+    content: { 'automations.0.description': 'Reminds the customer once.', 'automations.0.trigger_description': 'When a setup link goes out.' },
+  },
   '/admin/dispatch/alerts': {
     body: { alerts: [{ id: UUID, type: 'tech_late', severity: 'warning', tech_id: UUID, tech_name: 'Tech A', job_id: UUID, address: '2 Example Way', payload: { minutes_late: 12 }, created_at: '2026-10-14T13:00:00Z', resolved_at: null }] },
     kept: { 'alerts.0.type': 'tech_late', 'alerts.0.severity': 'warning' },
@@ -698,11 +751,11 @@ describe('the default withholds a name-matched key that no row declared', () => 
 });
 
 describe('keep mode: only the listed fields reach the model, and a new column never does', () => {
-  test('the 21 rows added with the core screens and leads are in keep mode', () => {
+  test('the 21 rows added with the core screens and leads, and the two email-template rows, are in keep mode', () => {
     expect(KEEP_ENTRIES.map(entry => entry.endpoint).sort()).toEqual([
       '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
       '/admin/customers/:id/estimates-summary', '/admin/customers/:id/latest-scheduled-service', '/admin/customers/:id/timeline',
-      '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/estimates',
+      '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/email-templates/automations', '/admin/estimates',
       '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
       '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/schedule/list',
     ]);

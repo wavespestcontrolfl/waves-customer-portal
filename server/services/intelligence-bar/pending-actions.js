@@ -172,7 +172,13 @@ const SUPERSEDE_RULES = {
     key: p => {
       const service = idPart(p._booking_service_id) ? `svc:${idPart(p._booking_service_id)}` : (idPart(p.service_type) ? `name:${idPart(p.service_type)}` : null);
       const parts = [idPart(p.customer_id ?? p.customerId), service, idPart(p.scheduled_date)];
-      return parts.every(Boolean) ? parts.join('|') : null;
+      if (!parts.every(Boolean)) return null;
+      // A named property (create_appointment property_id) is a separate visit:
+      // the same service on the same day at the customer's other property
+      // neither replaces nor is refused by this card. No property = the key
+      // as before.
+      const property = idPart(p.property_id);
+      return [...parts, ...(property ? [`prop:${property}`] : [])].join('|');
     },
     covers: () => true,
     afterConfirmed: 'refuse',

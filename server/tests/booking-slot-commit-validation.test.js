@@ -4,7 +4,7 @@
  *
  * POST /booking/confirm is public: the availability builder only OFFERS
  * conforming slots, so every rule it applies (day window, whole-hour grid,
- * lunch block, ET date bounds, day cap, real active tech, catalog-range
+ * working hours, ET date bounds, day cap, real active tech, catalog-range
  * duration) must be re-checked at commit or a crafted payload books whatever
  * it likes — and every check that needs no customer row must run BEFORE the
  * new-customer insert, or a rejection strands an orphan profile. Unit tests cover
@@ -42,29 +42,23 @@ const min = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 6
 // ---------------------------------------------------------------------------
 
 describe('bookingSlotWindow — one config derivation for builder + commit', () => {
-  test('defaults match the availability builder (08:00–18:00, 12–13 lunch bounds, cap 3, hourly grid)', () => {
+  test('defaults match the availability builder (08:00–18:00, hourly grid)', () => {
     // Day end is 18:00 since PR 2 (2026-09-23, scheduling/customer-windows.js
     // CUSTOMER_DAY_END_MINUTES) — a 17:00 start + the standard 60-minute
-    // visit ends at 18:00. Lunch bounds are still derived unconditionally;
-    // GATE_BOOKING_LUNCH_BLOCK (unset by default) governs whether callers
-    // (addCandidate, validateBookingSlotGeometry) actually enforce them.
+    // visit ends at 18:00.
     expect(bookingSlotWindow({})).toEqual({
       slotGridMinutes: 60,
       dayStartMin: 480,
       dayEndMin: 1080,
-      lunchStartMin: 720,
-      lunchEndMin: 780,
     });
   });
 
-  test('honors configured hours and lunch', () => {
+  test('honors configured hours', () => {
     const w = bookingSlotWindow({
       day_start: '09:00', day_end: '18:00',
-      lunch_start: '11:30', lunch_end: '12:30',
     });
     expect(w).toMatchObject({
       dayStartMin: 540, dayEndMin: 1080,
-      lunchStartMin: 690, lunchEndMin: 750,
     });
   });
 
@@ -80,24 +74,10 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
   const ok = (startHHMM, duration = 60, config = {}) =>
     validateBookingSlotGeometry({ startMin: min(startHHMM), duration, config });
 
-  // GATE_BOOKING_LUNCH_BLOCK is unset in this whole file's process — restore
-  // it around any test that flips it so later tests see the default again.
-  const withLunchGate = (value, fn) => {
-    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
-    if (value === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-    else process.env.GATE_BOOKING_LUNCH_BLOCK = value;
-    try { return fn(); } finally {
-      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
-      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+  test('accepts every slot the builder offers (whole hours, in-hours, including noon and the 17:00 close)', () => {
+    for (const t of ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']) {
+      expect(ok(t)).toBeNull();
     }
-  };
-
-  test('accepts every slot the builder offers (whole hours, in-hours, including noon and the 17:00 close with the lunch gate unset)', () => {
-    withLunchGate(undefined, () => {
-      for (const t of ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']) {
-        expect(ok(t)).toBeNull();
-      }
-    });
   });
 
   test('rejects out-of-hours starts (before day_start / ending after the 18:00 day_end)', () => {
@@ -113,20 +93,9 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
     expect(ok('10:01')).toMatch(/bookable slots/i);
   });
 
-  test('noon is a normal bookable hour with GATE_BOOKING_LUNCH_BLOCK unset (owner ruling 2026-09-23, default)', () => {
-    withLunchGate(undefined, () => {
-      expect(ok('12:00')).toBeNull();
-      expect(ok('11:00', 90)).toBeNull(); // would have overlapped the old lunch block
-    });
-  });
-
-  test('GATE_BOOKING_LUNCH_BLOCK=true restores the lunch block, including overlap-by-duration', () => {
-    withLunchGate('true', () => {
-      expect(ok('12:00')).toMatch(/isn.t available/i);
-      expect(ok('11:00', 90)).toMatch(/isn.t available/i); // ends 12:30, inside lunch
-      expect(ok('11:00', 60)).toBeNull(); // ends exactly at lunch start
-      expect(ok('13:00', 60)).toBeNull(); // starts exactly at lunch end
-    });
+  test('noon is a normal bookable hour (owner ruling 2026-09-23)', () => {
+    expect(ok('12:00')).toBeNull();
+    expect(ok('11:00', 90)).toBeNull(); // would have overlapped the old lunch block
   });
 
   // The last-start rule (GATE_CUSTOMER_LAST_START_16) is NOT a geometry rule:
@@ -390,7 +359,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
       // (still clamped) for internal callback visits
       'const duration = callbackVisit',
       'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
-      'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
+      'const geometryError = validateBookingSlotGeometry({', // grid/hours
       'if (!callbackVisit && (!serviceKey || !verifySlotOfferField({', // signed-offer proof (rounds 2+3; internal callbacks are availability-revalidated by their caller)
       "await db('technicians').where('id', techIdStr).first('id', 'employment_status', 'field_dispatchable')", // real assignable tech
       'let sourceEstimateId = null;', // accept-retry correlation validation

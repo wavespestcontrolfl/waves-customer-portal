@@ -1124,6 +1124,82 @@ describe('moves need a real drive saving (owner 2026-10-09; same-day re-times to
     });
   });
 
+  // GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28, Google cost "way too high").
+  describe('the road check at apply', () => {
+    const roadCheck = require('../services/auto-dispatch/road-check');
+    const legs = (name, date) => ({ [roadCheck.ROAD_LEGS]: { prev: { p: name }, stop: { s: name }, next: { n: name }, date, startMin: 540 } });
+    const current = { ...CURRENT, ...legs('now', CURRENT.date) };
+    const cand = { ...CAND_BIG, ...legs('cand', CAND_BIG.date) };
+    const table = { now: [25, 25, 10], cand: [10, 10, 10] };
+    let prevAllow;
+    let preload;
+    // How many road buys had been made when pass 2 began (its first call is the supersession read).
+    let boughtInPass1;
+    beforeEach(() => {
+      prevAllow = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+      preload = jest.fn(async () => {});
+      jest.spyOn(roadCheck, 'createRunTravel').mockReturnValue({
+        preload,
+        lookup: (leg) => ({ minutes: table[leg.from.p || leg.from.s][leg.from.s ? 1 : (leg.to.s ? 0 : 2)], source: 'google_traffic' }),
+        diagnostics: () => ({ requests: 0, elements: 0 }),
+      });
+      boughtInPass1 = null;
+      apply.revalidatePlacement.mockImplementation(async () => {
+        if (boughtInPass1 === null) boughtInPass1 = preload.mock.calls.length;
+        return { ok: true };
+      });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+      if (prevAllow === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prevAllow;
+    });
+
+    test('gate on, apply: pass 1 buys nothing; the move about to be written is checked', async () => {
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true });
+      expect(res).toMatchObject({ changed: 1 });
+      expect(boughtInPass1).toBe(0);
+      expect(preload.mock.calls.length).toBeGreaterThan(0);
+      expect(lastDecision('changed').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
+    });
+
+    test('gate on, cap already full: the held move is not re-evaluated and buys nothing', async () => {
+      servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' })];
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true, maxChangesPerRun: 1 });
+      expect(res).toMatchObject({ changed: 1, recommended: 1 });
+      expect(boughtInPass1).toBe(0);
+      // Only the one applied move was checked (one slot, three legs in a batch per side).
+      const bought = preload.mock.calls.length;
+      expect(bought).toBeGreaterThan(0);
+      expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+      const held = lastDecision('recommended');
+      expect(held).toMatchObject({ reason_code: 'MAX_CHANGES_REACHED', reason_description: expect.stringContaining('Per-run change cap 1 reached (valid move held, +') });
+      expect(held.service.id).toBe('s2');
+      // Run it again with the gate off for the same two visits: the held visit costs a road check of its own.
+      preload.mockClear();
+      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false, maxChangesPerRun: 1 });
+      expect(preload.mock.calls.length).toBeGreaterThan(bought);
+    });
+
+    test('gate off, apply: today\'s behavior, the road is checked in pass 1', async () => {
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false });
+      expect(res).toMatchObject({ changed: 1 });
+      expect(boughtInPass1).toBeGreaterThan(0);
+    });
+
+    test('gate on, dry run: today\'s behavior, the road is checked and the row carries it', async () => {
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true, roadCheckAtApply: true })).toMatchObject({ recommended: 1 });
+      expect(preload.mock.calls.length).toBeGreaterThan(0);
+      expect(lastDecision('recommended').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
+    });
+
+    test('the gate does nothing while the road check itself is off', async () => {
+      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: false, roadCheckAtApply: true });
+      expect(roadCheck.createRunTravel).not.toHaveBeenCalled();
+    });
+  });
+
   test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
     const current = { ...CURRENT, detour_minutes: 5, same_area_share: 0, route_minutes: 600 };
     const cand = { ...CAND_BIG, detour_minutes: 2, same_area_share: 1, route_minutes: 300, start_time: '09:00' };

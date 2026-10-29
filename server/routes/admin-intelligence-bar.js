@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho, ibBookingPropertyProposal, bookingPropertyLabel,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
@@ -865,6 +865,10 @@ const PINNED_DISPLAY_BUILDERS = {
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
   send_sms: pinnedRecipientDisplay,
+  // compose_email: the card names the recipient (name and address), From, subject and the exact body; the lines ride the contract.
+  compose_email: (params, preview) => (preview?.preview === true && preview.tool === 'compose_email'
+    ? { to: preview.to_label, from: preview.from, subject: preview.subject, body: preview.body, sends: 'one new email' }
+    : null),
   send_email_reply: (params, preview) => (preview?.pinned_recipient
     ? { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined }
     : null),
@@ -1070,6 +1074,8 @@ const VERIFIED_VERSION_PARAMS = {
   create_invoice: '_verified_invoice_create_version',
   // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
   set_customer_bill_to: '_verified_bill_to_version',
+  // compose_email binds the recipient, customer link, From, subject and a digest of the exact body the card showed.
+  compose_email: '_verified_compose_email_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1204,7 +1210,7 @@ function confirmationDisplayParams(toolName, params, preview) {
     const {
       price, customer_id: customerId, scheduled_date: scheduledDate, time_window: timeWindow,
       service_type: serviceType, technician_id: technicianId, technician_name: technicianName,
-      price_confirmed: _priceConfirmed, ...others
+      price_confirmed: _priceConfirmed, property_id: propertyId, ...others
     } = params;
     const money = (n) => `$${Number(n).toFixed(2)}`;
     // A member discount names itself and the list price it came off (owner
@@ -1230,6 +1236,9 @@ function confirmationDisplayParams(toolName, params, preview) {
     const when = bookingWhenLabel(scheduledDate, timeWindow);
     if (when) shown.when = when;
     if (serviceType !== undefined && serviceType !== null) shown.service = serviceType;
+    // The pinned property by its address (the id is opaque on a card).
+    if (preview?.pinned_property) shown.address = preview.pinned_property.address;
+    else if (propertyId !== undefined && propertyId !== null) shown.property_id = propertyId;
     if (!pinnedPrice && price !== undefined && price !== null) shown.price = price;
     else if (priceLine) shown.price = priceLine;
     // Show the pinned tech by NAME, once (the id is opaque on a card) — the
@@ -1243,7 +1252,7 @@ function confirmationDisplayParams(toolName, params, preview) {
     // Model-supplied extras can never overwrite or imitate a server-derived
     // card fact (GATE_IB_PLATFORM off lets extra fields through): the display
     // alias keys are dropped in any case, and the curated fields spread last.
-    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price']);
+    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price', 'address']);
     const extras = Object.fromEntries(Object.entries(others)
       .filter(([k]) => !CARD_ALIAS_KEYS.has(String(k).toLowerCase().replace(/[\s_-]+/g, ''))));
     return { ...extras, ...shown };
@@ -1728,6 +1737,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Which property the visit is at (the Schedule screen's address picker):
+      // a named property's stamp is pinned and shown on the card, and the
+      // executor re-reads it under the booking lock; a customer with several
+      // active properties and none named is asked which one, no card.
+      let bookingProperty;
+      try {
+        bookingProperty = await ibBookingPropertyProposal(String(params.customer_id), params.property_id);
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not read this customer\'s properties — try again in a moment. Nothing was changed.' } };
+      }
+      if (bookingProperty.error) return { failed: true, modelResult: bookingProperty };
+      if (bookingProperty.stamp) {
+        params.property_id = bookingProperty.stamp.property_id;
+        params._booking_property = bookingProperty.stamp;
+        preview = { ...preview, pinned_property: { id: bookingProperty.stamp.property_id, address: bookingPropertyLabel(bookingProperty.stamp) } };
+      } else {
+        delete params.property_id;
+        delete params._booking_property;
+      }
       // Whether another visit already overlaps this time when the card is
       // built (owner 2026-10-05). The executor books through an overlap that
       // already existed (warning only) but refuses one that is NEW since
@@ -2268,7 +2296,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
-      || (toolUse.name === 'block_sender' ? await TaskContext.validateSenderBlock(params, taskContext) : null);
+      || (toolUse.name === 'block_sender' ? await TaskContext.validateSenderBlock(params, taskContext) : null)
+      || (toolUse.name === 'compose_email' ? await TaskContext.validateComposeRecipient(params, taskContext) : null);
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {
@@ -3547,6 +3576,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Duplicate customer records (when these tools are available): merge_customers folds a duplicate with ANY history into the real record; delete_duplicate_customer only soft-deletes a record that holds nothing at all. Prefer merge_customers when unsure.
 - You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
+- New email: compose_email (when it is in your tools) sends ONE new email, not a reply, to ONE person (a customer's email on file, or one address the operator named), always on a confirmation card, the owner's login too. It is plain text exactly as shown: write the body as the operator asked, with no signature and no invented facts. It takes no CC, BCC or attachment and cannot send to a list; a portal link to a customer's account in the body is refused. To answer an existing email use draft_email_reply and send_email_reply.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 - Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. send_autopay_setup_link texts or emails a customer their Auto Pay setup link behind a confirmation card (it refuses a customer with a saved card: enrolling one is a billing change for the Customers page, and a link-only Auto Pay link is also the Customers page button). Never say there is no link tool. search_quick_links pulls Waves Quick Links (portal login and cancel plan, office Google review links, Yelp/Facebook review pages, app store links, socials, booking pages and every wavespestcontrol.com page) with a ready line, for a text (send_sms behind its card, or draft_sms), an email, a blog post or a note. Never invent a Waves URL: pull it. Card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.

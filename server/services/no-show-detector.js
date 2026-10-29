@@ -25,6 +25,13 @@ const isAssignable = (...args) => require('./technician-eligibility').isAssignab
 const CALL_MOVE_ACTIONS = ['call_reschedule_applied', 'call_makeup_move_applied'];
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
+// Office-card-only by default (owner approved 2026-10-27, gate audit 10-25): the stage-1 ping to an
+// ASSIGNED tech at 45 minutes was mostly noise, so with the gate on it is not sent unless this is
+// exactly 'true'. Read at call time. Stage 2 (the 150-minute card) and every card for a visit with
+// no recipient tech (the office alert) are unaffected.
+const techPingEnabled = () => process.env.NOSHOW_TECH_PING_ENABLED === 'true';
+// True for the one card this setting silences: stage 1 with a recipient tech.
+const skipsTechPing = ({ stage, recipient }) => stage === 1 && !!recipient && !techPingEnabled();
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 // The one terminal status that means the truck actually reached the stop.
 // Used only to settle a GROUPED stop: 'cancelled', 'skipped' and 'no_show'
@@ -1631,9 +1638,10 @@ async function sweep(conn, { now = new Date() } = {}) {
       // promised (codex P1).
       const customerName = techNotices.customerLabel({ cust_last_name: card.last_name, cust_first_name: card.first_name });
       const when = techNotices.formatPromisedWindow(live.promised_window.start_at, live.promised_window.end_at);
-      const notice = await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
-        stage: live.stage, dedupeKey: key, message: live.message,
-        payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
+      const notice = skipsTechPing({ stage: live.stage, recipient }) ? null
+        : await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
+          stage: live.stage, dedupeKey: key, message: live.message,
+          payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
       const office = live.stage === 2 || !recipient;
       const created = await reconcileOfficeAlert(trx, { card, visit, live, key, type, recipient, recipientTech, office });
       if (notice || created) {
@@ -1730,4 +1738,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { textActuallyWentOut, enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, byVisit, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { textActuallyWentOut, enabled, techPingEnabled, skipsTechPing, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, byVisit, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };

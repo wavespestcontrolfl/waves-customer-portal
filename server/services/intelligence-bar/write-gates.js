@@ -124,6 +124,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'schedule_invoice_send',
   'create_payment_plan',
   'cancel_payment_plan',
+  // compose_email (IB gap #9): the Email page's Send for a NEW email, run in process behind a card on every login (the owner's
+  // too, never owner-direct); it emails one person.
+  'compose_email',
   // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
   // a draft only, sends nothing.
   'create_invoice',

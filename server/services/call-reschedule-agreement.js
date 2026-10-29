@@ -801,7 +801,7 @@ function languageJudgementFailure(scheduling) {
   return typeof scheduling.relative_date_used === 'boolean' ? null : 'relative_date_unjudged';
 }
 
-function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
+function groundRescheduleAgreement({ v2, transcript, callStartedAt, acceptedSlot = false } = {}) {
   const fail = (reason) => ({ ok: false, reason, movedDate: null });
   const scheduling = v2?.scheduling || {};
   if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
@@ -837,12 +837,21 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
     grounded('/scheduling/moved_appointment_relative_date_used'), started)) {
     return fail('moved_appointment_ungrounded');
   }
-  const words = scheduling.agreed_slot_words;
-  if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   // A relative date is pinned by its own real quote, which the slot words'
   // quote need not repeat.
   const relativeQuotes = relative ? grounded('/scheduling/relative_date_used') : [];
   if (relative && !relativeQuotes.length) return fail('relative_date_ungrounded');
+  // acceptedSlot (GATE_CALL_RESCHEDULE_APPLY, owner 2026-10-27, the way the
+  // make-up move did it in #6437): the slot is the one the booking step
+  // accepts, the extraction's confirmed_start_at, which the checks above
+  // already tie to the agent's grounded commitment and the caller's grounded
+  // acceptance. The extraction's recorded agreed_slot_words (empty on 10 of
+  // 12 calls on Oct 24) need not sit inside a quote. A RELATIVE date is the
+  // one case the words still decide: they are the only check that the
+  // extraction resolved "next Thursday" to the right calendar day.
+  if (acceptedSlot && !relative) return { ok: true, reason: 'accepted_slot_grounded', movedDate };
+  const words = scheduling.agreed_slot_words;
+  if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate, relative, relativeQuotes)) return fail('agreed_slot_words_mismatch');
   const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
   if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');

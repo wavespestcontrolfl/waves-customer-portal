@@ -871,10 +871,9 @@ booking that already committed replays that booking;
 the customer-facing day closes at 18:00, and `booking_config.day_end` was
 migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
 open-day expansion cannot create additional starts. 12:00 is an ordinary
-offerable and reservable hour unless `GATE_BOOKING_LUNCH_BLOCK` is set, in
-which case every customer-facing offer AND commit surface (estimate picker +
-reserve, /book, public reschedule, public re-service, the assistant's
-availability engine) refuses a window overlapping 12:00–13:00. The estimate cache separates capacity mode
+offerable and reservable hour on every customer-facing offer AND commit
+surface (estimate picker + reserve, /book, public reschedule, public
+re-service, the assistant's availability engine). The estimate cache separates capacity mode
 from legacy mode. Assigned technicians have independent route capacity;
 unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
@@ -1074,7 +1073,7 @@ customer-facing and never had the cap. The finder's per-slot `return_time`
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
-shared grid / day-end / lunch-gate rules above, which apply in both modes.
+shared grid / day-end rules above, which apply in both modes.
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares
@@ -1328,7 +1327,7 @@ measured from the earlier stop's expected service end (catalog min/max
 midpoint, clamped to its window) and the 15-minute buffer is reduced by that
 stop's own window padding; rows with no catalog match keep the legacy drive +
 buffer gap. This packed-start geometry is independent of the customer grid /
-day-end / lunch-gate admission rule above (`customerWindowAdmits`) — a
+day-end admission rule above (`customerWindowAdmits`) — a
 candidate must clear both: the grid decides whether a start is offered at
 all, packing decides how close it may legally sit to a real neighbouring
 stop. Ranking ties on `/book` break toward the less hole-making slot
@@ -3889,16 +3888,11 @@ The identical detection table is shared with `resolveLeadSource`
 use — see those entries below — so an AI-referred visitor is classified
 the same way regardless of which endpoint their lead lands on. Abuse
 guards on both endpoints: honeypot silent-200, then Turnstile, enforced
-under `GATE_LEAD_TURNSTILE`. Owner alert call (owner 2026-10-14): a verified
-lead places the paid Twilio call to Adam's cell (the announce call, or the
-Press-1 bridge under `GATE_LEAD_AUTO_BRIDGE`) ONLY when
-`GATE_LEAD_ALERT_CALL` is exactly `true` AND it is 8 AM-8 PM ET
-(`shouldPlaceLeadAlertCall`, `server/routes/lead-webhook.js`). Off (the
-default), no call goes out at any hour: the lead takes the after-hours path
-(the `new_lead` bell; the legacy lead SMS to the owner only if that bell
-fails). The gate never changes the response, the lead's one automated text,
-or the estimate draft. A diff that places the call with the gate off is a
-P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead never places a phone
+call to the owner at any hour. It takes the `new_lead` bell; the legacy
+lead SMS to the owner goes only if that bell fails. The alert never
+changes the response, the lead's one automated text, or the estimate
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that
@@ -6146,8 +6140,7 @@ to show the van scene above the secure-card block. Unset gate = `false`
 in production (non-production envs return true, as above); no other field
 changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
 the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
-start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
-`GATE_BOOKING_LUNCH_BLOCK` is set.
+start grid is the shared 09:00–17:00 customer grid with 12:00 present.
 `GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
 unchanged by it.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
@@ -6184,8 +6177,7 @@ visit with 409 code
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
-(route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
-is set, and the self-serve notice window):
+(route feasibility and the self-serve notice window):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -6278,8 +6270,7 @@ lane that becomes unavailable refreshes eligibility with null availability,
 allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
-feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
-and the self-serve notice window — the anti-forgery model
+feasibility and the self-serve notice window — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion

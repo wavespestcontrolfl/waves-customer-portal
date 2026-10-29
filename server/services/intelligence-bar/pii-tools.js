@@ -60,6 +60,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'schedule_invoice_send',
   'create_payment_plan',
   'cancel_payment_plan',
+  // compose_email previews carry the recipient's name and address and the whole message.
+  'compose_email',
   // create_invoice previews name the customer and city.
   'create_invoice',
   // set_customer_bill_to previews name the customer, the payer and the invoices.

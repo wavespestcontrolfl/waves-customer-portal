@@ -95,6 +95,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // An email cannot be unsent.
+  'compose_email',
   // An invoice sent to the customer cannot be unsent.
   'send_invoice',
   // A recorded payment closes the invoice and stops its reminders; only a refund or void (closed to the bar) undoes it.
@@ -159,6 +161,8 @@ for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unv
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
+// compose_email: its card lines (To, From, subject, the exact body, every effect) come from its own preview (compose-email-tools.js cardLines).
+CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 
@@ -245,6 +249,7 @@ const ACTION_LABELS = {
   create_payment_plan: 'Create a payment plan (no card charged; emails the customer)',
   cancel_payment_plan: 'Cancel a payment plan',
   create_invoice: 'Create a draft invoice (sends nothing)',
+  compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
@@ -931,6 +936,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       else push(line.kind, line.text);
     }
   }
+  // compose_email: To, From, subject, the exact body (the whole text under "Show more" when long) and every effect of the send.
+  if (toolName === 'compose_email' && preview?.preview === true) {
+    for (const line of require('./compose-email-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
   // create_invoice: the customer, every line, the totals, and that the draft is not sent.
   if (toolName === 'create_invoice' && preview?.preview === true) {
     for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -1152,6 +1164,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // attributed to one (GH r17 P2) — vendor/partner replies are outbound
   // mail, not customer contact.
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
+  // compose_email contacts a CUSTOMER only when the address belongs to one on file; to anyone else it is outbound mail.
+  const composeToCustomer = toolName === 'compose_email' && preview?.pinned_recipient?.linked_customer === true;
   // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
   const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   // cancel_appointment's own SHARED status-writer hook (GATE_CANCEL_NOTICE_HOOK,
@@ -1172,7 +1186,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   const cancelTextGoesOut = cancelEffects !== null && cancelEffects.notify_customer === true && cancelEffects.customer_text?.would_send === true;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || composeToCustomer || emailChangeMayContact || bookingConfirmationText
       // A repair plan that queues a report email or receipt contacts the
       // customer through the delivery workers.
       || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
