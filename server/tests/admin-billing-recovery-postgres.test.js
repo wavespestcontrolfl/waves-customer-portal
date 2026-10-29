@@ -154,4 +154,82 @@ postgres('billing-recovery dismissal on migrated PostgreSQL', () => {
     } finally { await blocker.rollback(); }
     expect((await pending).status).toBe(200);
   });
+
+  // "Bill made, never sent": GET /unsent-drafts on real PostgreSQL. HAS_INVOICE_SQL
+  // keeps drafts off the leak list, so this separate list is their only home.
+  describe('GET /unsent-drafts', () => {
+    const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
+    const draft = (overrides = {}) => ({
+      id: randomUUID(), token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 24)}`,
+      customer_id: ids.customer, scheduled_service_id: ids.visit, status: 'draft', total: 129,
+      created_at: hoursAgo(48), ...overrides,
+    });
+    const listed = async (days = 90) => {
+      const response = await fetch(`${baseUrl}/billing-recovery/unsent-drafts?days=${days}`);
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    beforeEach(async () => {
+      await mockTransaction('scheduled_services').whereIn('id', [ids.visit, ids.otherVisit])
+        .update({ completed_at: hoursAgo(24 * 5), scheduled_date: '2026-10-20' });
+    });
+
+    test('lists a never-sent draft for a completed visit with its totals', async () => {
+      const row = draft();
+      await mockTransaction('invoices').insert(row);
+      const body = await listed();
+      expect(body.summary).toEqual({ count: 1, total: 129 });
+      expect(body.drafts[0]).toMatchObject({
+        invoice_id: row.id, invoice_number: row.invoice_number, total: 129, customer_id: ids.customer,
+        first_name: 'Billing fixture', last_name: 'Synthetic', scheduled_date: '2026-10-20',
+        service_type: 'Synthetic visit', visit_marked_free: false,
+      });
+    });
+
+    test('finds the visit through the service record when only service_record_id is set', async () => {
+      await mockTransaction('service_records').insert({
+        id: ids.record, customer_id: ids.customer, scheduled_service_id: ids.visit,
+        service_date: '2026-10-20', service_type: 'Synthetic visit', status: 'completed',
+      });
+      await mockTransaction('invoices').insert(draft({ scheduled_service_id: null, service_record_id: ids.record }));
+      expect((await listed()).drafts).toHaveLength(1);
+    });
+
+    test.each([
+      ['a sent draft (sent_at)', { sent_at: hoursAgo(1) }],
+      ['a texted draft (sms_sent_at)', { sms_sent_at: hoursAgo(1) }],
+      ['an emailed draft (email_sent_at)', { email_sent_at: hoursAgo(1) }],
+      ['a draft under 24 hours old', { created_at: hoursAgo(2) }],
+      ['a draft with a send still scheduled', { scheduled_send_at: new Date(Date.now() + 3600000) }],
+      ['a void invoice', { status: 'void' }],
+      ['a paid invoice', { status: 'paid' }],
+    ])('does not list %s', async (_name, overrides) => {
+      await mockTransaction('invoices').insert(draft(overrides));
+      expect((await listed()).drafts).toHaveLength(0);
+    });
+
+    test('does not list a payer-billed draft', async () => {
+      const [{ id: payerId }] = await mockTransaction('payers').insert({ display_name: 'Synthetic payer' }).returning('id');
+      await mockTransaction('invoices').insert(draft({ payer_id: payerId }));
+      expect((await listed()).drafts).toHaveLength(0);
+    });
+
+    test('does not list a draft whose visit is not completed or completed outside the window', async () => {
+      await mockTransaction('scheduled_services').where({ id: ids.visit }).update({ status: 'confirmed' });
+      await mockTransaction('scheduled_services').where({ id: ids.otherVisit }).update({ completed_at: hoursAgo(24 * 200) });
+      await mockTransaction('invoices').insert([draft(), draft({ scheduled_service_id: ids.otherVisit })]);
+      expect((await listed()).drafts).toHaveLength(0);
+      expect((await listed(365)).drafts).toHaveLength(1);
+    });
+
+    test('flags a draft whose visit was marked intentionally free and lists oldest visit first', async () => {
+      await mockTransaction('scheduled_services').where({ id: ids.otherVisit }).update({ completed_at: hoursAgo(24 * 20) });
+      await mockTransaction('visit_billing_dispositions').insert({
+        scheduled_service_id: ids.visit, disposition: 'intentionally_free', reason: 'Synthetic', actor_user_id: ids.actor,
+      });
+      await mockTransaction('invoices').insert([draft(), draft({ scheduled_service_id: ids.otherVisit })]);
+      const body = await listed();
+      expect(body.drafts.map((d) => d.visit_marked_free)).toEqual([false, true]);
+    });
+  });
 });

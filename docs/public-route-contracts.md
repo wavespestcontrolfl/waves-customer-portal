@@ -4346,6 +4346,7 @@ internals, or tech notes — generic 404 for missing/draft/expired/malformed.
 `GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
 top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
 itself never changes.
+`GATE_LAWN_JEV_TIMING_CHECK` (dark, `off` | `shadow` | `enforce`; needs `GATE_TYPED_DECISIONS`; off leaves the payload and the stored row unchanged) acts when the diagnosis is STORED, not when this page is read: in `enforce` the writers (this page's source rows from the public lawn assessment, the tech lawn diagnostic and the admin Analyze photos button) drop Jev-flagged timing sentences from `customer_summary` before the insert, waiting at most 3000 ms and failing open; `shadow` only records the verdict after the insert. Only the summary's sentences go to TypeSafe. The payload keys and shape never change, and `safeCustomerSummary` still drops word-list timing sentences at read.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
 "Based on N photos." from a count of the diagnostic's stored photos (capped at
@@ -4408,7 +4409,8 @@ the tech flow; the response is a TEASER ONLY — a strict subset of the public
 report egress allowlist (status label, one gated finding, counts) plus a
 32-hex claim token. The full report payload never leaves the server before
 claim. Prospect free-text note is stored for admin view only — never fed to
-models or customer copy. Privacy headers on all responses.)
+models or customer copy. Privacy headers on all responses.
+`GATE_LAWN_JEV_TIMING_CHECK` (owner 2026-10-28/29; dark, `off` | `shadow` | `enforce`, anything else reads as off, read at call time; honoured only while `GATE_TYPED_DECISIONS` is live; off changes nothing, makes no call and stores the row exactly as before) puts the MODEL-written lawn diagnosis summary (the contract's `customer_summary`; a deterministic summary is never sent) to TypeSafe Jev, one call per sentence of that summary and nothing else (no photo, contact, address or note), as package `lawn_result_timing.v1`. `shadow` stores the row unchanged, adds no wait to the request, and after the insert records the verdict in `decision_reviews` (subject `lawn_diagnostics`). `enforce` waits at most 3000 ms before the insert and drops the sentences Jev flags from `customer_summary` (the same way the read-time egress drops word-list timing sentences; nothing left reads as the generic low-confidence summary), so every stored copy (`report_contract.customer_summary`, `ai_summary` where it came from it) holds the same final text. A failed, malformed or late answer keeps the text (fail open); a technician's typed `aiSummary` is never checked or changed. The response shape and status codes do not change, and the read-time word list still runs after this.)
 `/api/card/:token` (read-only digital business card payload; 64-hex
 `customer_cards.share_token` format gate, generic 404 for unknown/malformed
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of

@@ -36,29 +36,54 @@ function adminFetch(path, options = {}) {
 // short and Square-style — the full marketing names live elsewhere.
 // "Monthly" is a visit cadence, never a billing term (owner ruling 2026-09-01:
 // never bill monthly). Visits stamped by the old "Billed Monthly" label still
-// match the monthly pattern.
+// match the monthly pattern; "Bi-Monthly" does not.
 const TIER_OPTIONS = [
-  { key: 'monthly',    label: 'Monthly',              subtitle: 'Monthly visits',       duration: 30, pattern: /monthly/i },
+  { key: 'monthly',    label: 'Monthly',              subtitle: 'Monthly visits',       duration: 30, pattern: /^(?!.*bi[-\s]?monthly).*monthly/i },
   { key: 'bimonthly',  label: 'Bi-Monthly',           subtitle: 'Every 2 months',       duration: 30, pattern: /bi[-\s]?monthly/i },
   { key: 'quarterly',  label: 'Quarterly',            subtitle: '4 visits per year',    duration: 30, pattern: /quarterly/i },
   { key: 'semiannual', label: 'Semiannual',           subtitle: '2 visits per year',    duration: 45, pattern: /semi[-\s]?annual/i },
   { key: 'one_time',   label: 'One-Time Service',     subtitle: 'Single visit',         duration: 60, pattern: /(one[-\s]?time|single|initial)/i },
 ];
 
-function detectTier(serviceType) {
-  if (!serviceType) return 'monthly';
+// A visit's repeat (scheduled_services.recurring_pattern) as the tier it is.
+// Repeats with no row here (weekly, every 4 months, annual, custom…) have none.
+const PATTERN_TIERS = {
+  monthly: 'monthly',
+  monthly_nth_weekday: 'monthly',
+  seasonal_feb_oct: 'monthly',
+  bimonthly: 'bimonthly',
+  quarterly: 'quarterly',
+  semiannual: 'semiannual',
+  one_time: 'one_time',
+};
+
+function inSeries(service) {
+  return !!(service?.isRecurring || service?.recurringParentId || service?.recurring_parent_id);
+}
+
+// The tier the sheet opens on: the cadence the visit's label names, else its
+// repeat (the day feed's label usually drops the cadence: "Pest Control"),
+// else One-Time for a visit with no series. null when no row fits, and then
+// no row is selected.
+function detectTier(service) {
+  const serviceType = service?.serviceType || '';
   for (const opt of TIER_OPTIONS) {
     if (opt.pattern.test(serviceType)) return opt.key;
   }
-  return 'monthly';
+  const pattern = service?.recurringPattern || service?.recurring_pattern;
+  if (pattern) return PATTERN_TIERS[pattern] || null;
+  return inSeries(service) ? null : 'one_time';
 }
 
+// The label without its cadence, so a new pick reads "<base> — <tier>": an
+// old "Billed Monthly" goes whole, and so does the em dash the sheet's own
+// stamp leaves behind.
 function baseServiceName(serviceType) {
   if (!serviceType) return 'Service';
   return serviceType
-    .replace(/\b(monthly|bi[-\s]?monthly|quarterly|semi[-\s]?annual|one[-\s]?time|single|initial)\b/gi, '')
+    .replace(/\b((billed\s+)?monthly|bi[-\s]?monthly|quarterly|semi[-\s]?annual|one[-\s]?time|single|initial)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
-    .replace(/[-|–]\s*$/g, '')
+    .replace(/[-|–—]\s*$/g, '')
     .trim() || serviceType;
 }
 
@@ -80,10 +105,10 @@ export default function MobileServiceEditModal({
   onClose,
   onSaved,
 }) {
-  const [tier, setTier] = useState(() => detectTier(service?.serviceType));
+  const [tier, setTier] = useState(() => detectTier(service));
   // The tier the sheet opened with — only a tier the tech actually changes
   // may rewrite the stored service type (see handleSave).
-  const initialTier = useRef(detectTier(service?.serviceType));
+  const initialTier = useRef(detectTier(service));
   const [price, setPrice] = useState(() => {
     const p = service?.estimatedPrice;
     return p != null ? String(p) : '';
@@ -109,7 +134,7 @@ export default function MobileServiceEditModal({
   // there is no choice and the save posts no scope. This visit only is the
   // default: a series-wide reprice is an explicit pick, never a default.
   const openedPrice = useRef(parsePriceInput(service?.estimatedPrice != null ? String(service.estimatedPrice) : ''));
-  const serviceHasSeries = !!(service?.isRecurring || service?.recurringParentId || service?.recurring_parent_id);
+  const serviceHasSeries = inSeries(service);
   const isBaseSeriesRow = !!(service?.isRecurring ?? service?.is_recurring);
   const [seriesSummary, setSeriesSummary] = useState(null);
   const [priceScope, setPriceScope] = useState('this_only');

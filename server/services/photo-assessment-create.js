@@ -54,6 +54,7 @@ const { buildPublicLawnReport } = require('../routes/public-lawn-diagnostic');
 const { overallStatusLabel } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { etParts } = require('../utils/datetime-et');
+const { checkDiagnosisSummary } = require('./service-report/lawn-jev-timing-check');
 const { gateEnvValue } = require('../config/feature-gates');
 
 let PhotoService;
@@ -362,8 +363,12 @@ async function runLawnAnalysis(photos, prospectNote, source) {
   });
   const releaseMode = classifyReleaseMode(reportContract);
   await applyWriterSummary(reportContract, { season, findingsSource, releaseMode, provenance });
-  const sanitizedContract = applyAutoReleaseRepair(reportContract, releaseMode);
+  // GATE_LAWN_JEV_TIMING_CHECK: Jev reads the model's summary before it is stored.
+  // analyzeAndStore calls afterInsert(row.id) once the row exists (shadow records then).
+  const jevCheck = await checkDiagnosisSummary(applyAutoReleaseRepair(reportContract, releaseMode), { modelWritten: Boolean(provenance.writerModel) });
+  const sanitizedContract = jevCheck.contract;
   return {
+    afterInsert: jevCheck.afterInsert,
     insert: {
       ai_analysis: JSON.stringify({
         release_mode: releaseMode,
@@ -733,6 +738,7 @@ async function analyzeAndStore({
     address_snapshot: addressSnapshot ? JSON.stringify(addressSnapshot) : null,
     ...analysis.insert,
   }).returning(['id', 'created_at']);
+  if (typeof analysis.afterInsert === 'function') analysis.afterInsert(row.id);
 
   await storeFunnelPhotos({
     table: config.photoTable,

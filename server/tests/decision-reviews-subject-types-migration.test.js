@@ -39,8 +39,8 @@ describe('decision_reviews subject types migration', () => {
     const recorded = JSON.parse(source.match(/const SUBJECT_TYPES = (\[[^\]]+\]);/)[1].replace(/'/g, '"'));
     // Later packages widen the CHECK in the migration that ships their writer
     // and reviewer: scheduled_services is 20261003101500 (visit_access) and
-    // agent_messages 20261028200000 (ask_waves_safety).
-    expect(recorded).toEqual([...narrow.SUBJECT_TYPES, 'scheduled_services', 'agent_messages']);
+    // agent_messages 20261028200000 (ask_waves_safety); lawn_diagnostics 20261029100000 (lawn_result_timing).
+    expect(recorded).toEqual([...narrow.SUBJECT_TYPES, 'scheduled_services', 'agent_messages', 'lawn_diagnostics']);
   });
 
   test('rolling the second cut back restores exactly what the first cut left', async () => {

@@ -317,6 +317,30 @@ const ASK_WAVES_SAFETY = {
   },
 };
 
+// Does one sentence of a lawn report say or imply WHEN a treatment's result
+// will be seen? Asked per sentence of the model-written lawn diagnosis summary
+// (services/service-report/lawn-jev-timing-check.js), beside the word list
+// (report-writer-rules lawnResultTimingViolation), which reads patterns, not
+// meaning. Owner 2026-10-28, after a replay on 16 new timing
+// claims: the word list missed 5 of 16, Jev caught 16 of 16 with one false flag
+// in 32 sentences, and the two together missed none. The false flag was a recheck
+// sentence that says progress will be checked; the `false` text below names it.
+// The wording is the whole decision: to change it, add lawn_result_timing.v2.
+const LAWN_RESULT_TIMING = {
+  id: 'lawn_result_timing.v1',
+  capability: 'lawn_result_timing',
+  version: 1,
+  description: 'Does one sentence of a lawn service report say or imply when a treatment result will be seen?',
+  stateShape: ['sentence'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    states_result_timing: noul('This is one sentence from a lawn service report. Does it say or imply WHEN a treatment\'s RESULT will be seen?', {
+      true: 'It ties a result (greening, color, weeds fading or dying, insects stopping, disease slowing, recovery, thickening, fill-in) to a time: a number of days, weeks or months, a date or weekday, "soon", "quickly", "right away", "by your next visit", "after the next watering or mowing", "this season", or any similar deadline or pace.',
+      false: 'Everything else: instructions about watering, irrigation or mowing (when or how often to water, holding irrigation until a time, waiting before mowing), even though they contain times; history (what happened before or during the visit, rainfall in the days before); what was applied, where, how and why; scheduling of visits or rechecks with no result attached, even when it says progress will be checked ("we\'ll check the progress at your next visit in six weeks"); a result with no time attached.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
@@ -329,6 +353,7 @@ const PACKAGES = deepFreeze({
   [PHOTO_PRIVACY.id]: PHOTO_PRIVACY,
   [VISIT_ACCESS.id]: VISIT_ACCESS,
   [ASK_WAVES_SAFETY.id]: ASK_WAVES_SAFETY,
+  [LAWN_RESULT_TIMING.id]: LAWN_RESULT_TIMING,
 });
 
 // Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a
