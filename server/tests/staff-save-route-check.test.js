@@ -127,3 +127,60 @@ describe('placeStaffSavedVisit', () => {
     expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, source: 'bulk_reschedule' });
   });
 });
+
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b)
+describe('GATE_ROUTE_CHECK_AUTO_SAVES: placeAutoSavedVisit', () => {
+  const autoOn = () => {
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+  const trx = { isTransaction: true };
+  afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; });
+
+  test('the reader is read at call time and needs the arrival-window route check; the staff gate does not turn it on', () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    expect(arrivalRoute.routeCheckAutoSavesLive()).toBe(false);
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    expect(arrivalRoute.routeCheckAutoSavesLive()).toBe(false);
+    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    expect(arrivalRoute.routeCheckAutoSavesLive()).toBe(true);
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    expect(arrivalRoute.routeCheckAutoSavesLive()).toBe(false);
+  });
+
+  test('gate off: touches nothing, even with the staff gate on', async () => {
+    gateOn();
+    expect(await routeCheck.placeAutoSavedVisit(trx, { serviceId: 'svc-1', source: 'completion_followup' })).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the written row goes to the staff writer on the caller transaction, cache roads only, with its source', async () => {
+    autoOn();
+    expect(await routeCheck.placeAutoSavedVisit(trx, { visit: { id: 'svc-9' }, source: 'package_followup' })).toEqual([1]);
+    expect(placeSpy).toHaveBeenCalledTimes(1);
+    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-9', staffSave: true, source: 'package_followup' });
+  });
+
+  test('gate on: no connection or no visit id is a quiet no-op', async () => {
+    autoOn();
+    expect(await routeCheck.placeAutoSavedVisit(null, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAutoSavedVisit(trx, { visit: undefined })).toBeNull();
+    expect(await routeCheck.placeAutoSavedVisit(trx)).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a throwing placement is one warning line and a null, never a throw', async () => {
+    autoOn();
+    placeSpy.mockRejectedValueOnce(new Error('route boom'));
+    expect(await routeCheck.placeAutoSavedVisit(trx, { serviceId: 'svc-1', source: 'call_booking' })).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+  });
+
+  test('never warns, notifies or buys: only placeMovedVisit is called', async () => {
+    autoOn();
+    await routeCheck.placeAutoSavedVisit(trx, { serviceId: 'svc-1' });
+    expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
+    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true });
+  });
+});

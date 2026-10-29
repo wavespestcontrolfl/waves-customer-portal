@@ -1076,6 +1076,16 @@ function routeCheckStaffSavesLive() {
   return gateEnvValue('GATE_ROUTE_CHECK_STAFF_SAVES') && arrivalWindowRoutingEnabled();
 }
 
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, "start the builds", Route
+// Check Everywhere build 2b): the automatic writers that create or move a
+// visit (completion and package follow-ups, annual prepay renewals, call
+// bookings) number the visit's technician day in the dispatcher's order
+// (placeMovedVisit, cache road times only). No warning, no notification, no
+// message, no Google call. Needs the arrival-window route check itself.
+function routeCheckAutoSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_AUTO_SAVES') && arrivalWindowRoutingEnabled();
+}
+
 // A staff save's travel for `date`: on a road day, the road times the pickers
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
@@ -1116,3 +1126,4 @@ module.exports = {
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
 module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
+module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;

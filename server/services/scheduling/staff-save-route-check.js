@@ -25,6 +25,12 @@ function routeCheckLive() {
   return typeof routeCheckStaffSavesLive === 'function' && routeCheckStaffSavesLive() === true;
 }
 
+// GATE_ROUTE_CHECK_AUTO_SAVES (build 2b): same read, for the automatic writers.
+function routeCheckAutoLive() {
+  const { routeCheckAutoSavesLive } = require('./arrival-route');
+  return typeof routeCheckAutoSavesLive === 'function' && routeCheckAutoSavesLive() === true;
+}
+
 /** The `arrivalWindow` argument findConflictingVisits takes for a saved visit. */
 function routeCheckArrivalWindow(serviceId) {
   return { serviceId, roads: 'cache' };
@@ -74,4 +80,27 @@ async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
   return require('./arrival-route').placeMovedVisit(conn, { serviceId, staffSave: true, ...(source ? { source } : {}) });
 }
 
-module.exports = { routeCheckLive, routeCheckArrivalWindow, staffSaveRouteWarnings, placeStaffSavedVisit };
+/**
+ * GATE_ROUTE_CHECK_AUTO_SAVES (build 2b): the same numbering for an automatic
+ * writer (completion and package follow-ups, annual prepay renewals, call
+ * bookings). Call INSIDE the writer's transaction after the insert or update;
+ * pass the written row as `visit` or its id as `serviceId`. Silent by design:
+ * no warning, no notification, no message. Reads only the road times already
+ * bought (`staffSave: true`). A failure is logged on one line and returns null:
+ * it never fails or rolls back the booking. Gate off (unset): touches nothing.
+ */
+async function placeAutoSavedVisit(conn, { serviceId, visit, source } = {}) {
+  const id = serviceId || (visit && visit.id);
+  if (!conn || !id) return null;
+  try {
+    if (!routeCheckAutoLive()) return null;
+    return await require('./arrival-route').placeMovedVisit(conn, { serviceId: id, staffSave: true, ...(source ? { source } : {}) });
+  } catch (err) {
+    logger.warn(`[staff-save-route-check] auto-save placement skipped for ${id}${source ? ` (${source})` : ''}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = {
+  routeCheckLive, routeCheckAutoLive, routeCheckArrivalWindow, staffSaveRouteWarnings, placeStaffSavedVisit, placeAutoSavedVisit,
+};
