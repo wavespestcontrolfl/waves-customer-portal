@@ -1046,15 +1046,37 @@ function keepNotesProblem(row) {
   return row.keepNotes.find(path => row.keep.includes(path)) ? 'keepNotes must not repeat a keep path' : null;
 }
 
+// office: the row is one the OFFICE login (a non-owner admin, GATE_IB_GENERAL_READ_OFFICE) may read. A reviewer marks it `office: true`
+// after reading what the response returns. These can never be office rows, whatever a reviewer writes: money in motion and the books
+// (banking, payouts, payroll, tax, revenue settings), pricing configuration, the SEO pipeline, credentials and tokens. A row reviewed to
+// return free-text notes (keepNotes) cannot be an office row either: the office login never receives notes (they are withheld at run
+// time even on a note-kind field), so a row whose purpose is its notes has no office use.
+const NEVER_OFFICE = [
+  [/^\/admin\/(banking|bank|payouts?|payroll|gusto|tax|taxes|seo|content-engine|backlinks?)(\/|$)/i, 'banking, payouts, payroll, tax and the SEO pipeline'],
+  [/^\/admin\/referrals\/payouts(\/|$)/i, 'referral payouts'],
+  [/^\/admin\/revenue\/settings(\/|$)/i, 'revenue settings'],
+  [/^\/admin\/(pricing|pricing-config|discounts)(\/|$)/i, 'pricing configuration'],
+  [/(^|\/)(credentials?|secrets?|tokens?|api-keys?|passwords?|oauth|webhooks?)(\/|$)/i, 'credentials and tokens'],
+  [/^\/admin\/(settings|integrations)(\/|$)/i, 'settings and integrations'],
+];
+function officeProblem(row) {
+  if (row.office === undefined) return null;
+  if (row.office !== true) return 'office must be true or absent';
+  const never = NEVER_OFFICE.find(([re]) => re.test(row.endpoint));
+  if (never) return `an office row cannot be on the never-office list (${never[1]})`;
+  if (row.keepNotes) return 'an office row cannot return notes (keepNotes): the office login never receives notes';
+  return null;
+}
+
 // What a row hands the run-time reader beyond scope and query: the response projection and the finder phrases.
-const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keepNotes ? { keepNotes: row.keepNotes } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
+const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keepNotes ? { keepNotes: row.keepNotes } : {}), ...(row.keywords ? { keywords: row.keywords } : {}), ...(row.office === true ? { office: true } : {}) });
 
 function validateReviewedRow(row) {
   const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
   if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
   const names = rules.patternParams(row.endpoint);
   const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names)
-    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row) || keepNotesProblem(row);
+    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row) || keepNotesProblem(row) || officeProblem(row);
   if (problem) fail(problem);
 }
 
