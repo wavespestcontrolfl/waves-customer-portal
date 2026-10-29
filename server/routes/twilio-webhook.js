@@ -316,10 +316,11 @@ router.post('/sms', async (req, res) => {
     // is skipped (`staffSender` below): the spam screen, the estimator draft and shadow agent, the
     // scheduling shadow, the tracking-line new-lead bell. A number that is also on a customer record
     // is not in the set, a compliance keyword (STOP/START/HELP) keeps its normal handling, and a
-    // technician line keeps its own conversation.
-    const staffSender = await require('../services/staff-sender-phones').isStaffTechSender(From)
-      && !TWILIO_NUMBERS.isTechLine(To) && !detectSmsOptCommand(Body || '').action;
-    if (staffSender) logger.info(`[sms] inbound from an active technician's phone ${maskPhone(From)} — staff sender, kept in the inbox, no customer or lead handling`);
+    // technician line keeps its own conversation. The keyword half waits for
+    // the GATE_SMS_BARE_YES_REPLY decision below (`staffSender`): a bare YES
+    // called a reply is no compliance keyword.
+    const staffSenderPhone = await require('../services/staff-sender-phones').isStaffTechSender(From)
+      && !TWILIO_NUMBERS.isTechLine(To);
 
     // Eligibility gates passed — attach the body to the entry reservation
     // (codex #3413 r27/r29). A DURABLE row (round-17): a crash from here
@@ -450,7 +451,20 @@ router.post('/sms', async (req, res) => {
     // (Codex r22 P2) so the persisted row carries the recruiting type and
     // stays out of technician-visible readers — a lookup failure simply
     // leaves it without the recruiting type; the command branch types it.
-    const complianceCommand = Boolean(detectSmsOptCommand(Body || '').action);
+    // GATE_SMS_BARE_YES_REPLY: YES is a Twilio opt-in keyword, but a bare YES
+    // from a number with nothing to restore is an answer ("Reply YES to
+    // book"), not START. Decided once, here, so every carrier-command check
+    // below (this recruiting lookup, the STOP/HELP/START branches, the
+    // visit-tech relay) treats it as an ordinary text. START and the other
+    // opt-in keywords are unchanged.
+    const rawOptCommand = detectSmsOptCommand(Body || '');
+    const bareYesReply = rawOptCommand.action === 'opt_in' && rawOptCommand.sourceKeyword === 'YES'
+      && require('../config/feature-gates').smsBareYesReplyLive?.() === true
+      && await require('../services/messaging/bare-yes-reply').bareYesIsReply({ phone: normalizeE164(From) || From, customerId: customer?.id || null });
+    if (bareYesReply) logger.info(`[sms-optin] bare YES from ${maskPhone(From)} handled as a reply (nothing to re-subscribe)`);
+    const complianceCommand = Boolean(rawOptCommand.action) && !bareYesReply;
+    const staffSender = staffSenderPhone && !complianceCommand;
+    if (staffSender) logger.info(`[sms] inbound from an active technician's phone ${maskPhone(From)} — staff sender, kept in the inbox, no customer or lead handling`);
     let recruitingReply = null;
     if (complianceCommand) {
       recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To).catch((e) => {
@@ -600,8 +614,10 @@ router.post('/sms', async (req, res) => {
     // redesign (audit 2026-09-09); this just removes the regex machinery
     // that used to try to protect that same boundary from inside the
     // detector.
-    const optCommand = complianceEligible
-      ? detectSmsOptCommand(Body)
+    // A bare YES the GATE_SMS_BARE_YES_REPLY rule called a reply (above)
+    // carries no command.
+    const optCommand = complianceEligible && !bareYesReply
+      ? rawOptCommand
       : { action: null };
 
     // Save the inbox message before any classifier await: the durable SID
@@ -1079,7 +1095,7 @@ router.post('/sms', async (req, res) => {
     // (Codex #6760 security review). The office path is unchanged; nothing is
     // sent to the customer.
     if (numberConfig.type !== 'tech_line' && !isAiNumber && (customer || knownCallerRecord) && (Body || inboundMedia.length)
-      && !smsReaction && !courtesyOnly && !staffSender && !detectSmsOptCommand(Body || '').action
+      && !smsReaction && !courtesyOnly && !staffSender && !complianceCommand
       && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
       const relayInput = { from: From, body: Body, mediaCount: inboundMedia.length };
       res.once('finish', () => {

@@ -717,6 +717,49 @@ async function getRecipientOptin(phone, customerId = null) {
   }
 }
 
+// The rows a YES confirms (see markRecipientOptin below): an ask that went out
+// (dispatched_at set), never ask_failed, plus a declined row whatever
+// dispatched_at says. Shared with yesWouldConfirmAsk so the two never disagree.
+function whereYesConfirms(q) {
+  return q.whereNot({ status: 'ask_failed' }).where(function confirmable() {
+    this.whereNotNull('dispatched_at').orWhere({ status: 'declined' });
+  });
+}
+
+// Marker-recovery evidence for one pending row: the newest opt-in ask text to
+// this phone for that row's customer (the caller checks its status).
+function latestOptinAsk(dbh, key, customerId) {
+  return dbh('sms_log')
+    .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
+    .where({ customer_id: customerId })
+    .where(function optinAsk() {
+      this.where({ message_type: 'recipient_optin_request' })
+        .orWhereRaw("metadata::text like '%recipient_optin_request%'");
+    })
+    .orderBy('created_at', 'desc')
+    .first('id', 'twilio_sid', 'status');
+}
+
+// True when a YES from this phone would confirm a recipient ask it has not
+// confirmed yet: a row markRecipientOptin('confirmed') writes that is not
+// confirmed, or a pending row its marker-recovery window would confirm.
+// Read-only; errors propagate (the bare-YES rule keeps the opt-in on one).
+async function yesWouldConfirmAsk(phone, { dbh = db } = {}) {
+  const key = recipientPhoneKey(phone);
+  if (!key) return false;
+  const open = await whereYesConfirms(dbh('recipient_optin').where({ phone_key: key }))
+    .whereNot({ status: 'confirmed' })
+    .first('id');
+  if (open) return true;
+  const { isFailureStatus } = require('./twilio-failure-alerts');
+  const pendingRows = await dbh('recipient_optin').where({ phone_key: key, status: 'pending' }).select('customer_id');
+  for (const row of pendingRows) {
+    const ask = await latestOptinAsk(dbh, key, row.customer_id);
+    if (ask && !isFailureStatus(ask.status)) return true;
+  }
+  return false;
+}
+
 // Webhook hook: the sender replied YES (status 'confirmed') or STOP
 // ('declined'). No-op when the phone has no row — a plain customer opt-in/
 // opt-out is not recipient state.
@@ -754,11 +797,7 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
         .map((r) => r.customer_id).sort();
       if (customerIds.length) await dbh('customers').whereIn('id', customerIds).orderBy('id').forUpdate().select('id');
     }
-    if (status === 'confirmed') {
-      q.whereNot({ status: 'ask_failed' }).where(function confirmable() {
-        this.whereNotNull('dispatched_at').orWhere({ status: 'declined' });
-      });
-    }
+    if (status === 'confirmed') whereYesConfirms(q);
     let updated = await q.update(stamp);
     // Marker-recovery window: Twilio accepted the ask but the dispatched_at
     // write crashed, and the person replied YES before the sweep
@@ -772,15 +811,7 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
       // undispatched pending row stays pending when only A's ask went out.
       const pendingRows = await dbh('recipient_optin').where({ phone_key: key, status: 'pending' });
       for (const row of pendingRows) {
-        const priorAskRow = await dbh('sms_log')
-          .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
-          .where({ customer_id: row.customer_id })
-          .where(function optinAsk() {
-            this.where({ message_type: 'recipient_optin_request' })
-              .orWhereRaw("metadata::text like '%recipient_optin_request%'");
-          })
-          .orderBy('created_at', 'desc')
-          .first('id', 'twilio_sid', 'status')
+        const priorAskRow = await latestOptinAsk(dbh, key, row.customer_id)
           .catch((err) => {
             // On a transactional dbh Postgres has already ABORTED on this
             // error; swallowing it here can let COMMIT silently resolve as a
@@ -1446,6 +1477,7 @@ module.exports = {
   optinBlocksSend,
   getRecipientOptin,
   markRecipientOptin,
+  yesWouldConfirmAsk,
   filterRecipientsByOptin,
   optinHeldPhoneKeys,
   resolveServiceContactSmsRecipient,
