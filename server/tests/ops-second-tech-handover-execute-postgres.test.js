@@ -73,7 +73,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     w.tue = await child(ownerId, w.pest, '2099-07-07');
     w.wed = await child(ownerId, w.pest, '2099-07-08');
     w.thu = await child(ownerId, w.pest, '2099-07-09');
-    w.fri = await child(ownerId, w.pest, '2099-07-10'); // the hire's day off: stays
+    w.fri = await child(ownerId, w.pest, '2099-10-09'); // the hire's day off, after the 13 weeks: stays
     w.done = await child(ownerId, w.pest, '2099-07-13', { status: 'completed' });
     w.early = await child(ownerId, w.pest, '2099-07-03'); // before --start
     w.theirs = await child(otherId, w.pest, '2099-07-14'); // held by someone else
@@ -97,9 +97,14 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     w.lawn = await series(ownerId, await customer(), { service_type: 'Lawn Care Program' });
     w.lawnVisit = await child(ownerId, w.lawn, '2099-07-07', { service_type: 'Lawn Care Program' });
 
-    // A second pest series that only changes template (its one visit is on a day off).
+    // A second pest series that only changes template (its one visit is on a day off after the 13 weeks).
     w.fridayOnly = await series(ownerId, await customer());
-    w.fridayVisit = await child(ownerId, w.fridayOnly, '2099-07-10');
+    w.fridayVisit = await child(ownerId, w.fridayOnly, '2099-10-09');
+
+    // A weekend customer (owner 2026-10-28, question 1 = C): a Saturday in the 13 weeks keeps the whole customer.
+    w.weekend = await series(ownerId, await customer());
+    w.weekendMon = await child(ownerId, w.weekend, '2099-07-06');
+    w.weekendSat = await child(ownerId, w.weekend, '2099-07-11');
     return w;
   }
 
@@ -144,7 +149,8 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
   test('moves the series templates and the Mon-Thu open visits, leaves everything else, sends ONE card, and rolls back', async () => {
     const w = await world();
     const before = await notices([w.ownerId, w.hireId, w.otherId]);
-    const stable = [w.fri, w.done, w.early, w.theirs, w.unassigned, w.enRoute, w.grouped, w.baitVisit, w.baitPestVisit, w.lawnVisit, w.fridayVisit];
+    const stable = [w.fri, w.done, w.early, w.theirs, w.unassigned, w.enRoute, w.grouped, w.baitVisit, w.baitPestVisit, w.lawnVisit, w.fridayVisit,
+      w.weekendMon, w.weekendSat];
     const snapshot = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (r) => [r.id, await get(r.id)])));
     const stableBefore = await snapshot(stable);
     const monBefore = await get(w.mon.id);
@@ -157,7 +163,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     for (const s of [w.pest, w.fridayOnly]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: w.hireId, recurring_technician_override: true });
     }
-    for (const s of [w.bait, w.baitPest, w.lawn]) {
+    for (const s of [w.bait, w.baitPest, w.lawn, w.weekend]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
     }
     // Mon-Thu open visits moved; route number cleared; date and window untouched.
@@ -204,6 +210,8 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
     expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 3, skipped: { series: [], visits: [w.wed.id] } });
     for (const v of [w.mon, w.tue, w.thu]) expect(await get(v.id)).toMatchObject({ technician_id: w.ownerId });
+    // The undo returns the route number the run cleared.
+    expect((await get(w.mon.id)).route_order).toBe(5);
     expect((await get(w.wed.id)).technician_id).toBe(w.otherId);
     for (const s of [w.pest, w.fridayOnly]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });

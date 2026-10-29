@@ -41,7 +41,9 @@
 //
 // ROLLBACK restores a series only while its template still reads (--to, override) and a visit only
 // while it is still open, still held by --to, still on the day the run moved it, and the original
-// technician can still take that day (assertAssignableTechnician). Everything else is listed.
+// technician can still take that day (assertAssignableTechnician). Everything else is listed. A
+// restored visit gets back the route number the file kept (the run cleared it): an undo returns the
+// old route, and the route repair that would renumber it is dark.
 //
 // SENDERS (rule 12), checked against the save path (dispatch-assignment assignDispatchJob):
 //   NOT CALLED: tech-visit-notifications notifyAssignmentChange (the per-visit visit_assigned /
@@ -364,7 +366,7 @@ async function rollbackHandover(db, opts) {
           .whereIn('status', OPEN_STATUSES)
           .where(function notStopped() { this.whereNull('track_state').orWhereNotIn('track_state', STOPPED_TRACK_STATES); })
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [v.date])
-          .update({ technician_id: v.technician_id, route_order: null, updated_at: trx.fn.now() });
+          .update({ technician_id: v.technician_id, route_order: v.route_order ?? null, updated_at: trx.fn.now() });
         if (n === 1) visitsRestored += 1; else skipped.visits.push(v.id);
       }
       await auditLog.recordAuditEvent({

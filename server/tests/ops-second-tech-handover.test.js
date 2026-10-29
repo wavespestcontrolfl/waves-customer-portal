@@ -21,6 +21,10 @@ const TUE = '2099-07-07';
 const WED = '2099-07-08';
 const THU = '2099-07-09';
 const FRI = '2099-07-10';
+const SAT = '2099-07-11';
+// After the 13-week weekend-customer window (--start 2099-07-06: dates before 2099-10-05 are inside it).
+const MON_LATE = '2099-10-12';
+const FRI_LATE = '2099-10-09';
 
 let seq = 0;
 const id = (p) => `${p}-${++seq}`;
@@ -43,18 +47,18 @@ const plan = (parents, visits, o = {}) => buildPlan({
 
 describe('second-tech-handover planner', () => {
   test('a series whose template changes but has no visit to move now is still listed (template-only)', () => {
-    const fridayOnly = parent();
+    const lateFridayOnly = parent();
     const noChildren = parent();
     const moving = parent();
-    const p = plan([fridayOnly, noChildren, moving], [visit(fridayOnly, FRI), visit(moving, MON)]);
+    const p = plan([lateFridayOnly, noChildren, moving], [visit(lateFridayOnly, FRI_LATE), visit(moving, MON)]);
     expect(p.series.retemplate).toBe(3);
-    expect(new Set(p.ids.retemplate)).toEqual(new Set([fridayOnly.id, noChildren.id, moving.id]));
+    expect(new Set(p.ids.retemplate)).toEqual(new Set([lateFridayOnly.id, noChildren.id, moving.id]));
     expect(p.ids.series).toEqual([moving.id]);
   });
 
-  test('a pest series on the owner moves its Mon-Thu visits; the Friday visit stays (stays_off_day)', () => {
+  test('a pest series on the owner moves its Mon-Thu visits; a Friday after the 13 weeks stays (stays_off_day)', () => {
     const s = parent();
-    const vs = [MON, TUE, WED, THU, FRI].map((d) => visit(s, d));
+    const vs = [MON, TUE, WED, THU, FRI_LATE].map((d) => visit(s, d));
     const p = plan([s], vs);
     expect(p.would_change).toMatchObject({ series: 1, visits: 4, by_line: { general: { series: 1, visits: 4 } } });
     expect(p.would_change.by_weekday).toEqual({ Mon: 1, Tue: 1, Wed: 1, Thu: 1 });
@@ -214,7 +218,7 @@ describe('second-tech-handover planner', () => {
 
   test('--to with explicit work_days changes the off days', () => {
     const s = parent();
-    const vs = [MON, TUE, WED, THU, FRI].map((d) => visit(s, d));
+    const vs = [MON_LATE, TUE, WED, THU, FRI].map((d) => visit(s, d));
     const p = plan([s], vs, { to: { id: HIRE, work_days: [2, 3, 4, 5] } });
     expect(p.target).toBe(HIRE);
     expect(p.target_work_days_source).toBe('technician_row');
@@ -223,6 +227,48 @@ describe('second-tech-handover planner', () => {
     const every = plan([s], vs, { to: { id: HIRE, work_days: null } });
     expect(every.would_change.visits).toBe(5);
     expect(every.stays_off_day.visits).toBe(0);
+  });
+
+  test('question 1 = C: a customer with a weekend visit in the 13 weeks keeps the owner, whole', () => {
+    const customerId = 'C-weekend';
+    const general = parent({ customer_id: customerId });
+    const mosquito = parent({ customer_id: customerId, line: 'mosquito' });
+    const weekday = parent();
+    const p = plan([general, mosquito, weekday], [visit(general, MON), visit(general, SAT), visit(mosquito, TUE), visit(weekday, WED)]);
+    // Both series of the weekend customer stay: no template change and no visit moves, the weekday ones included.
+    expect(p.skipped.off_day_customer).toEqual({ series: 2, visits: 3, customers: 1 });
+    expect(p.ids.retemplate).toEqual([weekday.id]);
+    expect(p.would_change.visits).toBe(1);
+    expect(p.stays_off_day.visits).toBe(0);
+    expect(p.off_day_policy).toBe('weekend_customer_stays_whole');
+    expect(p.off_day_customer_until).toBe('2099-10-05');
+  });
+
+  test('the 13 weeks end before day 91: a weekend visit on day 90 keeps the customer, one after the window does not', () => {
+    const inside = parent();
+    const after = parent();
+    // 2099-10-04 is a Sunday inside the window; 2099-10-10 a Saturday after it.
+    const p = plan([inside, after], [visit(inside, MON), visit(inside, '2099-10-04'), visit(after, MON), visit(after, '2099-10-10')]);
+    expect(p.skipped.off_day_customer).toEqual({ series: 1, visits: 2, customers: 1 });
+    expect(p.ids.retemplate).toEqual([after.id]);
+    expect(p.stays_off_day).toEqual({ visits: 1, by_weekday: { Sat: 1 } });
+  });
+
+  test('only a visit the run would move makes a weekend customer: done, someone else\'s, before --start, grouped or lawn do not', () => {
+    const s = parent();
+    const lawn = parent({ customer_id: s.customer_id, line: 'lawn' });
+    const vs = [
+      visit(s, MON),
+      visit(s, SAT, { status: 'completed' }),
+      visit(s, '2099-07-12', { technician_id: OTHER }),
+      visit(s, '2099-07-05'), // a Sunday before --start
+      visit(s, SAT, { visit_id: 'G-1', group_status: 'open' }),
+      visit(lawn, SAT),
+    ];
+    const p = plan([s, lawn], vs);
+    expect(p.skipped.off_day_customer).toBeUndefined();
+    expect(p.ids.retemplate).toEqual([s.id]);
+    expect(p.ids.visits).toEqual([vs[0].id]);
   });
 
   test('a series with no line is reported, not moved', () => {
@@ -272,7 +318,7 @@ describe('second-tech-handover PLAN ID', () => {
   const build = (parents, visits, o = {}) => plan(parents, visits, { to: HIRE_ROW, ...o });
   const fixture = () => {
     const s = parent();
-    return { s, vs: [MON, TUE, WED, THU, FRI].map((d) => visit(s, d)) };
+    return { s, vs: [MON, TUE, WED, THU, FRI_LATE].map((d) => visit(s, d)) };
   };
 
   test('the same plan gives the same 64-character id, whatever order the rows arrive in', () => {

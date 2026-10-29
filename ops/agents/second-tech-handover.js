@@ -88,9 +88,17 @@
 //            monitoring program: its catalog key (services.service_key by
 //            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
 //            matches /bait|monitor/. Every series of that customer is skipped.
-//   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). A visit on a
-//            target day off STAYS with --from (owner decision still open: move the
-//            date, or keep with the owner; default = keep).
+//   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). Owner
+//            2026-10-28 (Tech 2 & 3 Roadmap, question 1 = C): the weekend customers stay
+//            with the owner for 60 days, then a second handover run moves them. A WEEKEND
+//            CUSTOMER = a customer with a visit this run would otherwise move (open, dated
+//            >= --start, held by --from, in --lines, not grouped, not bait) on a target day
+//            off within OFF_DAY_CUSTOMER_DAYS (13 weeks) of --start: the window the roadmap
+//            counted its 80 weekend pest customers over. That customer stays WHOLE with
+//            --from: no series of theirs changes template and none of their visits move
+//            (skipped as off_day_customer). Any later visit on a target day off also stays
+//            with --from (stays_off_day). The second run must move those dates to a
+//            target work day as well, which this planner does not do.
 //
 // Output carries counts, technician ids the operator typed, series ids and visit
 // ids only — no customer names, addresses, phones or emails are selected.
@@ -126,6 +134,9 @@ const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
+// Owner 2026-10-28, question 1 = C (header, OFF DAY): a target-day-off visit within 13 weeks of --start keeps its customer
+// with --from, whole.
+const OFF_DAY_CUSTOMER_DAYS = 91;
 
 /** First solo day when --start is not given: the next Monday after today, ET. */
 function defaultStart(now = new Date()) {
@@ -291,7 +302,8 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     lines: [...lines],
     target_work_days: workDays.map((d) => WEEKDAYS[d]),
     target_work_days_source: workDaysSource,
-    off_day_policy: 'keep_with_owner',
+    off_day_policy: 'weekend_customer_stays_whole',
+    off_day_customer_until: etDateString(addETDays(parseETDateTime(`${start}T12:00:00`), OFF_DAY_CUSTOMER_DAYS)),
     series: { active: active.length, on_from: 0, in_lines: 0, retemplate: 0, with_visits_to_move: 0 },
     would_change: { series: 0, visits: 0, by_line: {}, by_weekday: {} },
     stays_off_day: { visits: 0, by_weekday: {} },
@@ -322,6 +334,15 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     ['bad_date', (v) => dayOfWeekOfDate(v.scheduled_date) === null],
   ];
   const baitHit = new Set();
+  const inScope = (p) => seriesTechnicianId(p) === from && p.line && lines.includes(p.line) && !baitCustomers.has(p.customer_id);
+  // Weekend customers (question 1 = C): a visit the run would otherwise move, on a target day off, before the window ends.
+  const weekendCustomers = new Set();
+  for (const p of active) {
+    if (!inScope(p)) continue;
+    const weekend = (bySeries.get(p.id) || []).some((v) => !visitStays.some(([, test]) => test(v))
+      && v.scheduled_date < plan.off_day_customer_until && !workDays.includes(dayOfWeekOfDate(v.scheduled_date)));
+    if (weekend) weekendCustomers.add(p.customer_id);
+  }
 
   for (const p of active) {
     if (seriesTechnicianId(p) !== from) continue;
@@ -336,6 +357,10 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     if (baitCustomers.has(p.customer_id)) {
       seriesSkip('termite_bait_customer', p.id, candidates);
       baitHit.add(p.customer_id);
+      continue;
+    }
+    if (weekendCustomers.has(p.customer_id)) {
+      seriesSkip('off_day_customer', p.id, candidates);
       continue;
     }
     plan.series.retemplate += 1;
@@ -367,6 +392,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     }
   }
   if (plan.skipped.termite_bait_customer) plan.skipped.termite_bait_customer.customers = baitHit.size;
+  if (plan.skipped.off_day_customer) plan.skipped.off_day_customer.customers = weekendCustomers.size;
   for (const s of Object.values(plan.skipped)) delete s._ids;
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
@@ -512,12 +538,15 @@ function printPlan(plan, { list }) {
   for (const [line, c] of Object.entries(plan.would_change.by_line)) out.push(`  ${line}: ${c.series} series, ${c.visits} visits`);
   out.push(`  by weekday: ${weekdayLine(plan.would_change.by_weekday)}`);
   out.push('');
-  out.push(`Visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
+  const weekend = plan.skipped.off_day_customer;
+  out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
+    + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
+  out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
-  out.push('  (owner decision open: keep with the owner, or move the date. This plan keeps them.)');
+  out.push('  (a second handover run moves these customers and their dates; it is not built here.)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'termite_bait_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'termite_bait_customer', 'off_day_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];
