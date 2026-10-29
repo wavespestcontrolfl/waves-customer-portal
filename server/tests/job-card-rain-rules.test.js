@@ -322,6 +322,9 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     const [sql, bindings] = raw.mock.calls[0];
     expect(sql).toMatch(/ON CONFLICT \(scheduled_service_id, visit_date\) DO UPDATE SET/);
     expect(sql).toMatch(/shadow_status = CASE WHEN .* THEN EXCLUDED\.shadow_status ELSE spray_rain_rule_shadow\.shadow_status END/);
+    // A Warning ranks above a plain caution inside the 'caution' status (step 2), on both sides of the comparison.
+    expect(sql).toMatch(/jsonb_array_elements\(EXCLUDED\.products\) AS e WHERE e->>'level' = 'warning'/);
+    expect(sql).toMatch(/jsonb_array_elements\(spray_rain_rule_shadow\.products\) AS e WHERE e->>'level' = 'warning'/);
     // The start time and service are the peak read's: they move only with it (Codex P2).
     expect(sql).toMatch(/start_at = CASE WHEN .* THEN EXCLUDED\.start_at ELSE spray_rain_rule_shadow\.start_at END/);
     expect(sql).toMatch(/service_type = CASE WHEN .* THEN EXCLUDED\.service_type ELSE spray_rain_rule_shadow\.service_type END/);

@@ -8,7 +8,10 @@
 // hold appeared, so the board's 60-second readiness poll does not write every minute.
 const db = require('../models/db');
 
-const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 3 WHEN 'caution' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END`;
+// A Warning (rain past the hold tier, owner 2026-10-29 step 2) is a caution with level 'warning'; it ranks above a
+// plain caution, so a later Warning read replaces an earlier caution peak (the status CHECK stays as it is).
+const WARNING_IN = (table) => `EXISTS (SELECT 1 FROM jsonb_array_elements(${table}.products) AS e WHERE e->>'level' = 'warning')`;
+const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 4 WHEN 'caution' THEN CASE WHEN ${WARNING_IN(table)} THEN 3 ELSE 2 END WHEN 'unknown' THEN 1 ELSE 0 END`;
 const RANK = { ok: 0, unknown: 1, caution: 2, hold: 3 };
 // Columns that describe the worst read, its start time and service included (the start moves with the clock once
 // the window opens); they move only when a read is worse than the stored one.
