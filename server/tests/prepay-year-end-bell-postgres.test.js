@@ -260,6 +260,42 @@ postgres('prepay year end bell (PostgreSQL)', () => {
     expect(await openBells(id)).toHaveLength(0);
   });
 
+  test('a bell closed by a paid next year rings again when that year is refunded', async () => {
+    const owner = await customer();
+    const id = await term(owner);
+    await run();
+    const paid = await invoice(owner, 'paid');
+    await term(owner, { status: 'payment_pending', start: '2026-11-25', end: '2027-11-24', invoiceId: paid });
+    expect((await run()).closed).toBe(1);
+    expect(await openBells(id)).toHaveLength(0);
+    await trx('invoices').where({ id: paid }).update({ status: 'refunded' });
+    expect(await run()).toEqual({ raised: 1, closed: 0 });
+    const [bell] = await openBells(id);
+    expect(bell.metadata.autoCleared).toBe(false);
+    expect(bell.metadata.recurrenceGeneration).toBe(1);
+  });
+
+  test('a year end moved and moved back rings its first bell again', async () => {
+    const id = await term(await customer());
+    await run();
+    await trx('annual_prepay_terms').where({ id }).update({ term_end: '2026-12-05' });
+    expect(await run()).toEqual({ raised: 1, closed: 1 });
+    await trx('annual_prepay_terms').where({ id }).update({ term_end: TERM_END });
+    expect(await run()).toEqual({ raised: 1, closed: 1 });
+    expect(await openBells(id)).toHaveLength(1);
+    expect(await openBells(id, '2026-12-05')).toHaveLength(0);
+  });
+
+  test("a person's dismissal of a year that still needs a person stays dismissed", async () => {
+    const id = await term(await customer());
+    await run();
+    await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [alertKey(id, TERM_END)])
+      .update({ done_at: new Date('2026-11-10T15:00:00Z'), done_by: '1', read_at: new Date('2026-11-10T15:00:00Z') });
+    expect(await run()).toEqual({ raised: 0, closed: 0 });
+    expect(await openBells(id)).toHaveLength(0);
+    expect(await bells(id)).toHaveLength(1);
+  });
+
   test('two runs leave one open bell', async () => {
     const id = await term(await customer());
     expect(await run()).toEqual({ raised: 1, closed: 0 });

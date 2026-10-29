@@ -30,7 +30,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { raiseAdminAlert } = require('./admin-alert-compose');
+const { composeAdminAlert } = require('./admin-alert-compose');
 // Through the module object, so a unit test can stand its SQL in.
 const AlertEpisodes = require('./admin-alert-episodes');
 const { fitAction, fullName, shortDateET, tidyName } = require('./admin-alert-names');
@@ -218,13 +218,20 @@ async function raiseOne(conn, row) {
     logger.warn(`${LOG} term ${row.id}: the visit price check failed: ${err.message}`);
     return CHECK_PRICE;
   });
-  const posted = await raiseAdminAlert('billing', alertSpec(row, consequence), {
+  // Throws on a rule break (the caller logs it per term): a malformed bell never goes out.
+  const composed = composeAdminAlert(alertSpec(row, consequence));
+  // Through the episode helper: a bell this job closed rings again when the year needs a person again
+  // (next year's paid term refunded; a year end moved and moved back), while a person's own dismissal
+  // of a year that is still unsettled stays dismissed.
+  const posted = await AlertEpisodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+    link: composed.link,
     bell: true,
     detail: alertDetail(row),
     dedupeKey: alertKey(row.id, row.term_end),
-    metadata: { customerId: row.customer_id, termId: row.id, termEnd: row.term_end },
+    metadata: { ...composed.metadata, customerId: row.customer_id, termId: row.id, termEnd: row.term_end },
+    ...(conn.isTransaction ? { trx: conn } : {}),
   });
-  return Boolean(posted?.id && !posted.deduped);
+  return Boolean(posted?.rang);
 }
 
 async function runPrepayYearEndBell({ conn = db, today = etDateString() } = {}) {
