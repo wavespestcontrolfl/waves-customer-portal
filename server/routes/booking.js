@@ -7207,6 +7207,7 @@ module.exports._internals = {
   availabilityForExistingCustomer,
   availabilityForPin,
   bookableOfferCustomer,
+  storedBookingPin,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

@@ -6296,8 +6296,8 @@ error code, limiter or token changes, and no message is sent.
   capped (5 seconds) comparison builds the customer pages' list for the same
   customer and logs one `[assistant-route-times]` line. The reply never waits
   for it.
-- `true`: a customer with a usable pin of their own (stored or geocoded
-  address) is offered the SAME list `/book` shows them, with
+- `true`: a customer with a stored pin of their own (no geocode: without one the old
+  list is served) is offered the SAME list `/book` shows them, with
   `GATE_CUSTOMER_ROUTE_CHECK` applied as on `/book`, in the old response shape
   (`days[]` with `date`, `dayOfWeek`, `dayNum`, `month`, `fullDate`, `slots[]`
   with `start`, `end`, `startTime24`, `endTime24`; one slot per distinct start).
@@ -6311,8 +6311,8 @@ error code, limiter or token changes, and no message is sent.
   conflict checks. With the gate `true`, the new visit is also numbered in its
   technician's day by the staff placement helper, inside the same transaction;
   a visit with no technician is left as it was.
-- Cost: no Google call of its own (drive times are the default route-optimizer
-  estimate; the pin lookup is the one `/book` runs).
+- Cost: no Google call (drive times are the default route-optimizer estimate;
+  the pin is read from the customer row, never geocoded).
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

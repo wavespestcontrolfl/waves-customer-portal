@@ -41,7 +41,9 @@ const NEW_DAYS = [
 
 let logger;
 let oldFinder;
-let resolveTextOfferPin;
+let bookableOfferCustomer;
+let geocoders;
+const NO_PIN_CUSTOMER = { id: 'cust-1', latitude: null, longitude: null, address_line1: '1 Main St', city: 'Venice', state: 'FL', zip: '34285' };
 let availabilityForPin;
 let funnelKeyForEstimateId;
 let placeMovedVisit;
@@ -56,22 +58,42 @@ beforeEach(() => {
   jest.resetModules();
   logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
   oldFinder = jest.fn().mockResolvedValue({ zone: 'Zone A', days: OLD_DAYS });
-  resolveTextOfferPin = jest.fn().mockResolvedValue({ lat: 27.1, lng: -82.4, source: 'customer' });
+  bookableOfferCustomer = jest.fn().mockResolvedValue({ id: 'cust-1', latitude: '27.1', longitude: '-82.4' });
+  // Every way a pin could be geocoded: none may run (the plan's $0 promise).
+  geocoders = {
+    customerBookingLocation: jest.fn().mockResolvedValue({ lat: 27.5, lng: -82.5 }),
+    resolveServiceLocation: jest.fn().mockResolvedValue({ lat: 27.5, lng: -82.5 }),
+    reviewedServiceLocation: jest.fn().mockResolvedValue(null),
+    resolveTextOfferPin: jest.fn().mockResolvedValue({ lat: 27.5, lng: -82.5, source: 'customer' }),
+  };
   availabilityForPin = jest.fn().mockResolvedValue({ days: NEW_DAYS, slots: [] });
   funnelKeyForEstimateId = jest.fn().mockResolvedValue('lawn_care');
   placeMovedVisit = jest.fn().mockResolvedValue([]);
   jest.doMock('../services/logger', () => logger);
   jest.doMock('../models/db', () => jest.fn());
   jest.doMock('../services/availability', () => ({ getAvailableSlots: oldFinder }));
-  jest.doMock('../services/scheduling/text-offer-times', () => ({ resolveTextOfferPin, textOfferDays: jest.fn() }));
-  jest.doMock('../routes/booking', () => ({ _internals: { availabilityForPin } }));
+  jest.doMock('../services/scheduling/text-offer-times', () => ({ resolveTextOfferPin: geocoders.resolveTextOfferPin, textOfferDays: jest.fn() }));
+  jest.doMock('../services/scheduling/day-stops', () => ({ resolveServiceLocation: geocoders.resolveServiceLocation }));
+  jest.doMock('../services/customer-geocode-review', () => ({ reviewedServiceLocation: geocoders.reviewedServiceLocation }));
+  jest.doMock('../routes/booking', () => ({
+    _internals: {
+      availabilityForPin,
+      bookableOfferCustomer,
+      customerBookingLocation: geocoders.customerBookingLocation,
+      storedBookingPin: (c) => {
+        const pair = [c?.latitude, c?.longitude];
+        if (pair.some((v) => v == null || String(v).trim() === '' || !Number.isFinite(Number(v)) || Number(v) === 0)) return null;
+        return { lat: Number(pair[0]), lng: Number(pair[1]) };
+      },
+    },
+  }));
   jest.doMock('../services/estimate-converter', () => ({ funnelKeyForEstimateId }));
   jest.doMock('../services/scheduling/arrival-route', () => ({ placeMovedVisit }));
   routeTimes = require('../services/scheduling/assistant-route-times');
 });
 afterEach(() => {
   ['../services/logger', '../models/db', '../services/availability', '../services/scheduling/text-offer-times', '../routes/booking',
-    '../services/estimate-converter', '../services/scheduling/arrival-route'].forEach((m) => jest.dontMock(m));
+    '../services/estimate-converter', '../services/scheduling/arrival-route', '../services/scheduling/day-stops', '../services/customer-geocode-review'].forEach((m) => jest.dontMock(m));
   jest.useRealTimers();
   jest.resetModules();
 });
@@ -113,7 +135,7 @@ describe('serveAssistantTimes — the assistant', () => {
     const out = await run();
     expect(out).toEqual({ engine: 'old', result: { zone: 'Zone A', days: OLD_DAYS } });
     expect(oldFinder).toHaveBeenCalledTimes(1);
-    expect(resolveTextOfferPin).not.toHaveBeenCalled();
+    expect(bookableOfferCustomer).not.toHaveBeenCalled();
     expect(availabilityForPin).not.toHaveBeenCalled();
     expect(funnelKeyForEstimateId).not.toHaveBeenCalled();
     expect(infoLines()).toEqual([]);
@@ -145,12 +167,12 @@ describe('serveAssistantTimes — the assistant', () => {
 
   test('shadow: a new list that cannot build is logged and the old list is still served', async () => {
     process.env[GATE] = 'shadow';
-    resolveTextOfferPin.mockResolvedValue({ lat: 1, lng: 2, source: 'city_table' });
+    bookableOfferCustomer.mockResolvedValue(NO_PIN_CUSTOMER);
     const out = await run();
     await out.settled;
     expect(out.result.days).toBe(OLD_DAYS);
     expect(availabilityForPin).not.toHaveBeenCalled();
-    expect(infoLines()[0]).toMatch(/old=3 new=- reason=no_pin/);
+    expect(infoLines()[0]).toMatch(/old=3 new=- reason=no_stored_pin/);
   });
 
   test('true: the customer pages\' list in the old shape, one slot per distinct start, no page-only fields', async () => {
@@ -187,15 +209,17 @@ describe('serveAssistantTimes — the assistant', () => {
   test('true: no customer, no pin of the customer\'s own, or a page that offers nothing -> the old finder', async () => {
     process.env[GATE] = 'true';
     expect((await run({ customerId: null })).engine).toBe('old');
-    expect(resolveTextOfferPin).not.toHaveBeenCalled();
-    resolveTextOfferPin.mockResolvedValueOnce(null);
+    expect(bookableOfferCustomer).not.toHaveBeenCalled();
+    bookableOfferCustomer.mockResolvedValueOnce(null);
     expect((await run()).engine).toBe('old');
-    resolveTextOfferPin.mockResolvedValueOnce({ lat: 1, lng: 2, source: 'zone_centre' });
+    bookableOfferCustomer.mockResolvedValueOnce(NO_PIN_CUSTOMER);
+    expect((await run()).engine).toBe('old');
+    bookableOfferCustomer.mockResolvedValueOnce({ id: 'cust-1', latitude: 0, longitude: 0 });
     expect((await run()).engine).toBe('old');
     availabilityForPin.mockResolvedValueOnce(null);
     expect((await run()).engine).toBe('old');
     expect(availabilityForPin).toHaveBeenCalledTimes(1);
-    expect(oldFinder).toHaveBeenCalledTimes(4);
+    expect(oldFinder).toHaveBeenCalledTimes(5);
   });
 
   test('true: any error -> the old finder, and it never throws', async () => {
@@ -204,7 +228,7 @@ describe('serveAssistantTimes — the assistant', () => {
     const out = await run();
     expect(out.engine).toBe('old');
     expect(out.result.days).toBe(OLD_DAYS);
-    resolveTextOfferPin.mockRejectedValueOnce(new Error('pin boom'));
+    bookableOfferCustomer.mockRejectedValueOnce(new Error('pin boom'));
     expect((await run()).engine).toBe('old');
   });
 
@@ -317,7 +341,7 @@ describe('text drafter — quote and re-check use one engine', () => {
     expect(oldFinder).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
     const snapshot = snapshotOf(out, null);
     expect(snapshot.lookup).toEqual({ city: 'Venice', customerId: 'cust-1', estimateId: null, serviceType: 'Pest Control' });
-    expect(resolveTextOfferPin).not.toHaveBeenCalled();
+    expect(bookableOfferCustomer).not.toHaveBeenCalled();
     expect(availabilityForPin).not.toHaveBeenCalled();
   });
 
@@ -369,8 +393,8 @@ describe('text drafter — quote and re-check use one engine', () => {
   test('true: no customer, no pin or an error -> no route offer, so the old finder quotes with no stamp', async () => {
     process.env[GATE] = 'true';
     expect(await drafter.cityFallbackOfferFor({ eligible: true, ...quoteArgs, context: {} })).toBeNull();
-    expect(resolveTextOfferPin).not.toHaveBeenCalled();
-    resolveTextOfferPin.mockResolvedValueOnce(null);
+    expect(bookableOfferCustomer).not.toHaveBeenCalled();
+    bookableOfferCustomer.mockResolvedValueOnce(NO_PIN_CUSTOMER);
     expect(await drafter.cityFallbackOfferFor({ eligible: true, ...quoteArgs })).toBeNull();
     availabilityForPin.mockRejectedValueOnce(new Error('boom'));
     expect(await drafter.cityFallbackOfferFor({ eligible: true, ...quoteArgs })).toBeNull();
@@ -385,9 +409,9 @@ describe('text drafter — quote and re-check use one engine', () => {
     process.env[GATE] = 'true';
     const offer = await drafter.cityFallbackOfferFor({ eligible: true, ...quoteArgs });
     const snapshot = snapshotOf(await offeredFrom(offer), offer);
-    resolveTextOfferPin.mockResolvedValue(null);
+    bookableOfferCustomer.mockResolvedValue(NO_PIN_CUSTOMER);
     await expect(recheck(snapshot)).resolves.toMatchObject({ ok: false, reason: 'open_times_no_longer_offered' });
-    resolveTextOfferPin.mockRejectedValue(new Error('pin down'));
+    bookableOfferCustomer.mockRejectedValue(new Error('pin down'));
     await expect(recheck(snapshot)).resolves.toMatchObject({ ok: false });
   });
 
@@ -417,5 +441,53 @@ describe('the other old-engine callers', () => {
     for (const file of ['../services/lead-response-tools.js', '../services/estimate-converter.js']) {
       expect(fs.readFileSync(path.join(__dirname, file), 'utf8')).not.toMatch(/assistantRouteTimes|assistant-route-times/);
     }
+  });
+});
+
+describe('no geocode, ever: a customer without a stored pin is served the old list in every mode', () => {
+  const flush = async () => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  const expectNoGeocode = () => {
+    Object.values(geocoders).forEach((spy) => expect(spy).not.toHaveBeenCalled());
+    expect(availabilityForPin).not.toHaveBeenCalled();
+  };
+  const noPinLines = () => infoLines().filter((l) => l.includes('new=- reason=no_stored_pin'));
+
+  test.each(['shadow', 'true'])('check_availability, %s: the old list is served and no geocoder runs', async (mode) => {
+    process.env[GATE] = mode;
+    bookableOfferCustomer.mockResolvedValue(NO_PIN_CUSTOMER);
+    const { executeToolCall } = require('../services/ai-assistant/tools-expanded');
+    const out = await executeToolCall('check_availability', { city: 'Venice' }, 'cust-1');
+    await flush();
+    expect(out.days.map((d) => d.date)).toEqual(OLD_DAYS.map((d) => d.date));
+    expect(oldFinder).toHaveBeenCalledTimes(1);
+    expectNoGeocode();
+    if (mode === 'shadow') expect(noPinLines()).toHaveLength(1);
+  });
+
+  test.each(['shadow', 'true'])('text drafter, %s: the old finder quotes and rechecks, and no geocoder runs', async (mode) => {
+    process.env[GATE] = mode;
+    process.env[REAL_ANSWERS] = 'true';
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+    const drafter = require('../services/sms-shadow-drafter');
+    bookableOfferCustomer.mockResolvedValue(NO_PIN_CUSTOMER);
+    const offer = await drafter.cityFallbackOfferFor({
+      eligible: true, serviceType: 'Pest Control', estimateId: null, city: 'Venice', context: { customer: { id: 'cust-1' } },
+    });
+    expect(offer).toBeNull();
+    const out = await drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-1', schedulingIntent: true });
+    await flush();
+    expect(oldFinder).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
+    expect(out.days[0].date).toBe('Monday, November 2');
+    expectNoGeocode();
+    if (mode === 'shadow') expect(noPinLines()).toHaveLength(1);
+    jest.dontMock('../services/call-booking-catalog');
+  });
+
+  test('a customer WITH a stored pin is offered from it without any geocoder either', async () => {
+    process.env[GATE] = 'true';
+    const out = await routeTimes.serveAssistantTimes({ customerId: 'cust-1', loadOld: () => oldFinder() });
+    expect(out.engine).toBe('route_times');
+    expect(availabilityForPin).toHaveBeenCalledWith({ lat: 27.1, lng: -82.4, serviceKey: 'pest_control' });
+    Object.values(geocoders).forEach((spy) => expect(spy).not.toHaveBeenCalled());
   });
 });

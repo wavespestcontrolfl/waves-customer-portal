@@ -12,7 +12,7 @@
  * routes/booking.js buildBookingAvailability, per technician and route-aware,
  * with the customer route check (GATE_CUSTOMER_ROUTE_CHECK) applied. This
  * module lets those two callers read the SAME list for a customer who has a
- * usable pin, and hands it back in the old response shape.
+ * stored pin, and hands it back in the old response shape.
  *
  * Modes (assistantRouteTimesMode, read at CALL time):
  *   off     unset or any other value. The new list is never built (byte-identical).
@@ -20,7 +20,7 @@
  *           new list AFTER the answer (detached, capped) and logs one
  *           `[assistant-route-times] ...` line with the difference.
  *   on      GATE_ASSISTANT_ROUTE_TIMES=true. The new list is served in the old
- *           shape. A customer with no usable pin, a list that did not build
+ *           shape. A customer with no stored pin, a list that did not build
  *           inside the cap, or any error falls back to the old finder.
  *
  * Quote and re-check: the text drafter stamps the engine on the offer it
@@ -30,7 +30,7 @@
  * wrong reason. A snapshot with no source is the old finder's.
  *
  * Read-only. Spends nothing of its own (the drive clock and the customer pages'
- * own pin lookup are what they always were), sends no message.
+ * stored pin is read from the customer row: no geocode), sends no message.
  */
 
 const logger = require('../logger');
@@ -113,24 +113,27 @@ function raceBudget(promise, budgetMs) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function buildRouteDays({ customerId, estimateId, serviceKey }) {
+// The customer's STORED pin only (the same latitude / longitude /book commits at):
+// a customer without one is never geocoded here, so this step costs nothing.
+// customerBookingLocation (the geocode path) is deliberately not called.
+async function buildRouteDays({ customerId, serviceKey }) {
   if (!customerId || !serviceKey) return { days: null, reason: customerId ? 'no_service' : 'no_customer' };
-  const pin = await require('./text-offer-times').resolveTextOfferPin({ customerId, estimateId });
-  // Only the customer's own pin: a city centre is not a place a route can be checked.
-  if (!pin || pin.source !== 'customer') return { days: null, reason: 'no_pin' };
-  const { availabilityForPin } = require('../../routes/booking')._internals;
-  const availability = await availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey });
+  const booking = require('../../routes/booking')._internals;
+  const customer = await booking.bookableOfferCustomer(customerId);
+  const pin = customer ? booking.storedBookingPin(customer) : null;
+  if (!pin) return { days: null, reason: 'no_stored_pin' };
+  const availability = await booking.availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey });
   return availability ? { days: availability.days || [] } : { days: null, reason: 'unavailable' };
 }
 
 /**
- * The customer pages' days for this customer's own pin, as { days } or
- * { days: null, reason } (no_customer, no_service, no_pin, unavailable, timeout,
+ * The customer pages' days for this customer's stored pin, as { days } or
+ * { days: null, reason } (no_customer, no_service, no_stored_pin, unavailable, timeout,
  * error). Never throws; gives up after `budgetMs`.
  */
 async function loadRouteDays({ customerId, estimateId = null, serviceKey, budgetMs = SERVED_BUDGET_MS } = {}) {
   try {
-    return await raceBudget(buildRouteDays({ customerId, estimateId, serviceKey }), budgetMs);
+    return await raceBudget(buildRouteDays({ customerId, serviceKey }), budgetMs);
   } catch (err) {
     logger.warn(`[assistant-route-times] route list failed (${String(err?.message || err).slice(0, 120)})`);
     return { days: null, reason: 'error' };

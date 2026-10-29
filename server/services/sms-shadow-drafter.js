@@ -753,7 +753,7 @@ async function loadRouteTimesDays({ offer, customerId, fresh = false }) {
   return loaded.days ? { days: loaded.days } : null;
 }
 
-// GATE_ASSISTANT_ROUTE_TIMES=true: the offer for a customer with a usable pin
+// GATE_ASSISTANT_ROUTE_TIMES=true: the offer for a customer with a stored pin
 // whose route list built, else null (the old finder quotes, and stamps nothing).
 // The returned offer's source is stamped on the snapshot, so the send-time recheck
 // asks this same list.
@@ -6150,7 +6150,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // GATE_MULTI_TECH_TEXT_TIMES: with no scheduler picker for this text, the
   // city-based fallback asks the website engine (stamped on the snapshot).
-  // GATE_ASSISTANT_ROUTE_TIMES=true: a customer with a usable pin and no other
+  // GATE_ASSISTANT_ROUTE_TIMES=true: a customer with a stored pin and no other
   // picker gets the route list instead, stamped on the snapshot the same way.
   const schedulerOffer = schedulerPickerOffer
     || await cityFallbackOfferFor({
