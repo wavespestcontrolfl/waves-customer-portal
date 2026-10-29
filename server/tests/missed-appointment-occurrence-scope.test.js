@@ -317,6 +317,127 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
       dbFn.mockImplementation(() => { throw new Error('db down'); });
       expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
     });
+
+    // A stateful fake of the three tables the repair touches, to prove retries (queue gate on).
+    function retryWorld({ tasks = [], confirmed = [], quickMoves = [], count = '2' } = {}) {
+      const state = { tasks, failNext: new Set(), raws: [], inserts: 0 };
+      const conn = (table) => {
+        let mode = null; // which customer_interactions rows the chain addresses
+        let subjectLike = false;
+        let newDateOnly = false;
+        const matches = (t) => {
+          if (t.status !== 'pending') return false;
+          if (mode === 'source') return t.metadata && t.metadata.source === 'missed_appointment_threshold';
+          if (mode === 'legacy') return !(t.metadata && t.metadata.source) && (!subjectLike || /^Recommended outreach: \d+ missed appointments in 90 days$/.test(t.subject));
+          return true;
+        };
+        const chain = {
+          where(c, op, v) { if (c === 'subject' && op === 'like') subjectLike = true; return chain; },
+          whereNotNull(col) { if (col === 'new_date') newDateOnly = true; return chain; },
+          orderBy() { return chain; },
+          whereNot() { return chain; },
+          whereRaw(sql) { mode = sql.includes('IS NULL') ? 'legacy' : 'source'; return chain; },
+          select: () => {
+            if (table === 'customer_interactions') return Promise.resolve(state.tasks.filter(matches).map((t) => ({ customer_id: t.customer_id })));
+            return Object.assign(Promise.resolve(newDateOnly ? quickMoves : confirmed), { first: async () => ({ count }) });
+          },
+          first: async () => {
+            if (table === 'customers') return { id: 'c1', first_name: 'Sam' };
+            if (table === 'customer_interactions') return state.tasks.find((t) => t.status !== 'cancelled' && t.metadata && t.metadata.source === 'missed_appointment_threshold');
+            return { count };
+          },
+          update: async (patch) => {
+            if (state.failNext.has('update')) { state.failNext.delete('update'); throw new Error('write failed'); }
+            const hit = state.tasks.filter(matches);
+            hit.forEach((t) => { t.status = patch.status; });
+            return hit.length;
+          },
+          insert: async (row) => {
+            if (state.failNext.has('insert')) { state.failNext.delete('insert'); throw new Error('write failed'); }
+            state.inserts += 1;
+            state.tasks.push({ customer_id: row.customer_id, status: 'pending', metadata: JSON.parse(row.metadata), subject: row.subject });
+          },
+        };
+        return chain;
+      };
+      conn.raw = (sql, b) => { state.raws.push(b); return sql; };
+      conn.isTransaction = true;
+      conn.transaction = (fn) => fn(conn);
+      const dbFn = require('../models/db');
+      dbFn.mockImplementation((table) => conn(table));
+      dbFn.raw = conn.raw;
+      dbFn.transaction = (fn) => fn(conn);
+      return state;
+    }
+    const task = (over = {}) => ({ customer_id: 'c1', status: 'pending', metadata: { source: 'missed_appointment_threshold' }, subject: 'Recommended outreach: 2 missed appointments in 90 days', ...over });
+    const legacyTask = (over = {}) => task({ metadata: null, ...over });
+
+    describe('queue on: the retry gaps', () => {
+      beforeEach(() => { mockQueueOn = true; });
+      afterEach(() => { mockQueueOn = false; });
+
+      test('an older pending task whose withdrawal failed is retried: the look-back is the 90-day count window (7 days with the queue off)', async () => {
+        const state = retryWorld({ tasks: [task()], count: '1' });
+        state.failNext.add('update'); // the withdrawal write fails once
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.tasks[0].status).toBe('pending');
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 1, raised: 0 });
+        expect(state.tasks[0].status).toBe('cancelled');
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        // the pending-task look-back is the 90-day count window
+        expect(state.raws.some((b) => Array.isArray(b) && b[0] === 90)).toBe(true);
+        mockQueueOn = false;
+        const off = retryWorld({ tasks: [task()], count: '1' });
+        await MissedAppointment.reconcileOutreach();
+        expect(off.raws.some((b) => Array.isArray(b) && b[0] === 90)).toBe(false);
+      });
+
+      test('a no-show Quick Move whose immediate evaluation failed is evaluated by the repair, once', async () => {
+        const state = retryWorld({ quickMoves: [{ id: 'log-Q', customer_id: 'c1' }], count: '2' });
+        state.failNext.add('insert'); // the task insert fails once
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.inserts).toBe(0);
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 1 });
+        expect(state.tasks[0].metadata).toEqual({ source: 'missed_appointment_threshold', log_id: 'log-Q' });
+        // idempotent: the task now exists in the window
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.inserts).toBe(1);
+      });
+
+      test('a customer on both lists (a confirmed miss and a Quick Move) gets one evaluation', async () => {
+        const state = retryWorld({ confirmed: [{ id: 'log-C', customer_id: 'c1' }], quickMoves: [{ id: 'log-Q', customer_id: 'c1' }], count: '2' });
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 1 });
+        expect(state.tasks.map((t) => t.metadata.log_id)).toEqual(['log-C']);
+      });
+
+      test('a pending task from before the queue (no metadata.source) is retired when fewer than 2 person-marked misses remain, and only then', async () => {
+        const state = retryWorld({ tasks: [legacyTask(), legacyTask({ customer_id: 'c2', subject: 'Call back about the gate' })], count: '1' });
+        state.failNext.add('update'); // the retirement write fails once
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.tasks[0].status).toBe('pending');
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 1, raised: 0 });
+        expect(state.tasks[0].status).toBe('cancelled');
+        // another kind of task (different subject) is never touched
+        expect(state.tasks[1].status).toBe('pending');
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+      });
+
+      test('a legacy task stays while two person-marked misses stand', async () => {
+        const state = retryWorld({ tasks: [legacyTask()], count: '2' });
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.tasks[0].status).toBe('pending');
+      });
+
+      test('queue off: legacy tasks and Quick Moves are not read (unchanged)', async () => {
+        mockQueueOn = false;
+        const state = retryWorld({ tasks: [legacyTask()], quickMoves: [{ id: 'log-Q', customer_id: 'c1' }], count: '2' });
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(state.inserts).toBe(0);
+        const noCount = retryWorld({ tasks: [legacyTask()], count: '0' });
+        expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+        expect(noCount.tasks[0].status).toBe('pending');
+      });
+    });
   });
 });
 
