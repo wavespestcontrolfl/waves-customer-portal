@@ -211,3 +211,13 @@ it('rows that Generate from estimate installs follow the pick, and Business rest
   fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
   expect(await program()).toHaveAttribute('aria-checked', 'true');
 });
+
+// Codex #6945 r1: the kept business rule follows a family change, even where the visible switch stays as it was.
+it('a program switched to Lawn while residential stays off when Business is picked', async () => {
+  await mount({ buildingUse: 'residential', programs: [
+    { id: 'pest-program', service: 'pest', label: 'Pest program', frequencyPerYear: 4, pricePerApplication: 100, taxable: false },
+  ] });
+  fireEvent.change(screen.getByLabelText('Service family'), { target: { value: 'lawn' } });
+  fireEvent.change(useSelect(), { target: { value: 'nonresidential' } });
+  expect(screen.getByRole('switch', { name: 'Taxable program' })).toHaveAttribute('aria-checked', 'false');
+});

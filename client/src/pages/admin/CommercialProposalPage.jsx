@@ -905,6 +905,10 @@ function CommercialProposalEditor() {
       // A row added here whose switch the operator has not touched follows
       // its family the same way (the new-row default).
       if (newReg && (inc.hadGenerated || exc.hadGenerated || (p.isNew && !p.taxTouched))) Object.assign(next, taxUnderUse(newReg.taxable === true));
+      // A kept business rule (residential, or no pick yet) belongs to the old
+      // family: it follows the new one even where the visible switch stays as
+      // the operator left it, so a later Business pick restores the right rule.
+      else if (newReg && p.bizTaxable !== undefined) next.bizTaxable = newReg.taxable === true;
       return next;
     }));
     // Generated responsibilities follow the same swap, pruning ONLY via the
