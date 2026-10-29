@@ -190,6 +190,27 @@ test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', a
   }
 });
 
+// The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES) continues today's route
+// from the current stop on the model: no Google travel source, no re-check.
+test('fromActiveStop without the picker road check: the current stop, no Google', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '09:00', windowEnd: '10:00', fit: { ...fit, travelSource: undefined } }], evaluated: 1, rejections: {} });
+  try {
+    await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(3), fromActiveStop: true });
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 // Codex #6881 r2 (P1): with the road check off, no route gets the travel
 // source and nothing is preloaded or re-checked — the gate-off search is the
 // model, exactly as before, for staff and technicians alike.

@@ -978,7 +978,12 @@ async function routeSameDayOptions(service, now = new Date()) {
       arrivalWindow: { serviceId: service.id },
       // The sheet commits on-the-hour one-hour blocks; rank every hour.
       slotStepMinutes: 60,
+      everyStepStart: true,
+      earliestStartMin: firstStart,
       topN: Number.POSITIVE_INFINITY,
+      // A tech moves a visit mid-route: today's route continues from the
+      // current stop (an active stop otherwise leaves every hour unverified).
+      fromActiveStop: true,
       // No Google drive times for a technician's request, the model only.
       providerTravel: false,
     });

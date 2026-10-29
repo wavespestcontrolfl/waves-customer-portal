@@ -388,6 +388,8 @@ describe('rain-out service', () => {
       expect(finder).toHaveBeenCalledWith(expect.objectContaining({
         technicianId: 'tech-1', dateFrom: '2026-06-11', dateTo: '2026-06-11', durationMinutes: 60,
         excludeServiceIds: ['svc-1'], arrivalWindow: { serviceId: 'svc-1' }, providerTravel: false,
+        // Every hourly start from the lead-time floor, continuing from the current stop.
+        everyStepStart: true, earliestStartMin: expect.any(Number), fromActiveStop: true,
       }));
       expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
     });

@@ -189,8 +189,9 @@ async function findArrivalWindowSlots(opts) {
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
         // GATE_PICKER_ROAD_CHECK: today's route under way continues from
-        // the tech's current stop.
-        fromActiveStop: roadCheck,
+        // the tech's current stop. `fromActiveStop` asks for that alone, on
+        // the model (the tech Quick Move, GATE_TECH_MOVE_ROUTE_TIMES).
+        fromActiveStop: roadCheck || opts.fromActiveStop === true,
       });
       if (!context) continue;
       // A whole visit: the technician must be able to do every service on it
