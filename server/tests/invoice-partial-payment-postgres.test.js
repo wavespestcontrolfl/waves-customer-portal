@@ -151,6 +151,26 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     }
   });
 
+  it('a part payment waits while a card dispute on the invoice is undecided, and is taken once the dispute is decided', async () => {
+    const invoice = await makeInvoice();
+    const [disputed] = await database('payments').insert({
+      customer_id: invoice.customer_id, amount: 100, status: 'disputed', payment_date: new Date(), description: `Invoice ${invoice.invoice_number} — card`,
+      metadata: JSON.stringify({ dispute_id: 'dp_synthetic', dispute_invoice_id: invoice.id }),
+    }).returning('id');
+
+    const err = await refusalOf(record(invoice.id, { amountCents: 2000 }));
+    expect(err).toMatchObject({ statusCode: 409 });
+    expect(err.message).toMatch(/open card dispute/);
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+
+    // Lost: the card money is gone for good, so the office can take parts again.
+    await database('payments').where({ id: disputed.id || disputed }).update({
+      metadata: JSON.stringify({ dispute_id: 'dp_synthetic', dispute_invoice_id: invoice.id, dispute_final: 'lost' }),
+    });
+    await record(invoice.id, { amountCents: 2000 });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(20);
+  });
+
   it('a part payment adds to amount_paid and leaves the invoice open: same status, reminders running, one ledger row, no receipt', async () => {
     const invoice = await makeInvoice();
     await seedSequence(invoice);

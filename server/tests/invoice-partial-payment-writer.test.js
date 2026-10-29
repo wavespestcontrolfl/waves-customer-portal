@@ -86,7 +86,7 @@ const recordFromPage = (id, opts) => recordManualPayment(id, { owedCentsSeen: ow
 
 // The pool answers the pre-lock reads (the invoice, the part-payment checks, the activity row); the transaction answers the locked ones.
 // `locked` is the row FOR UPDATE returns; `after` is what the UPDATE ... RETURNING gives back.
-function harness({ pre = openInvoice(), locked = pre, after = null, plan = null, term = null, customer = { id: 'cust-1' } } = {}) {
+function harness({ pre = openInvoice(), locked = pre, after = null, plan = null, term = null, customer = { id: 'cust-1' }, dispute = null } = {}) {
   lastPre = pre;
   const calls = { invoiceUpdate: null, paymentsInsert: null };
   const activity = recorder();
@@ -95,6 +95,7 @@ function harness({ pre = openInvoice(), locked = pre, after = null, plan = null,
     if (table === 'payment_plans') return recorder({ first: plan });
     if (table === 'annual_prepay_terms') return recorder({ first: term });
     if (table === 'customers') return recorder({ first: customer });
+    if (table === 'payments') return recorder({ first: dispute });
     if (table === 'activity_log') return activity;
     throw new Error(`unexpected table ${table}`);
   });
@@ -106,7 +107,7 @@ function harness({ pre = openInvoice(), locked = pre, after = null, plan = null,
         return r;
       }
       if (table === 'payments') {
-        const r = recorder();
+        const r = recorder({ first: dispute });
         r.insert = jest.fn((payload) => {
           calls.paymentsInsert = payload;
           return Object.assign(Promise.resolve(undefined), { returning: jest.fn(async () => [{ id: 'pay-1' }]) });
@@ -342,5 +343,15 @@ describe('a repeated submit never books the same part payment twice (pre-push P0
     expect(err.message).toMatch(/changed to \$60\.00/);
     expect(calls.paymentsInsert).toBeNull();
     expect(calls.invoiceUpdate).toBeNull();
+  });
+});
+
+describe('an open card dispute (pre-push P0)', () => {
+  test('a part payment waits until the dispute is decided: a won dispute would swallow it', async () => {
+    harness({ dispute: { id: 'pay-disputed' } });
+    const err = await refusalOf(recordFromPage('inv-1', { method: 'cash', amountCents: 2000 }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/open card dispute/);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 });

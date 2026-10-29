@@ -151,6 +151,13 @@ async function partPaymentRefusal(conn, invoice) {
   }
   const plan = await conn('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id');
   if (plan) return 'This invoice has a payment plan, so a part payment cannot be recorded on it.';
+  // An undecided card dispute: a won dispute puts the invoice back to the paid state of the disputed payment, which would swallow a part
+  // received meanwhile. Parts wait until the dispute is decided (dispute_final holds the outcome).
+  const openDispute = await conn('payments').where({ status: 'disputed' })
+    .whereRaw("(metadata->>'dispute_invoice_id' = CAST(? AS text) OR metadata->>'invoice_id' = CAST(? AS text))", [invoice.id, invoice.id])
+    .whereRaw("metadata->>'dispute_final' IS NULL")
+    .first('id');
+  if (openDispute) return 'This invoice has an open card dispute, so a part payment cannot be recorded until the dispute is decided.';
   const { resolveInvoiceTermId } = require('./invoice-prepay');
   const onTerm = await resolveInvoiceTermId(invoice, conn, { strict: true })
     || ((await conn.schema.hasTable('annual_prepay_terms')) && await conn('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id'));
