@@ -48,8 +48,13 @@ describe('finding 1: schedule-sms is office-only', () => {
   test('the route refuses any non-admin before it reads, validates or enqueues', () => {
     const guard = handler.indexOf("if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });");
     expect(guard).toBeGreaterThan(0);
-    expect(guard).toBeLessThan(handler.indexOf('recruitingReplyContext('));
-    expect(guard).toBeLessThan(handler.indexOf("trx('sms_log')"));
+    expect(guard).toBeLessThan(handler.indexOf('scheduleCustomerSms('));
+    // The writer the route calls (shared with the Intelligence Bar) repeats the refusal before any read or insert.
+    const queue = read('services/scheduled-sms-queue.js');
+    const writerGuard = queue.indexOf("if (actor?.techRole !== 'admin') return fail(403, 'Admin access required');");
+    expect(writerGuard).toBeGreaterThan(0);
+    expect(writerGuard).toBeLessThan(queue.indexOf('recruitingReplyContext('));
+    expect(writerGuard).toBeLessThan(queue.indexOf("trx('sms_log')"));
   });
 
   test('the technician allow-list no longer reaches schedule-sms, other texts stay', () => {

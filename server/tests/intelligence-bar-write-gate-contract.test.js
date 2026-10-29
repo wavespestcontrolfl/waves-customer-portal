@@ -83,6 +83,7 @@ beforeAll(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
+  process.env.GATE_IB_SCHEDULE_SMS = 'true';
   process.env.GATE_IB_INVOICE_EDITS = 'true';
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
@@ -103,6 +104,7 @@ afterAll(() => {
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
+  delete process.env.GATE_IB_SCHEDULE_SMS;
   delete process.env.GATE_IB_INVOICE_EDITS;
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
@@ -196,6 +198,7 @@ const WRITE_TWO_STEP = [
   'send_invoice',
   'record_payment',
   'void_invoice',
+  'schedule_sms',
   'edit_invoice',
   'archive_invoice',
   'unarchive_invoice',
@@ -822,6 +825,11 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
       payments: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [], scheduled_services: [],
     }],
+    // schedule_sms's preview reads the customer and the send path's consent checks; it may not write or queue without confirmed
+    // (intelligence-bar-schedule-sms.test.js covers the card itself).
+    ['schedule-sms-tools', 'executeScheduleSmsTool', 'schedule_sms', { customer_id: '00000000-0000-0000-0000-00000000f311', message: 'Synthetic scheduled text.', send_date: '2099-02-03', send_time: '10:00' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f311', first_name: 'Pat', last_name: 'Tester', phone: '+19415550188', deleted_at: null }],
+    }],
     // The invoice edit cards' previews read the invoice, its payments, plan, statement and links; none may write without
     // confirmed (intelligence-bar-invoice-edits.test.js covers the cards themselves).
     ...[
@@ -1317,10 +1325,11 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
+    // schedule_sms (_sideEffects): its confirmed run queues a customer text (live smoke must not).
     // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
   });
 });

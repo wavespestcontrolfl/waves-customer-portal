@@ -2191,6 +2191,14 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
+  "schedule_sms": {
+    "module": "schedule-sms-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "void_invoice": {
     "module": "void-invoice-tools.js",
     "domain": "customers",

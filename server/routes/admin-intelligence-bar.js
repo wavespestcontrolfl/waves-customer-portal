@@ -953,6 +953,11 @@ const PINNED_DISPLAY_BUILDERS = {
   convert_lead: (params, preview) => (preview?.preview === true && preview.tool === 'convert_lead'
     ? { lead: preview.lead_name, customer: preview.customer_name, phone_email_match: preview.matched_on, sends_to_customer: 'nothing' }
     : null),
+  // schedule_sms: the card names the customer, the number's last four, the From number, the exact text and the
+  // send time in words; the lines ride the contract.
+  schedule_sms: (params, preview) => (preview?.preview === true && preview.tool === 'schedule_sms'
+    ? { customer: preview.customer_name || preview.customer_id, to: `…${preview.to_last4 || '????'}`, from: preview.from_number, text: preview.message, send_at: preview.send_time_et, sends_now: 'no' }
+    : null),
   // void_invoice: the card names the invoice, the customer and the amount; the lines ride the contract.
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
@@ -1045,6 +1050,8 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // schedule_sms binds the customer, the number, the From number, the text digest and the send time the card showed.
+  schedule_sms: '_verified_schedule_sms_version',
   // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
   edit_invoice: '_verified_invoice_edit_version',
   archive_invoice: '_verified_invoice_archive_version',
@@ -3520,6 +3527,7 @@ RULES:
 - Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
 - Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
+- Scheduled texts: schedule_sms (when it is in your tools) queues ONE plain text to a customer for a later day and time behind a confirmation card, sent at that minute Eastern. Only 8:00 AM to 7:59 PM Eastern can be scheduled (owner ruling): a night time is refused. If the operator did not say AM or PM, ask which; never guess ("at 9" can be morning or evening). "Text them now" is send_sms, not this tool. To see or cancel a queued text use list_queued_messages and cancel_queued_message.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
