@@ -1,0 +1,245 @@
+/**
+ * Undo a manual (off-Stripe) invoice payment — the ONE writer, the counterpart of recordManualPayment
+ * (invoice-manual-payment.js). Shared by POST /admin/invoices/:id/undo-payment and, later, an Intelligence Bar tool.
+ *
+ *   undoManualPayment(invoiceId, { reason, undoneBy, undoneByTechnicianId })
+ *     → { invoice, payment: { id, amount, method }, remindersRearmed }
+ *   describeManualPaymentUndo(invoiceId)
+ *     → { eligible, code, message, payment } — the same rules, read without a lock, for the Invoices page
+ *
+ * Owner rule (2026-10-29): "Undo works on cash, check and Zelle entries on the same day, before any reminder or receipt goes
+ * out." Every manual tender counts (cash, check, zelle, venmo, paypal, other). The Zelle reconciler's settlements
+ * (`automated`) and Stripe payments are never undone here.
+ *
+ * What it works from: recordManualPayment writes a marker (audit_log, MANUAL_PAYMENT_RECORDED_ACTION) in the payment's own
+ * transaction. It names the payments row that backs the payment, whether a person or the reconciler recorded it, and every
+ * invoice column the paid flip overwrote. A payment recorded before the marker existed has none and is refused.
+ *
+ * Every rule runs again under the invoice row lock, in the order the payment writer locks (the per-customer combined-session
+ * lock, then the invoice). The payment writer's effects and what Undo does about each:
+ *   paid flip + operator note            reversed exactly from the marker
+ *   payments row                         kept as history, status 'canceled' + the undo note (every revenue reader counts 'paid')
+ *   follow-up sequence completed         re-armed after commit (resumeSequenceIfSystemResumable + scheduleForInvoice)
+ *   payment-failed admin bells closed    reopened
+ *   receipt (inline or queued)           refused when any exists
+ *   review ask enrolled                  refused when one exists
+ *   visit closed out                     refused when one was
+ *   billing pause auto-cleared           refused when it was
+ *   annual prepay term activated         refused when the invoice is a term's prepay invoice
+ *   payment plan completed               refused when the payment closed one
+ *   retired Stripe session               not restorable; the pay page opens a new one on demand
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
+const { recordAuditEvent } = require('./audit-log');
+const { undoManualPaymentLive } = require('../config/feature-gates');
+const {
+  VALID_PAYMENT_METHODS, MANUAL_PAYMENT_RECORDED_ACTION, PAID_FIELDS, refusal,
+} = require('./invoice-manual-payment');
+
+const UNDO_NOTE_KEY = 'manualPaymentUndo';
+const TOO_LATE = 'This payment can only be undone on the day it was recorded, before any receipt or reminder.';
+
+// Things that must NOT have happened since the payment (:since) or must not exist at all. One row from the query = refused.
+// Each probe names the side effect of recordManualPayment, or of what followed it, that Undo cannot take back.
+const AFTER_PAYMENT_PROBES = [
+  // The invoice's own receipt stamps (email, text), and a receipt queued for delivery that has not gone out yet.
+  {
+    code: 'receipt',
+    message: TOO_LATE,
+    sql: `SELECT 1 FROM invoices WHERE id = :invoiceId AND (receipt_sent_at IS NOT NULL OR receipt_sms_sent_at IS NOT NULL)
+          UNION ALL SELECT 1 FROM receipt_delivery_jobs WHERE invoice_id = :invoiceId`,
+  },
+  { code: 'customer_message', message: TOO_LATE, sql: 'SELECT 1 FROM messaging_audit_log WHERE invoice_id = CAST(:invoiceId AS text) AND created_at >= :since' },
+  {
+    code: 'review_ask',
+    message: 'A review request was already started by this payment, so it cannot be undone here.',
+    sql: `SELECT 1 FROM review_requests WHERE customer_id = :customerId AND created_at >= :since
+          UNION ALL SELECT 1 FROM review_sequences WHERE customer_id = :customerId AND created_at >= :since`,
+  },
+  {
+    code: 'visit_closed',
+    message: 'This payment already closed out its visit, so it cannot be undone here.',
+    sql: `SELECT 1 FROM audit_log WHERE created_at >= :since AND metadata->>'invoiceId' = CAST(:invoiceId AS text) AND metadata->>'trigger' = 'paid'
+            AND (action = 'visit.completed_on_invoice_issued' OR (action = 'visit.completion_on_invoice_issued_refused' AND metadata->>'code' = 'error'))
+          UNION ALL SELECT 1 FROM service_completion_attempts WHERE invoice_id = :invoiceId AND created_at >= :since`,
+  },
+  {
+    code: 'billing_pause_cleared',
+    message: 'This payment already cleared a billing pause on the customer, so it cannot be undone here.',
+    sql: `SELECT 1 FROM audit_log WHERE action = 'customer.billing_pause_cleared' AND resource_id = :customerId AND created_at >= :since
+            AND metadata->>'source' = 'admin_record_payment'`,
+  },
+  {
+    code: 'later_payment',
+    message: 'Another payment or credit was recorded on this invoice after this one, so it cannot be undone here.',
+    sql: `SELECT 1 FROM payments WHERE customer_id = :customerId AND id <> :paymentId AND starts_with(description, :descriptionPrefix)
+            AND metadata->'${UNDO_NOTE_KEY}' IS NULL
+          UNION ALL SELECT 1 FROM customer_credit_ledger WHERE invoice_id = :invoiceId AND created_at >= :since
+          UNION ALL SELECT 1 FROM stripe_orphan_charges WHERE invoice_id = :invoiceId AND created_at >= :since`,
+  },
+  {
+    code: 'synced',
+    message: 'This payment was already sent to an ad or accounting system, so it cannot be undone here.',
+    sql: `SELECT 1 FROM google_ads_conversion_uploads WHERE invoice_id = :invoiceId AND created_at >= :since
+          UNION ALL SELECT 1 FROM meta_conversion_uploads WHERE invoice_id = :invoiceId AND created_at >= :since`,
+  },
+  {
+    code: 'annual_prepay',
+    message: 'This is an annual prepay invoice. Its term was activated by the payment, so it cannot be undone here.',
+    sql: 'SELECT 1 FROM annual_prepay_terms WHERE prepay_invoice_id = :invoiceId',
+  },
+  {
+    code: 'payment_plan',
+    message: 'This payment closed a payment plan, so it cannot be undone here.',
+    sql: "SELECT 1 FROM payment_plans WHERE invoice_id = :invoiceId AND status = 'completed' AND completed_at >= :since",
+  },
+  {
+    code: 'reminders_paused',
+    message: 'Reminders for this invoice were paused before the payment, so it cannot be undone here. Ask for help.',
+    sql: 'SELECT 1 FROM invoice_followup_sequences WHERE invoice_id = :invoiceId AND (paused_reason IS NOT NULL OR paused_by_admin_id IS NOT NULL)',
+  },
+];
+
+const ms = (value) => (value ? new Date(value).getTime() : null);
+
+// The marker belonging to the payment now on the invoice: the newest one, whose created_at is the same transaction instant as
+// payment_recorded_at. An older marker (a payment already undone, or replaced) never matches.
+async function markerFor(conn, invoice) {
+  const marker = await conn('audit_log')
+    .where({ action: MANUAL_PAYMENT_RECORDED_ACTION, resource_type: 'invoices', resource_id: invoice.id })
+    .orderBy('created_at', 'desc')
+    .first('created_at', 'metadata');
+  return marker && ms(marker.created_at) === ms(invoice.payment_recorded_at) ? marker.metadata : null;
+}
+
+// Why this invoice's payment cannot be undone, or null. `conn` is the pool (describe) or the transaction holding the invoice lock
+// (the writer). Returns { refusal: { code, message } | null, marker, payment }.
+async function manualPaymentUndoRefusal(conn, invoice) {
+  const notEligible = (code, message) => ({ refusal: { code, message }, marker: null, payment: null });
+  const manualOnly = 'Only an invoice paid by cash, check, Zelle, Venmo, PayPal or another off-card tender recorded by the office can be undone.';
+  if (invoice.status !== 'paid' || !VALID_PAYMENT_METHODS.includes(invoice.payment_method)
+    || invoice.stripe_payment_intent_id || invoice.stripe_charge_id || invoice.processor) {
+    return notEligible('not_manual_paid', manualOnly);
+  }
+  const marker = await markerFor(conn, invoice);
+  if (!marker || marker.automated) return notEligible('not_recorded_by_office', manualOnly);
+  const sinceMs = ms(invoice.payment_recorded_at);
+  if (etDateString(new Date(sinceMs)) !== etDateString() || ms(invoice.updated_at) > sinceMs) {
+    return notEligible('too_late', TOO_LATE);
+  }
+  // The ledger row the marker names: still paid, never refunded, an off-gateway row written by this same transaction.
+  const payment = await conn('payments')
+    .where({ id: marker.paymentId, customer_id: invoice.customer_id, status: 'paid' })
+    .whereNull('processor').whereNull('stripe_payment_intent_id').whereNull('refunded_at')
+    .whereRaw('COALESCE(refund_amount, 0) = 0')
+    .first();
+  if (!payment || ms(payment.created_at) !== sinceMs) {
+    return notEligible('payment_row', 'The payment record for this invoice changed after it was recorded, so it cannot be undone here.');
+  }
+  const bindings = {
+    invoiceId: invoice.id,
+    customerId: invoice.customer_id,
+    paymentId: payment.id,
+    since: new Date(sinceMs),
+    descriptionPrefix: `Invoice ${invoice.invoice_number} — `,
+  };
+  for (const probe of AFTER_PAYMENT_PROBES) {
+    const { rows } = await conn.raw(probe.sql, bindings);
+    if (rows.length) return notEligible(probe.code, probe.message);
+  }
+  return { refusal: null, marker, payment };
+}
+
+// The Invoices page asks this before it offers the action: the same rules the writer re-runs under the lock.
+async function describeManualPaymentUndo(invoiceId) {
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!invoice) throw refusal(404, 'Invoice not found');
+  const { refusal: refused, payment } = await manualPaymentUndoRefusal(db, invoice);
+  if (refused) return { eligible: false, ...refused };
+  return {
+    eligible: true,
+    payment: { amount: Number(payment.amount), method: invoice.payment_method, recordedAt: invoice.payment_recorded_at },
+  };
+}
+
+// Payment-failed admin bells the payment's settlement closed ("The invoice was paid"): the invoice is unpaid again, so they reopen.
+// Only a bell this payment closed (done_at since the payment) — one a person closed earlier keeps its earlier done_at and is left.
+function reopenPaymentFailedBells(trx, invoiceId, since) {
+  return trx('notifications')
+    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: 'The invoice was paid' })
+    .whereRaw("metadata->>'triggerKey' = 'payment_failed' AND metadata->'payload'->>'invoiceId' = ?", [String(invoiceId)])
+    .where('done_at', '>=', since)
+    .update({ done_at: null, done_by: null, resolution: null });
+}
+
+async function undoManualPayment(invoiceId, { reason, undoneBy = 'admin', undoneByTechnicianId = null } = {}) {
+  if (!undoManualPaymentLive()) throw refusal(403, 'Undo payment is not turned on');
+  const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 400) : '';
+  if (!cleanReason) throw refusal(400, 'A reason is required to undo a payment');
+  const unlocked = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id');
+  if (!unlocked) throw refusal(404, 'Invoice not found');
+
+  const done = await db.transaction(async (trx) => {
+    // The payment writer's lock order: the per-customer combined-session lock first (re-read until the owner is stable), then the invoice.
+    await require('./pay-combined').lockCombinedCustomerStable(trx, invoiceId, unlocked.customer_id);
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!locked) throw refusal(404, 'Invoice not found');
+    const { refusal: refused, marker, payment } = await manualPaymentUndoRefusal(trx, locked);
+    if (refused) throw refusal(409, refused.message, { code: refused.code });
+
+    const since = new Date(ms(locked.payment_recorded_at));
+    const undone = {
+      at: new Date().toISOString(), by: undoneBy, reason: cleanReason, method: locked.payment_method, amount: Number(payment.amount),
+    };
+    const [restored] = await trx('invoices').where({ id: invoiceId, status: 'paid' })
+      .update({ ...Object.fromEntries(PAID_FIELDS.map((field) => [field, marker.previous?.[field] ?? null])), updated_at: trx.fn.now() })
+      .returning('*');
+    if (!restored) throw refusal(409, 'Invoice status changed before the payment could be undone');
+    // History stays: the ledger row is kept as 'canceled' (the status Stripe-canceled payments already carry) with what happened.
+    await trx('payments').where({ id: payment.id }).update({
+      status: 'canceled',
+      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [UNDO_NOTE_KEY]: undone })]),
+      updated_at: trx.fn.now(),
+    });
+    await reopenPaymentFailedBells(trx, invoiceId, since);
+    await trx('activity_log').insert({
+      customer_id: locked.customer_id,
+      admin_user_id: undoneByTechnicianId,
+      action: 'invoice_payment_undone',
+      description: `Manual payment undone for ${locked.invoice_number} ($${undone.amount.toFixed(2)} via ${undone.method}) — ${undoneBy} — ${cleanReason.slice(0, 120)}`,
+      metadata: JSON.stringify({ invoice_id: invoiceId, payment_id: payment.id, ...undone }),
+    });
+    await recordAuditEvent({
+      actor_type: undoneByTechnicianId ? 'admin' : 'system',
+      actor_id: undoneByTechnicianId,
+      action: 'invoice.manual_payment_undone',
+      resource_type: 'invoices',
+      resource_id: invoiceId,
+      metadata: { paymentId: payment.id, ...undone },
+      critical: true,
+      trx,
+    });
+    return { restored, payment, undone };
+  });
+
+  // Reminders resume on the normal schedule. After commit: resumeSequence reads the invoice and stops on a terminal one, so it must see
+  // the restored status. A completed row re-arms at its stored step (a step already sent never fires again); an office stop stays stopped.
+  let remindersRearmed = true;
+  try {
+    const FollowUps = require('./invoice-followups');
+    await FollowUps.resumeSequenceIfSystemResumable(invoiceId);
+    await FollowUps.scheduleForInvoice(invoiceId);
+  } catch (err) {
+    remindersRearmed = false;
+    logger.warn(`[invoice-manual-payment-undo] reminder re-arm failed for invoice ${invoiceId}: ${err.message}`);
+  }
+  return {
+    invoice: await db('invoices').where({ id: invoiceId }).first(),
+    payment: { id: done.payment.id, amount: done.undone.amount, method: done.undone.method },
+    remindersRearmed,
+  };
+}
+
+module.exports = { undoManualPayment, describeManualPaymentUndo, manualPaymentUndoRefusal };

@@ -21,6 +21,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(),
   cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
@@ -62,7 +63,8 @@ function recorder({ first = null, returning = [] } = {}) {
   ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(() => q);
-  q.insert = jest.fn(async () => undefined);
+  // insert() is awaited bare (most callers) or chained to returning() (the payments row, whose id the Undo marker names).
+  q.insert = jest.fn(() => Object.assign(Promise.resolve(undefined), { returning: jest.fn(async () => [{ id: 'pay-1' }]) }));
   q.returning = jest.fn(async () => returning);
   return q;
 }
@@ -583,6 +585,22 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(fence.mock.calls[1][0]).toEqual(expect.any(Function));
       expect(fence.mock.calls[1][1]).toMatchObject({ id: 'inv-1', status: 'sent' });
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('writes the Undo marker in the settlement transaction: the ledger row id, the tender, who recorded it and the pre-payment values', async () => {
+      settle({ locked: card({ status: 'viewed', notes: 'Seed note' }) });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, recordedBy: 'Synthetic Office' });
+      expect(require('../services/audit-log').recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'invoice.manual_payment_recorded',
+        resource_type: 'invoices',
+        resource_id: 'inv-1',
+        critical: true,
+        trx: expect.any(Function),
+        metadata: expect.objectContaining({
+          paymentId: 'pay-1', method: 'check', automated: false, recordedBy: 'Synthetic Office',
+          previous: expect.objectContaining({ status: 'viewed', notes: 'Seed note', paid_at: null }),
+        }),
+      }));
     });
 
     test('a stale card refuses BEFORE the open card session is retired (edit time compared on the plain read)', async () => {

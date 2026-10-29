@@ -3835,6 +3835,13 @@ const gates = {
   // by property_type exactly as before.
   buildingUseTax: gateEnvValue('GATE_BUILDING_USE_TAX'),
 
+  // Undo last manual payment (owner 2026-10-29, built before partial payments): the office can reverse a cash,
+  // check, Zelle, Venmo, PayPal or other off-Stripe entry recorded by hand, the same Eastern day, before any
+  // receipt or reminder went out (services/invoice-manual-payment-undo.js, POST /admin/invoices/:id/undo-payment).
+  // Read at CALL time via undoManualPaymentLive(); strict `true`, dark by default. Off = the route answers 404
+  // and the Invoices page hides the button. Kill switch: unset.
+  undoManualPayment: process.env.GATE_UNDO_MANUAL_PAYMENT === 'true',
+
   // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
   // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
   // taxes pest control only for an infestation of a nonresidential building, so
@@ -6220,6 +6227,11 @@ function slabHomeNoTaxLive() {
 // GATE_BUILDING_USE_TAX read at CALL time (so a flip needs no redeploy).
 function buildingUseTaxLive() {
   return gateEnvValue('GATE_BUILDING_USE_TAX');
+}
+
+// GATE_UNDO_MANUAL_PAYMENT read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
+function undoManualPaymentLive() {
+  return process.env.GATE_UNDO_MANUAL_PAYMENT === 'true';
 }
 
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
@@ -8864,3 +8876,5 @@ module.exports.manualAcceptConsumerNoticeReconcileLive = manualAcceptConsumerNot
 module.exports.setupFeeApplicationSettledLive = setupFeeApplicationSettledLive;
 // GATE_BUILDING_USE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.buildingUseTaxLive = buildingUseTaxLive;
+// GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
+module.exports.undoManualPaymentLive = undoManualPaymentLive;

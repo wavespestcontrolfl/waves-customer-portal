@@ -70,6 +70,7 @@ const InvoiceService = require('./invoice');
 const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
+const { recordAuditEvent } = require('./audit-log');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 
 // Append the operator note to the invoice notes (don't clobber existing notes). Built from the LOCKED row's notes inside the
@@ -82,6 +83,10 @@ function appendOperatorNote(existing, { method, reference, note }) {
 }
 
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
+// The audit_log action recordManualPayment writes with every settlement, and the invoice columns the paid flip overwrites (their
+// pre-payment values ride the marker so Undo can put them back exactly). Read by invoice-manual-payment-undo.js.
+const MANUAL_PAYMENT_RECORDED_ACTION = 'invoice.manual_payment_recorded';
+const PAID_FIELDS = ['status', 'notes', 'paid_at', 'payment_method', 'payment_reference', 'payment_recorded_by', 'payment_recorded_at'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
 
 function refusal(statusCode, message, extra = {}) {
@@ -367,7 +372,27 @@ async function recordManualPayment(id, {
         ...(row.payer_id ? { payer_id: row.payer_id } : {}),
       });
     }
-    await trx('payments').insert(paymentRow);
+    const [{ id: paymentId }] = await trx('payments').insert(paymentRow).returning('id');
+    // The marker Undo (invoice-manual-payment-undo.js) works from, in the SAME transaction: which ledger row backs this payment, how the
+    // invoice looked before it, and whether a person or the Zelle reconciler recorded it. The marker's created_at is this transaction's
+    // now(), the same instant payment_recorded_at carries, which is how Undo proves the marker belongs to the payment still on the invoice.
+    await recordAuditEvent({
+      actor_type: recordedByTechnicianId ? 'admin' : 'system',
+      actor_id: recordedByTechnicianId,
+      action: MANUAL_PAYMENT_RECORDED_ACTION,
+      resource_type: 'invoices',
+      resource_id: id,
+      metadata: {
+        paymentId,
+        method,
+        amount: paymentRow.amount,
+        automated: Boolean(automated),
+        recordedBy,
+        previous: Object.fromEntries(PAID_FIELDS.map((field) => [field, locked[field] ?? null])),
+      },
+      critical: true,
+      trx,
+    });
     // The invoice is settled — an active payment plan has nothing left to
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
@@ -565,6 +590,9 @@ async function recordManualPayment(id, {
 
 module.exports = {
   VALID_PAYMENT_METHODS,
+  MANUAL_PAYMENT_RECORDED_ACTION,
+  PAID_FIELDS,
+  refusal,
   recordManualPayment,
   retireOpenPaymentIntentBeforeSettlement,
 };
