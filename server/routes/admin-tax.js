@@ -3180,6 +3180,11 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       }
       return res.json({ success: true, reconciliation: null });
     }
+    // A line the payroll match linked to an expense the owner already had: the expense gets its category back.
+    if (row.status === 'matched_expense' && (row.matched_payroll_check_id || row.matched_tax_filing_id)) {
+      if (!(await bankImport.unlinkPayrollMatched(row))) return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      return res.json({ success: true, reconciliation: null });
+    }
     const baseSuggestion = row.suggestion || {};
     // rejections are CUMULATIVE: unlinking B after A must not let the
     // matcher re-propose A — every rejected id stays excluded forever

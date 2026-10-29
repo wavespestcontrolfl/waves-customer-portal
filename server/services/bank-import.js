@@ -1603,6 +1603,11 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
         : { kind: 'tax', id: plan.filing.id, title: plan.filing.title, amountCents: payrollMatch.filingCents(plan.filing), dueDate: plan.filing.due_date }]
       : (plan.candidates || []);
     // The same payment may already be an expense the owner entered: name it next to the paycheck / tax row.
+    // Suggested candidates (ties, one cent off, a held line) get the same survey as an automatic link.
+    if (planned.length && !held) {
+      const found = await surveyExpenseCandidatesForRow(row, rejectedTargets(sug));
+      if (found.length) held = found;
+    }
     const candidates = held
       ? planned.map(c => ({ ...c, existingExpenses: held.slice(0, 5).map(e => ({ id: e.id, amount: Number(e.gross_amount != null ? e.gross_amount : e.amount), vendor_name: e.vendor_name, expense_date: toDateStr(e.expense_date) })) }))
       : planned;
@@ -1688,7 +1693,7 @@ async function releaseVoidedPayrollLinks() {
 
 // A payroll tax link is only as good as the calendar row behind it: the sync rewrites an upcoming
 // row's amount when another run is finalized, and deletes a row whose duty is gone. A linked line whose
-// row no longer says the line's amount (amount_paid if recorded, else amount_due), or whose row is gone
+// row no longer says the amount it had when linked (amount_paid if recorded, else amount_due), or whose row is gone
 // (the FK went NULL but suggestion.payrollMatch still names it), goes back to review: the expense the
 // match made is removed (or restored, if it was the owner's), the evidence stays in
 // suggestion.payrollUnlinked, and the row is remembered as rejected only while its amount still differs.
@@ -1698,7 +1703,8 @@ async function reconcileTaxLinks() {
     .where(function stale() {
       this.where(function changed() {
         this.whereNotNull('bt.matched_tax_filing_id')
-          .whereRaw('round(bt.amount * 100) <> round(coalesce(f.amount_paid, f.amount_due, -1) * 100)');
+          .whereRaw(`round(coalesce(f.amount_paid, f.amount_due, -1) * 100) <> coalesce((bt.suggestion->'payrollMatch'->>'amountCents')::numeric, round(bt.amount * 100))
+            and round(coalesce(f.amount_paid, f.amount_due, -1) * 100) <> round(bt.amount * 100)`);
       }).orWhere(function deleted() {
         this.whereNull('bt.matched_tax_filing_id').whereIn('bt.status', ['created_expense', 'matched_expense'])
           .whereRaw("bt.suggestion->'payrollMatch'->>'filingId' is not null");
@@ -1720,7 +1726,10 @@ async function reconcileTaxLinks() {
           : null;
         const bankCents = Math.round(Number(live.amount) * 100);
         const calendarCents = filing ? Math.round(Number(filing.amount_paid != null ? filing.amount_paid : filing.amount_due) * 100) : null;
-        if (filing && calendarCents === bankCents) return; // corrected back since the scan
+        // The link stands while the row still says the amount it had when the owner or the matcher linked it
+        // (an owner-approved one-cent difference included), or the amount the bank line carries.
+        const recordedCents = pm.amountCents == null ? bankCents : Number(pm.amountCents);
+        if (filing && (calendarCents === recordedCents || calendarCents === bankCents)) return; // unchanged, or corrected back since the scan
         const differs = !!filing;
         const rejectedIds = differs ? [...new Set([...((live.suggestion && live.suggestion.rejectedTaxFilingIds) || []), filingId])] : null;
         const changed = await trx('bank_transactions').where({ id: live.id, status: live.status }).update({
@@ -1749,6 +1758,40 @@ async function reconcileTaxLinks() {
   return released;
 }
 
+// The owner's Unlink on a payroll-matched line (an expense the owner already had, reused by the match).
+// One transaction: the line goes back to review with its payroll links cleared, the expense gets its
+// category and deductible amount back from the snapshot, and the evidence stays in suggestion.
+// Returns false when the row changed under it.
+async function unlinkPayrollMatched(row) {
+  return db.transaction(async (trx) => {
+    const live = await trx('bank_transactions').where({ id: row.id, status: row.status, matched_expense_id: row.matched_expense_id }).forUpdate()
+      .first('id', 'status', 'match_method', 'matched_expense_id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
+    if (!live) return false;
+    const sug = live.suggestion || {};
+    const rejectedExpenseIds = [...new Set([...(sug.rejectedExpenseIds || []), ...(live.matched_expense_id ? [live.matched_expense_id] : [])])];
+    const patch = {
+      ...(rejectedExpenseIds.length ? { rejectedExpenseIds } : {}),
+      ...(live.matched_payroll_check_id ? { rejectedPayrollCheckIds: [...new Set([...(sug.rejectedPayrollCheckIds || []), live.matched_payroll_check_id])] } : {}),
+      ...(live.matched_tax_filing_id ? { rejectedTaxFilingIds: [...new Set([...(sug.rejectedTaxFilingIds || []), live.matched_tax_filing_id])] } : {}),
+      lastUnlink: { at: new Date().toISOString(), was: live.status, method: live.match_method, ...(live.matched_expense_id ? { expenseId: live.matched_expense_id } : {}) },
+      payrollUnlinked: {
+        at: new Date().toISOString(), reason: 'owner_unlinked', was: sug.payrollMatch || null,
+        ...(live.matched_payroll_check_id ? { checkId: live.matched_payroll_check_id } : {}),
+        ...(live.matched_tax_filing_id ? { filingId: live.matched_tax_filing_id } : {}),
+      },
+    };
+    const changed = await trx('bank_transactions').where({ id: live.id, status: live.status, matched_expense_id: live.matched_expense_id }).update({
+      status: 'unmatched', matched_expense_id: null, matched_payroll_check_id: null, matched_tax_filing_id: null,
+      match_method: null, matched_at: null,
+      suggestion: suggestionMerge(patch, ['payrollMatch', 'reconcilePending', 'verifyPending']),
+      updated_at: new Date(),
+    });
+    if (!changed) return false;
+    await releasePayrollExpense(trx, live);
+    return true;
+  });
+}
+
 // Top of every gated pass: free a line whose expense was deleted (the owner's undo, see the unlink
 // route) from its paycheck link and remember the target as rejected, so the matcher does not
 // re-book what the owner just undid; then release the lines of voided pay runs.
@@ -1760,6 +1803,11 @@ async function healPayrollLinks() {
   for (const o of orphans) {
     const sug = o.suggestion || {};
     const patch = {};
+    // an expense the match reused and another path (an edit heal) unlinked: give it its category back
+    // before the snapshot goes
+    if (sug.payrollMatch && sug.payrollMatch.reusedExpense && sug.payrollMatch.expenseId) {
+      await db.transaction((trx) => releasePayrollExpense(trx, { matched_expense_id: sug.payrollMatch.expenseId, suggestion: sug }));
+    }
     if (o.matched_payroll_check_id) patch.rejectedPayrollCheckIds = [...new Set([...(sug.rejectedPayrollCheckIds || []), o.matched_payroll_check_id])];
     if (o.matched_tax_filing_id) patch.rejectedTaxFilingIds = [...new Set([...(sug.rejectedTaxFilingIds || []), o.matched_tax_filing_id])];
     await db('bank_transactions').where({ id: o.id, status: 'unmatched' }).update({
@@ -2429,6 +2477,7 @@ module.exports = {
   rejectedTargets,
   resetDanglingLinks,
   claimPayrollLink,
+  unlinkPayrollMatched,
   releaseVoidedPayrollLinks,
   reconcileTaxLinks,
   healEditedExpenseLinks,

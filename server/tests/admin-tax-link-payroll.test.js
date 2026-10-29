@@ -40,6 +40,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   claimPayrollLink: jest.fn(),
+  unlinkPayrollMatched: jest.fn(),
   // the snapshot heals have their own suites; the list routes here only shape the response
   resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
   healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
@@ -133,6 +134,18 @@ describe('link-payroll', () => {
     expect((await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { filingId: UUID_B })).status).toBe(400);
     bankImport.claimPayrollLink.mockResolvedValue({ ok: false, reason: 'taken' });
     expect((await post(`/admin/tax/bank-import/${UUID_A}/link-payroll`, { checkId: UUID_B })).status).toBe(409);
+  });
+});
+
+describe('unlink', () => {
+  test('a payroll-matched line goes through the payroll unlink, not the generic one', async () => {
+    state.bankRow = { id: UUID_A, direction: 'debit', status: 'matched_expense', matched_expense_id: UUID_B, matched_payroll_check_id: UUID_B, matched_tax_filing_id: null, suggestion: {} };
+    bankImport.unlinkPayrollMatched.mockResolvedValue(true);
+    const res = await post(`/admin/tax/bank-import/${UUID_A}/unlink`, {});
+    expect(res.status).toBe(200);
+    expect(bankImport.unlinkPayrollMatched).toHaveBeenCalledWith(expect.objectContaining({ id: UUID_A }));
+    bankImport.unlinkPayrollMatched.mockResolvedValue(false);
+    expect((await post(`/admin/tax/bank-import/${UUID_A}/unlink`, {})).status).toBe(409);
   });
 });
 
