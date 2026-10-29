@@ -1859,6 +1859,53 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       }
     });
 
+    // The read tail is a closed grammar of read-only asks. Free text after "show/tell me" is never discarded: the prompt
+    // stays whole, its leftover words fail the closed-vocabulary rule, and the bar asks.
+    test('the audit sentence (a prohibition after "tell me") never grounds a receipt', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive('We received 2 gallons of Taurus SC, tell me the balance but do not record this again')).toEqual(ASK);
+    });
+
+    test.each([
+      ['a negation', 'tell me the balance but do not record this'],
+      ['a contraction', "show me what we have, don't record it"],
+      ['never', 'tell me the balance and never record it'],
+      ['no more', 'show me what we have, no more'],
+      ['cancel', 'show me what we have and cancel the receipt'],
+      ['undo', 'tell me the balance then undo it'],
+      ['stop', 'show me what we have, stop'],
+      ['instead', 'show me what we have instead'],
+      ['except', 'show me everything except Taurus SC'],
+      ['but', 'show me what we have but wait'],
+      ['again', 'show me what we have now again'],
+      ['an unrecognised read ask', 'show me the price of Taurus SC'],
+      ['a second instruction', 'show me what we have now and order more'],
+    ])('a tail with %s is not a read tail, so nothing is stripped and the bar asks', async (_label, tail) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive(`We received 2 gallons of Taurus SC, ${tail}`)).toEqual(ASK);
+      const adjust = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: `We received 2 gallons of Taurus SC, ${tail}`, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+      expect(adjust).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test.each([
+      'show me what we have now', 'Show me what we have.', 'tell me what we have left', 'and show me what we have on hand',
+      'then please tell me the new on-hand', 'show me the new total', 'tell me the balance', 'show me how much we have now',
+    ])('the read-only ask ", %s" is a read tail and the receipt still grounds', async (tail) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      expect(await receive(`We received 2 gallons of Taurus SC, ${tail}`)).toEqual({ productId: TAURUS.id, requestId: 'req-taurus' });
+    });
+
+    test('a prohibition BEFORE a valid read tail still asks (the receipt words are validated, not dropped)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests('req-taurus');
+      for (const prompt of ['Do not record 2 gallons of Taurus SC, show me what we have now', 'We received 2 gallons of Taurus SC but do not record it, show me what we have now']) {
+        expect(await receive(prompt)).toEqual(ASK);
+      }
+    });
+
     test('words the vocabulary does not cover next to the name still ask', async () => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       activeRequests('req-taurus');
@@ -1886,6 +1933,19 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       expect(await adjust('Reorder four more jugs of Taurus SC from the vendor and record the three that just came in.', ALPINE.id)).toMatchObject({ code: 'target_relationship_mismatch' });
       expect(await adjust('Reorder four more jugs of Taurus SC and Alpine WSG and record the three that just came in.')).toMatchObject({ code: 'target_clarification_required' });
       expect(await adjust('Reorder four more jugs of Taurus SC and record the three that were damaged.')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('free text in the order-plus-receipt wording is validated, never dropped', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const adjust = (prompt) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' } });
+      for (const prompt of [
+        'Reorder four more jugs of Taurus SC from the vendor, not the supplier and record the three that just came in.',
+        'Reorder four more jugs of Taurus SC from the vendor and record the three that just came in but do not add them.',
+        "Reorder four more jugs of Taurus SC from the vendor and record the three that just came in, don't record them again.",
+        'Reorder four more jugs of Taurus SC from the vendor and record the three that just came in again.',
+      ]) {
+        expect(await adjust(prompt)).toMatchObject({ code: 'target_clarification_required' });
+      }
     });
 
     describe('a stated correction of the amount just recorded', () => {
@@ -1927,7 +1987,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       test('other wording about amounts is not a correction', async () => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         IbThreadsMock.recentOperatorTurns.mockResolvedValue(['We received 2 quarts of Taurus SC.']);
-        for (const prompt of ['that was 2 gallons, not 2 quarts of Alpine WSG', 'make it 2 gallons', 'that was 2 gallons, not 2 quarts, and order more']) {
+        for (const prompt of ['that was 2 gallons, not 2 quarts of Alpine WSG', 'make it 2 gallons', 'that was 2 gallons, not 2 quarts, and order more', 'that was 2 gallons, not 2 quarts, but do not record it', 'that was 2 gallons, not 2 quarts again']) {
           expect(await correct({ prompt })).toMatchObject({ code: 'target_clarification_required' });
         }
       });

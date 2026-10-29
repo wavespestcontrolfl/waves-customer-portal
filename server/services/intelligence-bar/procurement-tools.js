@@ -1506,9 +1506,14 @@ function operationMatches(toolName, texts, preview) {
   return toolName === 'create_restock_request' && operation === 'order';
 }
 
-// Receipt words the operator may add after the receipt itself ("..., show me what we have now"): a read request that
-// carries no write content. The receipt tools ground on the words before it; a bare "Show me ..." has nothing before it.
-const READ_TAIL_RE = /^(.+?)\s*[,;]?\s*(?:and\s+)?(?:then\s+)?(?:please\s+)?(?:show|tell)\s+me\b[^.!?]*[.!?]?\s*$/i;
+// A read request the operator may add after the receipt ("..., show me what we have now"). A CLOSED grammar: show or tell
+// me, then one of a few fixed read-only asks for the count, then end of text. Anything else after "show/tell me" ("the
+// balance but do not record this again", "what we have instead") is not a read tail, so it is never stripped: the prompt
+// stays whole, the leftover words fail the closed-vocabulary rule, nothing grounds, and the bar asks. A negation or a
+// conflicting instruction can only ever sit outside this grammar, so none is dropped. A bare "Show me ..." has nothing
+// before it and is not stripped either.
+const READ_TAIL_ASK = '(?:what we have(?: now| left| on hand)?|how much we have(?: now| left| on hand)?|the (?:new )?(?:on[- ]hand(?: count| amount| total)?|total|count|stock|amount|balance))';
+const READ_TAIL_RE = new RegExp(`^(.+?)\\s*[,;]?\\s*(?:and\\s+)?(?:then\\s+)?(?:please\\s+)?(?:show|tell)\\s+me\\s+${READ_TAIL_ASK}\\s*[.!?]*\\s*$`, 'i');
 const RECEIPT_TOOL_NAMES = new Set(['adjust_stock', 'update_restock_request']);
 function withoutReadTail(toolName, prompt) {
   if (!RECEIPT_TOOL_NAMES.has(toolName)) return prompt;
