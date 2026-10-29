@@ -2027,3 +2027,48 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
     expect(map.get('visit-1')).toMatchObject({ start_at: new Date('2026-09-10T13:00:00.000Z').toISOString(), source_id: 'm1' });
   });
 });
+
+describe('office cards only: the 45-minute tech ping is off unless NOSHOW_TECH_PING_ENABLED is exactly true', () => {
+  const detector = require('../services/no-show-detector');
+  const saved = { ping: process.env.NOSHOW_TECH_PING_ENABLED, gate: process.env.GATE_NOSHOW_DETECTOR };
+  afterEach(() => {
+    for (const [key, value] of [['NOSHOW_TECH_PING_ENABLED', saved.ping], ['GATE_NOSHOW_DETECTOR', saved.gate]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+
+  test('default: only the stage-1 card for an assigned tech is silenced', () => {
+    delete process.env.NOSHOW_TECH_PING_ENABLED;
+    expect(detector.skipsTechPing({ stage: 1, recipient: 'tech-1' })).toBe(true);
+    // Stage 2 keeps its tech notice and office card; the no-tech card keeps its office alert.
+    expect(detector.skipsTechPing({ stage: 2, recipient: 'tech-1' })).toBe(false);
+    expect(detector.skipsTechPing({ stage: 2, recipient: null })).toBe(false);
+    expect(detector.skipsTechPing({ stage: 1, recipient: null })).toBe(false);
+  });
+
+  test('only the exact string true brings the stage-1 ping back', () => {
+    for (const value of ['1', 'TRUE', 'yes', 'on', '']) {
+      process.env.NOSHOW_TECH_PING_ENABLED = value;
+      expect(detector.skipsTechPing({ stage: 1, recipient: 'tech-1' })).toBe(true);
+    }
+    process.env.NOSHOW_TECH_PING_ENABLED = 'true';
+    expect(detector.techPingEnabled()).toBe(true);
+    expect(detector.skipsTechPing({ stage: 1, recipient: 'tech-1' })).toBe(false);
+  });
+
+  test('stage rules are unchanged: the pure evaluator still reports stage 1 and stage 2', () => {
+    const promise = { visit_id: 'v', start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' };
+    const visit = { id: 'v', status: 'confirmed', scheduled_date: '2026-09-10' };
+    const at = (time) => evaluateNoShow({ visit, promise, now: new Date(`2026-09-10T${time}:00-04:00`) });
+    expect(at('09:45')?.stage).toBe(1);
+    expect(at('11:30')?.stage).toBe(2);
+  });
+
+  test('gate off: the sweep does nothing and never touches the database, whatever the setting says', async () => {
+    delete process.env.GATE_NOSHOW_DETECTOR;
+    process.env.NOSHOW_TECH_PING_ENABLED = 'true';
+    const conn = jest.fn(() => { throw new Error('database touched with the gate off'); });
+    await expect(detector.sweep(conn)).resolves.toEqual({ alerted: 0 });
+    expect(conn).not.toHaveBeenCalled();
+  });
+});
