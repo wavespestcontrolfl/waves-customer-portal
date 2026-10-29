@@ -118,7 +118,7 @@ async function loadPendingSmsConversations({
   // person booked a visit or recorded a payment for the text's customer within 24 hours after it
   // (sms-staff-action-answers.js, by customer id and never by phone). In every other mode the
   // CTE, its join and its filter are absent: the SQL below is byte-identical to before.
-  const staffAnswers = staffActionAnswersMode() === 'true';
+  const staffAnswers = staffActionAnswersMode?.() === 'true';
   const staffActionCte = staffAnswers ? `, staff_action_inbound AS MATERIALIZED (
       SELECT li.id AS inbound_id
       FROM enriched_inbound li
