@@ -1788,6 +1788,16 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
   });
 
+  test('secured render for a recurring visit with frozen terms carries NO fee note — the rail never enforces them (owner ruling 2026-10-29)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24,
+    });
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, is_recurring: true, recurring_pattern: 'quarterly' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(res.cancelFeeNote).toBeNull();
+  });
+
   test('a sticky-marked row\'s secured render carries the reset sentence it consented to', async () => {
     mockTableHandlers.appointment_card_requests.first = () => ({
       ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24, sticky_window_disclosed: true,

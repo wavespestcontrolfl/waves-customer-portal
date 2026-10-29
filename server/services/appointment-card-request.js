@@ -2283,7 +2283,9 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
   // If the in-flight attempt fails and reverts, the durable webhook retry
   // converges the row to completed.
   if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
-    return { state: 'secured', ...base, cancelFeeNote: frozenFeeNoteForRow(request) };
+    // A recurring visit's frozen terms are never enforced (fee rail
+    // recurring_visit), so they are never repeated either.
+    return { state: 'secured', ...base, cancelFeeNote: visitCarriesCancelFee(visit) ? frozenFeeNoteForRow(request) : null };
   }
 
   // Plan-choice lane (GATE_SECURE_PLAN_CHOICE; both helpers return null
