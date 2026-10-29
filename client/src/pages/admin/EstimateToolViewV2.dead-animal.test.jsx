@@ -24,8 +24,8 @@ const ACCESS_LABELS = [
 
 const RESULT = {
   recurring: { tier: "Bronze", grandTotal: 0, annualAfterDiscount: 0, services: [] },
-  oneTime: { total: 149, items: [{ service: "rodent_dead_animal_removal", name: LABEL, price: 149 }] },
-  results: {}, totals: { year2mo: 0, year1: 149 },
+  oneTime: { total: 169, items: [{ service: "rodent_dead_animal_removal", name: LABEL, price: 169 }] },
+  results: {}, totals: { year2mo: 0, year1: 169 },
 };
 
 function jsonResponse(body, status = 200) {

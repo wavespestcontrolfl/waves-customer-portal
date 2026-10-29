@@ -3,8 +3,8 @@
  * the one `services` row, its completion profile and its `service_taxability` row, so an accepted estimate line
  * resolves to a scheduled service, a completion lane and an invoice line by KEY, never by display name.
  *
- *   rodent_dead_animal_removal   one-time. Priced by priceDeadAnimalRemoval: easy reach 45 min ($149 alone / $99 riding),
- *                                attic search 90 min ($219 alone / $169 riding); inside a wall or ceiling is a custom
+ *   rodent_dead_animal_removal   one-time. Priced by priceDeadAnimalRemoval: easy reach 45 min ($169 alone / $119 riding),
+ *                                attic search 90 min ($269 alone / $219 riding); inside a wall or ceiling is a custom
  *                                quote. base_price is the easy-reach own-visit price and the range runs riding easy reach
  *                                to alone attic.
  *
@@ -51,9 +51,9 @@ const SERVICE = {
   min_duration_minutes: 45,
   max_duration_minutes: 90,
   pricing_type: 'variable',
-  base_price: 149.0,
-  price_range_min: 99.0,
-  price_range_max: 219.0,
+  base_price: 169.0,
+  price_range_min: 119.0,
+  price_range_max: 269.0,
   pricing_model_key: null,
   is_waveguard: false,
   is_taxable: false,
@@ -70,7 +70,7 @@ const SERVICE = {
   color: '#78716c',
   sort_order: 41,
   engine_keys: ['rodent_dead_animal_removal'],
-  internal_notes: 'Priced by priceDeadAnimalRemoval; engine_keys rodent_dead_animal_removal. Easy reach 45 min $149 alone / $99 riding; attic search 90 min $219 alone / $169 riding; in a wall or ceiling = custom quote. No pesticide application: closeout mirrors rodent_inspection (no application log, no notice). Dark behind GATE_DEAD_ANIMAL_REMOVAL; staff-sold only.',
+  internal_notes: 'Priced by priceDeadAnimalRemoval; engine_keys rodent_dead_animal_removal. Easy reach 45 min $169 alone / $119 riding; attic search 90 min $269 alone / $219 riding; in a wall or ceiling = custom quote. No pesticide application: closeout mirrors rodent_inspection (no application log, no notice). Dark behind GATE_DEAD_ANIMAL_REMOVAL; staff-sold only.',
 };
 
 // Closeout posture: a cleanup visit with no product applied. Source is non-inferred, so it is read as written.
@@ -92,7 +92,7 @@ const PROFILE = {
   followup_policy: 'none',
 };
 
-const STATE_KEY = 'migration.20261026140000.state';
+const STATE_KEY = 'migration.20261029130000.state';
 const MARKER = '[dead_rodent_removal_action=inserted]';
 const STATUTE = 'FL §212.05(1)(i)1';
 

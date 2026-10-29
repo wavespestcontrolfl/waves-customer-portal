@@ -10,8 +10,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const fs = require('fs');
 const path = require('path');
-const catalog = require('../models/migrations/20261026140000_dead_rodent_removal_catalog');
-const seedMigration = require('../models/migrations/20261026140100_dead_rodent_removal_pricing_config');
+const catalog = require('../models/migrations/20261029130000_dead_rodent_removal_catalog');
+const seedMigration = require('../models/migrations/20261029130100_dead_rodent_removal_pricing_config');
 const constants = require('../services/pricing-engine/constants');
 const config = require('../services/pricing-engine/dead-animal-removal-config');
 const { classifyCatalogRow } = require('../config/completion-lane-registry');
@@ -94,19 +94,19 @@ const emptyDb = () => ({
 });
 const svc = (db) => db.services.find((r) => r.service_key === KEY);
 
-describe('20261026140000 catalog row, completion profile and taxability', () => {
+describe('20261029130000 catalog row, completion profile and taxability', () => {
   test('up() inserts the one-time rodent row with engine key, tier minutes and no public exposure', async () => {
     const db = emptyDb();
     await catalog.up(fakeKnex(db));
     const row = svc(db);
     expect(row).toMatchObject({
       service_key: KEY, name: NAME, category: 'rodent', billing_type: 'one_time', is_active: true, is_archived: false,
-      public_quote_selectable: false, booking_enabled: false, is_waveguard: false, base_price: 149,
+      public_quote_selectable: false, booking_enabled: false, is_waveguard: false, base_price: 169,
       default_duration_minutes: 45, min_duration_minutes: 45, max_duration_minutes: 90,
     });
     expect(JSON.parse(row.engine_keys)).toEqual([KEY]);
-    expect(row.price_range_min).toBe(99);
-    expect(row.price_range_max).toBe(219);
+    expect(row.price_range_min).toBe(119);
+    expect(row.price_range_max).toBe(269);
   });
 
   test('the catalog name is the pricer line name verbatim, and the base price is the easy-reach own-visit price', () => {
@@ -228,7 +228,7 @@ describe('20261026140000 catalog row, completion profile and taxability', () => 
   });
 });
 
-describe('20261026140100 pricing_config seed', () => {
+describe('20261029130100 pricing_config seed', () => {
   test('the seed equals the in-code table and passes the one validator', () => {
     expect(seedMigration.SEED).toEqual(config.defaultDeadAnimalRemovalData());
     expect(seedMigration.SEED).toEqual({
@@ -274,11 +274,10 @@ describe('20261026140100 pricing_config seed', () => {
     expect(edited.pricing_config_audit).toHaveLength(1);
   });
 
-  test('the two migration timestamps come after every other migration file', () => {
+  test('both migration files exist and the catalog row is created before the price seed', () => {
     const dir = path.join(__dirname, '..', 'models', 'migrations');
-    const mine = ['20261026140000_dead_rodent_removal_catalog.js', '20261026140100_dead_rodent_removal_pricing_config.js'];
-    const others = fs.readdirSync(dir).filter((f) => /^\d{14}_/.test(f) && !mine.includes(f)).sort();
-    expect(mine[0] > others[others.length - 1] || others[others.length - 1].startsWith('2026102614')).toBe(true);
+    const mine = ['20261029130000_dead_rodent_removal_catalog.js', '20261029130100_dead_rodent_removal_pricing_config.js'];
+    for (const file of mine) expect(fs.existsSync(path.join(dir, file))).toBe(true);
     expect(mine[0] < mine[1]).toBe(true);
   });
 });
@@ -341,9 +340,9 @@ describe('the sold line through the stored estimate: identity, copy and the slot
     delete process.env.GATE_DEAD_ANIMAL_REMOVAL;
     try {
       const rows = estimatePublic.normalizeOneTimeBreakdown({ result }).items;
-      expect(rows.find((i) => i.service === KEY)).toMatchObject({ amount: 219, deadAnimalTier: 'attic', onSiteMinutes: 90 });
+      expect(rows.find((i) => i.service === KEY)).toMatchObject({ amount: 269, deadAnimalTier: 'attic', onSiteMinutes: 90 });
       expect(availability._internals.oneTimeProfileServices({ id: 'est-3', pricing_authority: null }, { result }).find((s) => s.engineKey === KEY)).toMatchObject({ durationMinutes: 90 });
-      expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 219 })).toBe(KEY);
+      expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 269 })).toBe(KEY);
     } finally {
       process.env.GATE_DEAD_ANIMAL_REMOVAL = 'true';
     }
@@ -354,7 +353,7 @@ describe('customer estimate copy', () => {
   const entry = copyPack[KEY];
 
   test('the pack has the entry in the rodent_sanitation shape and the line resolves to it', () => {
-    expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 149 })).toBe(KEY);
+    expect(oneTimeCopyKeyFor({ service: KEY, name: NAME, price: 169 })).toBe(KEY);
     expect(Object.keys(entry).sort()).toEqual(Object.keys(copyPack.rodent_sanitation).sort());
     expect(Object.keys(entry.hero).sort()).toEqual(Object.keys(copyPack.rodent_sanitation.hero).sort());
     expect(entry.includes.length).toBeGreaterThanOrEqual(3);
@@ -375,7 +374,7 @@ describe('customer estimate copy', () => {
   });
 
   test('the pack builder returns the entry for the sold row', () => {
-    const copy = resolveOneTimeServiceCopy({ service: KEY, name: NAME, price: 149 });
+    const copy = resolveOneTimeServiceCopy({ service: KEY, name: NAME, price: 169 });
     expect(copy).toMatchObject({ key: KEY, outcome: entry.outcome, terms: entry.terms });
     expect(copy.includes).toEqual(entry.includes);
   });

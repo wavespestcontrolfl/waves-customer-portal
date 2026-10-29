@@ -55,7 +55,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | Termite Bait | ✅ quarterly monitoring billed per application | install only | ✅ |
 | Rodent | ✅ quarterly bait program + one-time trapping | — | ✅ bait program; trapping is separate |
 | WDO Inspection | — | ✅ ($250 flat code default) | — |
-| Dead Rodent Removal & Odor Treatment (dark, `GATE_DEAD_ANIMAL_REMOVAL`; see §9) | — | ✅ fixed tier price: easy reach $149 alone / $99 riding, attic search $219 alone / $169 riding, inside a wall or ceiling = custom quote | — (no tier credit; takes the one-time recurring-customer perk like other rodent one-time lines) |
+| Dead Rodent Removal & Odor Treatment (dark, `GATE_DEAD_ANIMAL_REMOVAL`; see §9) | — | ✅ fixed tier price: easy reach $169 alone / $119 riding, attic search $269 alone / $219 riding, inside a wall or ceiling = custom quote | — (no tier credit; takes the one-time recurring-customer perk like other rodent one-time lines) |
 | Specialty (plugging, top-dressing, dethatching, trenching, BoraCare, pre-slab Termidor, foam-drill, German roach, bed bug, flea, wasp, exclusion) | varies | mostly one-time | varies |
 
 ---
@@ -339,7 +339,7 @@ bundle-discounted). Jobs sold before 2026-09-27 keep unlimited included checks.
 An emergency request adds the greater of 20% or $75.
 The active pricer does not apply the legacy footprint/lot adjustment arrays.
 
-**Dead Rodent Removal & Odor Treatment** (owner approved 2026-10-26; dark behind
+**Dead Rodent Removal & Odor Treatment** (owner approved 2026-10-26, prices 2026-10-29; dark behind
 `GATE_DEAD_ANIMAL_REMOVAL`; one-time; line key `rodent_dead_animal_removal`;
 `generateEstimate({ services: { deadAnimalRemoval: { tier } } })`).
 `tier` is `reachable` (easy reach: garage, crawl-space opening, under a cabinet,
@@ -349,17 +349,18 @@ is no default tier: an unchosen tier or `in_wall` is a custom-quote line
 (`quoteRequired` and `requiresCustomQuote`, manual-review reason
 `dead_animal_access_not_chosen` or `dead_animal_in_wall_custom_quote`). An unknown
 tier string throws a 400 `PricingError`. The prices are FIXED numbers in
-`constants.js` `RODENT.deadAnimalRemoval`, set once from the owner's add-on cost
-formula; the formula is not evaluated at quote time:
+`constants.js` `RODENT.deadAnimalRemoval` (owner 2026-10-29, from the 2026-10-26
+market check). The owner's add-on cost formula is the floor under each price; it
+is not evaluated at quote time:
 
-    price = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40,
+    floor = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40,
             rounded UP to the next price ending in 9
             (drive = GLOBAL.DRIVE_TIME 20 min; admin = AREA_ADDONS.adminPerJob $8)
 
-| Tier | On site | Material | Alone (own visit) | Riding |
+| Tier | On site | Material | Alone (own visit): floor -> price | Riding: floor -> price |
 |---|---:|---:|---:|---:|
-| `reachable` | 45 min | $12 | (45 + 20) min: $37.92 + $12 + $8 = $57.92 / 0.40 = $144.79 -> **$149** | 45 min, no drive, no admin: $38.25 / 0.40 = $95.63 -> **$99** |
-| `attic` | 90 min | $15 | (90 + 20) min: $64.17 + $15 + $8 = $87.17 / 0.40 = $217.92 -> **$219** | 90 min, no drive, no admin: $67.50 / 0.40 = $168.75 -> **$169** |
+| `reachable` | 45 min | $12 | (45 + 20) min: $37.92 + $12 + $8 = $57.92 / 0.40 = $144.79 -> $149 -> **$169** | 45 min, no drive, no admin: $38.25 / 0.40 = $95.63 -> $99 -> **$119** |
+| `attic` | 90 min | $15 | (90 + 20) min: $64.17 + $15 + $8 = $87.17 / 0.40 = $217.92 -> $219 -> **$269** | 90 min, no drive, no admin: $67.50 / 0.40 = $168.75 -> $169 -> **$219** |
 
 "Riding" means the SAME estimate already carries another PRICED rodent one-time
 line: trapping, exclusion (V1, the V2 section rows or `exclusion_v2`), wire mesh,

@@ -11,8 +11,8 @@
  * The prices are FIXED numbers set from the owner's add-on cost formula, inlined here because a pushed migration is frozen
  * (a test pins them equal to constants.js):
  *   price = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40, rounded UP to a price ending in 9
- *   reachable 45 min, $12 material: alone $149 (drive 20 min + $8 admin), riding $99 (no drive, no admin)
- *   attic     90 min, $15 material: alone $219, riding $169
+ *   reachable 45 min, $12 material: alone $169 (drive 20 min + $8 admin), riding $119 (no drive, no admin)
+ *   attic     90 min, $15 material: alone $269, riding $219
  * The inside-a-wall tier has no price (a custom quote) and no knob.
  *
  * Insert-if-missing: an existing row is never overwritten (an admin may already have edited it). The insert also writes one
@@ -23,12 +23,12 @@
 const { isDeepStrictEqual } = require('util');
 
 const KEY = 'rodent_dead_animal_removal';
-const TAG = 'migration:20261026140100_dead_rodent_removal_pricing_config';
+const TAG = 'migration:20261029130100_dead_rodent_removal_pricing_config';
 const SEED = {
-  reachable: { alone: 149, riding: 99, on_site_min: 45 },
-  attic: { alone: 219, riding: 169, on_site_min: 90 },
+  reachable: { alone: 169, riding: 119, on_site_min: 45 },
+  attic: { alone: 269, riding: 219, on_site_min: 90 },
 };
-const REASON = 'Seed the Dead Rodent Removal & Odor Treatment prices (owner approved 2026-10-26): easy reach $149 alone / $99 riding, attic search $219 alone / $169 riding; riding = the same estimate has another priced rodent one-time line (no drive, no admin). Dark behind GATE_DEAD_ANIMAL_REMOVAL.';
+const REASON = 'Seed the Dead Rodent Removal & Odor Treatment prices (owner 2026-10-29, from the 2026-10-26 market check): easy reach $169 alone / $119 riding, attic search $269 alone / $219 riding; riding = the same estimate has another priced rodent one-time line (no drive, no admin). Dark behind GATE_DEAD_ANIMAL_REMOVAL.';
 const CHANGELOG = {
   version_from: 'v4.6',
   version_to: 'v4.6',

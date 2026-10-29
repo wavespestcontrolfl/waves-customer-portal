@@ -4,12 +4,12 @@
  * The DB-editable knobs of Dead Rodent Removal & Odor Treatment (pricing_config key `rodent_dead_animal_removal`).
  *
  * Production pricing is DB-authoritative: the row seeds from the in-code table (constants.js RODENT.deadAnimalRemoval,
- * migration 20261026140100) and an admin may edit it. This file is the ONE validator of that row (the admin PUT and the
+ * migration 20261029130100) and an admin may edit it. This file is the ONE validator of that row (the admin PUT and the
  * db-bridge sync both call it) and the one place that turns it into constants.
  *
  *   {
- *     "reachable": { "alone": 149, "riding": 99,  "on_site_min": 45 },
- *     "attic":     { "alone": 219, "riding": 169, "on_site_min": 90 }
+ *     "reachable": { "alone": 169, "riding": 119, "on_site_min": 45 },
+ *     "attic":     { "alone": 269, "riding": 219, "on_site_min": 90 }
  *   }
  *
  *   alone / riding   dollars, a plain JSON number from 1 to 2000 (riding = no drive, no admin; it may not exceed alone)

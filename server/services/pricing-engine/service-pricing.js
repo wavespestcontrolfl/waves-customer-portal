@@ -6235,7 +6235,7 @@ function priceSanitation(options = {}) {
 // An estimate saved with the line before the gate went off stays a normal
 // estimate: nothing in send, accept, booking or completion calls this pricer.
 function assertDeadAnimalRemovalEnabled() {
-  if (require('../../config/feature-gates').deadAnimalRemovalLive()) return;
+  if (require('../../config/feature-gates').deadAnimalRemovalLive?.() === true) return;
   const err = new Error('Dead Rodent Removal & Odor Treatment is not enabled on this environment (GATE_DEAD_ANIMAL_REMOVAL) - remove the service or flip the gate.');
   err.name = 'PricingError';
   err.status = 400;

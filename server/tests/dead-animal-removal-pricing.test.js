@@ -45,30 +45,33 @@ const formula = ({ onSiteMin, material, riding }) => {
   return roundUpToNine(((onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60 + material + admin) / 0.40);
 };
 
-describe('the stored prices are the owner formula, written down', () => {
+describe('the stored prices sit at or above the owner cost formula (the floor)', () => {
   test.each([
-    ['reachable', 45, 12],
-    ['attic', 90, 15],
-  ])('%s: alone and riding equal the formula (rounded up to a price ending in 9)', (tier, onSiteMin, material) => {
+    ['reachable', 45, 12, 149, 99],
+    ['attic', 90, 15, 219, 169],
+  ])('%s: the formula floor is written down and alone and riding are not below it', (tier, onSiteMin, material, aloneFloor, ridingFloor) => {
     const cfg = RODENT.deadAnimalRemoval[tier];
     expect(cfg.durationMin).toBe(onSiteMin);
     expect(cfg.material).toBe(material);
-    expect(cfg.alone).toBe(formula({ onSiteMin, material, riding: false }));
-    expect(cfg.riding).toBe(formula({ onSiteMin, material, riding: true }));
+    expect(formula({ onSiteMin, material, riding: false })).toBe(aloneFloor);
+    expect(formula({ onSiteMin, material, riding: true })).toBe(ridingFloor);
+    expect(cfg.alone).toBeGreaterThanOrEqual(aloneFloor);
+    expect(cfg.riding).toBeGreaterThanOrEqual(ridingFloor);
+    expect(cfg.riding).toBeLessThanOrEqual(cfg.alone);
   });
 
-  test('the four prices are 149 / 99 and 219 / 169', () => {
-    expect([RODENT.deadAnimalRemoval.reachable.alone, RODENT.deadAnimalRemoval.reachable.riding]).toEqual([149, 99]);
-    expect([RODENT.deadAnimalRemoval.attic.alone, RODENT.deadAnimalRemoval.attic.riding]).toEqual([219, 169]);
+  test('the four prices are 169 / 119 and 269 / 219', () => {
+    expect([RODENT.deadAnimalRemoval.reachable.alone, RODENT.deadAnimalRemoval.reachable.riding]).toEqual([169, 119]);
+    expect([RODENT.deadAnimalRemoval.attic.alone, RODENT.deadAnimalRemoval.attic.riding]).toEqual([269, 219]);
   });
 });
 
 describe('priceDeadAnimalRemoval', () => {
   test.each([
-    ['reachable', false, 149, 45],
-    ['reachable', true, 99, 45],
-    ['attic', false, 219, 90],
-    ['attic', true, 169, 90],
+    ['reachable', false, 169, 45],
+    ['reachable', true, 119, 45],
+    ['attic', false, 269, 90],
+    ['attic', true, 219, 90],
   ])('%s riding=%s -> $%i, %i minutes on site', (tier, riding, expected, minutes) => {
     const line = priceDeadAnimalRemoval({ tier, riding });
     expect(line).toMatchObject({
@@ -101,8 +104,8 @@ describe('priceDeadAnimalRemoval', () => {
   });
 
   test('riding is only true for a literal true', () => {
-    expect(priceDeadAnimalRemoval({ tier: 'reachable', riding: 'true' }).price).toBe(149);
-    expect(priceDeadAnimalRemoval({ tier: 'reachable', riding: 1 }).price).toBe(149);
+    expect(priceDeadAnimalRemoval({ tier: 'reachable', riding: 'true' }).price).toBe(169);
+    expect(priceDeadAnimalRemoval({ tier: 'reachable', riding: 1 }).price).toBe(169);
   });
 });
 
@@ -123,7 +126,7 @@ describe('the gate: NEW QUOTES ONLY', () => {
   test.each(['1', 'true', 'on', 'TRUE', 'On'])('GATE_DEAD_ANIMAL_REMOVAL=%p is on, read at call time', (value) => {
     process.env.GATE_DEAD_ANIMAL_REMOVAL = value;
     expect(featureGates.deadAnimalRemovalLive()).toBe(true);
-    expect(price({ deadAnimalRemoval: { tier: 'reachable' } }).price).toBe(149);
+    expect(price({ deadAnimalRemoval: { tier: 'reachable' } }).price).toBe(169);
     process.env.GATE_DEAD_ANIMAL_REMOVAL = 'false';
     expect(() => price({ deadAnimalRemoval: { tier: 'reachable' } })).toThrow(/not enabled/);
   });
@@ -137,19 +140,19 @@ describe('the gate: NEW QUOTES ONLY', () => {
 
 describe('the engine decides riding from its own priced rodent lines', () => {
   test('alone: own visit prices', () => {
-    expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 149, riding: false });
-    expect(price({ deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 219, riding: false });
+    expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 169, riding: false });
+    expect(price({ deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 269, riding: false });
   });
 
   test('a priced trapping line on the same estimate makes it ride', () => {
     const estimate = generateEstimate({ ...HOME, services: { rodentTrapping: true, deadAnimalRemoval: { tier: 'reachable' } } });
     expect(estimate.lineItems.find((l) => l.service === 'rodent_trapping').price).toBeGreaterThan(0);
-    expect(lineOf(estimate)).toMatchObject({ price: 99, riding: true });
-    expect(lineOf(generateEstimate({ ...HOME, services: { rodentTrapping: true, deadAnimalRemoval: { tier: 'attic' } } }))).toMatchObject({ price: 169, riding: true });
+    expect(lineOf(estimate)).toMatchObject({ price: 119, riding: true });
+    expect(lineOf(generateEstimate({ ...HOME, services: { rodentTrapping: true, deadAnimalRemoval: { tier: 'attic' } } }))).toMatchObject({ price: 219, riding: true });
   });
 
   test('the order of the keys on the request does not matter', () => {
-    expect(lineOf(generateEstimate({ ...HOME, services: { deadAnimalRemoval: { tier: 'reachable' }, rodentTrapping: true } })).price).toBe(99);
+    expect(lineOf(generateEstimate({ ...HOME, services: { deadAnimalRemoval: { tier: 'reachable' }, rodentTrapping: true } })).price).toBe(119);
   });
 
   test.each([
@@ -160,7 +163,7 @@ describe('the engine decides riding from its own priced rodent lines', () => {
     ['bird box', { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 1 } }],
   ])('a priced %s line makes it ride', (_label, extra) => {
     const estimate = generateEstimate({ ...HOME, services: { ...extra, deadAnimalRemoval: { tier: 'reachable' } } });
-    expect(lineOf(estimate)).toMatchObject({ price: 99, riding: true });
+    expect(lineOf(estimate)).toMatchObject({ price: 119, riding: true });
   });
 
   test('the host rule: only a PRICED line hosts', () => {
@@ -185,10 +188,10 @@ describe('the engine decides riding from its own priced rodent lines', () => {
       const engine = require('../services/pricing-engine/estimate-engine');
       const estimate = engine.generateEstimate({ ...HOME, services: { rodentTrapping: true, deadAnimalRemoval: { tier: 'reachable' } } });
       expect(estimate.lineItems.find((l) => l.service === 'rodent_trapping').quoteRequired).toBe(true);
-      expect(lineOf(estimate)).toMatchObject({ price: 149, riding: false });
+      expect(lineOf(estimate)).toMatchObject({ price: 169, riding: false });
       // With a PRICED host next to the custom quote, it rides again.
       const withHost = engine.generateEstimate({ ...HOME, services: { rodentTrapping: true, rodentInspection: true, deadAnimalRemoval: { tier: 'attic' } } });
-      expect(lineOf(withHost)).toMatchObject({ price: 169, riding: true });
+      expect(lineOf(withHost)).toMatchObject({ price: 219, riding: true });
     });
     jest.dontMock('../services/pricing-engine/service-pricing');
   });
@@ -199,11 +202,11 @@ describe('the engine decides riding from its own priced rodent lines', () => {
       expect(hosts.has(service)).toBe(false);
       expect(isDeadAnimalRidingHostLine({ service, price: 99 })).toBe(false);
     }
-    expect(price({ rodentBait: true, deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 149, riding: false });
+    expect(price({ rodentBait: true, deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 169, riding: false });
   });
 
   test('a riding key on the request is never read', () => {
-    expect(price({ deadAnimalRemoval: { tier: 'reachable', riding: true } })).toMatchObject({ price: 149, riding: false });
+    expect(price({ deadAnimalRemoval: { tier: 'reachable', riding: true } })).toMatchObject({ price: 169, riding: false });
     expect(price({ deadAnimalRemoval: { tier: 'reachable', riding: true } }).riding).toBe(false);
   });
 
@@ -265,7 +268,7 @@ describe('discount behavior matches the other rodent one-time lines', () => {
     const [dead] = discounted({ deadAnimalRemoval: { tier: 'reachable' } });
     const [inspection] = discounted({ rodentInspection: true });
     const [sanitation] = discounted({ sanitation: { tier: 'light', affectedSqFt: 200 } });
-    expect(dead).toMatchObject({ price: 149, priceBeforeDiscount: 149, priceAfterDiscount: 126.65 });
+    expect(dead).toMatchObject({ price: 169, priceBeforeDiscount: 169, priceAfterDiscount: 143.65 });
     expect(dead.discount.effectiveDiscount).toBe(0.15);
     expect(inspection.discount.effectiveDiscount).toBe(0.15);
     expect(sanitation.discount.effectiveDiscount).toBe(0.15);
@@ -273,7 +276,7 @@ describe('discount behavior matches the other rodent one-time lines', () => {
   });
 
   test('a customer with no recurring service pays the fixed price', () => {
-    expect(lineOf(generateEstimate({ ...HOME, services: { deadAnimalRemoval: { tier: 'attic' } } })).priceAfterDiscount).toBe(219);
+    expect(lineOf(generateEstimate({ ...HOME, services: { deadAnimalRemoval: { tier: 'attic' } } })).priceAfterDiscount).toBe(269);
   });
 
   test('the line is not part of a rodent bundle', () => {
@@ -297,8 +300,8 @@ describe('the DB-editable row (pricing_config rodent_dead_animal_removal)', () =
 
   test('the seed row is the code table', () => {
     expect(seed()).toEqual({
-      reachable: { alone: 149, riding: 99, on_site_min: 45 },
-      attic: { alone: 219, riding: 169, on_site_min: 90 },
+      reachable: { alone: 169, riding: 119, on_site_min: 45 },
+      attic: { alone: 269, riding: 219, on_site_min: 90 },
     });
     expect(config.normalizeDeadAnimalRemovalConfig(seed())).toMatchObject({ ok: true });
   });
@@ -326,15 +329,15 @@ describe('the DB-editable row (pricing_config rodent_dead_animal_removal)', () =
     ['an array', []],
   ])('a malformed row (%s) is ignored whole and the code defaults stand', async (_label, data) => {
     await sync(data);
-    expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 149, durationMin: 45 });
-    expect(price({ deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 219, durationMin: 90 });
+    expect(price({ deadAnimalRemoval: { tier: 'reachable' } })).toMatchObject({ price: 169, durationMin: 45 });
+    expect(price({ deadAnimalRemoval: { tier: 'attic' } })).toMatchObject({ price: 269, durationMin: 90 });
   });
 
   test('a deleted row restores the defaults on the next sync (an old edit is not pinned)', async () => {
     await sync({ reachable: { alone: 159, riding: 109, on_site_min: 50 }, attic: { alone: 229, riding: 179, on_site_min: 100 } });
     expect(price({ deadAnimalRemoval: { tier: 'reachable' } }).price).toBe(159);
     await sync(undefined);
-    expect(price({ deadAnimalRemoval: { tier: 'reachable' } }).price).toBe(149);
+    expect(price({ deadAnimalRemoval: { tier: 'reachable' } }).price).toBe(169);
   });
 
   test('a row edit never touches the stated material cost', async () => {
@@ -365,12 +368,12 @@ describe('the staff estimator translator (property-lookup-v2)', () => {
   test('a client riding value is not carried', () => {
     const input = translate(['RODENT_DEAD_ANIMAL'], { deadAnimalAccess: 'reachable', deadAnimalRiding: true, riding: true });
     expect(input.services.deadAnimalRemoval).toEqual({ tier: 'reachable' });
-    expect(lineOf(generateEstimate(input))).toMatchObject({ price: 149, riding: false });
+    expect(lineOf(generateEstimate(input))).toMatchObject({ price: 169, riding: false });
   });
 
   test('riding is decided with sanitation selected next to it', () => {
     const input = translate(['RODENT_SANITATION', 'RODENT_DEAD_ANIMAL'], { deadAnimalAccess: 'attic', sanitationTier: 'light', sanitationArea: 200 });
-    expect(lineOf(generateEstimate(input))).toMatchObject({ price: 169, riding: true });
+    expect(lineOf(generateEstimate(input))).toMatchObject({ price: 219, riding: true });
   });
 
   test('gate off: the whole translated request is refused with the 400', () => {
@@ -386,7 +389,7 @@ describe('the legacy mapper', () => {
   test('a priced line becomes a one-time row with the label, the price, the tier and the on-site minutes', () => {
     const item = itemOf(mapped({ deadAnimalRemoval: { tier: 'attic' } }));
     expect(item).toMatchObject({ service: 'rodent_dead_animal_removal', name: 'Dead Rodent Removal & Odor Treatment', deadAnimalTier: 'attic', onSiteMinutes: 90 });
-    expect(Number(item.price)).toBe(219);
+    expect(Number(item.price)).toBe(269);
   });
 
   test('a custom-quote line stays an unpriced quote-required row', () => {
@@ -399,6 +402,6 @@ describe('the legacy mapper', () => {
     const shape = mapped({ rodentInspection: true, deadAnimalRemoval: { tier: 'reachable' } });
     const items = [...(shape.oneTime?.items || []), ...(shape.specItems || [])].filter((i) => i.price > 0);
     expect(items.map((i) => i.service).sort()).toEqual(['rodent_dead_animal_removal', 'rodent_inspection']);
-    expect(items.find((i) => i.service === 'rodent_dead_animal_removal').price).toBe(99);
+    expect(items.find((i) => i.service === 'rodent_dead_animal_removal').price).toBe(119);
   });
 });
