@@ -393,6 +393,8 @@ const TRIGGER_REGISTRY = {
       link: p.threadId
         ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
+      // Handled: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No reply.
+      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('handled') },
     }),
   },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
@@ -509,6 +511,8 @@ const TRIGGER_REGISTRY = {
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
+      // Called back: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No call.
+      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('called_back') },
     }),
   },
   // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.

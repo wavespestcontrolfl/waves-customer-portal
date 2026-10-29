@@ -115,7 +115,9 @@ async function acquireClaim(s, stillHeld) {
   if (!stillHeld('before_claim')) {
     return early409('The send lock was lost before anything was sent — nothing was sent. Try again in a minute.', IN_FLIGHT);
   }
-  const claim = await claimReceiptJobForOperatorSend(s.id, { sawUnsent: s.sawUnsent ?? !s.invoice.receipt_sent_at });
+  // requirePaid: the paid check at the top of sendInvoiceReceipt can be overtaken by an Undo of the payment; the claim re-reads it under the claim lock.
+  const claim = await claimReceiptJobForOperatorSend(s.id, { sawUnsent: s.sawUnsent ?? !s.invoice.receipt_sent_at, requirePaid: true });
+  if (claim.notPaid) return early409('This invoice is no longer paid — nothing was sent.', 'invoice_not_paid');
   if (claim.inFlight) {
     return early409(claim.byOperator
       ? 'Another receipt send for this invoice is in progress — refresh in a minute before resending.'

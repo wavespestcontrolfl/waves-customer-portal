@@ -2434,7 +2434,7 @@ describe('completion route wiring (source contracts)', () => {
     // due-cents ceiling rides beside the subtotal cap; the annual stamp is
     // validated against the LIVE term, never taken at face value.
     expect(source).toMatch(/refuseWhenDunningStopped: true,/);
-    expect(source).toMatch(/maxAuthorizedChargeCents: Math\.max\(0, Math\.round\(\(Number\(invoice\.total \|\| 0\) - Number\(invoice\.credit_applied \|\| 0\)\) \* 100\)\),/);
+    expect(source).toMatch(/maxAuthorizedChargeCents: Math\.round\(require\('\.\.\/services\/invoice-helpers'\)\.invoiceAmountDue\(invoice\) \* 100\),/);
     const laneSource = fs.readFileSync(path.join(__dirname, '../services/billing-lane.js'), 'utf8');
     expect(laneSource).toMatch(/annualPrepayCoversVisit\(fullSvc, dbConn, \{ throwOnError: true \}\)/);
     // Round 5-6: entry keys on the FULL candidate (no-cost + unresolved

@@ -1069,7 +1069,7 @@ async function alertAutopayHold(schedule, now) {
 async function raiseAutopayHoldAlert(schedule, now) {
   const rows = await db('invoice_followup_sequences as s').join('invoices as i', 'i.id', 's.invoice_id')
     .where('s.customer_id', schedule.customer_id).whereIn('s.status', ['active', 'autopay_hold'])
-    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES).select('i.total', 'i.credit_applied');
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES).select('i.total', 'i.credit_applied', 'i.amount_paid');
   const { invoiceAmountDue } = require('../invoice-helpers');
   const total = rows.reduce((sum, r) => sum + Math.round(invoiceAmountDue(r) * 100), 0) / 100;
   const who = (await customerName(schedule.customer_id))?.short || 'The customer';

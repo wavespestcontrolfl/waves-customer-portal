@@ -292,8 +292,8 @@ async function getKpiSnapshot() {
       .whereNull('paid_at')
       .whereNotIn('status', ['draft', 'void'])
       .select(
-        db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as total_owed'),
-        db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue"),
+        db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)) as total_owed'),
+        db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) ELSE 0 END) as overdue"),
         db.raw('COUNT(*) as count'),
       ).first(),
     // Latest per customer keys on scored_at (current rows are updated in
@@ -1292,15 +1292,15 @@ async function getOutstandingBalances(input) {
       .leftJoin({ c: 'customers' }, 'i.customer_id', 'c.id')
       .whereNull('i.paid_at')
       .whereNotIn('i.status', ['draft', 'void'])
-      .whereRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) > ?', [minAmount])
+      .whereRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0) - COALESCE(i.amount_paid, 0), 0) > ?', [minAmount])
   )
     .select(
       'i.id', 'i.total', 'i.status', 'i.created_at', 'i.due_date',
-      db.raw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) as amount_due'),
+      db.raw('GREATEST(i.total - COALESCE(i.credit_applied, 0) - COALESCE(i.amount_paid, 0), 0) as amount_due'),
       'c.id as customer_id', 'c.first_name', 'c.last_name',
       'c.waveguard_tier', 'c.phone',
     )
-    .orderByRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) desc');
+    .orderByRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0) - COALESCE(i.amount_paid, 0), 0) desc');
 
   // ET-anchored "today" so the days-past-due math doesn't drift at the
   // UTC midnight boundary. due_date is a date-only column — parse it as
