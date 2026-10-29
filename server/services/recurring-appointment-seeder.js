@@ -11,6 +11,7 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
+const { LAWN_ROUNDS_9, lawnRoundDate, roundOf } = require('./lawn-rounds');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -133,10 +134,36 @@ function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDat
   return null;
 }
 
+// Weekend shifts and blackout nudges can push a lawn-rounds date across a
+// round edge, which would double up two visits in one round and leave another
+// empty. Walk back INTO the round the cadence intended (the round of
+// `intendedDate`, the date lawnRoundDate returned before any shift) from
+// whichever edge was crossed. A no-op for every other pattern, for a call with
+// no intendedDate, and for dates already inside the intended round. Returns
+// null when no clear date exists inside the round within the bounded search,
+// so callers skip the candidate like every other exhausted nudge.
+function clampDateToRound(pattern, dateStr, { skipWeekends = false, blackoutDates = null, intendedDate = null } = {}) {
+  if (pattern !== LAWN_ROUNDS_9 || !dateStr || !intendedDate) return dateStr;
+  const round = roundOf(intendedDate);
+  if (!round) return dateStr;
+  if (dateStr >= round.start && dateStr <= round.end) return dateStr;
+  const step = dateStr > round.end ? -1 : 1;
+  let candidate = dateStr;
+  for (let i = 0; i < 75; i++) {
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
+    if (candidate < round.start || candidate > round.end) continue;
+    const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+    const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+    if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
+  }
+  return null;
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
   [SEASONAL_FEB_OCT]: 9,
+  [LAWN_ROUNDS_9]: 9,
   bimonthly: 6,
   quarterly: 4,
   triannual: 3,
@@ -173,6 +200,9 @@ function normalizeRecurringPattern(value) {
   // reason as every_6_weeks above: numeric 9-visit inference must stay
   // 'bimonthly' so legacy 9-visit rows keep their office-scheduled behavior.
   if ([SEASONAL_FEB_OCT.replace(/_/g, ''), 'seasonalfeboctober', 'seasonal9', 'seasonal9x'].includes(compact)) return SEASONAL_FEB_OCT;
+  // Lawn 9x rounds (nine fixed rounds a year). EXPLICIT tokens only: numeric
+  // 9-visit inference and the '9x' token keep resolving as they do today.
+  if ([LAWN_ROUNDS_9.replace(/_/g, ''), 'lawnrounds'].includes(compact)) return LAWN_ROUNDS_9;
   if (['bimonthly', 'bimonth', 'bimonthlypest', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bimonthly';
   if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
   if (['triannual', 'threetimesyearly', '3x', '3xperyear'].includes(compact)) return 'triannual';
@@ -188,7 +218,7 @@ function normalizeRecurringPattern(value) {
   if (compact === 'biweekly') return 'biweekly';
   const visits = Number(raw);
   if (Number.isFinite(visits) && visits > 0) return patternFromVisitsPerYear(visits);
-  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT].includes(raw)) return raw;
+  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT, LAWN_ROUNDS_9].includes(raw)) return raw;
   return null;
 }
 
@@ -328,6 +358,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDate(safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -340,7 +371,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
 // walk, a day gap, the nth-weekday walk, the season, or a custom interval)?
 // Anything else schedules at FALLBACK_RECURRENCE_GAP_DAYS.
 function schedulerPlacesPattern(pattern) {
-  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === 'custom'
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === LAWN_ROUNDS_9 || pattern === 'custom'
     || !!MONTH_RECURRENCE_INTERVALS[pattern] || Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern);
 }
 
@@ -362,7 +393,7 @@ function intervalDaysForPattern(pattern, intervalDays = null) {
   if (pattern === 'monthly_nth_weekday') return MONTH_RECURRENCE_INTERVALS.monthly * 30;
   if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
   if (Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern)) return DAY_RECURRENCE_INTERVALS[pattern];
-  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT) return null;
+  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT || pattern === LAWN_ROUNDS_9) return null;
   return FALLBACK_RECURRENCE_GAP_DAYS;
 }
 
@@ -426,7 +457,8 @@ function* recurringDateCandidates(baseDate, pattern, {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     const shifted = shiftPastWeekend(rawNext, skipWeekends, weekendShift);
     const cleared = nudgeOffBlackoutDates(shifted, blackoutDates, { skipWeekends });
-    const nextDate = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
+    const seasonal = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
+    const nextDate = seasonal && clampDateToRound(pattern, seasonal, { skipWeekends, blackoutDates, intendedDate: rawNext });
     if (!nextDate || recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDate) || seen.has(nextDate)) continue;
     seen.add(nextDate);
     yield nextDate;
@@ -1514,6 +1546,9 @@ module.exports = {
   seasonalFebOctDate,
   nextSeasonalFebOctDue,
   clampDateToSeason,
+  LAWN_ROUNDS_9,
+  lawnRoundDate,
+  clampDateToRound,
   firstInSeasonDate,
   markParentRecurring,
   normalizeRecurringPattern,
