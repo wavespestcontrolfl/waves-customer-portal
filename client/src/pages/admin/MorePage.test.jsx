@@ -17,11 +17,11 @@ import { clearEmailDrafts, loadEmailDrafts, setEmailSending, updateEmailDrafts }
 
 // The grouped menu is the only menu; `navigation: false` models the unverified
 // session, where the shell gives no navigation context.
-function renderMore(role = "admin", navigation = true) {
+function renderMore(role = "admin", navigation = true, name) {
   return render(
     <MemoryRouter initialEntries={["/admin/more"]}>
       <Routes>
-        <Route element={<AdminNavigationProvider user={{ id: 'fixture', role }} enabled={navigation}><Outlet context={{ user: { role } }} /></AdminNavigationProvider>}>
+        <Route element={<AdminNavigationProvider user={{ id: 'fixture', role }} enabled={navigation}><Outlet context={{ user: { role, name } }} /></AdminNavigationProvider>}>
           <Route path="/admin/more" element={<MorePage />} />
         </Route>
         <Route path="/admin/login" element={<div>Signed out</div>} />
@@ -33,12 +33,19 @@ function renderMore(role = "admin", navigation = true) {
 afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); });
 
 describe("MorePage — the mobile Settings tab", () => {
-  it('keeps the complete directory and preferences under the grouped menu', () => {
+  it('is the one phone menu: every page that is not a bottom tab, with no row named after a tab (owner 2026-10-29)', () => {
     renderMore('admin');
+    // An owner has no Today tab, so Today is listed; Schedule and Customers are
+    // tabs, so their other pages are plain rows, never a folder named after the tab.
+    expect(screen.getByRole('link', { name: 'Today', exact: true })).toHaveAttribute('href', '/admin/today');
+    expect(screen.getByRole('link', { name: 'Contracts', exact: true })).toHaveAttribute('href', '/admin/contracts');
+    expect(screen.getByRole('link', { name: 'Gate codes', exact: true })).toHaveAttribute('href', '/admin/customers/gate-codes');
+    for (const tab of ['Dashboard', 'Schedule', 'Customers', 'Communications']) {
+      expect(screen.queryByRole('link', { name: tab, exact: true }), tab).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: tab, exact: true }), tab).not.toBeInTheDocument();
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Expand Sales', exact: true }));
     expect(screen.getByRole('link', { name: 'Estimates', exact: true })).toHaveAttribute('href', '/admin/pipeline?tab=estimates');
-    fireEvent.click(screen.getByRole('button', { name: 'Customers', exact: true }));
-    expect(screen.getByRole('link', { name: 'Contracts', exact: true })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Operations', exact: true }));
     expect(screen.getByRole('link', { name: 'Assessments', exact: true })).toHaveAttribute('href', '/admin/lawn-assessments?tab=field');
     expect(screen.getByRole('link', { name: 'Health', exact: true })).toHaveAttribute('href', '/admin/tool-health');
@@ -49,10 +56,18 @@ describe("MorePage — the mobile Settings tab", () => {
 
   it('keeps Contracts and Health owner-only in the grouped technician directory', () => {
     renderMore('technician');
+    expect(screen.queryByRole('link', { name: 'Today', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Contracts', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Customers', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Settings', exact: true })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Usage', exact: true })).toBeVisible();
   });
+  it("shows the signed-in account, since a phone has no side menu", () => {
+    renderMore("technician", true, "Fixture Technician");
+    expect(screen.getByText("Fixture Technician")).toBeInTheDocument();
+    expect(screen.getByText("Technician")).toBeInTheDocument();
+  });
+
   it("is titled Settings and lists the Settings leaves inline instead of a Settings nav row", () => {
     renderMore();
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();

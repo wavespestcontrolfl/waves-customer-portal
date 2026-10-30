@@ -5,6 +5,7 @@ import {
   ADMIN_MOBILE_TABS,
   ADMIN_NAV_ITEMS,
   ADMIN_WORKSPACE_DESTINATIONS,
+  getAdminMobileTabs,
   isAdminNavItemActive,
   isAdminNavItemEnabled,
   isPathAdminOnly,
@@ -76,6 +77,13 @@ describe("grouped workspaces", () => {
 function sectionItems(sections) {
   return sections.flatMap(({ items }) => items);
 }
+
+describe("getAdminMobileTabs", () => {
+  it("gives each login its own bottom tabs: Dashboard for the owner, Today for a technician", () => {
+    expect(getAdminMobileTabs("admin").map(({ id }) => id)).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
+    expect(getAdminMobileTabs("technician").map(({ id }) => id)).toEqual(["today", "schedule", "customers", "communications", "more"]);
+  });
+});
 
 describe("isAdminNavItemEnabled", () => {
   it("needs the flag, or any one of the anyFlag list, and fails closed", () => {

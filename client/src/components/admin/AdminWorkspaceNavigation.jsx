@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, LogOut, Pin, Search, Sparkles, X } from 'lucide-react';
+import { ChevronDown, LogOut, Pin, Search, Sparkles } from 'lucide-react';
 import { Button, UiSurface } from '../ui';
 import { cn } from '../ui/cn';
 import useAdminNavigation from '../../hooks/useAdminNavigation';
@@ -63,7 +63,7 @@ export function PinnedWorkspaceLinks({ onNavigate, source = 'sidebar' }) {
   </div>;
 }
 
-export default function AdminWorkspaceNavigation({ user, isMobile, onClose, onAsk, onSearch, onLogout, unreadCount }) {
+export default function AdminWorkspaceNavigation({ user, onClose, onAsk, onSearch, onLogout, unreadCount }) {
   const navigation = useAdminNavigation();
   if (!navigation) return null;
   const { groups } = navigation;
@@ -72,7 +72,7 @@ export default function AdminWorkspaceNavigation({ user, isMobile, onClose, onAs
       <img src="/waves-logo.png" alt="Waves" className="h-7" />
       <span className="text-16 font-medium" aria-hidden>Waves</span>
       <span className="flex-1" />
-      {isMobile ? <Button variant="ghost" onClick={onClose} aria-label="Close menu" className="!px-3"><X size={18} aria-hidden /></Button> : <NotificationBell type="admin" />}
+      <NotificationBell type="admin" />
     </div>
     <div className="shrink-0 space-y-1 px-3 py-2">
       <Button variant="secondary" onClick={onSearch} className="w-full !justify-start" aria-label="Search pages"><Search size={18} aria-hidden /><span className="flex-1 text-left">Search</span><kbd className="text-14 font-normal">⌘K</kbd></Button>
