@@ -122,6 +122,7 @@ function scenario({
   prepaidVisitIds = [],
   paidInvoiceVisitIds = [],
   cardRequestVisitIds = [],
+  cardRequestFeeStatus = null,
   invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
@@ -197,7 +198,7 @@ function scenario({
       return [];
     }
     if (table === 'appointment_card_requests') {
-      if (op === 'await') return cardRequestVisitIds.map((id) => ({ scheduled_service_id: id }));
+      if (op === 'await') return cardRequestVisitIds.map((id) => ({ scheduled_service_id: id, fee_status: cardRequestFeeStatus }));
       return [];
     }
     if (table === 'invoices') {
@@ -425,17 +426,23 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
-  test('refuses a /secure visit whose late-cancel fee is unsettled — that path CHARGES (Codex #3337 r5 P1)', async () => {
-    // handleAppointmentCardCancellation does not merely close the request: at
-    // appointment-card-request.js:1996 it calls chargeAppointmentNoShowFee
-    // inside the cancel window. The trim has no fee preview and no waiver, so
-    // such a visit must never reach the follow-through.
-    const { conn, parent } = scenario({ upcoming: 4, cardRequestVisitIds: [103] });
+  test('refuses a /secure visit whose late-cancel fee event is in flight — that path CHARGES (Codex #3337 r5 P1)', async () => {
+    // handleAppointmentCardCancellation does not merely close the request: it
+    // calls chargeAppointmentNoShowFee inside the cancel window. The trim has
+    // no fee preview and no waiver, so a visit whose fee event is already
+    // charging must never reach the follow-through.
+    const { conn, parent } = scenario({ upcoming: 4, cardRequestVisitIds: [103], cardRequestFeeStatus: 'charging' });
     await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
       status: 409,
       message: expect.stringContaining('late-cancel fee has not been settled'),
     });
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('an undecided fee on a recurring series visit does not block the trim — the fee rail never charges recurring visits (owner ruling 2026-10-29)', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3, cardRequestVisitIds: [102] });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
   test('a settled card-request fee does not block the trim', async () => {

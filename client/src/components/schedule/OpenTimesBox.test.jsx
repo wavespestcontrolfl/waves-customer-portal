@@ -226,3 +226,21 @@ describe('already-late days', () => {
   });
 });
 
+describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+  const NOTE = 'Google road times paused: month limit reached. Times marked ~ use the estimate.';
+  it('sits under the "~" legend, and is absent without the server\'s line', () => {
+    render(<OpenTimesBox availability={answer(DAYS, { roadLimit: NOTE })} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.getByTestId('road-limit-note').textContent).toBe(NOTE);
+    cleanup();
+    render(<OpenTimesBox availability={answer()} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+  it('shows only while the legend does: every row on a road time, no line', () => {
+    const google = [day('2035-01-01', [hour('2035-01-01', '09:00', 4, { driveSource: 'google' })])];
+    render(<OpenTimesBox availability={answer(google, { roadLimit: NOTE })} currentDate="2035-01-01" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.queryByText('~ = straight-line estimate, not a road time.')).toBeNull();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+});

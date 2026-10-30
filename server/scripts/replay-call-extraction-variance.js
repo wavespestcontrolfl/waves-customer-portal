@@ -123,6 +123,8 @@ const FIELD_GROUPS = {
     // hallucinating one) must show up here, not just in a triage-flag count.
     'caller_id_disclaimed',
     'phone_note',
+    // The plan the caller chose for a recurring plan (schema 1.29.0): drift must show.
+    'billing_choice',
     // ani_cannot_text / text_phone (schema 1.25.0) — decide which number a
     // call's texts go to (new customer phone, the swap card, the booking-link
     // text); a model that drifts on them must show up here.

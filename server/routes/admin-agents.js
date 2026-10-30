@@ -715,7 +715,7 @@ async function loadAdTasks() {
       const roas = cost > 0 ? value / cost : null;
       return { ...campaign, cost, conversions, value, roas };
     })
-    .filter((row) => row.budget_mode === 'stop' || (row.cost >= 50 && row.conversions < 1) || (row.cost >= 75 && row.roas != null && row.roas < 1.5))
+    .filter((row) => (row.cost >= 50 && row.conversions < 1) || (row.cost >= 75 && row.roas != null && row.roas < 1.5))
     .sort((a, b) => b.cost - a.cost)
     .slice(0, 10);
 
@@ -724,14 +724,14 @@ async function loadAdTasks() {
     tasks: rows.map((row) => task({
       id: `ad_campaign:${row.id}`,
       agentId: 'ads',
-      title: row.budget_mode === 'stop' ? `Campaign stopped: ${row.campaign_name}` : `Review spend: ${row.campaign_name}`,
+      title: `Review spend: ${row.campaign_name}`,
       summary: [
         row.campaign_type,
         row.target_area,
         `$${Math.round(row.cost)} spent in 7d`,
         `${Math.round(row.conversions)} conv`,
       ].filter(Boolean).join(' · '),
-      priority: row.budget_mode === 'stop' || (row.cost >= 100 && row.conversions < 1) ? 'high' : 'medium',
+      priority: row.cost >= 100 && row.conversions < 1 ? 'high' : 'medium',
       source: 'ad_campaigns',
       sourceLabel: 'PPC',
       sourceId: row.id,

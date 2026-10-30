@@ -658,6 +658,15 @@ describe('the send', () => {
     }));
   });
 
+  test('a recurring-plan visit\'s invite carries NO fee clause (owner ruling 2026-10-29: one-time visits only)', async () => {
+    mockTableHandlers = baseHandlers({
+      scheduled_services: { first: () => ({ ...VISIT, service_type: 'Quarterly Pest Control', is_recurring: true, recurring_pattern: 'quarterly' }) },
+    });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'admin' });
+    expect(res.action).toBe('sent');
+    expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card', expect.objectContaining({ cancel_fee_line: '' }));
+  });
+
   test('customerInitiated rides to the send for an inbound-call booking; absent otherwise (owner ruling 2026-09-30)', async () => {
     // The call pipeline marks the card ask as the caller's own action, so
     // the send-window validator lets it out at night. The marker is an
@@ -1779,6 +1788,16 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
   });
 
+  test('secured render for a recurring visit with frozen terms carries NO fee note — the rail never enforces them (owner ruling 2026-10-29)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24,
+    });
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, is_recurring: true, recurring_pattern: 'quarterly' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(res.cancelFeeNote).toBeNull();
+  });
+
   test('a sticky-marked row\'s secured render carries the reset sentence it consented to', async () => {
     mockTableHandlers.appointment_card_requests.first = () => ({
       ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24, sticky_window_disclosed: true,
@@ -2170,14 +2189,34 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
     expect(Object.keys(res).sort()).toEqual([
       // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
       // ruling) — present in ALL states, unrelated to the plan gate this test pins.
-      // stickyDisclosureVersion joined 2026-08-10 (sticky cancel window) —
-      // the completing tab's echo token; attached ONLY to the ready state
-      // (Codex #3342 r8 P1), unrelated to the plan gate this test pins.
+      // stickyDisclosureVersion (sticky cancel window) rides only with a fee
+      // disclosure, and PLAN_VISIT is recurring — no fee since the
+      // 2026-10-29 one-time-only ruling, so it is absent here.
       // paymentMethodTypes + capturedMethodType joined 2026-09-08 ("use a
       // different payment method") — the capture UI's tender slice, present
       // whenever a SetupIntent is offered; unrelated to the plan gate.
-      'cancelFeeNote', 'capturedMethodType', 'clientSecret', 'dateDisplay', 'firstName', 'paymentMethodTypes', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
+      'cancelFeeNote', 'capturedMethodType', 'clientSecret', 'dateDisplay', 'firstName', 'paymentMethodTypes', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
     ]);
+    expect(res.cancelFeeNote).toBeNull();
+  });
+
+  test('a recurring-plan visit renders NO fee note and pins the row to no fee terms (owner ruling 2026-10-29)', async () => {
+    const updates = [];
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: {
+        first: () => ({ ...REQUEST }),
+        update: (chain, patch) => { updates.push(patch); return 1; },
+      },
+      scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+      customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+    });
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    expect(res.cancelFeeNote).toBeNull();
+    const stamp = updates.find((p) => 'cancel_window_hours' in p);
+    expect(stamp).toEqual(expect.objectContaining({ no_show_fee_amount: null, cancel_window_hours: 0 }));
   });
 
   test('unpriced visit renders CLOSED and mints no SetupIntent — live price recheck on the token (Codex #3077 P1)', async () => {

@@ -96,9 +96,13 @@ const NATURE_DEFAULTS = {
  * @param {object|null} args.legacy       V1 flat extraction (is_lead / is_spam / is_voicemail / appointment_confirmed / quote_promised)
  * @param {object|null} args.spamVerdict  layered classifier result: { verdict: 'spam'|'not_spam'|'insufficient_signals' }
  * @param {object}      args.outcome      what the pipeline actually did: { appointmentCreated, appointmentPendingReview, customerId, isKnownCustomer }
+ * @param {boolean}     args.thirdPartyNatureDefault  GATE_CALL_APPLICANT_HANDLING, passed in by the caller (this
+ *                                         function stays pure). When true, a job_applicant / vendor_or_partner call
+ *                                         whose model recommendation is no_action_needed keeps the nature default
+ *                                         (vendor_logged): a real call from a third party was handled, not empty.
  * @returns {{ disposition: string, reason: string }}
  */
-function decideDisposition({ extraction = null, legacy = null, spamVerdict = null, outcome = {} }) {
+function decideDisposition({ extraction = null, legacy = null, spamVerdict = null, outcome = {}, thirdPartyNatureDefault = false }) {
   const v2 = extraction || {};
   const v1 = legacy || {};
   const nature = v2.call_nature || null;
@@ -179,6 +183,14 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
     // move belongs to the apply step, not here — deferred follow-up.
     if (isRescheduleIntent && modelRecommended === 'cancellation_processed') {
       return done('existing_customer_routed', 'reschedule_not_cancellation_model');
+    }
+    // Third-party natures (GATE_CALL_APPLICANT_HANDLING): "no action needed" is
+    // the dead-air label. An applicant or vendor who spoke to us is logged as
+    // that third party. Only no_action_needed is replaced; any other model
+    // recommendation still stands, and steps 1a-1d above already ran.
+    if (thirdPartyNatureDefault === true && modelRecommended === 'no_action_needed'
+      && (nature === 'job_applicant' || nature === 'vendor_or_partner')) {
+      return done(NATURE_DEFAULTS[nature], 'third_party_nature_default');
     }
     return done(modelRecommended, 'v2_model_recommended');
   }

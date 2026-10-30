@@ -475,3 +475,37 @@ it('an already_late day and its day_already_late hours reach the strip and the o
   }
 });
 
+// ---- the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE, owner 2026-10-29) ----
+
+const LIMIT_NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
+const road_limit = { reason: 'daily_cap', note: LIMIT_NOTE };
+
+it('road limit: the strip answer carries the server\'s line; an answer without it has no such field', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ...summaryAnswer, road_limit }) }));
+  const stopped = renderHook(() => useBestTimes({ date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(stopped.result.current.availability).not.toBeNull());
+  expect(stopped.result.current.availability.roadLimit).toBe(LIMIT_NOTE);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer }));
+  const quiet = renderHook(() => useBestTimes({ date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '15:00' }));
+  await waitFor(() => expect(quiet.result.current.availability).not.toBeNull());
+  expect('roadLimit' in quiet.result.current.availability).toBe(false);
+});
+
+it('road limit: a line only the week row\'s own search carried still reaches the strip', async () => {
+  const far = { ...summaryAnswer, summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } } };
+  const week = { slots: [], road_limit, summary: { days: [], best: { day: [], week: [], week_covered: true } } };
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week }));
+  const { result } = renderHook(() => useBestTimes({ bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(result.current.availability.roadLimit).toBe(LIMIT_NOTE);
+});
+
+it('road limit: the open-times list carries the line too', async () => {
+  const today = etDateString();
+  vi.stubGlobal('fetch', routedFetch({ ui: true, answer: (body) => ({ ...listOf(body), road_limit }) }));
+  const { result } = renderHook(() => useBestTimes({ date: addDays(today, 3), serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
+  expect(result.current.availability.roadLimit).toBe(LIMIT_NOTE);
+});

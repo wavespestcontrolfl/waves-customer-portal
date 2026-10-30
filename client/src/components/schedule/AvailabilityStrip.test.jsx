@@ -335,3 +335,27 @@ describe('best-times rows', () => {
     expect(screen.queryByTestId('best-row')).toBeNull();
   });
 });
+
+describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+  const NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
+  const modelDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5)] }];
+  const googleDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5, { driveSource: 'google' })] }];
+
+  it('sits under the "~" legend when the server sends it', () => {
+    render(<AvailabilityStrip availability={{ ...answer(null, modelDays), roadLimit: NOTE }} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.getByTestId('road-limit-note').textContent).toBe(NOTE);
+  });
+
+  it('without it the legend is alone, exactly as before', () => {
+    render(<AvailabilityStrip availability={answer(null, modelDays)} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+
+  it('shows only where the legend shows: no "~" hour on screen, no line', () => {
+    render(<AvailabilityStrip availability={{ ...answer(null, googleDays), roadLimit: NOTE }} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.queryByText('~ = straight-line estimate, not a road time.')).toBeNull();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+});

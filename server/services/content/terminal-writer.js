@@ -20,8 +20,9 @@
  * is deferred a few hours (a deferral refunds the attempt). The next morning's
  * batch claims the rows whose draft is written by then before it claims by
  * score (autonomous-runner _runDailyInner). The 1:00 PM catch-up claims blog
- * rows only, by score, so it never looks again at a refresh. After the batch
- * ONE admin item lists the rows that wait for a draft.
+ * rows only (written blog drafts first, then by score), so it never looks
+ * again at a refresh. After the batch ONE admin item lists the rows that wait
+ * for a draft.
  *
  * A row that waits keeps the brief it was handed: while its latest run ended
  * waiting, the runner loads that stored brief instead of composing a new one

@@ -1674,13 +1674,35 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     expect(result).toMatchObject({ count: 5, outcome: 'skipped_no_opportunity' });
   });
 
-  test('the 1 PM catch-up (a blog-scoped pass) is unchanged: no drafts first', async () => {
-    const blog = (id, score) => row(id, score, { action_type: 'new_supporting_blog', outcome: 'completed_pending_review' });
-    const { runner, order } = queueRunner([blog('blog_55', 55), blog('blog_50', 50), row('written_a', 78)], { written: ['written_a'] });
-    await runner._runDailyInner({ limit: 5, actionType: 'new_supporting_blog' });
-    expect(runner._writtenTerminalDraftIds).not.toHaveBeenCalled();
-    expect(order).toEqual(['blog_55', 'blog_50']);
-    expect(runner.runNext.mock.calls.every(([args]) => args.actionType === 'new_supporting_blog' && args.onlyIds === undefined)).toBe(true);
+  test('the 1 PM catch-up (a blog-scoped pass) takes the written blog drafts first, inside the same limit', async () => {
+    // The 2026-10-29 catch-up: blog rows with no draft outranked the blog draft
+    // that waited, and the limit ran out before the claim reached it.
+    const blog = (id, score, over = {}) => row(id, score, { action_type: 'new_supporting_blog', ...over });
+    const { runner, order } = queueRunner(
+      [blog('no_draft_80', 80), blog('no_draft_79', 79), blog('written_blog', 50, { outcome: 'completed_pending_review' }), row('written_refresh', 78)],
+      { written: ['written_blog'] },
+    );
+    await runner._runDailyInner({ limit: 2, actionType: 'new_supporting_blog' });
+    expect(runner._writtenTerminalDraftIds).toHaveBeenCalledWith('new_supporting_blog');
+    expect(order).toEqual(['written_blog', 'no_draft_80']);
+    expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+      { excludeIds: [], actionType: 'new_supporting_blog', onlyIds: ['written_blog'] },
+      { excludeIds: [], actionType: 'new_supporting_blog' },
+    ]);
+  });
+
+  test('the blog fallback after a failure streak keeps taking the drafts left, in the blog lane', async () => {
+    const rows = [
+      row('written_refresh_1', 80, { outcome: 'failed' }), row('written_refresh_2', 79, { outcome: 'failed' }),
+      row('written_blog', 50, { action_type: 'new_supporting_blog', outcome: 'completed_pending_review' }),
+      row('no_draft_blog_60', 60, { action_type: 'new_supporting_blog' }),
+    ];
+    const { runner, order } = queueRunner(rows, { written: ['written_refresh_1', 'written_refresh_2', 'written_blog'] });
+    await runner.runDaily({ limit: 5 });
+    expect(order).toEqual(['written_refresh_1', 'written_refresh_2', 'written_blog', 'no_draft_blog_60']);
+    expect(runner.runNext.mock.calls[2][0]).toEqual({
+      excludeIds: ['written_refresh_1', 'written_refresh_2'], actionType: 'new_supporting_blog', onlyIds: ['written_blog'],
+    });
   });
 
   describe('_writtenTerminalDraftIds', () => {
@@ -1688,12 +1710,15 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     const tw = () => require('../services/content/terminal-writer');
     const runnerFor = () => new (require('../services/content/autonomous-runner').AutonomousRunner)();
 
-    test('gate on: the written rows only, in the listed order; gate off, kill switch off or a failed read: none', async () => {
+    test('gate on: the written rows only, in the listed order (a scoped pass: its lane only); gate off, kill switch off or a failed read: none', async () => {
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
       const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
-        due: [{ opportunity_id: 'due_1' }], written: [{ opportunity_id: 'w_hi' }, { opportunity_id: 'w_lo' }], rebrief: [{ opportunity_id: 'old_1' }],
+        due: [{ opportunity_id: 'due_1' }],
+        written: [{ opportunity_id: 'w_hi', action_type: 'refresh_existing_page' }, { opportunity_id: 'w_lo', action_type: 'new_supporting_blog' }],
+        rebrief: [{ opportunity_id: 'old_1' }],
       });
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
+      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo']);
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
@@ -1703,7 +1728,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
-      expect(listing).toHaveBeenCalledTimes(2);
+      expect(listing).toHaveBeenCalledTimes(3);
     });
 
     test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
