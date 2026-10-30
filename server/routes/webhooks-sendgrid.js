@@ -330,9 +330,15 @@ async function handleEvent(ev) {
   // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
   // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
   const alertUntrackedHardBounce = ({ rescue = true } = {}) => {
-    if (!bounceRecovery.isHardBounceEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev)) return;
+    const hard = bounceRecovery.isHardBounceEvent(ev);
+    // GATE_CALL_EMAIL_CHECKS: a domain with no mail server gets the alert
+    // only. The rescue can apply a mechanical repair on its own, and a
+    // call-captured address is never auto-corrected (AGENTS.md call-pipeline rule).
+    const deadDomain = !hard && bounceRecovery.isNoMailServerEvent(ev);
+    if (!hard && !deadDomain) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+    if (deadDomain) return;
     // Untracked bounces have no email_messages row for domain recovery, but
     // the transcript rescue only needs the address — same fire-and-forget
     // contract; the rescue ledger's UNIQUE(bounced_email) absorbs replays.
@@ -425,9 +431,8 @@ async function handleEvent(ev) {
       } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
         // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people,
         // never to an automatic correction or resend (AGENTS.md call-pipeline
-        // rule; attemptRecovery could repair a domain typo and resend): the
-        // bounced-contact alert, the transcript rescue (suggest-only for a
-        // call-captured address) and the recording re-check card.
+        // rule; attemptRecovery and the rescue can both repair a domain on
+        // their own): the bounced-contact alert and the recording re-check card.
         alertUntrackedHardBounce();
         require('../services/email-bounce-reverify').reverifyBouncedEmailFromCall({ bouncedEmail: email })
           .catch((err) => logger.error(`[sendgrid-webhook] bounce re-check failed for ${messageId}: ${err.message}`));

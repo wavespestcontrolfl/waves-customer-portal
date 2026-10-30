@@ -91,9 +91,10 @@ function isHardBounceEvent(ev) {
  * bounce ("unable to get mx info: ..."), which isHardBounceEvent rightly
  * leaves to the sender-retry rail for real IP blocks; a dead domain is a bad
  * address, so the webhook sends it to people instead (the bounced-contact
- * alert, the transcript rescue, the recording re-check card), never to an
- * automatic correction or resend. A temporary DNS failure is not one
- * (call-email-checks.js isNoMailServerReason). Suppression is not widened:
+ * alert and the recording re-check card), never to an automatic correction
+ * or resend (recovery and the rescue both can repair a domain on their own).
+ * A temporary DNS failure is not one (call-email-checks.js
+ * isNoMailServerReason). Suppression is not widened:
  * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
  */
 function isNoMailServerEvent(ev) {

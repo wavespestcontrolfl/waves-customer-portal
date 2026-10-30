@@ -224,7 +224,7 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
 
   test.each([
     ['gate off: the sender-retry rail, nothing else', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
-    ['gate on: people only (alert, rescue suggestion, recording re-check), never an automatic recovery or resend', 'true', { retry: 0, alert: 1, rescue: 1, recheck: 1 }],
+    ['gate on: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
   ])('%s', async (_label, gate, want) => {
     if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
     const recovery = require('../services/email-bounce-recovery');
