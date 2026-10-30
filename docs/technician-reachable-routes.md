@@ -375,7 +375,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/dashboard-ops/photos/:id/approve` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/photos/:id/flag` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/recent-photos` | admin-dashboard-ops |
-| GET | `/api/admin/dashboard-ops/weather` | admin-dashboard-ops |
 | POST | `/api/admin/discounts/calculate` | admin-discounts |
 | GET | `/api/admin/discounts/stats` | admin-discounts |
 | GET | `/api/admin/drafts` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
