@@ -8342,6 +8342,29 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
   return null;
 }
 
+// Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): the technician the map picks for
+// ONE call-booked visit's own service and day, replacing the default technician:
+// { id, name } (id null = nobody fits: the visit is saved unassigned), or null when
+// the gate is not live, the visit's line is unmapped or the read failed (the old
+// default stands). Own savepoint, so a failed read cannot abort `trx`. No free-time
+// check: the tech-blind overlap probe below still flags a clash for the office.
+async function lineDefaultCallBookingTechnician(trx, visit) {
+  const lineTech = require('./scheduling/line-technician');
+  if (!lineTech.lineMapLive()) return null;
+  try {
+    return await trx.transaction(async (sp) => {
+      const pick = await lineTech.pickLineTechnician(sp, { ...visit, checkFree: false });
+      if (!pick.mapped) return null;
+      if (!pick.technicianId) return { id: null, name: null };
+      const tech = await sp('technicians').where({ id: pick.technicianId }).first('name');
+      return { id: pick.technicianId, name: tech?.name || null };
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] line-map technician read failed (default technician kept): ${err.message}`);
+    return null;
+  }
+}
+
 async function resolveDefaultCallBookingTechnicianId(conn = db) {
   const tech = await resolveDefaultCallBookingTechnician(conn);
   return tech?.id || null;
@@ -20112,6 +20135,9 @@ const CallRecordingProcessor = {
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
+                // Visit 2 copies visit 1's technician; when visit 1 has none, the default.
+                // Under the live line map the line's pick (even "nobody") is visit 1's default.
+                let followUpDefaultTechId = defaultTechnicianId;
                 // Linked follow-up visit (visit 2). PENDING, not customer-
                 // confirmed: the exact time gets confirmed by a human at
                 // dispatch. No confirmation SMS and no reminder registration
@@ -20248,7 +20274,7 @@ const CallRecordingProcessor = {
                       // The follow-up inherits the primary's tech; if that tech
                       // is no longer assignable (offboarded since the primary
                       // was booked) seed it unassigned rather than onto them.
-                      let followUpTechId = primaryRow.technician_id || defaultTechnicianId || null;
+                      let followUpTechId = primaryRow.technician_id || followUpDefaultTechId || null;
                       if (followUpTechId) {
                         const fuTech = await sp('technicians').where({ id: followUpTechId }).forShare()
                           .first('id', 'employment_status', 'field_dispatchable');
@@ -20510,7 +20536,21 @@ const CallRecordingProcessor = {
                   // read as a clash for every technician.
                   let reuseCandidateTechId = defaultTechnicianId;
                   let reuseTechPicked = false;
+                  let reuseLineMapped = false;
                   if (!isAttachedManualBooking && !existing.technician_id && !reuseHeldForAddress) {
+                    // Live service-line map: the line's technician for THIS row's own service and day
+                    // is the default. Unmapped (or gate not live): the default above, byte for byte.
+                    const reuseLineTech = await lineDefaultCallBookingTechnician(trx, {
+                      serviceId: existing.service_id || null,
+                      serviceKey: existing.service_key_snapshot || null,
+                      serviceType: existing.service_type || serviceType,
+                      date: callBookingDateOnly(existing.scheduled_date),
+                    });
+                    if (reuseLineTech) {
+                      reuseCandidateTechId = reuseLineTech.id;
+                      followUpDefaultTechId = reuseLineTech.id;
+                      reuseLineMapped = true;
+                    }
                     try {
                       const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
                         conn: pickSp,
@@ -20568,8 +20608,9 @@ const CallRecordingProcessor = {
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
-                      // so an Off saved since cannot receive this visit.
-                      if (reuseTechPicked) {
+                      // so an Off saved since cannot receive this visit. The line map's
+                      // pick passed the same test: it gets the same re-read.
+                      if (reuseTechPicked || reuseLineMapped) {
                         await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
                           [{ id: existing.id, service_type: existing.service_type || serviceType, service_id: existing.service_id || null, service_key: existing.service_key_snapshot || null }],
                           (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
@@ -21033,6 +21074,23 @@ const CallRecordingProcessor = {
                 let bookingTechnicianId = defaultTechnicianId;
                 let bookingTechnicianName = defaultTechnicianName;
                 let bookingTechnicianPicked = false;
+                // Live service-line map: the line's technician for this visit's own service and day
+                // is the default. It is NOT "picked" (no free-time check, no re-pick off the line):
+                // bookingLineMapped only keeps the capability re-read below. Unmapped / gate not live:
+                // the default above, byte for byte.
+                let bookingLineMapped = false;
+                const bookingLineTech = await lineDefaultCallBookingTechnician(trx, {
+                  serviceId: callBookingCatalogRow?.id || null,
+                  serviceKey: callBookingCatalogRow?.service_key || null,
+                  serviceType,
+                  date: scheduledDate,
+                });
+                if (bookingLineTech) {
+                  bookingTechnicianId = bookingLineTech.id;
+                  bookingTechnicianName = bookingLineTech.name;
+                  followUpDefaultTechId = bookingLineTech.id;
+                  bookingLineMapped = true;
+                }
                 const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
                   conn: pickSp,
                   date: scheduledDate,
@@ -21383,8 +21441,9 @@ const CallRecordingProcessor = {
                     await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
-                    // so an Off saved since cannot receive this visit.
-                    if (bookingTechnicianPicked) {
+                    // so an Off saved since cannot receive this visit. The line map's
+                    // pick passed the same test: it gets the same re-read.
+                    if (bookingTechnicianPicked || bookingLineMapped) {
                       await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
                         [{ id: null, service_type: serviceType, service_id: callBookingCatalogRow?.id || null }],
                         (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
@@ -25801,6 +25860,7 @@ CallRecordingProcessor._test = {
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
+  lineDefaultCallBookingTechnician,
   resolveCallContactPhone,
   startPrecedesCall,
   clarifyAskTargetPhone,

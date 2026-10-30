@@ -1165,6 +1165,32 @@ still serializes concurrent confirms per calendar day regardless of technician,
 so two technicians' bookings and an unassigned insert cannot race past each
 other's probe.
 
+**Service-line map, live (`GATE_SERVICE_LINE_MAP=live`, roadmap build 4, owner
+2026-10-30; ships dark: `shadow`, the prod value, and every other value leave
+these routes byte-identical, with no extra query).** `/api/booking/availability`,
+`/find-slots` and the `/capture-intent` revalidation (all through
+`buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
+`termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. When at least one of those lines has a home or gap technician set
+in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
+slots on a technician who is the home or gap technician of EVERY mapped line (a
+two-service key such as `pest_control+lawn_care` therefore needs one technician
+on both lines; a line with no technician set adds no rule). At a date and start
+both have, the home technician's slot is the one offered (a gap slot never
+displaces a home slot, under the re-service rank profile too); the gap
+technician's slots fill the starts the home technician has none for. Nothing
+else changes: auth, rate limits, the hours offered, packing, grace, the payload
+shape and every commit check. A slot still names one technician inside its HMAC
+`slot_sig`, and `/confirm` (`createSelfBooking`) books exactly the technician the
+signed offer named, with no second line check at confirm: an offer minted before
+a map edit stays redeemable for its 45-minute lifetime, as for any other offer
+input. The capture-intent revalidation passes the same lines as the offer, so
+offer and recheck agree. Fail-open: an unreadable map, or a map with no
+technician set for the asked lines, offers what today's code offers. Public
+inspection booking, public reschedule and re-service offers do not pass lines
+and are unchanged.
+
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another

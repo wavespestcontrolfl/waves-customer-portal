@@ -1,16 +1,28 @@
 /**
- * Service-line map: which technician a service line's visit would go to.
- * SHADOW ONLY (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25).
+ * Service-line map: which technician a service line's visit goes to.
+ * GATE_SERVICE_LINE_MAP=shadow records (owner 2026-10-25); =live records AND picks
+ * (build 4, owner "DO THIS NOW" 2026-10-30).
  *
  * A second technician starts early 2027. The new technician is the HOME tech for
  * general pest, rodent and mosquito; the owner is the home tech for lawn / tree &
  * shrub and termite / WDO, and covers every gap (the new tech's days off,
  * absences). service_line_techs holds the home and gap technician per line.
  *
- * THIS RELEASE ONLY RECORDS. Six booking choice points call recordLinePickShadow
- * AFTER their own commit; it resolves what the map would pick and writes one
+ * SHADOW. Six booking choice points call recordLinePickShadow AFTER their own
+ * commit; it resolves what the map would pick and writes one
  * service_line_pick_shadow row next to the technician actually chosen. It never
  * changes a booking and sends nothing. Gate off = no resolver call, no query.
+ *
+ * LIVE keeps those rows and adds two pickers for NEW work, used by their callers
+ * only while the gate reads 'live':
+ *   - lineOfferRanking: an offer builder (/book, the phone booking recheck)
+ *     keeps only a mapped line's home and gap technician's slots, home first
+ *     at a start both have.
+ *   - pickLineTechnician: one visit whose day is fixed (the after-call booking,
+ *     the office Auto choice, the scheduling pick): the home technician when
+ *     fit (and free, when asked), else the gap technician, else nobody.
+ * A line with no technician set adds no rule: while service_line_techs is empty
+ * (as on 2026-10-30) live picks exactly what today's code picks.
  *
  * Reads only, apart from the one shadow insert. No new eligibility rules: a
  * technician counts as assignable through technician-eligibility (employment
@@ -34,8 +46,11 @@ const LINES = CAPABILITY_CATEGORIES;
 
 // Read at call time off the module: this file is loaded under many partial
 // feature-gates mocks, and a missing reader must read as "off".
-const shadowOn = () => typeof featureGates.serviceLineMapMode === 'function'
-  && featureGates.serviceLineMapMode() === 'shadow';
+const lineMapMode = () => (typeof featureGates.serviceLineMapMode === 'function' ? featureGates.serviceLineMapMode() : 'off');
+// Live keeps the shadow rows: the read-out then shows each live pick next to what was saved.
+const shadowOn = () => ['shadow', 'live'].includes(lineMapMode());
+const lineMapLive = () => lineMapMode() === 'live';
+const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 
 const clean = (value, max = 200) => {
   if (value === null || value === undefined) return null;
@@ -139,17 +154,21 @@ async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null
  * told cheaply: no time, or the multi-tech occupancy scope is off (then the
  * probe is not per technician and "free" would mean "nobody is booked").
  */
+/** HH:MM end of a window: its own end, else start + duration (60 by default); null past midnight. */
+function windowEndOf(start, windowEnd, durationMinutes) {
+  if (windowEnd) return String(windowEnd).slice(0, 5);
+  const [h, m] = start.split(':').map(Number);
+  const total = h * 60 + (m || 0) + (Number(durationMinutes) > 0 ? Number(durationMinutes) : 60);
+  if (!Number.isFinite(total) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 async function wouldBeFree(db, { technicianId, date, windowStart, windowEnd, durationMinutes, scheduledServiceId, customerId }) {
   if (!technicianId || !date || !windowStart) return null;
   try {
     const start = String(windowStart).slice(0, 5);
-    let end = windowEnd ? String(windowEnd).slice(0, 5) : null;
-    if (!end) {
-      const [h, m] = start.split(':').map(Number);
-      const total = h * 60 + (m || 0) + (Number(durationMinutes) > 0 ? Number(durationMinutes) : 60);
-      if (!Number.isFinite(total) || total >= 24 * 60) return null;
-      end = `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-    }
+    const end = windowEndOf(start, windowEnd, durationMinutes);
+    if (!end) return null;
     const { technicianFreeAt, pickTechnicianActive } = require('./pick-technician');
     if (!pickTechnicianActive()) return null;
     return !!(await technicianFreeAt({
@@ -162,6 +181,161 @@ async function wouldBeFree(db, { technicianId, date, windowStart, windowEnd, dur
     logger.warn(`[line-technician] free-time check failed (would_free left null): ${err.message}`);
     return null;
   }
+}
+
+/**
+ * The home and gap technician per line, for the lines that have either set:
+ * Map(line -> { homeId, gapId }). A gap equal to the home counts once (home).
+ */
+async function loadLineMap(db, lines) {
+  const wanted = [...new Set((lines || []).filter((line) => LINES.includes(line)))];
+  if (!wanted.length) return new Map();
+  const rows = await db('service_line_techs').whereIn('service_category', wanted)
+    .select('service_category', 'home_technician_id', 'gap_technician_id');
+  const map = new Map();
+  for (const row of rows) {
+    const homeId = row.home_technician_id || null;
+    const gapId = row.gap_technician_id && !sameId(row.gap_technician_id, homeId) ? row.gap_technician_id : null;
+    if (homeId || gapId) map.set(row.service_category, { homeId, gapId });
+  }
+  return map;
+}
+
+/**
+ * LIVE (GATE_SERVICE_LINE_MAP=live): how an offer builder ranks each technician's
+ * slots for work on `lines` (capability categories: ['general'], or
+ * ['general', 'lawn'] for a two-service booking).
+ *
+ * null when the gate is not live, or when none of `lines` has a technician set:
+ * the builder then offers exactly what it offers today. Otherwise
+ * { lines, rankOf }, where rankOf(technicianId) is
+ *   - null: drop this technician's slots (not the home or gap technician of
+ *     EVERY mapped line, or switched Off for one of them);
+ *   - 0, 1, ...: keep. Lower wins a date and start two technicians both have:
+ *     the count of mapped lines this technician covers only as the gap.
+ * A line with no technician set adds no rule. Day rules (absent, off day, not
+ * assignable) stay with the slot finders, which never build a slot on such a
+ * day, so the gap technician's slots fill exactly the starts the home technician
+ * has none for: the owner's "i cover all gaps the tech cant fullfill" (2026-10-25).
+ * Reads only; throws only on an unreadable database.
+ */
+async function lineOfferRanking(conn, { lines = [] } = {}) {
+  if (!lineMapLive()) return null;
+  const db = conn || defaultDb;
+  const map = await loadLineMap(db, lines);
+  if (!map.size) return null;
+  const ids = [...new Set([...map.values()].flatMap(({ homeId, gapId }) => [homeId, gapId]).filter(Boolean))];
+  const capRows = await db('technician_capabilities').whereIn('technician_id', ids).whereIn('service_category', [...map.keys()])
+    .select('technician_id', 'service_category', 'capability_level', 'active');
+  const off = new Set(capRows.filter((row) => stateOf(row) === 'off').map((row) => `${row.technician_id}:${row.service_category}`));
+  const rankOf = (technicianId) => {
+    if (technicianId == null || technicianId === '') return null;
+    let rank = 0;
+    for (const [line, { homeId, gapId }] of map) {
+      if (off.has(`${technicianId}:${line}`)) return null;
+      if (sameId(technicianId, homeId)) continue;
+      if (!sameId(technicianId, gapId)) return null;
+      rank += 1;
+    }
+    return rank;
+  };
+  return { lines: [...map.keys()], rankOf };
+}
+
+/**
+ * LIVE (GATE_SERVICE_LINE_MAP=live): the line's technician for ONE visit whose
+ * day (and maybe time) is already fixed.
+ *
+ * { mapped: false, line, technicianId: null, reason } when the gate is not live
+ * ('off'), or the visit has no line or its line has no technician set
+ * ('no_map'): the caller keeps today's choice. Otherwise
+ * { mapped: true, line, technicianId, reason }:
+ *   'home'       the home technician takes it;
+ *   'gap_<why>'  the gap technician takes it; <why> is why the home technician
+ *                could not: not_assignable | absent | off_day | capability_off |
+ *                busy | not_listed | unset (the line has no home technician);
+ *   'none'       neither can: technicianId null, and the caller takes its own
+ *                "nobody" path (the visit is saved unassigned).
+ * A Waves Assessment is { mapped: false, reason: 'assessment' } (isAssessmentIdentity).
+ * A technician is tried only when fit (unfitReason) and, when `candidateIds` is
+ * given, listed in it (the caller's own eligible list). `checkFree` adds the
+ * save probe (pick-technician.technicianFreeAt) for a visit with a time; a
+ * caller passes it only while that probe is per technician. Reads only; throws
+ * only on an unreadable database.
+ */
+async function pickLineTechnician(conn, opts = {}) {
+  if (!lineMapLive()) return { mapped: false, line: null, technicianId: null, reason: 'off' };
+  const db = conn || defaultDb;
+  const identity = { serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType };
+  if (await isAssessmentIdentity(db, identity)) return { mapped: false, line: null, technicianId: null, reason: 'assessment' };
+  const { line } = await serviceLineFor(db, identity);
+  const entry = line ? (await loadLineMap(db, [line])).get(line) : null;
+  if (!entry) return { mapped: false, line, technicianId: null, reason: 'no_map' };
+
+  const day = opts.date ? dateOnlyString(opts.date) : null;
+  const order = [entry.homeId, entry.gapId].filter(Boolean);
+  const test = {
+    line,
+    day,
+    ctx: await loadFitContext(db, { ids: order, line, day }),
+    listed: Array.isArray(opts.candidateIds) ? new Set(opts.candidateIds.map(String)) : null,
+    probe: opts.checkFree ? freeProbeFor(day, opts) : null,
+  };
+  let homeWhy = entry.homeId ? null : 'unset';
+  for (const id of order) {
+    const why = await whyNotPicked(db, id, test);
+    if (!why) return { mapped: true, line, technicianId: id, reason: sameId(id, entry.homeId) ? 'home' : `gap_${homeWhy}` };
+    if (sameId(id, entry.homeId)) homeWhy = why;
+  }
+  return { mapped: true, line, technicianId: null, reason: 'none' };
+}
+
+/**
+ * Whether the visit is a Waves Assessment: the free sales visit (catalog key
+ * lawn_inspection, name "Waves Assessment"; services/assessment-booking.js).
+ * Live mode routes no assessment: which line an inspection belongs to is still
+ * an open owner decision (build-4 trace, decision 1), and the name alone reads
+ * general pest, which would hand a sales visit to the new pest technician. The
+ * caller keeps today's choice for it. An unreadable catalog row reads "no".
+ */
+async function isAssessmentIdentity(db, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
+  const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentServiceRow } = require('../assessment-booking');
+  if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return true;
+  if (!serviceId) return false;
+  try {
+    return isAssessmentServiceRow(await db('services').where({ id: serviceId }).first('service_key', 'name'));
+  } catch (err) {
+    logger.warn(`[line-technician] assessment lookup failed (read as not an assessment): ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * LIVE: the line a booked service routes by, or null (no line rule): a Waves
+ * Assessment belongs to no line (isAssessmentIdentity); otherwise serviceLineFor.
+ */
+async function liveServiceLine(conn, identity = {}) {
+  const db = conn || defaultDb;
+  if (await isAssessmentIdentity(db, identity)) return null;
+  return (await serviceLineFor(db, identity)).line;
+}
+
+/** The save-probe arguments for a visit with a day and a start, or null (no probe). */
+function freeProbeFor(day, { windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds }) {
+  const start = windowStart ? String(windowStart).slice(0, 5) : null;
+  const end = start ? windowEndOf(start, windowEnd, durationMinutes) : null;
+  if (!day || !start || !end) return null;
+  return { date: day, windowStart: start, windowEnd: end, excludeCustomerId: excludeCustomerId || null, excludeServiceIds: excludeServiceIds || [] };
+}
+
+/** Why `id` cannot take the visit, or null: the fit test, the caller's list, then the save probe when asked. */
+async function whyNotPicked(db, id, { line, day, ctx, listed, probe }) {
+  const unfit = await unfitReason(db, id, line, day, ctx);
+  if (unfit) return unfit;
+  if (listed && !listed.has(String(id))) return 'not_listed';
+  if (!probe) return null;
+  const { technicianFreeAt } = require('./pick-technician');
+  return (await technicianFreeAt({ ...probe, conn: db, technicianId: id })) ? null : 'busy';
 }
 
 /**
@@ -281,4 +455,9 @@ module.exports = {
   serviceLineFor,
   resolveLineTechnician,
   recordLinePickShadow,
+  lineMapLive,
+  lineOfferRanking,
+  pickLineTechnician,
+  liveServiceLine,
+  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity },
 };

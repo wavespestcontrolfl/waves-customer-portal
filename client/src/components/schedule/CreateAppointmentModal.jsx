@@ -1433,6 +1433,7 @@ const AUTO_UNASSIGNED_REASONS = {
   none_assignable: 'No technician is available that day.',
   several_assignable: 'More than one technician could take it.',
   none_free: 'No technician is free at that time.',
+  line_none: 'The technicians for this service are not free that day.',
   absent_on_series_date: 'The technician is out on a later date of the series.',
 };
 export function autoAssignWarning(results) {
