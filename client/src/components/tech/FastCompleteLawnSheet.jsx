@@ -1142,6 +1142,19 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
 // The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
 const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
 
+// A yearly limit is a warning, never a block (owner 2026-10-30): one line per product and place, in the limit's own words (which
+// open with the product's name), above the Complete button. The completion records the application and the office is told.
+const LIMIT_WARNING_TAIL = 'You can still complete. The office gets an alert.';
+function limitWarningsOf(rows) {
+  const lines = rows.filter((row) => row.placeRule && row.placeWarning).map((row) => {
+    const lead = `${row.name}:`;
+    const message = String(row.placeWarning).trim();
+    const words = message.startsWith(lead) ? message.slice(lead.length).trim() : message;
+    return `${row.name}, ${areaLabelOf(row)}: ${words} ${LIMIT_WARNING_TAIL}`;
+  });
+  return [...new Set(lines)];
+}
+
 // GATE_LAWN_NEW_SOD_NOTE: the server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
 const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
@@ -1157,7 +1170,8 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
-  // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
+  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
+  // it here; a yearly limit is a warning on the footer (limitWarningsOf).
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
   const missingPlace = rows.find((row) => row.placeRule && !row.place);
   const [, reason = ''] = [
@@ -1754,6 +1768,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
+  const limitWarnings = limitWarningsOf(rows);
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
@@ -1863,6 +1878,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
         submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
+        warnings={limitWarnings}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (

@@ -195,11 +195,22 @@ describeDb('places and trouble areas through PostgreSQL', () => {
     });
   });
 
-  describe('the plan reader, the completion preflight and the closeout audit agree', () => {
+  describe('the plan reader, the place-limit reader and the closeout audit agree', () => {
     const svcOf = async () => {
       const visit = await world.visit(0);
       return { id: visit.id, customer_id: world.customerId, property_id: world.property.id, scheduled_date: visit.scheduled_date, service_type: 'Lawn fixture' };
     };
+    // The yearly limit reader the completion preflight used to refuse with (owner 2026-10-30: a limit warns, /complete never refuses it
+    // now): the product's own count, interval and v13 amount at the row's place, as a proposal. The sheet's warning follows it and the
+    // closeout audit raises the office alert, so these tests keep the three agreeing. null = no limit at that place.
+    const proposalBlock = async (svc, row) => {
+      const { etCalendarDayOf } = require('../utils/datetime-et');
+      const result = await limits.checkLimits(svc.customer_id, row.productId, new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`), knex, {
+        propertyId: svc.property_id, place: row.areaPlace, proposal: true, proposedRow: areas.proposedRow(row), excludeScheduledServiceId: svc.id,
+      });
+      return (result.blocks || []).find(areas.refusesAtPlace) || null;
+    };
+    const auditAt = (svc, productId, place) => limits.auditHardCountLimits(svc.customer_id, productId, svc.scheduled_date, knex, { propertyId: svc.property_id, place, excludeScheduledServiceId: svc.id });
 
     test('cappedByPlace (the sheet) shows the front closed and the back open, the same as checkLimits', async () => {
       await applied(CELSIUS, { place: 'front' });
@@ -220,23 +231,26 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       spy.mockRestore();
     });
 
-    test('preflightPlaces refuses a spot row at the closed place, allows the open one, and asks for a place', async () => {
+    test('preflightPlaces never refuses a spot row for a yearly limit (the closeout audit flags the closed place instead), and still asks for a place', async () => {
       await applied(CELSIUS, { place: 'front' });
       await applied(CELSIUS, { place: 'front', daysAgo: 20 });
       const svc = await svcOf();
       const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, applicationMethod: 'spot_treatment', ...extra });
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
-      const closed = await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] });
-      expect(closed).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front', limitType: 'annual_max_apps' } });
-      expect(closed.payload.error).toMatch(/LIMIT REACHED/);
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toBeNull();
+      // The limit is still there: the reader says it at the front, and the audit that raises the office alert flags it there only.
+      expect(await proposalBlock(svc, row({ areaPlace: 'front' }))).toMatchObject({ type: 'annual_max_apps' });
+      expect(await proposalBlock(svc, row({ areaPlace: 'back' }))).toBeNull();
+      expect((await auditAt(svc, catalog[CELSIUS].id, 'front')).map((v) => v.type)).toContain('annual_max_apps');
+      expect(await auditAt(svc, catalog[CELSIUS].id, 'back')).toEqual([]);
       expect(await areas.preflightPlaces({ knex, svc, products: [row({})] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
       // A whole-lawn row is not judged by place.
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ applicationMethod: 'broadcast_spray' })] })).toBeNull();
     });
 
-    // One row per way a spot treatment reaches the sheet: the product is at its yearly count at the FRONT, so /complete refuses
-    // the front and accepts the back (the sheet tests prove the tech can reach the back in the counted taps).
+    // One row per way a spot treatment reaches the sheet: the product is at its yearly limit at the FRONT, so the limit reader closes the
+    // front and not the back (the sheet warns at the front), and /complete accepts both.
     test.each([
       ['Weed spots lead (Celsius WG)', CELSIUS, 2],
       ['Weed spots member (Certainty)', 'Certainty Turf Herbicide', 2],
@@ -246,11 +260,13 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       ['caterpillar card (a stored cap)', 'Stored Cap Caterpillar Insecticide', 1],
       ['dry-spot card (a stored cap)', 'Stored Cap Wetting Agent', 1],
       ['a search-added spot row (a stored cap)', 'Stored Cap Fungicide', 1],
-    ])('%s: /complete refuses the front and accepts the back', async (_label, name, rows) => {
+    ])('%s: the limit reader closes the front and not the back, and /complete accepts both', async (_label, name, rows) => {
       for (let i = 0; i < rows; i += 1) await applied(name, { place: 'front', daysAgo: 100 - i * 60, rate: 0.147 });
       const svc = await svcOf();
       const row = (areaPlace) => ({ productId: catalog[name].id, name, applicationMethod: 'spot_treatment', areaPlace });
-      expect(await areas.preflightPlaces({ knex, svc, products: [row('front')] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+      expect(await proposalBlock(svc, row('front'))).not.toBeNull();
+      expect(await proposalBlock(svc, row('back'))).toBeNull();
+      expect(await areas.preflightPlaces({ knex, svc, products: [row('front')] })).toBeNull();
       expect(await areas.preflightPlaces({ knex, svc, products: [row('back')] })).toBeNull();
     });
 
@@ -279,24 +295,26 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         ['0.0294 oz on 100 sq ft is exactly the cap: allowed', 0.0294, false],
       ])('%s', async (_label, totalAmount, refused) => {
         const row = typed({ totalAmount });
-        const result = await areas.preflightPlaces({ knex, svc: await visit(), products: [row] });
-        if (refused) expect(result).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        const result = await proposalBlock(await visit(), row);
+        if (refused) expect(result).toMatchObject({ type: 'annual_max_rate' });
         else expect(result).toBeNull();
+        // Never a refusal at /complete.
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [row] })).toBeNull();
         // The audit, given the row as the ledger would hold it, reaches the same verdict.
         expect(await audited(row)).toBe(refused);
       });
 
       test('the same quantity on a larger spot is under the cap (the row\'s OWN area decides)', async () => {
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [typed({ totalAmount: 0.05, areaValue: 1000 })] })).toBeNull();
+        expect(await proposalBlock(await visit(), typed({ totalAmount: 0.05, areaValue: 1000 }))).toBeNull();
       });
 
       test('a stated rate wins over the quantity, as it does for a recorded row; a quantity on a row with no area falls back to the program\'s dose', async () => {
         const rateRow = typed({ totalAmount: 5, rate: 0.147, rateUnit: 'oz' });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [rateRow] })).toBeNull();
+        expect(await proposalBlock(await visit(), rateRow)).toBeNull();
         expect(await audited(rateRow)).toBe(false);
         // A quantity with no spot area cannot be sized: the preflight counts the cap row's fixed fallback rate, the recorded row's own reading.
         const noArea = typed({ totalAmount: 5, areaValue: undefined, areaUnit: undefined });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [noArea] })).toBeNull();
+        expect(await proposalBlock(await visit(), noArea)).toBeNull();
         expect(await audited(noArea)).toBe(false);
       });
 
@@ -311,11 +329,11 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[ARENA].id, product_name: ARENA, role: 'insecticide_spot', application_mode: 'spot', default_in_plan: false, rate_per_1000: 0.147, rate_unit: 'oz', gates: '{}' });
         expect((await limits.programDose(knex, catalog[ARENA].id)).ratePer1000).toBe(0.147);
         const quantityOnly = typed({ totalAmount: 0.147, areaValue: undefined, areaUnit: undefined });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [quantityOnly] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        expect(await proposalBlock(await visit(), quantityOnly)).toMatchObject({ type: 'annual_max_rate' });
         expect(await audited(quantityOnly)).toBe(true);
         // A row the ledger CAN size (a stated rate of 0.147 oz per 1,000, exactly the remaining half): both agree it fits, at 100%.
         const sized = typed({ totalAmount: 1, rate: 0.147, rateUnit: 'oz' });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [sized] })).toBeNull();
+        expect(await proposalBlock(await visit(), sized)).toBeNull();
         expect(await audited(sized)).toBe(false);
         await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id }).del();
         await knex('lawn_protocol_windows').where({ id: window.id }).del();
@@ -402,11 +420,11 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         expect(await go([{ productId: catalog['Plain Spot Fungicide'].id, name: 'Plain Spot Fungicide' }])).toBeNull();
       });
 
-      test('the limit is read for an inferred spot row at its place', async () => {
+      test('an inferred spot row is a spot row (it needs a place) and a limit at its place does not refuse it', async () => {
         await applied(CELSIUS, { place: 'front' });
         await applied(CELSIUS, { place: 'front', daysAgo: 20 });
         const svc = await svcRow();
-        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toBeNull();
         expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
       });
     });

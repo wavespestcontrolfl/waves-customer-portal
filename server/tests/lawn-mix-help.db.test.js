@@ -134,14 +134,24 @@ describeDb('mix help through PostgreSQL', () => {
     });
   });
 
-  // The visit entered by AREA and the same visit entered by GALLONS must be judged the same by the places check: the per-place yearly
-  // Arena amount (0.294 oz per 1,000 sq ft), where the quantity over the recorded area is the dose.
+  // The visit entered by AREA and the same visit entered by GALLONS must be judged the same by the per-place limit reader (the sheet's
+  // warning and the closeout audit follow it; /complete no longer refuses a limit, owner 2026-10-30): the per-place yearly Arena amount
+  // (0.294 oz per 1,000 sq ft), where the quantity over the recorded area is the dose.
   describe('gallons -> recorded area -> the per-place limit equals the visit entered by area', () => {
     const arenaRow = (extra) => ({ productId: catalog[ARENA].id, name: ARENA, applicationMethod: 'spot_treatment', areaPlace: 'front', amountUnit: 'oz', ...extra });
+    // The limit the row meets at its place: the product's own count, interval and v13 amount, as a proposal (null = none).
+    const verdictOf = async (svc, row) => {
+      const { etCalendarDayOf } = require('../utils/datetime-et');
+      const result = await require('../services/application-limits').checkLimits(svc.customer_id, row.productId, new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`), knex, {
+        propertyId: svc.property_id, place: row.areaPlace, proposal: true, proposedRow: areas.proposedRow(row), excludeScheduledServiceId: svc.id,
+      });
+      return (result.blocks || []).find(areas.refusesAtPlace) || null;
+    };
     const byGallons = async (svc, row) => {
       const products = [row];
+      // The gallons step and the places check never refuse a limit; the verdict is read from the row the gallons step left.
       const refusal = await help.withSprayedGallons({ knex, svc, products, loadPlan }, () => areas.preflightPlaces({ knex, svc, products }));
-      return { refusal, row: products[0] };
+      return { refusal, row: products[0], verdict: await verdictOf(svc, products[0]) };
     };
 
     test.each([
@@ -152,31 +162,33 @@ describeDb('mix help through PostgreSQL', () => {
     ])('%s', async (_label, totalAmount, gallons, area) => {
       await applied(ARENA, { place: 'front', daysAgo: 100, rate: 0.147 });
       const svc = await svcOf();
-      const typed = await areas.preflightPlaces({ knex, svc, products: [arenaRow({ totalAmount, areaValue: area, areaUnit: 'sqft' })] });
+      const typed = await verdictOf(svc, arenaRow({ totalAmount, areaValue: area, areaUnit: 'sqft' }));
       const viaGallons = await byGallons(svc, arenaRow({ totalAmount, sprayedGallons: gallons }));
       expect(viaGallons.row).toMatchObject({ areaValue: area, areaUnit: 'sqft' });
-      expect(viaGallons.refusal).toEqual(typed);
+      expect(viaGallons.refusal).toBeNull();
+      expect(viaGallons.verdict).toEqual(typed);
     });
 
-    test('the two outcomes really differ with the area (the test can fail): the small spot is refused, the wide one fits', async () => {
+    test('the two outcomes really differ with the area (the test can fail): the small spot meets the limit, the wide one fits', async () => {
       await applied(ARENA, { place: 'front', daysAgo: 100, rate: 0.147 });
       const svc = await svcOf();
-      expect((await byGallons(svc, arenaRow({ totalAmount: 0.3, sprayedGallons: 4 }))).refusal).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate' } });
-      expect((await byGallons(svc, arenaRow({ totalAmount: 0.3, sprayedGallons: 16 }))).refusal).toBeNull();
+      expect((await byGallons(svc, arenaRow({ totalAmount: 0.3, sprayedGallons: 4 }))).verdict).toMatchObject({ type: 'annual_max_rate' });
+      expect((await byGallons(svc, arenaRow({ totalAmount: 0.3, sprayedGallons: 16 }))).verdict).toBeNull();
     });
 
     // Celsius is judged over a rolling 365 days (not the calendar year): the gallons path must give the verdict a typed area gives.
     test.each([
-      ['two passes at the front inside the rolling year: the front is refused', [300, 200], { status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_apps' } }],
+      ['two passes at the front inside the rolling year: the front meets the limit', [300, 200], { type: 'annual_max_apps' }],
       ['one of the two is older than 365 days: the front is open', [400, 200], null],
     ])('Celsius over the rolling year, %s', async (_label, daysAgo, expected) => {
       for (const days of daysAgo) await applied(CELSIUS, { place: 'front', daysAgo: days, rate: 0.085 });
       const svc = await svcOf();
       const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, applicationMethod: 'spot_treatment', areaPlace: 'front', amountUnit: 'oz', totalAmount: 0.085, rate: 0.085, rateUnit: 'oz', ...extra });
-      const typed = await areas.preflightPlaces({ knex, svc, products: [row({ areaValue: 1000, areaUnit: 'sqft' })] });
+      const typed = await verdictOf(svc, row({ areaValue: 1000, areaUnit: 'sqft' }));
       const viaGallons = await byGallons(svc, row({ sprayedGallons: 1 }));
       expect(viaGallons.row).toMatchObject({ areaValue: 1000, areaUnit: 'sqft' });
-      expect(viaGallons.refusal).toEqual(typed);
+      expect(viaGallons.refusal).toBeNull();
+      expect(viaGallons.verdict).toEqual(typed);
       if (expected) expect(typed).toMatchObject(expected); else expect(typed).toBeNull();
     });
 

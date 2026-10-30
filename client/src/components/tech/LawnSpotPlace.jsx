@@ -4,7 +4,8 @@
 // (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09). The server decides every word and every closed place
 // (lib/lawn-trouble-places.js reads it); this file renders:
 //   - PlaceControl         "Where" with one chip per place of the closed list, under a spot row's area. A place
-//                          the yearly limits close for the row is off, with the limit's own words under the chips.
+//                          a hold closes for the row (a take-all row on an unmapped place) is off, with the reason under the chips.
+//                          A yearly limit never closes a chip: its words are a warning on the Complete footer.
 //   - PlaceAddButtons      the place buttons of a one-tap entry (Weed spots, Chinch bugs found): the tap names the
 //                          place and adds what that place takes, so the place costs no extra tap there.
 //   - KnownTroubleAreas    a compact line above the guide cards: place, type, last treated date; Clear asks once.
@@ -14,7 +15,8 @@ import { Button } from '../ui';
 import { Chip } from './FastCompleteParts';
 import { knownPlacesOfType, troubleTypeOfRow } from '../../lib/lawn-trouble-places';
 
-// The reason line under a row's chips: why a place is off, or that the place came from a known trouble area.
+// The reason line under a row's chips: why a place is off (a hold; a yearly limit is only a warning, on the Complete footer), or that
+// the place came from a known trouble area.
 function placeNote(row) {
   if (row.placeNowhere) return `${row.name} cannot go anywhere on this lawn right now. ${row.placeNowhere}`;
   if (row.placeBlock) return row.placeBlock;
@@ -34,7 +36,7 @@ export function PlaceControl({ areas, row, title = null, locked, onChange }) {
         {areas.places.map((place) => (
           <Chip
             key={place.id}
-            disabled={locked || !!row.placeProblems?.[place.id]}
+            disabled={locked || !!row.placeHolds?.[place.id]}
             label={known.has(place.id) ? `${place.label} · known` : place.label}
             pressed={row.place === place.id}
             onClick={() => onChange(place.id)}

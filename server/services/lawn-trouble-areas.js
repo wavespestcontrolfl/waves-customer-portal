@@ -16,8 +16,8 @@
  *   3. The yearly LIMITS per place: the v13 caps (count 2, the Arena 56-day interval, the Arena yearly
  *      amount) are judged per (property, place) for spot rows with a place (application-limits
  *      checkLimits opts.place). A ledger row with no place on record counts at EVERY place. This module
- *      reads the plan's own limit reader once per place, so the sheet decides instantly and /complete
- *      asks the same reader again (preflightPlaces).
+ *      reads the plan's own limit reader once per place, so the sheet warns instantly; /complete refuses
+ *      no limit (owner 2026-10-30), the closeout audit judges the recorded row at its place and tells the office.
  *
  * No limit value is added or changed here. A limit read that fails is the existing "unknown": the sheet
  * and the completion keep their old behavior (record, flag the office); it is never read as "allowed".
@@ -544,8 +544,8 @@ function proposedRow(row) {
   };
 }
 
-// The limit types a place may refuse at completion: the product's OWN count, minimum interval and v13 yearly amount, the three the
-// closeout audit judges (application-limits auditHardCountLimits). The shared active-ingredient cap, a stored yearly rate,
+// The limit types a place may close on the sheet (a warning there; /complete refuses none, owner 2026-10-30): the product's OWN count,
+// minimum interval and v13 yearly amount, the three the closeout audit judges (application-limits auditHardCountLimits). The shared active-ingredient cap, a stored yearly rate,
 // MOA rotation and everything else stay advisory after the fact, exactly as before the gate.
 function refusesAtPlace(block) {
   const matchType = block.matchType || 'product';
@@ -553,18 +553,16 @@ function refusesAtPlace(block) {
   return block.type === 'annual_max_rate' && matchType === 'v13_amount';
 }
 
-// What a place's limit read keeps: the blocks /complete would refuse there, and a read that failed (no type: the unknown stays unknown).
+// What a place's limit read keeps: the blocks the sheet warns about there, and a read that failed (no type: the unknown stays unknown).
 // The one predicate for every per-place answer (the context's map, the guide's, the weed and chinch decisions, the preflight).
 const blocksAtPlace = (blocks) => (blocks || []).filter((block) => !block.type || refusesAtPlace(block));
 
 /**
  * The /complete preflight of the places (called from preflightLawnFastCompletion while the gate is live): every spot
- * row names a closed-list place (400 lawn_place_required / lawn_place_invalid), and the place the cap forbids is
- * refused (400 lawn_place_limit, the limit's own words), by the SAME reader the sheet followed
- * (application-limits checkLimits at that place, as a proposal on the visit's date, the visit's own rows left out).
- * Only the product's own count, interval and yearly amount refuse here. A read that fails refuses nothing: it is the
- * existing "unknown" (the completion records the visit and flags the office), never "allowed" by this check.
- * Returns `{ status, payload }` or null.
+ * row names a closed-list place (400 lawn_place_required / lawn_place_invalid) and a take-all row sits on a mapped one.
+ * A yearly limit never refuses here (owner 2026-10-30, after 09-28 "make these all a warning"): the sheet shows the limit's
+ * words as a warning, the completion records the application, and the closeout audit (complete-scheduled-service.js,
+ * recordedProductLimitFindings, after the commit) judges it AT its place and tells the office. Returns `{ status, payload }` or null.
  */
 async function preflightPlaces({ knex = db, svc, products }) {
   // The places are off for a visit whose property cannot be resolved: nothing is asked and nothing is judged, as with the gate off.
@@ -573,54 +571,7 @@ async function preflightPlaces({ knex = db, svc, products }) {
   const spots = await spotRowsOf(knex, products);
   const missing = placeRefusal(spots);
   if (missing) return missing;
-  const unmapped = await unmappedRefusal({ knex, svc, spots, propertyId });
-  if (unmapped) return unmapped;
-  const limits = require('./application-limits');
-  const day = !svc.scheduled_date ? new Date() : svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`);
-  const seen = new Set();
-  for (const row of spots) {
-    const productId = String(row.productId || '').toLowerCase();
-    if (!UUID_RE.test(productId)) continue; // the main flow refuses a malformed id with its own code
-    if (seen.has(`${productId}:${row.areaPlace}`)) continue;
-    seen.add(`${productId}:${row.areaPlace}`);
-    let result;
-    try {
-      // Two rules of the same kind. (1) Two completions for the same lawn, place and product that both pass here before either commits are
-      // both RECORDED: each records an application that already happened, so a refusal inside the transaction could only drop a real one
-      // from the ledger. The closeout audit runs after each commit (complete-scheduled-service.js, after persistRecord) on its own
-      // connection, so the later-committing completion always sees both rows and raises the alert; no ordering leaves both blind.
-      // (2) The rule for a backdated completion: it is RECORDED and FLAGGED, never refused, because the application already happened.
-      // checkLimits reads the history up to the visit's own day (application-limits.js, priorApplications), so an application recorded
-      // LATER than this visit (a September visit completed after an October one at the same place) is not held against it here; the
-      // closeout audit (auditHardCountLimits) judges both sides of the date and raises the office alert after the commit.
-      result = await limits.checkLimits(svc.customer_id, productId, day, knex, {
-        propertyId,
-        place: row.areaPlace.trim(),
-        proposal: true,
-        proposedRow: proposedRow(row),
-        excludeScheduledServiceId: svc.id,
-      });
-    } catch (err) {
-      logger.warn(`[lawn-trouble-areas] place limits unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-      continue;
-    }
-    const block = (result.blocks || []).find(refusesAtPlace);
-    if (block) {
-      // 400, not 409: the shared submit hook treats a 4xx other than a 409 conflict as correctable (a fresh key and an editable
-      // sheet), which is what the technician needs: pick another place or take the row off, then complete again.
-      return {
-        status: 400,
-        payload: {
-          error: `${block.message} Choose another place, or take it off the sheet.`,
-          code: 'lawn_place_limit',
-          productId,
-          place: row.areaPlace.trim(),
-          limitType: block.type,
-        },
-      };
-    }
-  }
-  return null;
+  return unmappedRefusal({ knex, svc, spots, propertyId });
 }
 
 module.exports = {

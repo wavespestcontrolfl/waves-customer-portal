@@ -213,6 +213,8 @@ async function analyzeOnly() {
 const completeButton = () => document.querySelector('.tech-visit-footer .tech-visit-complete');
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
 const editorFor = (name) => screen.getByRole('group', { name });
+// The limit warnings on the footer (a yearly limit warns, never holds: owner 2026-10-30).
+const limitWarnings = () => [...document.querySelectorAll('.tech-visit-footer .tech-visit-status--warn')].map((node) => node.textContent).filter((text) => /You can still complete/.test(text));
 const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
 
 async function submit() {
@@ -393,55 +395,59 @@ describe('a known trouble area', () => {
   });
 });
 
-describe('the yearly limits close a place', () => {
-  const CLOSED = (extra = {}) => areasBlock({ blocked: { [P_FUNG]: { front: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.' } }, ...extra });
+describe('the yearly limits warn at a place (never block)', () => {
+  const MESSAGE = 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.';
+  const CLOSED = (extra = {}) => areasBlock({ blocked: { [P_FUNG]: { front: MESSAGE } }, ...extra });
+  const whereOf = () => within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
 
-  test('a closed place is off for the row, with the limit\'s own words; the other places stay', async () => {
+  test('a limit-closed place stays tappable; picking it shows the limit\'s own words as a warning and Complete stays on', async () => {
     await open(placeContext({ troubleAreas: CLOSED() }));
     addFungicide();
-    const where = within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
-    expect(chipOf(where, 'Front').disabled).toBe(true);
-    expect(chipOf(where, 'Back').disabled).toBe(false);
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    expect(chipOf(whereOf(), 'Front').disabled).toBe(false);
+    expect(limitWarnings()).toEqual([]);
+    fireEvent.click(chipOf(whereOf(), 'Front'));
+    expect(limitWarnings()).toEqual(['Spot Fungicide, Front: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.']);
+    // Said once: the row's own note does not repeat the limit's words.
+    expect(within(row).queryByText(/LIMIT REACHED/)).toBeNull();
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerNote()).not.toMatch(/cannot go on/);
+    // The other place carries no warning.
+    fireEvent.click(chipOf(whereOf(), 'Back'));
+    expect(limitWarnings()).toEqual([]);
   });
 
-  test('a known area at a closed place is not the default (the open place stays the tech\'s choice)', async () => {
+  test('a known area at a limit-closed place is still the default, with the warning', async () => {
     await open(placeContext({ troubleAreas: CLOSED({ known: [{ ...KNOWN_FUNGUS_BACK, place: 'front', placeLabel: 'Front' }] }) }));
     addFungicide();
-    const where = within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
-    expect(pressed(where)).toEqual([]);
+    expect(pressed(whereOf())).toEqual(['Front · known']);
+    expect(limitWarnings()).toHaveLength(1);
   });
 
-  test('a row with every place closed says it cannot go anywhere and holds Complete until it is removed', async () => {
-    const every = Object.fromEntries(PLACE_LIST.map((place) => [place.id, 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.']));
+  test('a row with every place limit-closed does not say it cannot go anywhere: it completes with the warning for the place it went', async () => {
+    const every = Object.fromEntries(PLACE_LIST.map((place) => [place.id, MESSAGE]));
     await open(placeContext({ troubleAreas: areasBlock({ blocked: { [P_FUNG]: every } }) }));
     addFungicide();
     const row = placeGroup('Spot Fungicide');
     typeArea(row, '100');
-    expect(within(row).getByText(/Spot Fungicide cannot go anywhere on this lawn right now\. Spot Fungicide: 2\/2/)).toBeTruthy();
+    expect(within(row).queryByText(/cannot go anywhere/)).toBeNull();
+    for (const place of PLACE_LIST) expect(chipOf(whereOf(), place.label).disabled).toBe(false);
+    fireEvent.click(chipOf(whereOf(), 'Left side'));
     await analyze();
-    await waitFor(() => expect(footerNote() || completeButton().textContent).toMatch(/Remove Spot Fungicide: /));
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
-    expect(screen.queryByRole('group', { name: 'Spot Fungicide' })).toBeNull();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(limitWarnings()).toEqual(['Spot Fungicide, Left side: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.']);
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(1));
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('left_side');
   });
 
-  test('the server\'s own refusal of a place reads as the server worded it and the sheet stays editable', async () => {
-    await open(placeContext());
+  test('a limit message that does not open with the product name still names the product and the place', async () => {
+    await open(placeContext({ troubleAreas: areasBlock({ blocked: { [P_FUNG]: { back: 'A yearly limit is reached for this place.' } } }) }));
     addFungicide();
-    const row = placeGroup('Spot Fungicide');
-    typeArea(row, '100');
-    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Front'));
-    completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED. Choose another place, or take it off the sheet.'));
-    await analyze();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    await screen.findByText(/Choose another place, or take it off the sheet\./);
-    // A correctable refusal: pick another place and complete again.
-    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(completeCalls()).toHaveLength(2));
-    expect(completeCalls()[1].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('back');
+    fireEvent.click(chipOf(whereOf(), 'Back'));
+    expect(limitWarnings()).toEqual(['Spot Fungicide, Back: A yearly limit is reached for this place. You can still complete. The office gets an alert.']);
   });
 });
 
@@ -472,12 +478,17 @@ describe('Weed spots: the entry is one tap per place', () => {
     expect(pressed(screen.getByRole('group', { name: 'Weed spots place' }))).toEqual(['Front']);
   });
 
-  test('the place chips of the rows follow the server: a place that does not take the rows on the sheet is off', async () => {
+  test('the place chips of the rows follow the server: a place that does not take the rows on the sheet warns (the limit decides, never blocks)', async () => {
     await open(CHOICES({ ...ALL(LEAD_SET), front: BLIND_SET }));
     addWeedAt('Back');
     const where = screen.getByRole('group', { name: 'Weed spots place' });
     expect(chipOf(where, 'Back').disabled).toBe(false);
-    expect(chipOf(where, 'Front').disabled).toBe(true);
+    expect(chipOf(where, 'Front').disabled).toBe(false);
+    expect(limitWarnings()).toEqual([]);
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(limitWarnings().length).toBeGreaterThan(0);
+    fireEvent.click(chipOf(where, 'Back'));
+    expect(limitWarnings()).toEqual([]);
     expect(within(where).queryByText(/./, { selector: '[role="status"]' })).toBeNull();
     fireEvent.click(chipOf(where, 'Right side'));
     expect(pressed(where)).toEqual(['Right side']);
@@ -570,23 +581,26 @@ describe('Chinch bugs found: the entry is one tap per place', () => {
     expect(sent(P_BIF)).toMatchObject({ areaPlace: 'front', troubleType: 'chinch', troubleSource: 'tech_tap' });
   });
 
-  test('on the sheet at one place, the row cannot be moved to a place that takes the other product', async () => {
+  test('on the sheet at one place, the row can be moved to a place that takes the other product, with a warning there', async () => {
     await openChinch();
     fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Back' }));
     const where = within(screen.getByRole('group', { name: 'Arena 50 WDG' })).getByRole('group', { name: 'Place for Arena 50 WDG' });
-    expect(chipOf(where, 'Front').disabled).toBe(true);
-    expect(chipOf(where, 'Right side').disabled).toBe(true);
-    expect(chipOf(where, 'Left side').disabled).toBe(false);
+    expect(limitWarnings()).toEqual([]);
+    expect(chipOf(where, 'Front').disabled).toBe(false);
+    expect(chipOf(where, 'Right side').disabled).toBe(false);
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(limitWarnings()).toHaveLength(1);
     fireEvent.click(chipOf(where, 'Left side'));
     expect(pressed(where)).toEqual(['Left side']);
+    expect(limitWarnings()).toEqual([]);
   });
 });
 
 // ── reachability: place A is capped, place B is open ────────────────────────────────────────────────────────
 // For every guided or standing way a spot treatment gets onto the sheet, with the front closed for the product (or the
 // front needing a different product) and the back open, the tech reaches the back treatment in the counted taps, the front
-// cannot be chosen for a closed product, and the completion carries the back. (/complete accepting the back and refusing the
-// front is proven against Postgres in lawn-trouble-areas.db.test.js, one row per product kind.)
+// can be chosen for a limited product (with a warning), and the completion carries the back. (The limit reader closing the front and
+// not the back is proven against Postgres in lawn-trouble-areas.db.test.js, one row per product kind.)
 describe('reachability: the front is capped, the back is open', () => {
   const P_CATER = 'dddddddd-0000-4000-8000-000000000001';
   const P_DISP = 'dddddddd-0000-4000-8000-000000000002';
@@ -664,8 +678,15 @@ describe('reachability: the front is capped, the back is open', () => {
     const chinch = _label.includes('chinch');
     const where = chinch ? within(group('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' }) : group(chipRow ? `Place for ${chipRow}` : 'Weed spots place');
     expect(pressed(where)).toEqual(['Back']);
-    // A product the front is closed for cannot be put on the front.
-    if (chipRow) expect(chipOf(where, 'Front').disabled).toBe(true);
+    // A product the front is limited for can still be put on the front: the footer warns, and the back goes back on.
+    if (chipRow) {
+      expect(limitWarnings()).toEqual([]);
+      expect(chipOf(where, 'Front').disabled).toBe(false);
+      fireEvent.click(chipOf(where, 'Front'));
+      expect(limitWarnings()).toHaveLength(1);
+      fireEvent.click(chipOf(where, 'Back'));
+      expect(limitWarnings()).toEqual([]);
+    }
     // The completion carries the back, and nothing at the front.
     typeAreaFor(rowNames);
     await waitFor(() => expect(completeButton().disabled).toBe(false));
@@ -799,29 +820,37 @@ describe('a planned Arena or Celsius row is judged by the per-place decision', (
     },
   };
 
-  test('Arena planned (no entry tag): the front is off, the back is open; Talak planned: both open', async () => {
+  test('Arena planned (no entry tag): the front warns, the back is clear; Talak planned: both clear', async () => {
     await open(placeContext({ treatmentGuide: true, chinch: CHINCH, planned: [ARENA_ITEM, BIF_ITEM], addOns: [] }));
     guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: CHINCH };
     const arena = within(placeGroup('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' });
-    expect(chipOf(arena, 'Front').disabled).toBe(true);
+    expect(chipOf(arena, 'Front').disabled).toBe(false);
     expect(chipOf(arena, 'Back').disabled).toBe(false);
+    fireEvent.click(chipOf(arena, 'Front'));
+    expect(limitWarnings()).toHaveLength(1);
+    fireEvent.click(chipOf(arena, 'Back'));
+    expect(limitWarnings()).toEqual([]);
     const talak = within(placeGroup('Atticus Talak 7.9 F')).getByRole('group', { name: 'Place for Atticus Talak 7.9 F' });
     expect(chipOf(talak, 'Front').disabled).toBe(false);
     expect(chipOf(talak, 'Back').disabled).toBe(false);
   });
 
-  test('Lead WG planned on its own: the place that takes the replacement is off, the lead\'s place is open', async () => {
+  test('Lead WG planned on its own: the place that takes the replacement warns, the lead\'s place is clear', async () => {
     const mix = MIX({ front: BLIND_SET, back: LEAD_SET });
     await open(placeContext({ weedMix: mix, planned: [addOn(P_LEAD, 'Lead WG')], addOns: ADD_ONS }));
     const lead = within(placeGroup('Lead WG')).getByRole('group', { name: 'Place for Lead WG' });
-    expect(chipOf(lead, 'Front').disabled).toBe(true);
+    expect(chipOf(lead, 'Front').disabled).toBe(false);
     expect(chipOf(lead, 'Back').disabled).toBe(false);
+    fireEvent.click(chipOf(lead, 'Front'));
+    expect(limitWarnings().length).toBeGreaterThan(0);
+    fireEvent.click(chipOf(lead, 'Back'));
+    expect(limitWarnings()).toEqual([]);
   });
 });
 
 
 // ── the place maps are read again: with the guide's answer, and after /complete refuses a place ──────────────────
-describe('the guide answer carries the fresh per-place blocks; a refused place refreshes them', () => {
+describe('the guide answer carries the fresh per-place limits, shown as warnings', () => {
   const FUNG_ITEM = ADD_ONS[4];
   const fungusCard = () => ({ kind: 'fungus', title: 'Fungus', finding: 'Finding for fungus.', check: null, detail: null, note: null, productIds: [P_FUNG], items: [FUNG_ITEM], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found' });
   const closedFront = { [P_FUNG]: { front: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.' } };
@@ -837,190 +866,57 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
   test('a limit that changed since the sheet opened: a place the guide read open is open, though the opening map had it closed', async () => {
     guideAnswer = guideWith({ [P_FUNG]: {} });
     await openAndTake(ctxWith(closedFront));
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    expect(limitWarnings()).toEqual([]);
   });
 
   test('a place newly capped: the guide\'s map closes it though the opening map had it open', async () => {
     guideAnswer = guideWith(closedFront);
     await openAndTake(ctxWith({}));
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-    expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    expect(limitWarnings()).toHaveLength(1);
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
+    fireEvent.click(chipOf(chipsOf(), 'Back'));
+    expect(limitWarnings()).toEqual([]);
   });
 
   test('an answer without the map, and a guide read that fails, leave the opening map standing', async () => {
     guideAnswer = guideWith(null);
     await openAndTake(ctxWith(closedFront));
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    expect(limitWarnings()).toHaveLength(1);
     cleanup();
     guideAnswer = refusal(500, 'boom', 'Internal error');
     await open(ctxWith(closedFront));
     await analyze();
     await waitFor(() => expect(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' })).toBeTruthy());
     fireEvent.click(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' }));
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-  });
-
-  test('/complete refuses a place (400 lawn_place_limit): the context and the guide are read again, the chip closes, and the tech picks another place without reloading', async () => {
-    let contextReads = 0;
-    let guideReads = 0;
-    const base = makeRequest({ ctx: ctxWith({}) });
-    const request = vi.fn(async (path, options) => {
-      if (path.includes('/lawn-fast/context')) { contextReads += 1; return contextReads === 1 ? ctxWith({}) : ctxWith(closedFront); }
-      return base(path, options);
-    });
-    guideAnswer = () => { guideReads += 1; return guideWith(guideReads === 1 ? {} : closedFront); };
-    await openSheet({ request, props: { catalog: CAT } });
-    await analyze();
-    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-    typeArea(placeGroup('Spot Fungicide'), '100');
     fireEvent.click(chipOf(chipsOf(), 'Front'));
-    expect(contextReads).toBe(1);
-    expect(guideReads).toBe(1);
-    completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED. Choose another place, or take it off the sheet.'));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    await screen.findByText(/Choose another place, or take it off the sheet\./);
-    await waitFor(() => expect(contextReads).toBe(2));
-    await waitFor(() => expect(guideReads).toBe(2));
-    await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-    // The row still sits on Front (closed now): Complete says so; another place completes.
-    await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Spot Fungicide cannot go on Front/));
-    fireEvent.click(chipOf(chipsOf(), 'Back'));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(completeCalls()).toHaveLength(2));
-    expect(completeCalls()[1].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('back');
+    expect(limitWarnings()).toHaveLength(1);
   });
 
-  // A failed re-read keeps the answer only while it belongs to the SAME confirmed assessment.
-  describe('a failed guide re-read', () => {
-    // Opens the sheet with a fungus card, takes it, and sends a completion the server refuses (400 lawn_place_limit), which re-reads the
-    // context (now OPEN everywhere) and the guide. The first guide answer closes the front; `rereads` says what the second read does.
-    const refuseOnce = async (rereads) => {
-      let contextReads = 0;
-      let guideReads = 0;
-      const base = makeRequest({ ctx: ctxWith({}) });
-      const request = vi.fn(async (path, options) => {
-        if (path.includes('/lawn-fast/context')) { contextReads += 1; return ctxWith({}); }
-        return base(path, options);
-      });
-      guideAnswer = () => { guideReads += 1; if (guideReads === 1) return guideWith(closedFront); return rereads(); };
-      await openSheet({ request, props: { catalog: CAT } });
-      await analyze();
-      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-      typeArea(placeGroup('Spot Fungicide'), '100');
-      fireEvent.click(chipOf(chipsOf(), 'Back'));
-      completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: closed.'));
-      await waitFor(() => expect(completeButton().disabled).toBe(false));
-      await submit();
-      await waitFor(() => expect(contextReads).toBe(2));
-      await waitFor(() => expect(guideReads).toBe(2));
-      return { guideReads: () => guideReads };
-    };
-
-    test('the same assessment: the answer the sheet has stands (its per-place blocks), though the fresh context says open', async () => {
-      await refuseOnce(() => { throw refusal(500, 'boom', 'Internal error'); });
-      // The context was re-read and says open; the guide's answer (the front closed) is the one that stays.
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-      expect(screen.getByRole('group', { name: 'Suggested from this lawn' })).toBeTruthy();
-    });
-
-    test('a new confirmed assessment after the refusal: a failed read drops the old answer; the sheet follows the context, and is not left waiting', async () => {
-      await refuseOnce(() => guideWith(closedFront));
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-      // Retake, and confirm a different assessment; its guide read fails.
-      fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
-      await screen.findByTestId('lawn-shot-list');
-      const NEXT = { ...ASSESSED, id: 'assessment-2' };
-      assessAnswer = { ...assessAnswer, assessment: NEXT };
-      confirmAnswer = { ...confirmAnswer, assessment: { ...NEXT, confirmed_by_tech: true } };
-      guideAnswer = refusal(500, 'boom', 'Internal error');
-      await analyze();
-      // The old assessment's cards and per-place blocks are gone: no cards, the context's opening map (open), and no wait.
-      await waitFor(() => expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull());
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
-      expect(footerNote() + completeButton().textContent).not.toMatch(/Wait for the lawn guide/);
-    });
-  });
-
-  test('the refusal names the product and the place: the chip closes at once and stays closed, though the maps it reads again say open; the reads name the spot products on the sheet', async () => {
-    const urls = [];
-    const base = makeRequest({ ctx: ctxWith({}) });
-    const request = vi.fn(async (path, options) => {
-      urls.push(path);
-      if (path.includes('/lawn-fast/context')) return ctxWith({});
-      return base(path, options);
-    });
-    guideAnswer = guideWith({ [P_FUNG]: {} });
-    await openSheet({ request, props: { catalog: CAT } });
-    await analyze();
-    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-    typeArea(placeGroup('Spot Fungicide'), '100');
+  // A failed guide re-read keeps the answer only while it belongs to the SAME confirmed assessment.
+  test('a new confirmed assessment: a failed guide read drops the old answer; the sheet follows the context, and is not left waiting', async () => {
+    guideAnswer = guideWith(closedFront);
+    await openAndTake(ctxWith({}));
     fireEvent.click(chipOf(chipsOf(), 'Front'));
-    // Nothing is named before a refusal: the first reads are exactly what they always were.
-    expect(urls.filter((u) => /productIds=/.test(u))).toEqual([]);
-    completeErrors.push(Object.assign(refusal(400, 'lawn_place_limit', 'Spot Fungicide: LIMIT REACHED. Choose another place, or take it off the sheet.', { productId: P_FUNG.toUpperCase(), place: 'front' })));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-    // Both re-reads named the spot product on the sheet.
-    await waitFor(() => expect(urls.filter((u) => u.includes(`productIds=${P_FUNG}`))).toHaveLength(2));
-    expect(urls.some((u) => u.includes('/lawn-fast/context?productIds='))).toBe(true);
-    expect(urls.some((u) => u.includes('/treatment-guide?assessmentId=assessment-1&productIds='))).toBe(true);
-    // The maps said open (the guide's placeBlocked is empty): the refusal still holds.
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-    expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
+    expect(limitWarnings()).toHaveLength(1);
+    // Retake, and confirm a different assessment; its guide read fails.
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await screen.findByTestId('lawn-shot-list');
+    const NEXT = { ...ASSESSED, id: 'assessment-2' };
+    assessAnswer = { ...assessAnswer, assessment: NEXT };
+    confirmAnswer = { ...confirmAnswer, assessment: { ...NEXT, confirmed_by_tech: true } };
+    guideAnswer = refusal(500, 'boom', 'Internal error');
+    await analyze();
+    // The old assessment's cards and per-place limits are gone: no cards, the context's opening map (open), and no wait.
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull());
+    await waitFor(() => expect(limitWarnings()).toEqual([]));
+    expect(footerNote() + completeButton().textContent).not.toMatch(/Wait for the lawn guide/);
   });
 
-  // A refusal of the yearly AMOUNT depends on the dose entered; a count or interval refusal does not.
-  describe('what ends a refusal', () => {
-    const refuseAt = async (limitType) => {
-      const base = makeRequest({ ctx: ctxWith({}) });
-      guideAnswer = guideWith({ [P_FUNG]: {} });
-      await openSheet({ request: base, props: { catalog: CAT } });
-      await analyze();
-      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-      typeArea(placeGroup('Spot Fungicide'), '100');
-      fireEvent.click(chipOf(chipsOf(), 'Front'));
-      completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: refused.', { productId: P_FUNG, place: 'front', limitType }));
-      await waitFor(() => expect(completeButton().disabled).toBe(false));
-      await submit();
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-    };
-    const amountBox = () => within(placeGroup('Spot Fungicide')).getByLabelText('Spot Fungicide');
-
-    test('an amount refusal ends when the area changes (the figured amount changes with it)', async () => {
-      await refuseAt('annual_max_rate');
-      typeArea(placeGroup('Spot Fungicide'), '250');
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
-    });
-
-    test('an amount refusal ends when the tech types a different amount', async () => {
-      await refuseAt('annual_max_rate');
-      fireEvent.change(amountBox(), { target: { value: '0.5' } });
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
-    });
-
-    test('an amount refusal stays while the dose is unchanged, though the maps it reads again say open', async () => {
-      await refuseAt('annual_max_rate');
-      // A re-read already happened after the refusal and said open (guideWith({[P_FUNG]: {}})): the refusal still holds.
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-      // Picking another place and back does not change the dose either.
-      fireEvent.click(chipOf(chipsOf(), 'Back'));
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-    });
-
-    test.each(['annual_max_apps', 'min_interval_days'])('a %s refusal does not end when the area or the amount changes', async (limitType) => {
-      await refuseAt(limitType);
-      typeArea(placeGroup('Spot Fungicide'), '250');
-      fireEvent.change(amountBox(), { target: { value: '0.5' } });
-      typeArea(placeGroup('Spot Fungicide'), '500');
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-    });
-  });
-
-  // A block that arrives in a MAP (the opening context, the re-read context, the guide's answer) carries its limit type too: the
-  // yearly amount was judged at the program dose, so it ends when the row's dose changes; a count or an interval block does not.
+  // A limit that arrives in a MAP (the opening context, the guide's answer) carries its limit type too: the yearly amount was
+  // judged at the program dose, so its warning ends when the row's dose changes; a count or an interval warning does not.
   describe('what ends a block read from a map', () => {
     const MESSAGE = 'Spot Fungicide: LIMIT REACHED at the front.';
     const mapped = (limitType) => ({ blocked: { [P_FUNG]: { front: MESSAGE } }, blockedTypes: { [P_FUNG]: { front: limitType } } });
@@ -1031,29 +927,30 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
       await analyze();
       fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
       typeArea(placeGroup('Spot Fungicide'), '100');
+      fireEvent.click(chipOf(chipsOf(), 'Front'));
     };
     let limitTypeUnderTest;
 
     test.each([
       ['the area', () => typeArea(placeGroup('Spot Fungicide'), '250')],
       ['the amount', () => fireEvent.change(amountBox(), { target: { value: '0.5' } })],
-    ])('an amount block in the opening and guide maps ends when %s of its row changes', async (_name, change) => {
+    ])('an amount warning from the opening and guide maps ends when %s of its row changes', async (_name, change) => {
       limitTypeUnderTest = 'annual_max_rate';
       guideAnswer = guideMapped('annual_max_rate');
       await takeFungus();
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+      expect(limitWarnings()).toHaveLength(1);
       change();
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
+      await waitFor(() => expect(limitWarnings()).toEqual([]));
       expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
     });
 
-    test.each(['annual_max_apps', 'min_interval_days'])('a %s block in the maps stays closed when the dose changes', async (limitType) => {
+    test.each(['annual_max_apps', 'min_interval_days'])('a %s warning from the maps stays when the dose changes', async (limitType) => {
       limitTypeUnderTest = limitType;
       guideAnswer = guideMapped(limitType);
       await takeFungus();
       typeArea(placeGroup('Spot Fungicide'), '250');
       fireEvent.change(amountBox(), { target: { value: '0.5' } });
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+      expect(limitWarnings()).toHaveLength(1);
     });
 
     test('a map without limit types (an older answer) never ends on a dose change', async () => {
@@ -1061,46 +958,15 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
       guideAnswer = guideWith({ [P_FUNG]: { front: MESSAGE } });
       await takeFungus();
       typeArea(placeGroup('Spot Fungicide'), '250');
-      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
-    });
-
-    // The re-read after a refusal judges the program dose and can put the very product and place into the maps it returns.
-    test.each([
-      ['annual_max_rate', false],
-      ['annual_max_apps', true],
-    ])('a %s refusal whose re-read maps carry the block too: after a dose change the chip is closed = %s', async (limitType, stillClosed) => {
-      const reread = areasBlock(mapped(limitType));
-      const base = makeRequest({ ctx: ctxWith({}) });
-      const request = vi.fn(async (path, options) => (path.includes('/lawn-fast/context') && /productIds=/.test(path) ? placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: reread }) : base(path, options)));
-      guideAnswer = guideWith({ [P_FUNG]: {} });
-      await openSheet({ request, props: { catalog: CAT } });
-      await analyze();
-      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-      typeArea(placeGroup('Spot Fungicide'), '100');
-      fireEvent.click(chipOf(chipsOf(), 'Front'));
-      guideAnswer = guideMapped(limitType);
-      completeErrors.push(refusal(400, 'lawn_place_limit', MESSAGE, { productId: P_FUNG, place: 'front', limitType }));
-      await waitFor(() => expect(completeButton().disabled).toBe(false));
-      await submit();
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-      await waitFor(() => expect(request.mock.calls.some(([path]) => /context\?productIds=/.test(path))).toBe(true));
-      typeArea(placeGroup('Spot Fungicide'), '250');
-      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(stillClosed));
-      // A second refusal at the new dose closes the chip again, for an amount block too (the server stays authoritative).
-      if (!stillClosed) {
-        completeErrors.push(refusal(400, 'lawn_place_limit', MESSAGE, { productId: P_FUNG, place: 'front', limitType }));
-        await waitFor(() => expect(completeButton().disabled).toBe(false));
-        await submit();
-        await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
-      }
+      expect(limitWarnings()).toHaveLength(1);
     });
   });
 
-  test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
+  test('other refusals do not re-read the place maps', async () => {
     let contextReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });
     const request = vi.fn(async (path, options) => {
-      if (path.includes('/lawn-fast/context')) { contextReads += 1; if (contextReads > 1) throw new Error('offline'); return ctxWith({}); }
+      if (path.includes('/lawn-fast/context')) { contextReads += 1; return ctxWith({}); }
       return base(path, options);
     });
     guideAnswer = guideWith({});
@@ -1114,12 +980,6 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     await submit();
     await screen.findByText(/Pick where on the lawn/);
     expect(contextReads).toBe(1);
-    completeErrors.push(refusal(400, 'lawn_place_limit', 'closed'));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(contextReads).toBe(2));
-    // The refresh failed: the chips stand as they were and the sheet is still usable.
-    expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
   });
 });
 
