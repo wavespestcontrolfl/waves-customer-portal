@@ -230,11 +230,19 @@ describe('4. Careers row', () => {
   const call = { id: 'call-1', direction: 'inbound', from_phone: '+19415550100', to_phone: '+19415550199' };
 
   // A fake knex: a table store, a transaction, advisory-lock raws.
-  function fakeDb({ existing = [] } = {}) {
+  function fakeDb({ existing = [], liveGeneration = 1 } = {}) {
     const rows = existing.map((r, i) => ({ id: r.id || `app-${i}`, ...r }));
     const log = { raws: [], inserts: [], tables: [] };
     function table(name) {
       log.tables.push(name);
+      if (name === 'call_log') {
+        const callQ = {
+          where() { return callQ; },
+          forUpdate() { log.lockedCall = true; return callQ; },
+          async first() { return liveGeneration == null ? undefined : { processing_generation: liveGeneration }; },
+        };
+        return callQ;
+      }
       if (name !== 'job_applications') throw new Error(`unexpected table ${name}`);
       const filters = [];
       const q = {
@@ -297,6 +305,19 @@ describe('4. Careers row', () => {
     const { database, log } = fakeDb();
     await createJobApplicationFromCall({ call, extraction: extraction({ caller: { name_full: 'Pat Example', phone_e164: '+19415550177' } }), database });
     expect(JSON.parse(log.inserts[0].contact_snapshot).phone).toBe('+19415550177');
+  });
+
+  test('generation fence: a pass that no longer owns the call files nothing; the owning pass files under the call lock', async () => {
+    const stale = fakeDb({ liveGeneration: 3 });
+    const out = await createJobApplicationFromCall({ call, extraction: extraction(), database: stale.database, procGeneration: 2 });
+    expect(out).toEqual({ created: false, id: null, reason: 'superseded' });
+    expect(stale.log.inserts).toHaveLength(0);
+    const gone = fakeDb({ liveGeneration: null });
+    expect((await createJobApplicationFromCall({ call, extraction: extraction(), database: gone.database, procGeneration: 2 })).reason).toBe('superseded');
+    const owner = fakeDb({ liveGeneration: 2 });
+    const ok = await createJobApplicationFromCall({ call, extraction: extraction(), database: owner.database, procGeneration: 2 });
+    expect(ok.created).toBe(true);
+    expect(owner.log.lockedCall).toBe(true);
   });
 
   test('an outbound call uses the number we dialed, for every outbound variant', async () => {

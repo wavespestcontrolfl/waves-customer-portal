@@ -10579,12 +10579,12 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // idempotent by call and deduped by phone. It sends nothing to the applicant: no
 // text, no email, no invite, no AI screen. Needs a VALID V2 extraction whose
 // call_nature is job_applicant; a spam call files nothing. Never blocks the call.
-async function fileApplicantCareersRowStep({ call, callSid, extracted, v2Result }) {
+async function fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration = null }) {
   if (!callApplicantHandlingLive() || extracted?.is_spam) return null;
   const extraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
   if (extraction?.call_nature !== 'job_applicant') return null;
   try {
-    const outcome = await require('./job-applications').createJobApplicationFromCall({ call, extraction, database: db });
+    const outcome = await require('./job-applications').createJobApplicationFromCall({ call, extraction, database: db, procGeneration });
     logger.info(`[call-proc] Careers row for ${maskSid(callSid)}: ${outcome.reason}`);
     return outcome;
   } catch (err) {
@@ -24678,7 +24678,7 @@ const CallRecordingProcessor = {
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
 
       // GATE_CALL_APPLICANT_HANDLING: a job applicant's call files one Careers row, comms-free.
-      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result });
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
 
       // A callback once classified spam that this pass settled on any other
       // verdict gives the parent voicemail back what the spam verdict closed

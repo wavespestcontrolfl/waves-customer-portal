@@ -207,11 +207,21 @@ function callApplicationFields(call, extraction) {
   return { name, phone, email, source, phoneKey: lastTenDigits(phone) };
 }
 
-async function createJobApplicationFromCall({ call = {}, extraction = null, database }) {
+async function createJobApplicationFromCall({ call = {}, extraction = null, database, procGeneration = null }) {
   const fields = callApplicationFields(call, extraction);
   if (fields.reason) return { created: false, id: null, reason: fields.reason };
   const { name, phone, email, source, phoneKey } = fields;
   return database.transaction(async (trx) => {
+    // Generation fence (the processor's other post-finalization writers do the
+    // same): a newer pass that reclaimed or corrected the call owns it now, so
+    // this pass's extraction is stale and files nothing. The row lock holds
+    // until the insert commits.
+    if (procGeneration != null) {
+      const live = await trx('call_log').where({ id: call.id }).forUpdate().first('processing_generation');
+      if (!live || Number(live.processing_generation) !== Number(procGeneration)) {
+        return { created: false, id: null, reason: 'superseded' };
+      }
+    }
     // One writer at a time per call and per phone: two passes of the same call
     // (or two calls from one number) cannot both pass the checks below.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`job_application_call:${call.id}`]);
