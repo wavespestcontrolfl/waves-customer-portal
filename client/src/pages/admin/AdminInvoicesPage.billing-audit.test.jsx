@@ -448,6 +448,42 @@ describe("finding 6: receipt delivery is reported per channel", () => {
     ).toBeDisabled();
   });
 
+  it("does not invite a resend of a text the server reads as uncertain (delivery.sms = unknown)", async () => {
+    const invoice = fixtureInvoice({
+      status: "paid",
+      amount_paid: 100,
+      credit_applied: 0,
+    });
+    installInvoiceFetch(invoice, {
+      receiptResponses: [
+        {
+          ok: true,
+          email: { ok: true },
+          sms: { ok: false, error: "provider timeout" },
+          delivery: { email: "sent", sms: "unknown" },
+        },
+      ],
+    });
+    const dialog = await openReceiptDialog(invoice);
+    fireEvent.click(
+      dialog.getByRole("button", { name: "Send receipt", exact: true }),
+    );
+
+    expect(
+      (
+        await screen.findAllByText(
+          /SMS may have been delivered \(provider timeout\)/,
+        )
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/selected to retry/)).not.toBeInTheDocument();
+    expect(dialog.getByRole("checkbox", { name: /Email/ })).not.toBeChecked();
+    expect(dialog.getByRole("checkbox", { name: /SMS/ })).not.toBeChecked();
+    expect(
+      dialog.getByRole("button", { name: "Send receipt", exact: true }),
+    ).toBeDisabled();
+  });
+
   it("still says send failed, and keeps both channels selected, when nothing went out", async () => {
     const invoice = fixtureInvoice({
       status: "paid",

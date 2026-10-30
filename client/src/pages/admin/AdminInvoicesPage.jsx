@@ -4458,9 +4458,11 @@ function SendInvoiceModal({
 
 // What happened on each receipt channel the operator asked for. The server
 // answers ok when ANY leg went out, with a result per leg: { ok, error?,
-// skipped?, deliveryOutcome? } — an email leg tagged deliveryOutcome
-// "uncertain" may still have reached the provider. A requested leg is "sent",
-// "uncertain" (never offer a resend) or "failed" (with its reason).
+// skipped?, deliveryOutcome? }, plus `delivery`, its per-leg certainty
+// ('sent' | 'not_sent' | 'unknown'). A leg the server reads 'unknown' (or an
+// email tagged deliveryOutcome "uncertain") may still have reached the
+// customer. A requested leg is "sent", "uncertain" (never offer a resend) or
+// "failed" (with its reason).
 export function receiptDeliveryOutcome(res, requested) {
   // No per-leg results at all: fall back to the overall flag.
   if (!res?.email && !res?.sms) {
@@ -4486,7 +4488,10 @@ export function receiptDeliveryOutcome(res, requested) {
     if (leg?.ok) {
       sent.push(key);
       notes.push(`${label} sent.`);
-    } else if (leg?.deliveryOutcome === "uncertain") {
+    } else if (
+      leg?.deliveryOutcome === "uncertain" ||
+      res?.delivery?.[key] === "unknown"
+    ) {
       uncertain.push(key);
       notes.push(
         `${label} may have been delivered (${reason}). Check before sending it again.`,
