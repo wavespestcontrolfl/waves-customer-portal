@@ -877,7 +877,7 @@ export default function TechHomePage({ section = 'today' }) {
           followThrough={<TechFollowThroughCards />}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
-          timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
+          timeClock={<TechTimeTrackingCard nextStop={fieldNextStop?.primary} />}
           truckCheck={<TechTruckCheckCard kit={truckKit.data} base={base} visitSearch={visitSearch} />}
           toolGaps={toolGapsOf(truckKit.data)}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
@@ -919,6 +919,7 @@ export default function TechHomePage({ section = 'today' }) {
 
       {showCreateProject && (
         <CreateProjectModal
+          theme="light"
           presentation={projectDefaults?.scheduledServiceId ? 'sheet' : 'modal'}
           defaultCustomerId={projectDefaults?.customerId || ''}
           defaultCustomerLabel={projectDefaults?.customerLabel || ''}
@@ -1254,6 +1255,7 @@ export default function TechHomePage({ section = 'today' }) {
       {outcomeTarget && (
         <ConsultationOutcomeSheet
           key={outcomeTarget.id}
+          theme="light"
           serviceId={outcomeTarget.id}
           customerName={outcomeTarget.customer_name || outcomeTarget.customerName || 'Customer'}
           request={techRequest}

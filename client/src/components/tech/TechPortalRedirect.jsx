@@ -4,6 +4,7 @@ import { isNativeApp } from '../../native/platform';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
 import { FIELD_BOOKMARK_META } from '../../lib/adminBookmarkMeta';
+import { ADMIN_FONT, AUTH, authPrimaryButton } from '../admin/adminAuthStyles';
 
 // The standalone /tech portal shell is retired: the field workspace lives at
 // /admin/today. Installed PWAs, push notifications and old bookmarks still open
@@ -64,10 +65,10 @@ export default function TechPortalRedirect() {
     return (
       // Standalone PWA under viewport-fit=cover: clear the notch / status bar
       // like the retired shell did (Codex #5573 r14).
-      <div style={{ minHeight: '100vh', padding: 24, paddingTop: 'calc(24px + env(safe-area-inset-top, 0px))', background: '#0f1923', color: '#e2e8f0', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
-        <h1 style={{ fontSize: 24, margin: '8px 0 16px' }}>Waves Field Tools</h1>
+      <div style={{ minHeight: '100vh', padding: 24, paddingTop: 'calc(24px + env(safe-area-inset-top, 0px))', background: AUTH.page, color: AUTH.text, fontFamily: ADMIN_FONT }}>
+        <h1 style={{ fontSize: 24, fontWeight: 500, fontFamily: ADMIN_FONT, color: AUTH.text, margin: '8px 0 16px' }}>Waves Field Tools</h1>
         <AddToHomeScreenHint />
-        <Link to={`/admin/login?next=${encodeURIComponent(target)}`} style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, padding: '10px 16px', borderRadius: 8, background: '#e2e8f0', color: '#0f1923', fontSize: 16, fontWeight: 700, textDecoration: 'none' }}>
+        <Link to={`/admin/login?next=${encodeURIComponent(target)}`} style={{ ...authPrimaryButton(false), display: 'inline-flex', width: 'auto', marginTop: 0, padding: '10px 20px', fontSize: 16, textDecoration: 'none' }}>
           Sign in
         </Link>
       </div>

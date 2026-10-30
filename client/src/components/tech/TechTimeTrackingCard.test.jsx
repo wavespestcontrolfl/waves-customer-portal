@@ -58,7 +58,7 @@ describe('TechTimeTrackingCard', () => {
     let clockedIn = false;
     const fetchMock = vi.fn(async () => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } }));
     vi.stubGlobal('fetch', fetchMock);
-    render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
+    render(<TechTimeTrackingCard nextStop={{ id: 'visit-1', status: 'on_site' }} />);
     expect(await screen.findByRole('button', { name: 'Clock in' })).toBeInTheDocument();
     clockedIn = true;
     window.dispatchEvent(new Event('focus'));
@@ -68,7 +68,7 @@ describe('TechTimeTrackingCard', () => {
   it('only the newest status read lands: an older read arriving last never puts back the old controls', async () => {
     const pending = [];
     vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => pending.push(r))));
-    render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
+    render(<TechTimeTrackingCard nextStop={{ id: 'visit-1', status: 'on_site' }} />);
     window.dispatchEvent(new Event('focus'));
     const body = (clockedIn) => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } });
     // the newer read (after the timer started) answers first, the older one last
@@ -143,7 +143,7 @@ describe('TechTimeTrackingCard', () => {
       vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).endsWith('/no-lunch')
         ? response(409, { error: 'Reopen the approved day before changing lunch.' })
         : response(200, clockedInStatus({ enabled: true, noLunch: false })))));
-      render(<TechTimeTrackingCard variant="field" nextStop={null} />);
+      render(<TechTimeTrackingCard nextStop={null} />);
 
       fireEvent.click(await screen.findByRole('button', { name: 'No lunch today' }));
       await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Reopen the approved day'));
