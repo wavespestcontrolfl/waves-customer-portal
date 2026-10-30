@@ -200,6 +200,20 @@ postgres('misting portal reader against PostgreSQL', () => {
     });
   });
 
+  test('app property scope off (unscoped session, two homes): the next check is the system\'s own property only', async () => {
+    const second = await property(false);
+    // The newest system is at the second home; its only plan visit is at the primary.
+    await calibration({ property_id: home.id, mist_times: ['06:30'] });
+    await calibration({ property_id: second.id, installed_on: '2026-06-10', mist_times: ['18:00'] });
+    await visit({ property_id: null, scheduled_date: '2026-11-12' }); // unstamped: the primary's
+    await visit({ property_id: home.id, scheduled_date: '2026-11-14' });
+    // A visit at another house never stands in for this system's next check: no card.
+    expect(await read(OPEN_SCOPE())).toBeNull();
+    // Its own plan visit brings the card back, with that visit as the next check.
+    await visit({ property_id: second.id, scheduled_date: '2026-11-20' });
+    expect(await read(OPEN_SCOPE())).toMatchObject({ installedOn: '2026-06-10', nextCheckOn: '2026-11-20', mistTimes: ['18:00'] });
+  });
+
   test('a NULL-property calibration is never current: a newer NULL row is ignored under a scoped primary and an unscoped single home', async () => {
     await calibration({ property_id: home.id, mist_times: ['07:00'] });
     await calibration({ property_id: null, mist_times: ['08:00'] }); // newer, its property row was deleted

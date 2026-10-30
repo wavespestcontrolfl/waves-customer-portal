@@ -61,10 +61,18 @@ async function getPortalMistingSystem({ customerId, scope, now = new Date(), kne
     .select('property_id', 'mist_times', knex.raw('installed_on::text as installed_on'))
     .first();
 
-  // Same visit rules as GET /api/schedule/next (routes/schedule.js).
+  // The next check belongs to THIS system's property, whatever the session scope: visits stamped with
+  // that property, plus unstamped visits when it is the primary (the visit rule applyPropertyPredicate
+  // applies for a selected house). With app property scope off, a multi-home customer's session is
+  // unscoped, and a visit at another house must not stand in for this system's next check.
+  const property = await knex('customer_properties')
+    .where({ id: calibration.property_id, customer_id: customerId, active: true })
+    .first('id', 'is_primary');
+  if (!property) return null;
+  // Otherwise the same visit rules as GET /api/schedule/next (routes/schedule.js).
   const checkQuery = knex('scheduled_services')
     .where({ 'scheduled_services.customer_id': customerId });
-  applyPropertyPredicate(checkQuery, scope);
+  applyPropertyPredicate(checkQuery, { enabled: true, scoped: true, closed: false, property });
   const nextCheck = await checkQuery
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     // A still-pending, never-confirmed call-created follow-up is dispatch's,
