@@ -2062,10 +2062,9 @@ router.post('/:id/new-customer', familyCardRoute('start the new customer', async
 // resolves the card. It creates a DRAFT annual prepay invoice and a payment-pending term: the invoice is NOT sent and the customer is not
 // texted. Every refusal is a plain message and changes nothing (estimate already accepted, no longer eligible, visit gone, customer
 // changed). Admin only; the version the screen showed must still be the card's (409 otherwise).
-router.post('/:id/accept-call-prepay', async (req, res) => {
+router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
   try {
     must(require('../config/feature-gates').callPrepayChoiceLive(), 404, 'Not found');
-    must(req.techRole === 'admin', 403, 'Admin access required');
     must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
     const item = await db('triage_items').where({ id: req.params.id }).first();
     must(item, 404, 'Triage item not found');
