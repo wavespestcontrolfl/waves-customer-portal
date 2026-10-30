@@ -644,7 +644,7 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
 // Codex #6294 r2, r3, r4: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
 describe('the contract follows the extractor that wrote the stored answer', () => {
   const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
-  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE, DAY_TIME_CONFLICT_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE, DAY_TIME_CONFLICT_RULE, DAY_TIME_CONFLICT_AUDIT_RULE } = require('../services/prompts/appointment-confirmed-rules');
   const v2With = (scheduling) => JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling });
   const confirmedV2 = v2With({ status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' });
   const noneV2 = v2With({ status: 'none' });
@@ -704,10 +704,13 @@ describe('the contract follows the extractor that wrote the stored answer', () =
     expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
-    expect(AUDIT_PROMPT_V1).not.toContain(DAY_TIME_CONFLICT_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(DAY_TIME_CONFLICT_AUDIT_RULE);
     const v1 = row({ ai_extraction: '{}' });
     expect(AUDIT_PROMPT).toContain(CALLER_PROPOSED_TIME_RULE);
-    expect(AUDIT_PROMPT).toContain(DAY_TIME_CONFLICT_RULE);
+    // The judges get the rule without its weekday/date check: no judge is given the call's date.
+    expect(AUDIT_PROMPT).toContain(DAY_TIME_CONFLICT_AUDIT_RULE);
+    expect(AUDIT_PROMPT).not.toContain(DAY_TIME_CONFLICT_RULE);
+    expect(AUDIT_PROMPT).not.toContain('Thursday the 6th');
     const v2 = valid(noneV2, {});
     expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
     expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
@@ -728,7 +731,7 @@ describe('AUDIT_PROMPT appointment definition', () => {
   const { AUDIT_PROMPT } = require('../services/call-self-audit');
   const {
     auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE,
-    bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE,
+    bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE, DAY_TIME_CONFLICT_AUDIT_RULE,
   } = require('../services/prompts/appointment-confirmed-rules');
   const { PACKAGES } = require('../services/typed-decisions/packages');
   test('carries the production appointment_confirmed rules verbatim', () => {
@@ -753,8 +756,10 @@ describe('AUDIT_PROMPT appointment definition', () => {
       expect(v4).toContain(heading);
       expect(v3).not.toContain(heading);
     }
-    // v5 adds the day/time conflict rule (prompt v32); v4 and v3 never had it.
+    // v5 adds the day/time conflict rule (prompt v32); v4 and v3 never had it. Like the
+    // bare-time rule, its weekday/date check needs the call's date, so v5 carries it without.
     expect(v5).toContain('DAY/TIME CONFLICT');
+    expect(v5).not.toContain('Thursday the 6th');
     expect(v4).not.toContain('DAY/TIME CONFLICT');
     expect(v3).not.toContain('DAY/TIME CONFLICT');
     // The bare-time rule needs the call's clock, which no judge is given: it is in none.
@@ -768,7 +773,9 @@ describe('AUDIT_PROMPT appointment definition', () => {
   });
   test('the audit prompt carries the four clock-free V2-only rules, and not the bare-time rule', () => {
     expect(AUDIT_PROMPT).not.toContain(bareTimeNoDayRule('the date the call took place'));
-    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE]) expect(AUDIT_PROMPT).toContain(rule);
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_AUDIT_RULE]) expect(AUDIT_PROMPT).toContain(rule);
+    // The weekday/date check needs the call's date, like the bare-time rule: not in the audit.
+    expect(AUDIT_PROMPT).not.toContain(DAY_TIME_CONFLICT_RULE);
   });
   test('the extractor renders the shared rules, not its own copy', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');

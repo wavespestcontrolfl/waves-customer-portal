@@ -6,7 +6,7 @@
 // All names, numbers and addresses are synthetic.
 const { buildExtractionPrompt, PROMPT_VERSION, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const {
-  bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE,
+  bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE, DAY_TIME_CONFLICT_AUDIT_RULE,
 } = require('../services/prompts/appointment-confirmed-rules');
 const { canAutoRoute } = require('../services/call-triage-flags');
 const { callTimeETString } = require('../services/call-recording-processor')._test;
@@ -226,8 +226,12 @@ describe('case: the day/time conflict rule (staff closing slip, v32)', () => {
   });
 
   test('the self-audit grades V2 answers by the same text, and V1 answers by none of it', () => {
-    expect(auditAppointmentContract('2026-10-29')).toContain(DAY_TIME_CONFLICT_RULE);
-    expect(auditAppointmentContract('2026-10-29', { v2OnlyRules: false })).not.toContain(DAY_TIME_CONFLICT_RULE);
+    // The audit contract carries the rule without its weekday/date check (no judge is given the call's date).
+    expect(auditAppointmentContract('2026-10-29')).toContain(DAY_TIME_CONFLICT_AUDIT_RULE);
+    expect(auditAppointmentContract('2026-10-29')).not.toContain(DAY_TIME_CONFLICT_RULE);
+    expect(DAY_TIME_CONFLICT_RULE).toContain('Thursday the 6th');
+    expect(DAY_TIME_CONFLICT_AUDIT_RULE).not.toContain('Thursday the 6th');
+    expect(auditAppointmentContract('2026-10-29', { v2OnlyRules: false })).not.toContain(DAY_TIME_CONFLICT_AUDIT_RULE);
   });
 
   test('the synthetic fixture carries the 10-29 shape with invented names only', () => {
