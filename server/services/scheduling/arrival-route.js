@@ -1048,7 +1048,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
     words(() => describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES })));
   }
-  if (!winner && lateDays) {
+  // Late days are an arrival-window rule: capacity mode never offers them (findCapacitySlots), so no
+  // capacity-mode caller (picked hour, save) may certify one (pre-push audit, PR #7041).
+  if (!winner && lateDays && !capacity) {
     const lateBaselineDrive = (baseline) => {
       const legs = [];
       const simulation = simulate(baseline, legs, { reportLate: true });

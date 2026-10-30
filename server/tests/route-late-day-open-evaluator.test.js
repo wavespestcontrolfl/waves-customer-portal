@@ -218,3 +218,13 @@ describe('stale numbering: a stop is already late only when it is late in every 
     expect(fit.arrivals.map((a) => a.id)).toEqual(['A', 'B', '__candidate__']);
   });
 });
+
+// Pre-push audit (PR #7041): late days are an arrival-window rule. The capacity list (findCapacitySlots) never
+// offers them, so in capacity mode the option changes nothing and no picked hour or save can certify one.
+test('capacity mode: lateDays changes nothing, the day stays refused as overcommitted', () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const withOption = evaluate(LATE_DAY, '15:00', 60, { lateDays: true });
+  expect(withOption).toEqual(evaluate(LATE_DAY, '15:00', 60));
+  expect(withOption).toMatchObject({ feasible: false, reason: 'day_overcommitted' });
+  expect(withOption).not.toHaveProperty('dayAlreadyLate');
+});
