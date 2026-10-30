@@ -2656,6 +2656,30 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(createBuy).not.toHaveBeenCalled();
     });
 
+    // Codex #7043 r2: a named property books at its own stamp, so its pin is the
+    // one priced (the purchase runs before the transaction re-reads the stamp).
+    test('create_appointment: a booking at a named property buys for that property\'s pin, or nothing without one', async () => {
+      const located = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', latitude: '27.5', longitude: '-82.4', ...MEMBER_BILLING }) });
+      const bookAt = (stamp) => {
+        wireDb({
+          customers: [located(), located()],
+          technicians: [1, 2, 3].map(() => chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true }) })),
+          technician_absences: [chain(), chain()],
+          scheduled_services: [chain(), chain({ returning: jest.fn().mockResolvedValue([{ id: 'appt-1', technician_id: 'tech-1', window_start: '10:00:00', window_end: '11:00:00' }]) })],
+        });
+        return executeTool('create_appointment', {
+          customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', technician_id: 'tech-1',
+          property_id: 'prop-2', _booking_property: stamp,
+        }, admin);
+      };
+      await bookAt({ property_id: 'prop-2', lat: '27.9', lng: '-82.7' });
+      expect(createBuy).toHaveBeenCalledTimes(1);
+      expect(createBuy.mock.calls[0][0].prospective).toMatchObject({ lat: '27.9', lng: '-82.7' });
+      createBuy.mockClear();
+      await bookAt({ property_id: 'prop-2', lat: null, lng: null });
+      expect(createBuy).not.toHaveBeenCalled();
+    });
+
     test('reschedule_appointment: an admin move buys its landing hour first, outside the transaction', async () => {
       const appt = { id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-14',
         window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control' };

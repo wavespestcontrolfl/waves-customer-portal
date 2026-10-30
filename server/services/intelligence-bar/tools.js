@@ -3921,12 +3921,16 @@ async function createAppointment(input, actionContext = {}) {
   // runs): an ADMIN's booking buys them BEFORE the transaction, so the
   // route number and route check below read the same Google road times the
   // Edit dialog's check does. A technician's Intelligence Bar never buys.
+  // A named property books at the card's property stamp (lockedBookingProperty
+  // re-reads the same one), so its pin is the one priced; else the customer's.
+  const namedProperty = input.property_id !== undefined && input.property_id !== null && input.property_id !== '';
+  const bookingPin = namedProperty ? input._booking_property : { lat: customer?.latitude, lng: customer?.longitude };
   if (actionContext.isAdmin === true && actionContext.technicianId && technician_id && win.start
-    && customer?.latitude != null && customer?.longitude != null) {
+    && bookingPin?.lat != null && bookingPin?.lng != null) {
     await require('../scheduling/save-road-buy').buyRoadsBeforeSave({
       spender: actionContext.technicianId, date: dateStr, technicianId: technician_id,
       windowStart: win.start, windowEnd,
-      prospective: { lat: customer.latitude, lng: customer.longitude,
+      prospective: { lat: bookingPin.lat, lng: bookingPin.lng,
         estimated_duration_minutes: 60, service_type },
     });
   }
