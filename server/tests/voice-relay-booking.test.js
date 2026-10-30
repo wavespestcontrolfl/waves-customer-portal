@@ -32,6 +32,7 @@ jest.mock('../services/scheduling/line-technician', () => {
     ...actual,
     recordLinePickShadow: jest.fn(actual.recordLinePickShadow),
     serviceLineFor: jest.fn(actual.serviceLineFor),
+    liveServiceLine: jest.fn(actual.liveServiceLine),
   };
 });
 jest.mock('../config/feature-gates', () => ({
@@ -912,21 +913,21 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   // the line's. Not live: nothing is read and nothing is passed.
   describe('service-line map', () => {
     const lineTech = require('../services/scheduling/line-technician');
-    afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; lineTech.serviceLineFor.mockClear(); });
+    afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; lineTech.serviceLineFor.mockClear(); lineTech.liveServiceLine.mockClear(); });
 
     test('live: the re-check passes [line] of the resolved catalog row, and still no serviceIdentity', async () => {
       process.env.GATE_SERVICE_LINE_MAP = 'live';
-      lineTech.serviceLineFor.mockResolvedValueOnce({ line: 'lawn', lineFrom: 'catalog' });
+      lineTech.liveServiceLine.mockResolvedValueOnce('lawn');
       await executeTool('request_booking', GOOD_INPUT, slotCtx());
       const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
       expect(call[0].serviceLines).toEqual(['lawn']);
       expect(call[0]).not.toHaveProperty('serviceIdentity');
-      expect(lineTech.serviceLineFor).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ serviceType: PEST_ROW.name }));
+      expect(lineTech.liveServiceLine).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ serviceType: PEST_ROW.name }));
     });
 
-    test('live but the service has no line: nothing passed', async () => {
+    test('live but the service has no line (or is a Waves Assessment): nothing passed', async () => {
       process.env.GATE_SERVICE_LINE_MAP = 'live';
-      lineTech.serviceLineFor.mockResolvedValueOnce({ line: null, lineFrom: null });
+      lineTech.liveServiceLine.mockResolvedValueOnce(null);
       await executeTool('request_booking', GOOD_INPUT, slotCtx());
       const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
       expect(call[0].serviceLines).toBeUndefined();
@@ -941,6 +942,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
         expect(call[0].serviceLines).toBeUndefined();
       }
       expect(lineTech.serviceLineFor).not.toHaveBeenCalled();
+      expect(lineTech.liveServiceLine).not.toHaveBeenCalled();
     });
   });
 

@@ -210,11 +210,12 @@ async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
 }
 
 // The booked service's line as `serviceLines` for the recheck: [line] while the
-// service-line map is LIVE and the catalog row has a line, else undefined (no read at all).
+// service-line map is LIVE and the catalog row has a line, else undefined (no read at
+// all with the gate off). A Waves Assessment has no line (liveServiceLine): today's recheck.
 async function bookingServiceLines(db, catalogRow) {
-  const { lineMapLive, serviceLineFor } = require('../scheduling/line-technician');
+  const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
   if (!lineMapLive() || !catalogRow) return undefined;
-  const { line } = await serviceLineFor(db, {
+  const line = await liveServiceLine(db, {
     serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null,
   });
   return line ? [line] : undefined;

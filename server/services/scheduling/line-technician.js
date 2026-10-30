@@ -256,6 +256,7 @@ async function lineOfferRanking(conn, { lines = [] } = {}) {
  *                busy | not_listed | unset (the line has no home technician);
  *   'none'       neither can: technicianId null, and the caller takes its own
  *                "nobody" path (the visit is saved unassigned).
+ * A Waves Assessment is { mapped: false, reason: 'assessment' } (isAssessmentIdentity).
  * A technician is tried only when fit (unfitReason) and, when `candidateIds` is
  * given, listed in it (the caller's own eligible list). `checkFree` adds the
  * save probe (pick-technician.technicianFreeAt) for a visit with a time; a
@@ -265,7 +266,9 @@ async function lineOfferRanking(conn, { lines = [] } = {}) {
 async function pickLineTechnician(conn, opts = {}) {
   if (!lineMapLive()) return { mapped: false, line: null, technicianId: null, reason: 'off' };
   const db = conn || defaultDb;
-  const { line } = await serviceLineFor(db, { serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType });
+  const identity = { serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType };
+  if (await isAssessmentIdentity(db, identity)) return { mapped: false, line: null, technicianId: null, reason: 'assessment' };
+  const { line } = await serviceLineFor(db, identity);
   const entry = line ? (await loadLineMap(db, [line])).get(line) : null;
   if (!entry) return { mapped: false, line, technicianId: null, reason: 'no_map' };
 
@@ -285,6 +288,36 @@ async function pickLineTechnician(conn, opts = {}) {
     if (sameId(id, entry.homeId)) homeWhy = why;
   }
   return { mapped: true, line, technicianId: null, reason: 'none' };
+}
+
+/**
+ * Whether the visit is a Waves Assessment: the free sales visit (catalog key
+ * lawn_inspection, name "Waves Assessment"; services/assessment-booking.js).
+ * Live mode routes no assessment: which line an inspection belongs to is still
+ * an open owner decision (build-4 trace, decision 1), and the name alone reads
+ * general pest, which would hand a sales visit to the new pest technician. The
+ * caller keeps today's choice for it. An unreadable catalog row reads "no".
+ */
+async function isAssessmentIdentity(db, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
+  const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentServiceRow } = require('../assessment-booking');
+  if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return true;
+  if (!serviceId) return false;
+  try {
+    return isAssessmentServiceRow(await db('services').where({ id: serviceId }).first('service_key', 'name'));
+  } catch (err) {
+    logger.warn(`[line-technician] assessment lookup failed (read as not an assessment): ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * LIVE: the line a booked service routes by, or null (no line rule): a Waves
+ * Assessment belongs to no line (isAssessmentIdentity); otherwise serviceLineFor.
+ */
+async function liveServiceLine(conn, identity = {}) {
+  const db = conn || defaultDb;
+  if (await isAssessmentIdentity(db, identity)) return null;
+  return (await serviceLineFor(db, identity)).line;
 }
 
 /** The save-probe arguments for a visit with a day and a start, or null (no probe). */
@@ -425,5 +458,6 @@ module.exports = {
   lineMapLive,
   lineOfferRanking,
   pickLineTechnician,
-  _internals: { loadLineMap, windowEndOf },
+  liveServiceLine,
+  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity },
 };

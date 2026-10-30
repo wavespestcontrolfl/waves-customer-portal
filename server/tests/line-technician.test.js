@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const defaultDb = require('../models/db');
 const {
-  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive,
+  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive, liveServiceLine,
 } = require('../services/scheduling/line-technician');
 const pickTechnician = require('../services/scheduling/pick-technician');
 
@@ -328,6 +328,30 @@ describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
       const db = fakeDb({ lines: LINES });
       await pick(db);
       expect(db.inserts).toEqual([]);
+    });
+
+    test('a Waves Assessment is never routed: by name, by catalog key, or by its catalog row', async () => {
+      live();
+      const db = fakeDb({ lines: LINES, services: [{ id: 'svc-assess', service_key: 'lawn_inspection', name: 'Waves Assessment', category: 'inspection' }] });
+      const none = { mapped: false, line: null, technicianId: null, reason: 'assessment' };
+      expect(await pick(db, { serviceType: 'Waves Assessment' })).toEqual(none);
+      expect(await pick(db, { serviceType: null, serviceKey: 'lawn_inspection' })).toEqual(none);
+      expect(await pick(db, { serviceType: 'Consultation', serviceId: 'svc-assess' })).toEqual(none);
+    });
+  });
+
+  describe('liveServiceLine', () => {
+    test('a Waves Assessment has no line; anything else reads serviceLineFor', async () => {
+      const db = fakeDb({ services: [{ id: 'svc-lawn', service_key: 'lawn_x', name: 'Lawn Care', category: 'lawn_care' }] });
+      expect(await liveServiceLine(db, { serviceType: 'Waves Assessment' })).toBeNull();
+      expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection' })).toBeNull();
+      expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceType: 'Anything' })).toBe('lawn');
+      expect(await liveServiceLine(db, { serviceType: 'General Pest Control' })).toBe('general');
+    });
+
+    test('an unreadable catalog row is not an assessment: the name decides', async () => {
+      const db = jest.fn(() => { throw new Error('boom'); });
+      expect(await liveServiceLine(db, { serviceId: 'x', serviceType: 'Mosquito Control' })).toBe('mosquito');
     });
   });
 });
