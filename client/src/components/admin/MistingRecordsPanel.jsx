@@ -356,12 +356,24 @@ function RefillForm({ calibration, onSaved, onCancel, onNewCalibration, customer
   );
 }
 
+const EMPTY = { properties: [], calibrations: [], refills: [] };
+const NO_FORM = { type: null };
+
+// Opening the calibration form: a re-calibration starts from the current record; a new install starts
+// blank, at the first home that has no system when the customer has several.
+function calibrationStart(base, properties, homesWithoutSystem) {
+  if (base) return { type: "calibrate", key: base.id, initial: fromCalibration(base) };
+  const propertyId = properties.length < 2 ? "" : (homesWithoutSystem[0]?.id || "");
+  return { type: "calibrate", key: "new", initial: { ...blankCalibration(), propertyId } };
+}
+
 export default function MistingRecordsPanel({ customerId }) {
-  const [status, setStatus] = useState("loading"); // loading | off | ready | error
-  const [data, setData] = useState(null);
+  // hidden = loading, or 404/403 (gate off, or not an admin): no panel at all.
+  const [status, setStatus] = useState("hidden"); // hidden | ready | error
+  const [data, setData] = useState(EMPTY);
   const [loadErr, setLoadErr] = useState("");
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState(null); // { type: 'calibrate', base } | { type: 'refill', calibration }
+  const [mode, setMode] = useState(NO_FORM); // { type: 'calibrate', key, initial } | { type: 'refill', calibration }
   const [voiding, setVoiding] = useState(null); // { kind, id, reason, busy, err }
   const [showEarlier, setShowEarlier] = useState(false);
   const [showAllRefills, setShowAllRefills] = useState(false);
@@ -373,11 +385,11 @@ export default function MistingRecordsPanel({ customerId }) {
   // the other panels on this sheet.
   useEffect(() => {
     customerRef.current = customerId;
-    setStatus("loading");
-    setData(null);
+    setStatus("hidden");
+    setData(EMPTY);
     setLoadErr("");
     setOpen(false);
-    setMode(null);
+    setMode(NO_FORM);
     setVoiding(null);
     setShowEarlier(false);
     setShowAllRefills(false);
@@ -389,46 +401,43 @@ export default function MistingRecordsPanel({ customerId }) {
     adminFetch(`${BASE}/customers/${customerId}/records`)
       .then((res) => {
         if (cancelled) return;
-        setData(res);
+        setData({ ...EMPTY, ...res });
         setStatus("ready");
       })
       .catch((e) => {
-        if (cancelled) return;
         // 404: the gate is off (or no such customer). 403: not an admin. Either way, no panel.
-        if (e.status === 404 || e.status === 403) {
-          setStatus("off");
-        } else {
-          setLoadErr(e.message || "Could not load the misting records.");
-          setStatus("error");
-        }
+        if (cancelled || e.status === 404 || e.status === 403) return;
+        setLoadErr(e.message || "Could not load the misting records.");
+        setStatus("error");
       });
     return () => { cancelled = true; };
   }, [customerId, nonce]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
-  if (status === "loading" || status === "off") return null;
+  if (status === "hidden") return null;
 
-  const properties = data?.properties || [];
-  const calibrations = data?.calibrations || [];
-  const refills = data?.refills || [];
+  const { properties, calibrations, refills } = data;
   const current = calibrations.filter((c) => c.isCurrent);
   const earlier = calibrations.filter((c) => !c.isCurrent);
-  // Records group by their real property id. A NULL property_id means the property was removed: those rows
-  // are history under "Removed property" and are never the primary's or current.
+  // Records group by their real property id. A NULL property_id, or a property no longer active, means the
+  // property was removed: those rows are history under "Removed property" and never current.
   const propertyName = (propertyId) => {
     const hit = propertyId ? properties.find((p) => p.id === propertyId) : null;
     if (!hit) return "Removed property";
     return properties.length < 2 ? "" : hit.label || "";
   };
-  const currentFor = (propertyId) => current.find((c) => c.propertyId === propertyId);
-  const homesWithoutSystem = properties.filter((p) => !currentFor(p.id));
+  const homesWithoutSystem = properties.filter((p) => !current.some((c) => c.propertyId === p.id));
+  // One rule for a new install: offered while an active home has no system. With no active home at all the
+  // button stays, so the server can say why ("This customer has no active property.").
+  const offerInstall = mode.type !== "calibrate" && (homesWithoutSystem.length > 0 || properties.length === 0);
+  const startCalibration = (base) => { setMsg(""); setMode(calibrationStart(base, properties, homesWithoutSystem)); };
 
   // A save that finishes after the sheet switched customers belongs to the old customer: ignore it, so it
   // never clears the new customer's open form or shows a success message there (same rule as confirmVoid).
   const saved = (text, forCustomerId) => {
     if (customerRef.current !== forCustomerId) return;
-    setMode(null);
+    setMode(NO_FORM);
     setMsg(text);
     reload();
   };
@@ -459,6 +468,11 @@ export default function MistingRecordsPanel({ customerId }) {
       onCancel={() => setVoiding(null)}
     />
   );
+  const voidLink = (kind, id) => (
+    <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid(kind, id)}>
+      Void
+    </button>
+  );
 
   const shownRefills = showAllRefills ? refills : refills.slice(0, REFILLS_SHOWN);
 
@@ -471,22 +485,14 @@ export default function MistingRecordsPanel({ customerId }) {
         </Button>
       </div>
 
-      {open && (
+      {open && (status === "error" ? (
+        <div className="mt-3 flex items-center gap-3">
+          <span role="alert" className="text-ui-body text-alert-fg">{loadErr}</span>
+          <Button size="sm" variant="secondary" onClick={() => { setStatus("hidden"); reload(); }}>Retry</Button>
+        </div>
+      ) : (
         <div className="mt-3 flex flex-col gap-4">
-          {status === "error" && (
-            <div className="flex items-center gap-3">
-              <span role="alert" className="text-ui-body text-alert-fg">{loadErr}</span>
-              <Button size="sm" variant="secondary" onClick={() => { setStatus("loading"); reload(); }}>Retry</Button>
-            </div>
-          )}
           {msg && <div role="status" className="text-ui-label text-zinc-700">{msg}</div>}
-
-          {status === "ready" && current.length === 0 && mode?.type !== "calibrate" && (
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-ui-body text-ink-secondary">No misting system on file.</span>
-              <Button size="sm" onClick={() => { setMsg(""); setMode({ type: "calibrate", base: null }); }}>Record install calibration</Button>
-            </div>
-          )}
 
           {current.map((cal) => (
             <div key={cal.id} className="flex flex-col gap-1">
@@ -499,19 +505,18 @@ export default function MistingRecordsPanel({ customerId }) {
               <Row label="Daily output">{ozLine(cal)}</Row>
               <Row label="Recorded">by {cal.recordedBy?.name || "staff"}, {dayOf(cal.createdAt)} (installed {formatETDateOnly(cal.installedOn, { month: "short", day: "numeric", year: "numeric" })})</Row>
               {cal.notes && <Row label="Notes">{cal.notes}</Row>}
-              {mode?.type === "refill" && mode.calibration.id === cal.id && (
+              {mode.type === "refill" && mode.calibration.id === cal.id ? (
                 <RefillForm
                   customerId={customerId}
                   calibration={cal}
-                  onCancel={() => setMode(null)}
-                  onNewCalibration={() => setMode({ type: "calibrate", base: cal })}
+                  onCancel={() => setMode(NO_FORM)}
+                  onNewCalibration={() => startCalibration(cal)}
                   onSaved={() => saved("Refill saved.", customerId)}
                 />
-              )}
-              {!(mode?.type === "refill" && mode.calibration.id === cal.id) && (
+              ) : (
                 <div className="mt-1 flex flex-wrap gap-2">
                   <Button size="sm" onClick={() => { setMsg(""); setMode({ type: "refill", calibration: cal }); }}>Log refill</Button>
-                  <Button size="sm" variant="secondary" onClick={() => { setMsg(""); setMode({ type: "calibrate", base: cal }); }}>New calibration</Button>
+                  <Button size="sm" variant="secondary" onClick={() => startCalibration(cal)}>New calibration</Button>
                   <Button size="sm" variant="ghost" onClick={() => startVoid("calibration", cal.id)}>Void</Button>
                 </div>
               )}
@@ -519,19 +524,22 @@ export default function MistingRecordsPanel({ customerId }) {
             </div>
           ))}
 
-          {status === "ready" && current.length > 0 && homesWithoutSystem.length > 0 && properties.length >= 2 && mode?.type !== "calibrate" && (
-            <div>
-              <Button size="sm" variant="secondary" onClick={() => { setMsg(""); setMode({ type: "calibrate", base: null }); }}>Record install calibration at another property</Button>
+          {offerInstall && (
+            <div className="flex flex-wrap items-center gap-3">
+              {current.length === 0 && <span className="text-ui-body text-ink-secondary">No misting system on file.</span>}
+              <Button size="sm" onClick={() => startCalibration(null)}>
+                {current.length ? "Record install calibration at another property" : "Record install calibration"}
+              </Button>
             </div>
           )}
 
-          {mode?.type === "calibrate" && (
+          {mode.type === "calibrate" && (
             <CalibrationForm
-              key={mode.base?.id || "new"}
+              key={mode.key}
               customerId={customerId}
               properties={properties}
-              initial={{ ...(mode.base ? fromCalibration(mode.base) : blankCalibration()), ...(mode.base || properties.length < 2 ? {} : { propertyId: homesWithoutSystem[0]?.id || "" }) }}
-              onCancel={() => setMode(null)}
+              initial={mode.initial}
+              onCancel={() => setMode(NO_FORM)}
               onSaved={() => saved("Calibration saved.", customerId)}
             />
           )}
@@ -550,12 +558,7 @@ export default function MistingRecordsPanel({ customerId }) {
                       {`, by ${r.recordedBy?.name || "staff"}`}
                     </div>
                     {r.notes && <div className={cn("text-ui-label text-ink-secondary", r.voidedAt && "line-through")}>{r.notes}</div>}
-                    {r.voidedAt && <div className="text-ui-label">Voided {dayOf(r.voidedAt)}: {r.voidReason}</div>}
-                    {!r.voidedAt && (
-                      <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid("refill", r.id)}>
-                        Void
-                      </button>
-                    )}
+                    {r.voidedAt ? <div className="text-ui-label">Voided {dayOf(r.voidedAt)}: {r.voidReason}</div> : voidLink("refill", r.id)}
                     {voidBox("refill", r.id)}
                   </li>
                 ))}
@@ -581,12 +584,7 @@ export default function MistingRecordsPanel({ customerId }) {
                         {dayOf(c.createdAt)}: {c.vendor} {c.model}, {c.nozzleCount} nozzles, {c.riserCount} risers, {c.productName}, {c.concentrateFlOzPerTank} fl oz per {c.tankGallons} gal. {ozLine(c)}
                         {propertyName(c.propertyId) ? ` ${propertyName(c.propertyId)}.` : ""} By {c.recordedBy?.name || "staff"}.
                       </div>
-                      {c.voidedAt && <div className="text-ui-label">Voided {dayOf(c.voidedAt)}: {c.voidReason}</div>}
-                      {!c.voidedAt && (
-                        <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid("calibration", c.id)}>
-                          Void
-                        </button>
-                      )}
+                      {c.voidedAt ? <div className="text-ui-label">Voided {dayOf(c.voidedAt)}: {c.voidReason}</div> : voidLink("calibration", c.id)}
                       {voidBox("calibration", c.id)}
                     </li>
                   ))}
@@ -595,7 +593,7 @@ export default function MistingRecordsPanel({ customerId }) {
             </div>
           )}
         </div>
-      )}
+      ))}
     </div>
   );
 }

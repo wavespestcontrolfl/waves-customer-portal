@@ -485,7 +485,8 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
         throw opError(409, 'MISTING_PROPERTY_RETIRED', 'This property was removed from the customer. Re-add it before logging a refill.');
       }
     }
-    const current = cal.voided_at ? null : await currentCalibration(trx, customerId, cal.property_id);
+    // currentCalibration never returns a voided row, so a voided calibration is refused here as not current.
+    const current = await currentCalibration(trx, customerId, cal.property_id);
     if (!current || current.id !== cal.id) {
       throw opError(409, 'MISTING_CALIBRATION_NOT_CURRENT', 'This calibration has been replaced. Reload and log the refill against the current one.');
     }
@@ -519,7 +520,7 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
     const [row] = await trx('misting_refills').insert({
       customer_id: customerId,
       calibration_id: cal.id,
-      property_id: cal.property_id || null,
+      property_id: cal.property_id,
       refilled_on: fields.refilledOn,
       product_name: cal.product_name,
       epa_reg_no: cal.epa_reg_no,
@@ -529,11 +530,11 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
       counter_reset: fields.counterReset,
       notes: fields.notes,
       source: 'staff',
-      recorded_by: actorId || null,
+      recorded_by: actorId,
       created_at: trx.raw('clock_timestamp()'),
       updated_at: trx.raw('clock_timestamp()'),
     }).returning('id');
-    return row.id || row;
+    return row.id;
   });
   return toRefill(await refillRows(knex).where('r.id', id).first());
 }
