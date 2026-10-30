@@ -26,6 +26,7 @@ import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import MistingSystemCard from '../components/portal/MistingSystemCard';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -2787,6 +2788,22 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
+  // Misting system card (dark behind GATE_MOSQUITO_MISTING: gate off = { system: null }).
+  // A loading or failed read renders nothing.
+  const mistingRead = usePortalRead('misting-system', () => api.getMistingSystem());
+  const mistingScopeStale = scopeEchoMismatch(mistingRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
+  useEffect(() => { if (mistingScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [mistingScopeStale, onSavedScopeUnavailable]);
+  const mistingSystem = mistingScopeStale ? null : (mistingRead.data?.system || null);
+  // The server works out the next mist when it is read. Re-read just after that time passes, so a
+  // Home left open never keeps showing a mist that already ran (the card shows "—" meanwhile).
+  const mistingNextAt = mistingSystem?.nextMistAt || null;
+  const refreshMisting = mistingRead.refresh;
+  useEffect(() => {
+    const at = mistingNextAt ? new Date(mistingNextAt).getTime() : NaN;
+    if (!Number.isFinite(at)) return undefined;
+    const timer = setTimeout(() => { void refreshMisting(); }, Math.min(Math.max(at - Date.now(), 0) + 1000, 2147483647));
+    return () => clearTimeout(timer);
+  }, [mistingNextAt, refreshMisting]);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [reviewCard, setReviewCard] = useState(null);
   const [reviewCardStatus, setReviewCardStatus] = useState('loading');
@@ -3263,6 +3280,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           </div>
         </section>
       </div>
+
+      {mistingSystem && <MistingSystemCard system={mistingSystem} cardStyle={card} muted={muted} />}
 
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
