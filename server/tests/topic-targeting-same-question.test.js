@@ -86,9 +86,11 @@ describe('evaluateSameQuestion', () => {
   test('falls back to the working title, then the slug, when the keyword has no topic words', () => {
     const viaTitle = run([MILLIPEDE], candidate('best tips in florida', { title: 'Millipedes in Your Sarasota Home' }));
     expect(viaTitle.source).toBe('title');
+    expect(viaTitle.source_text).toBe('Millipedes in Your Sarasota Home');
     expect(viaTitle.would_block).toBe(true);
     const viaSlug = run([MILLIPEDE], candidate('', { slug: '/pest-control/florida-millipedes-southwest-florida/' }));
     expect(viaSlug.source).toBe('slug');
+    expect(viaSlug.source_text).toBe('florida millipedes southwest florida');
     expect(viaSlug.would_block).toBe(true);
   });
 

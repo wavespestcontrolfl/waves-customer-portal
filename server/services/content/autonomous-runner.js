@@ -568,17 +568,27 @@ class AutonomousRunner {
           logger.info(`[autonomous-runner] same-question ${enforce ? 'BLOCK' : 'shadow'} for ${opp.id}: tokens=${record.tokens.join('+')} owner=${record.owner_url}`);
         }
         if (record.would_block && enforce) {
-          const question = String(brief.target_keyword || opp.query || ob?.working_title || candidate.title || '').trim();
+          // The question is the text the match was made on: evaluateSameQuestion
+          // falls back from the keyword to the working title, then the slug,
+          // and the queued answer block must be about that, not about a
+          // keyword with no topic words in it.
+          const question = String(sameQuestion.source_text || '').trim();
           try {
-            const refreshQueue = getSameQuestionRefresh();
-            if (!refreshQueue) throw new Error('same_question_refresh_unavailable');
-            record.refresh = await refreshQueue.enqueueOwnerRefresh({
-              owner: sameQuestion.owner,
-              tokens: sameQuestion.tokens,
-              question,
-              sourceOpportunityId: opp.id,
-              sourceRunId: run.id || null,
-            });
+            // A shadow-mode blog run records what it would do and queues
+            // nothing: the refresh it would create may run live.
+            if (run.shadow_mode) {
+              record.refresh = { queued: false, reason: 'shadow_mode' };
+            } else {
+              const refreshQueue = getSameQuestionRefresh();
+              if (!refreshQueue) throw new Error('same_question_refresh_unavailable');
+              record.refresh = await refreshQueue.enqueueOwnerRefresh({
+                owner: sameQuestion.owner,
+                tokens: sameQuestion.tokens,
+                question,
+                sourceOpportunityId: opp.id,
+                sourceRunId: run.id || null,
+              });
+            }
           } catch (err) {
             // The block stands (it is deterministic and correct); only the
             // rewrite is lost, and the replay script can find it again.

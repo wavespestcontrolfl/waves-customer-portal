@@ -1175,23 +1175,26 @@ function sameQuestionCore(text) {
  * evaluateSameQuestion(candidate, { index })
  *   candidate: { actionType, pageType, query, title, slug }
  *   index: indexCorpus() result (the live blog corpus)
- * → { applicable, would_block, reason, tokens, source, owner, owners, findings }
+ * → { applicable, would_block, reason, tokens, source, source_text, owner, owners, findings }
  * Pure and read-only. `would_block` is the rule's verdict; the CALLER decides
  * whether to enforce it (GATE_SAME_QUESTION_CHECK). `findings` holds the one
  * P0 finding only when would_block. A missing index is `reason: 'no_corpus'`,
  * never a block.
  */
 function evaluateSameQuestion(candidate = {}, { index = null } = {}) {
-  const base = { applicable: false, would_block: false, reason: null, tokens: [], source: null, owner: null, owners: [], findings: [] };
+  const base = { applicable: false, would_block: false, reason: null, tokens: [], source: null, source_text: null, owner: null, owners: [], findings: [] };
   if (!isApplicable(candidate)) return { ...base, reason: 'not_a_new_blog' };
   const sources = [['query', candidate.query], ['title', candidate.title], ['slug', slugWords(candidate.slug || '')]];
   let tokens = [];
   let source = null;
+  let sourceText = null;
   for (const [name, text] of sources) {
     const core = sameQuestionCore(text);
-    if (core.length) { tokens = core; source = name; break; }
+    if (core.length) { tokens = core; source = name; sourceText = String(text || '').trim(); break; }
   }
-  const applicable = { ...base, applicable: true, tokens, source };
+  // source_text is the phrase the match was made on (keyword, else working
+  // title, else slug words): the question a refresh of the owner should answer.
+  const applicable = { ...base, applicable: true, tokens, source, source_text: sourceText };
   if (!tokens.length) return { ...applicable, reason: 'no_topic_words' };
   if (!index || !Array.isArray(index.posts) || !index.posts.length) return { ...applicable, reason: 'no_corpus' };
   const selfUrl = normalizeSlug(candidate.slug || '');

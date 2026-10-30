@@ -190,6 +190,43 @@ describe('step 2d-bis — same-question check', () => {
     expect(result.topic_targeting_result.same_question.refresh.reason).toMatch(/enqueue_error:db_down/);
   });
 
+  test('the queued question is the text the match was made on: keyword with no topic words → the working title', async () => {
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    const queue = makeQueue({ id: 'opp_title', action_type: 'new_supporting_blog', query: 'best tips', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const sameQuestionRefresh = { enqueueOwnerRefresh: jest.fn().mockResolvedValue({ queued: true, reason: 'queued' }) };
+    const { runner } = loadRunner({ queue, dispatcher: { runWithBrief: jest.fn() }, sameQuestionRefresh, briefBuilder: blogBrief({ query: 'best tips', operator_brief: { working_title: 'Millipedes at Home', slug: '/pest-control/millipedes-at-home/' } }) });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_SAME_QUESTION_LIVE');
+    expect(sameQuestionRefresh.enqueueOwnerRefresh).toHaveBeenCalledWith(expect.objectContaining({ question: 'Millipedes at Home' }));
+  });
+
+  test('slug-only match forwards the slug words as the question', async () => {
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    const queue = makeQueue({ id: 'opp_slug', action_type: 'new_supporting_blog', query: 'best tips', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const sameQuestionRefresh = { enqueueOwnerRefresh: jest.fn().mockResolvedValue({ queued: true, reason: 'queued' }) };
+    const { runner } = loadRunner({ queue, dispatcher: { runWithBrief: jest.fn() }, sameQuestionRefresh, briefBuilder: blogBrief({ query: 'best tips', operator_brief: { slug: '/pest-control/florida-millipedes-southwest-florida/' } }) });
+
+    await runner.runNext();
+
+    expect(sameQuestionRefresh.enqueueOwnerRefresh).toHaveBeenCalledWith(expect.objectContaining({ question: 'florida millipedes southwest florida' }));
+  });
+
+  test('a shadow-mode blog run (SHADOW_MODE_NEW_SUPPORTING_BLOG) still skips the post but queues NO refresh', async () => {
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'true';
+    const queue = makeQueue(millipedeOpp());
+    const sameQuestionRefresh = { enqueueOwnerRefresh: jest.fn() };
+    const { runner } = loadRunner({ queue, dispatcher: { runWithBrief: jest.fn() }, sameQuestionRefresh, briefBuilder: blogBrief({ query: 'florida millipede' }) });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_SAME_QUESTION_LIVE');
+    expect(result.topic_targeting_result.same_question.refresh).toEqual({ queued: false, reason: 'shadow_mode' });
+    expect(sameQuestionRefresh.enqueueOwnerRefresh).not.toHaveBeenCalled();
+  });
+
   test('a broad one-word topic ("cockroach types in florida" vs the German cockroach post) never blocks, gate ON', async () => {
     process.env.GATE_SAME_QUESTION_CHECK = 'true';
     const queue = makeQueue({ id: 'opp_roach', action_type: 'new_supporting_blog', query: 'cockroach types in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
