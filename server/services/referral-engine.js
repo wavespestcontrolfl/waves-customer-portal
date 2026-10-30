@@ -1319,6 +1319,35 @@ async function getSettings() {
 // ---------------------------------------------------------------------------
 // 7. updateSettings
 // ---------------------------------------------------------------------------
+const SETTING_BOOLEAN_KEYS = ['program_active', 'auto_credit_enabled', 'require_service_completion'];
+const SETTING_TEMPLATE_KEYS = ['invite_sms_template', 'reward_sms_template', 'milestone_sms_template'];
+const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days'];
+
+// Money and count settings feed promoter balances and fraud limits, so a
+// negative, fractional or non-numeric value must never reach the table. No
+// upper bound on purpose: that is a business decision.
+function validateSettingValue(key, value) {
+  if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
+    const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
+      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is 0 or more`);
+    }
+    return n;
+  }
+  if (SETTING_BOOLEAN_KEYS.includes(key)) {
+    if (typeof value !== 'boolean') throw referralError(400, 'INVALID_SETTING', `${key} must be true or false`);
+    return value;
+  }
+  if (SETTING_TEMPLATE_KEYS.includes(key)) {
+    if (value !== null && typeof value !== 'string') throw referralError(400, 'INVALID_SETTING', `${key} must be text`);
+    return value;
+  }
+  if (key === 'base_url' && typeof value !== 'string') {
+    throw referralError(400, 'INVALID_SETTING', 'base_url must be text');
+  }
+  return value;
+}
+
 async function updateSettings(updates) {
   const allowed = [
     'program_active', 'base_url', 'referrer_reward_cents', 'referee_discount_cents',
@@ -1331,7 +1360,7 @@ async function updateSettings(updates) {
 
   const filtered = {};
   for (const key of allowed) {
-    if (updates[key] !== undefined) filtered[key] = updates[key];
+    if (updates[key] !== undefined) filtered[key] = validateSettingValue(key, updates[key]);
   }
   filtered.updated_at = new Date();
 

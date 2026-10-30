@@ -299,6 +299,11 @@ router.post('/payouts/:id/approve', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
+      if (!Number.isSafeInteger(payout.amount_cents) || payout.amount_cents <= 0) {
+        const err = new Error('Payout amount must be a positive whole number of cents');
+        err.statusCode = 400;
+        throw err;
+      }
 
       const promoter = await trx('referral_promoters')
         .where({ id: payout.promoter_id })
@@ -365,8 +370,14 @@ router.post('/payouts/:id/request', async (req, res, next) => {
     if (!promoter) return res.status(404).json({ error: 'Promoter not found' });
 
     const settings = await engine.getSettings();
-    const requestAmount = amount || promoter.available_balance_cents;
+    const requestAmount = amount === undefined || amount === null || amount === ''
+      ? promoter.available_balance_cents
+      : (typeof amount === 'string' && amount.trim() !== '' ? Number(amount) : amount);
 
+    // A payout is always a positive whole number of cents, whatever the minimum says.
+    if (!Number.isSafeInteger(requestAmount) || requestAmount <= 0) {
+      return res.status(400).json({ error: 'Payout amount must be a positive whole number of cents' });
+    }
     if (requestAmount < settings.min_payout_cents) {
       return res.status(400).json({ error: `Minimum payout is $${(settings.min_payout_cents / 100).toFixed(2)}` });
     }
@@ -402,7 +413,10 @@ router.put('/settings', async (req, res, next) => {
   try {
     const settings = await engine.updateSettings(req.body);
     res.json({ settings });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 // =========================================================================
