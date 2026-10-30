@@ -333,6 +333,8 @@ describe('RecruitingPage — stale stage decision (audit R1)', () => {
     // the detail under the dialog now shows the newer stage and why
     expect(screen.getByText('rejected')).toBeInTheDocument();
     expect(screen.getByText('No license')).toBeInTheDocument();
+    // this dialog was opened on the old stage: Confirm could only 409 again
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
   });
 });
 

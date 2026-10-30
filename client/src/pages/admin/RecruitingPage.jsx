@@ -440,6 +440,7 @@ function StageChangeDialog({
   onMoveWithoutNotifyingChange,
   sendResult,
   busy,
+  stale,
   error,
   onConfirm,
   onClose,
@@ -497,7 +498,7 @@ function StageChangeDialog({
             <Button
               size="sm"
               onClick={onConfirm}
-              disabled={busy || previewLoading || !preview}
+              disabled={busy || previewLoading || !preview || stale}
             >
               {busy ? "Sending…" : "Confirm"}
             </Button>
@@ -655,9 +656,15 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       : `Move to ${STATUS_LABEL[stageDialog.status] || stageDialog.status}`
     : "";
 
+  // After a 409 the detail shows the newer stage; this dialog was opened on
+  // the old one, so Confirm could only be refused again. The owner closes
+  // it and decides from the refreshed detail.
+  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
+
   return {
     stageDialog,
     title,
+    stale,
     preview,
     previewLoading,
     previewError,
@@ -1114,6 +1121,7 @@ export default function RecruitingPage() {
         onMoveWithoutNotifyingChange={stageWorkflow.setMoveWithoutNotifying}
         sendResult={stageWorkflow.sendResult}
         busy={stageWorkflow.busy}
+        stale={stageWorkflow.stale}
         error={stageWorkflow.error}
         onConfirm={stageWorkflow.confirmStage}
         onClose={stageWorkflow.closeStageDialog}
