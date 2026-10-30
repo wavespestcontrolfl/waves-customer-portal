@@ -352,3 +352,23 @@ it("keeps the saves locked until the recovery reload after a lost reply has land
   await act(async () => { releaseReload(); });
   await waitFor(() => expect(screen.getByRole("button", { name: "Save decision" })).not.toBeDisabled());
 });
+
+it("keeps an unsaved Decision note when a due-date save loses its reply, and re-reads only that date", async () => {
+  let reads = 0;
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
+    if (path === "/admin/bid-desk/b1") { reads += 1; return reply(detail()); }
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const note = await screen.findByLabelText("Note");
+  fireEvent.change(note, { target: { value: "Ask the prime about the chemical scope" } });
+  fireEvent.change(screen.getByLabelText("Due date (Eastern time)"), { target: { value: "2026-11-04T14:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  expect(await screen.findByText("Could not confirm the save. The list below shows what the server has now.")).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(2));
+  expect(screen.getByLabelText("Note")).toHaveValue("Ask the prime about the chemical scope");
+  // The lost save was the date itself, so the field shows the date as the server has it (none here).
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("");
+});

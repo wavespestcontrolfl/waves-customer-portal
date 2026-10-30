@@ -254,9 +254,10 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const dueEditedAtNow = useRef(null);
   dueEditedAtNow.current = dueEditedAt;
 
-  // keepDueDraft: a reload after a lost reply keeps a due date the operator typed but has not saved, still tied to the
-  // version it was typed on, as the decision save itself does.
-  const load = useCallback(async ({ keepDueDraft = false } = {}) => {
+  // keepDrafts: the reload after a lost reply refreshes the bid as the server has it and leaves every unsaved field
+  // alone (Decision, Note, and a due date typed but not saved, still tied to the version it was typed on), as a
+  // successful save does. Only the save's own date (resetDueDraft) is re-read.
+  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false } = {}) => {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
@@ -265,12 +266,14 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
         : null;
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
-      if (!(keepDueDraft && dueEditedAtNow.current)) {
+      if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
         setDueInput(etDatetimeLocalValue(data.bid.due_at));
         setDueEditedAt(null);
       }
-      setStatus(data.bid.status);
-      setNote(data.bid.decision_note || "");
+      if (!keepDrafts) {
+        setStatus(data.bid.status);
+        setNote(data.bid.decision_note || "");
+      }
     } catch (err) {
       setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
     }
@@ -314,7 +317,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
         setMessage(UNCONFIRMED_MESSAGE);
         onChanged();
-        await load({ keepDueDraft: true });
+        await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
       }
       return false;
     } finally {
