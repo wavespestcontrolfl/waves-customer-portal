@@ -151,6 +151,41 @@ describe("SMS templates load failures", () => {
     expect(screen.queryByText(/Variants could not load/)).not.toBeInTheDocument();
     expect(countCalls(calls, "/api/admin/sms-templates/synthetic_reminder/variants")).toBe(2);
   });
+
+  it("after a failed variants load, a variant added meanwhile does not stop Try again from loading the full list", async () => {
+    let variantsUp = false;
+    const variantB = { id: 1, variant_key: "b", name: "Variant B", body: "B body", status: "active", weight: 1 };
+    const variantC = { id: 2, variant_key: "c", name: "Variant C", body: "C body", status: "active", weight: 1 };
+    const calls = stubFetch(({ path, method }) => {
+      if (path === "/api/admin/sms-templates") return json({ templates: [template] });
+      if (path === "/api/admin/sms-templates/synthetic_reminder/variants" && method === "POST") return json({ variant: variantC });
+      if (path === "/api/admin/sms-templates/synthetic_reminder/variants") {
+        return variantsUp ? json({ variants: [variantB, variantC] }) : json({ error: "variants down" }, 500);
+      }
+      return json({ issues: [] });
+    });
+
+    render(<SmsTemplatesTabV2 />);
+    await screen.findByText("Synthetic reminder");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByText(/Variants could not load: variants down/);
+
+    // Add Variant succeeds while the list is still unknown.
+    fireEvent.click(screen.getByRole("button", { name: "Add Variant" }));
+    fireEvent.change(screen.getByPlaceholderText("variant_key"), { target: { value: "c" } });
+    fireEvent.change(screen.getByPlaceholderText("Variant body"), { target: { value: "C body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Variant" }));
+    await waitFor(() => expect(countCalls(calls, "/api/admin/sms-templates/synthetic_reminder/variants", "POST")).toBe(1));
+    // The partial list stays behind the error: it is not the full list.
+    expect(screen.getByText(/Variants could not load/)).toBeInTheDocument();
+
+    variantsUp = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Variant B")).toBeInTheDocument();
+    expect(screen.getByText("Variant C")).toBeInTheDocument();
+    expect(screen.queryByText(/Variants could not load/)).not.toBeInTheDocument();
+    expect(countCalls(calls, "/api/admin/sms-templates/synthetic_reminder/variants")).toBe(2);
+  });
 });
 
 const futureIso = new Date(Date.now() + 86400000).toISOString();

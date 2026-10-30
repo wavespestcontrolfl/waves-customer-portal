@@ -207,7 +207,9 @@ export function SmsTemplatesTabV2() {
   };
 
   const loadVariants = async (templateKey) => {
-    if (!templateKey || variantsByKey[templateKey]) return;
+    // After a failed load the cache holds at most the variants saved since
+    // (Add Variant), never the full list: a retry fetches it.
+    if (!templateKey || (variantsByKey[templateKey] && !variantLoadErrors[templateKey])) return;
     setLoadingVariants(templateKey);
     try {
       const data = await adminFetch(`/admin/sms-templates/${templateKey}/variants`);
