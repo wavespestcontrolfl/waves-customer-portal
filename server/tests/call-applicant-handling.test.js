@@ -295,10 +295,12 @@ describe('4. Careers row', () => {
     expect(JSON.parse(log.inserts[0].contact_snapshot).phone).toBe('+19415550177');
   });
 
-  test('an outbound call uses the number we dialed', async () => {
-    const { database, log } = fakeDb();
-    await createJobApplicationFromCall({ call: { ...call, direction: 'outbound', from_phone: '+19415550199', to_phone: '+19415550123' }, extraction: extraction(), database });
-    expect(JSON.parse(log.inserts[0].contact_snapshot).phone).toBe('+19415550123');
+  test('an outbound call uses the number we dialed, for every outbound variant', async () => {
+    for (const direction of ['outbound', 'outbound-api', 'outbound-dial', 'Outbound-Dial']) {
+      const { database, log } = fakeDb();
+      await createJobApplicationFromCall({ call: { ...call, direction, from_phone: '+19415550199', to_phone: '+19415550123' }, extraction: extraction(), database });
+      expect(JSON.parse(log.inserts[0].contact_snapshot).phone).toBe('+19415550123');
+    }
   });
 
   test('idempotent by call: a reprocess files nothing, whatever became of the first row', async () => {

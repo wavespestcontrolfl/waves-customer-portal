@@ -178,7 +178,8 @@ function callerName(caller) {
 // The caller's own spoken number first, else the number that called us (the
 // number we dialed, on an outbound call).
 function callerPhone(call, caller) {
-  const ani = String(call.direction || '').toLowerCase() === 'outbound' ? call.to_phone : call.from_phone;
+  // Every outbound variant ('outbound', 'outbound-api', 'outbound-dial'), the processor's isOutboundCall rule.
+  const ani = String(call.direction || '').toLowerCase().startsWith('outbound') ? call.to_phone : call.from_phone;
   return normalizeNanpPhone(caller.phone_e164) || normalizeNanpPhone(ani);
 }
 
