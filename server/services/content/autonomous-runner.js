@@ -1868,14 +1868,16 @@ class AutonomousRunner {
 
   // The rows whose terminal draft is pushed and usable, best score first
   // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
-  // past its age limit is not listed, it is briefed again). Gate off, kill
+  // past its age limit is not listed, it is briefed again). With an
+  // actionType (a scoped pass), only that lane's rows: the run that waited
+  // for the draft carries the lane its claim was fenced to. Gate off, kill
   // switch off or any read failure: none (the batch claims by score as before).
-  async _writtenTerminalDraftIds() {
+  async _writtenTerminalDraftIds(actionType = null) {
     const terminalWriter = require('./terminal-writer');
     if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
     try {
       const { written } = await terminalWriter.awaitingTerminalDrafts();
-      return written.map((row) => row.opportunity_id);
+      return written.filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
     } catch (err) {
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
       return [];
@@ -1939,18 +1941,24 @@ class AutonomousRunner {
     // read-only peek so an empty lane reserves nothing; the rest of the batch
     // claims by score as before. Kill: AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS=0.
     let reservedLeft = actionType ? 0 : await this._claimableBackfillSlots(batchLimit);
-    // Written terminal drafts first (owner ruling 2026-10-26). The claim
-    // orders by score, so a row whose draft was pushed waited behind
-    // higher-scored rows that still had none, each looked at and deferred
-    // again, and the batch limit ran out first. The unscoped batch spends
+    // Written terminal drafts first (owner rulings 2026-10-26 and 2026-10-29).
+    // The claim orders by score, so a row whose draft was pushed waited
+    // behind higher-scored rows that still had none, each looked at and
+    // deferred again, and the batch limit ran out first. Every pass spends
     // its first slots on the rows whose draft is written: each claim is
     // scoped to the ones not yet taken (best score first, every claim rule
     // still applies), inside the same batch limit; then the reserved
-    // backfill slots, then score order. No written draft = the batch as
-    // before. Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
-    let draftIds = actionType ? [] : await this._writtenTerminalDraftIds();
+    // backfill slots, then score order. A scoped pass takes its own lane's
+    // drafts: the 1 PM blog catch-up the blog drafts (2026-10-29: a deploy
+    // cut the 9 AM batch after two claims, and the catch-up, by score, spent
+    // all ten slots on blog rows with no draft while four blog drafts
+    // waited). The blog fallback keeps taking the drafts left: its claims
+    // carry the blog lane, so a non-blog draft id among them matches nothing
+    // and the slot returns. No written draft = the batch as before.
+    // Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
+    let draftIds = await this._writtenTerminalDraftIds(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
-      const drafts = draftIds.length > 0 && !scopedActionType;
+      const drafts = draftIds.length > 0;
       const reserve = !drafts && reservedLeft > 0 && !scopedActionType;
       if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
