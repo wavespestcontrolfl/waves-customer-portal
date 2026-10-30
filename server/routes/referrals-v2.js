@@ -323,7 +323,8 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     } catch (reserveErr) {
       // referral_invites is a best-effort tracking table — if the reservation
       // can't be taken (e.g. migration not applied yet), send without it.
-      logger.warn(`[referrals-v2] invite SMS cooldown reservation unavailable: ${reserveErr.message}`);
+      // Code only: a Knex error message renders the bound phone.
+      logger.warn(`[referrals-v2] invite SMS cooldown reservation unavailable for promoter ${promoter.id}: ${reserveErr.code || 'unknown'}`);
     }
     // Released only when the text definitely did not go out, so a retry is
     // not locked out for 24 hours. A sent or uncertain outcome keeps the row:
