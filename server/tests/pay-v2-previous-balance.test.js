@@ -368,3 +368,25 @@ describe('GET /pay/:token visit note', () => {
     expect(body.service.techNotes).toBeNull();
   });
 });
+
+describe('GET /pay/:token part payments (billing audit 2026-10-30, finding 5)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => false);
+  });
+
+  test('a part-paid invoice carries amountPaid beside the net amountDue, so the page can explain the gap', async () => {
+    const { body } = await getPayPage(invoiceData({
+      total: '100.00', subtotal: '100.00', credit_applied: '10.00', amount_paid: '40.00', amount_due: 50,
+    }));
+    expect(body.invoice.total).toBe(100);
+    expect(body.invoice.creditApplied).toBe(10);
+    expect(body.invoice.amountPaid).toBe(40);
+    expect(body.invoice.amountDue).toBe(50);
+  });
+
+  test('nothing paid reads as 0', async () => {
+    const { body } = await getPayPage(invoiceData());
+    expect(body.invoice.amountPaid).toBe(0);
+  });
+});
