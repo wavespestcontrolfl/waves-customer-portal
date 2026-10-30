@@ -73,26 +73,24 @@ const committed = () => writes.filter((body) => !body.dryRun);
 
 describe("nextFormForTierExtension", () => {
   const estimate = { currentServiceTierOffer: OFFER };
+  const pestOnly = { currentServiceTierOffer: { ...OFFER, services: OFFER.services.filter((svc) => svc.key === "pest_control") } };
   it("ticks every offered service on a first result", () => {
     expect(nextFormForTierExtension({}, estimate, "c1").tierExtensionPick)
-      .toEqual({ customerId: "c1", offered: ["lawn_care", "pest_control"], ticked: ["lawn_care", "pest_control"] });
+      .toEqual({ customerId: "c1", offered: ["lawn_care", "pest_control"], unticked: [] });
   });
-  it("keeps a service staff unticked for the same customer across a regenerate, and starts a new one ticked", () => {
-    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: [] } };
-    expect(nextFormForTierExtension(form, estimate, "c1").tierExtensionPick.ticked).toEqual(["pest_control"]);
+  it("keeps an untick through a regenerate, a result without the list, and a list that briefly leaves the service out", () => {
+    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care", "pest_control"], unticked: ["lawn_care"] } };
+    expect(nextFormForTierExtension(form, estimate, "c1").tierExtensionPick.unticked).toEqual(["lawn_care"]);
+    // A failed lookup returns no list: the same customer's choices stay.
+    expect(nextFormForTierExtension(form, {}, "c1")).toBe(form);
+    // Lawn drops off the list for one regenerate, then comes back: still unticked.
+    const partial = nextFormForTierExtension(form, pestOnly, "c1");
+    expect(partial.tierExtensionPick).toEqual({ customerId: "c1", offered: ["pest_control"], unticked: ["lawn_care"] });
+    expect(nextFormForTierExtension(partial, estimate, "c1").tierExtensionPick.unticked).toEqual(["lawn_care"]);
   });
   it("never carries one customer's unticks to another", () => {
-    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: [] } };
-    expect(nextFormForTierExtension(form, estimate, "c2").tierExtensionPick.ticked).toEqual(["lawn_care", "pest_control"]);
-  });
-  it("keeps the same customer's unticks through a result without the list, so a failed lookup cannot reprice them", () => {
-    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: [] }, notes: "x" };
-    expect(nextFormForTierExtension(form, {}, "c1")).toBe(form);
-    // The list comes back: the untick still holds.
-    expect(nextFormForTierExtension(form, estimate, "c1").tierExtensionPick.ticked).toEqual(["pest_control"]);
-  });
-  it("drops a pick that belongs to no customer or another customer", () => {
-    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: ["lawn_care"] }, notes: "x" };
+    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], unticked: ["lawn_care"] }, notes: "x" };
+    expect(nextFormForTierExtension(form, estimate, "c2").tierExtensionPick.unticked).toEqual([]);
     expect(nextFormForTierExtension(form, {}, "c2")).toEqual({ tierExtensionPick: null, notes: "x" });
     expect(nextFormForTierExtension(form, {}, null)).toEqual({ tierExtensionPick: null, notes: "x" });
     const plain = { notes: "x" };
@@ -119,14 +117,14 @@ describe("current services at the new tier in the Pricing summary", () => {
     expect(committed()[0].tierExtensionKeys).toEqual(["pest_control"]);
     expect(committed()[0].tierExtensionKeptKeys).toEqual(["lawn_care"]);
     expect(committed()[0].estimateData.inputs.tierExtensionPick).toEqual({
-      customerId: "qa-cust", offered: ["lawn_care", "pest_control"], ticked: ["pest_control"],
+      customerId: "qa-cust", offered: ["lawn_care", "pest_control"], unticked: ["lawn_care"],
     });
   });
 
   it("a reopened draft saves the same choice without a regenerate", async () => {
     currentSource = {
       ...structuredClone(source),
-      inputs: { ...source.inputs, tierExtensionPick: { customerId: "qa-cust", offered: ["lawn_care", "pest_control"], ticked: ["pest_control"] } },
+      inputs: { ...source.inputs, tierExtensionPick: { customerId: "qa-cust", offered: ["lawn_care", "pest_control"], unticked: ["lawn_care"] } },
     };
     renderEditor();
     await screen.findByDisplayValue("QA Member");

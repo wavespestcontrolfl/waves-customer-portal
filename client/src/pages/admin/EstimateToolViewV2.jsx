@@ -796,19 +796,19 @@ export function nextFormForOfferTiers(form, estimate) {
   return form;
 }
 // The linked member's current services this quote moves up a tier
-// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). Each fresh list
-// replaces the pick: every offered service starts ticked, except one staff
-// unticked on an earlier result for the SAME customer. A result without the
-// list (nothing to offer, or the lookup failed) keeps that customer's choices:
-// dropping them would let the save fall back to the server's automatic plan
-// and reprice a service staff unticked. Another customer's pick never carries.
-// The pick lives in the form so a reopened draft saves the same choice.
+// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). The pick keeps the
+// latest list (`offered`) and every service staff unticked for this customer
+// (`unticked`); a service is ticked when it is offered and not unticked. An
+// untick holds until staff tick it again — through a regenerate, a result
+// without the list (nothing to offer, or the lookup failed) and a list that
+// briefly leaves the service out — so a save can never reprice a service staff
+// declined. Another customer's pick never carries. The pick lives in the form
+// so a reopened draft saves the same choice.
 export function nextFormForTierExtension(form, estimate, customerId) {
   const offered = (estimate?.currentServiceTierOffer?.services || []).map((svc) => svc.key);
   const prior = customerId && form.tierExtensionPick?.customerId === customerId ? form.tierExtensionPick : null;
   if (!offered.length) return (form.tierExtensionPick || null) === prior ? form : { ...form, tierExtensionPick: prior };
-  const unticked = (key) => !!prior && prior.offered.includes(key) && !prior.ticked.includes(key);
-  return { ...form, tierExtensionPick: { customerId, offered, ticked: offered.filter((key) => !unticked(key)) } };
+  return { ...form, tierExtensionPick: { customerId, offered, unticked: prior ? prior.unticked : [] } };
 }
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
 // Dead Rodent Removal & Odor Treatment access choices. The values are the engine's tiers
@@ -4848,9 +4848,10 @@ export default function EstimateToolViewV2({
         ...(savingInputs.tierExtensionPick
           && savingInputs.tierExtensionPick.customerId === (form.customerId || existingCustomerMatch?.id)
           ? {
-            tierExtensionKeys: savingInputs.tierExtensionPick.ticked,
+            tierExtensionKeys: savingInputs.tierExtensionPick.offered
+              .filter((key) => !savingInputs.tierExtensionPick.unticked.includes(key)),
             tierExtensionKeptKeys: savingInputs.tierExtensionPick.offered
-              .filter((key) => !savingInputs.tierExtensionPick.ticked.includes(key)),
+              .filter((key) => savingInputs.tierExtensionPick.unticked.includes(key)),
           }
           : {}),
         // Explicit staff confirmation of a county-roll-flagged address
@@ -8523,14 +8524,14 @@ export default function EstimateToolViewV2({
                         <div key={svc.key} className="mb-1">
                           <Checkbox
                             id={`estimate-tier-extension-${svc.key}`}
-                            checked={form.tierExtensionPick.ticked.includes(svc.key)}
+                            checked={!form.tierExtensionPick.unticked.includes(svc.key)}
                             onChange={() => setForm((f) => (f.tierExtensionPick ? {
                               ...f,
                               tierExtensionPick: {
                                 ...f.tierExtensionPick,
-                                ticked: f.tierExtensionPick.ticked.includes(svc.key)
-                                  ? f.tierExtensionPick.ticked.filter((key) => key !== svc.key)
-                                  : [...f.tierExtensionPick.ticked, svc.key],
+                                unticked: f.tierExtensionPick.unticked.includes(svc.key)
+                                  ? f.tierExtensionPick.unticked.filter((key) => key !== svc.key)
+                                  : [...f.tierExtensionPick.unticked, svc.key],
                               },
                             } : f))}
                             label={`${svc.label}: ${fmt(svc.currentPerVisit)} → ${fmt(svc.newPerVisit)} / application${svc.marginPct != null ? ` · est. margin ${svc.marginPct}%` : ""}`}
