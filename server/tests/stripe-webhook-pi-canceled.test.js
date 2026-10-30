@@ -257,7 +257,7 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(category).toBe('billing');
     expect(spec).toMatchObject({
       area: 'Billing',
-      action: "charge or waive Pat Doe's canceled dues",
+      action: "collect Pat Doe's canceled dues",
       severity: 'needs-you',
       subject: { type: 'customer', id: 'cust-1' },
       doneWhen: 'collected_and_marked_done',
@@ -271,7 +271,9 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(spec.link).toBe('/admin/customers?customerId=cust-1');
     expect(opts.detail).toMatch(/While it is still October 2026, Charge now on the customer's page collects it and records October 2026 as paid\./);
     expect(opts.detail).toMatch(/an invoice made by hand does not mark October 2026 as paid \(a plan visit in October 2026 completed later could bill it again\)/);
-    expect(opts.detail).toMatch(/To waive it, mark this done\./);
+    // Done is not a waiver: nothing records one, so the alert never calls it that.
+    expect(opts.detail).toMatch(/Marking this done only closes this alert: it records nothing on the account\./);
+    expect(opts.detail).not.toMatch(/waive/i);
     expect(updatesWhenAlerted).toBe(0); // raised before the canceled flip
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_canceled', expect.objectContaining({
       paymentId: 'pay-dues-1', amountCents: 5530,

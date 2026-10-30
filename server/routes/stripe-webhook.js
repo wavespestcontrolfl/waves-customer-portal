@@ -6853,7 +6853,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
  * cancel leaves its row 'failed' and is skipped here), so a person in Stripe
  * or Stripe itself did it: charging again could undo a deliberate cancel, so
  * this does NOT arm a retry. It rings the office once per PaymentIntent to
- * charge or waive the month. No message goes to the customer, and nothing is
+ * collect the month (or decide not to). No message goes to the customer, and nothing is
  * charged.
  *
  * Guards: monthly_autopay PIs only; never invoice-linked PIs (they reopen
@@ -6917,7 +6917,7 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
   const alert = await raiseAdminAlert('billing', {
     area: 'Billing',
     action: fitAction('Billing', name, [
-      (who) => `charge or waive ${who}'s canceled dues`,
+      (who) => `collect ${who}'s canceled dues`,
       (who) => `review ${who}'s canceled dues`,
     ]),
     why: `The ${duesPayment} ${copy.why}; the month is unpaid.`,
@@ -6925,7 +6925,7 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     // Customer 360 holds Charge now, the one office action that records the month as paid.
     link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
     subject: { type: 'customer', id: customerId },
-    // Nothing closes this alert automatically: a person marks it done after collecting or waiving.
+    // Nothing closes this alert automatically: a person marks it done once it is handled.
     doneWhen: 'collected_and_marked_done',
     who: 'person',
   }, {
@@ -6937,7 +6937,7 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     // completion) trusts. So it is the right tool only while it is still the canceled month. An
     // invoice made by hand carries no dues-month stamp (create() strips it), so a plan visit of that
     // month completed later could mint the month's dues again.
-    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. While it is still ${monthWords}, Charge now on the customer's page collects it and records ${monthWords} as paid. After that, Charge now bills the new month, and an invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. To waive it, mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
+    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. While it is still ${monthWords}, Charge now on the customer's page collects it and records ${monthWords} as paid. After that, Charge now bills the new month, and an invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. Marking this done only closes this alert: it records nothing on the account. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
     dedupeKey: `autopay-canceled:${customerId}:${piId}`,
     metadata: {
       customer_id: customerId,
