@@ -232,19 +232,21 @@ function KitPill({ templateKey, kit }) {
 function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
   const [notes, setNotes] = useState(item.notes || "");
   const [editing, setEditing] = useState(false);
-  const noteInput = useRef(null);
   const draft = useRef(notes);
   draft.current = notes;
   const lastSent = useRef(item.notes || "");
   const saving = useRef(false);
   const again = useRef(false);
-  // A save's refresh brings back the note as saved. If the operator has gone on typing in this field since, that
-  // reply is older than the draft and must not replace it; the draft is saved on its next blur. The same holds while
-  // this row's note save is in flight or a newer draft is queued behind it, even after the field lost focus: another
-  // reload (a tick) can bring back the older text, and the queued draft must still be the one sent.
+  // A refresh replaces the note only while the field holds no unsaved typing (its text is still the note the server
+  // last had), focused or not: an untouched field must not keep an older note that its next blur would send back.
+  // Typing not saved yet stays, since a refresh can bring back a note older than the draft (the reply to a save the
+  // operator has typed past); the draft is saved on its next blur. The same holds while this row's note save is in
+  // flight or a newer draft is queued behind it: another reload (a tick) can bring back the older text, and the
+  // queued draft must still be the one sent.
   useEffect(() => {
+    const unsaved = draft.current !== lastSent.current;
     lastSent.current = item.notes || "";
-    if (saving.current || again.current || (noteInput.current && noteInput.current === document.activeElement)) return;
+    if (unsaved || saving.current || again.current) return;
     setNotes(item.notes || "");
   }, [item.notes]);
   // A note saves when its field loses focus. The save does not lock the panel (a tap that starts the blur would land
@@ -283,7 +285,7 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
         </span>
       </div>
       {item.source_text && <div className="text-ui-caption text-ink-secondary">From the solicitation: “{item.source_text}”</div>}
-      <Input ref={noteInput} aria-label={`Note: ${item.label}`} placeholder="Note" maxLength={2000} value={notes}
+      <Input aria-label={`Note: ${item.label}`} placeholder="Note" maxLength={2000} value={notes}
         onChange={(event) => setNotes(event.target.value)} onBlur={saveNotes} />
     </li>
   );

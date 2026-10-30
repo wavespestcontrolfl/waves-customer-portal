@@ -372,3 +372,35 @@ it("keeps an unsaved Decision note when a due-date save loses its reply, and re-
   // The lost save was the date itself, so the field shows the date as the server has it (none here).
   expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("");
 });
+
+it("shows a note changed on the server when its field has focus but no typing, and does not send the old note back", async () => {
+  let stored = "Old note";
+  let reads = 0;
+  let releaseReload;
+  const notePatches = [];
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1") {
+      reads += 1;
+      if (reads === 1) return reply(detail([line({ notes: stored })]));
+      return new Promise((resolve) => {
+        releaseReload = () => resolve({ ok: true, status: 200, json: async () => detail([line({ notes: stored, checked_at: "2026-10-30T10:00:00Z" })]) });
+      });
+    }
+    if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) { notePatches.push(options.body.notes); return reply({ ok: true }); }
+    if (path === "/admin/bid-desk/b1/checklist/i1") return reply({ ok: true });
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const input = await screen.findByLabelText(NOTE);
+  expect(input).toHaveValue("Old note");
+  fireEvent.click(screen.getByLabelText("Example required document")); // the tick's reload is held back
+  await waitFor(() => expect(reads).toBe(2));
+  input.focus(); // no typing
+  stored = "Note saved from another screen";
+  await act(async () => { releaseReload(); });
+  await waitFor(() => expect(input).toHaveValue("Note saved from another screen"));
+  input.blur();
+  await act(async () => {});
+  expect(notePatches).toEqual([]);
+});
