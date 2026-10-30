@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -412,6 +412,64 @@ it("a new search term clears the old results at once and no result can be picked
   expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
 });
 
+const SEARCH_EXAMPLE = "/admin/customers?search=Example&limit=8&sort=name";
+const LEE = { id: "cust-7", firstName: "Lee", lastName: "Example", address: "12 Other Court", phone: "+19415550142" };
+const noSuggestion = (route) => (path, init) => (path.startsWith("/admin/access-codes/found")
+  ? response({ total: 1, items: [{ ...UNLINKED_ROW, suggestedCustomer: null }] })
+  : route(path, init));
+
+it("a failed customer search says so with Try again, which reruns the same term", async () => {
+  let fail = true;
+  rawAdminFetch.mockImplementation(noSuggestion((path, init) => {
+    if (path === SEARCH_EXAMPLE) return fail ? response({}, { ok: false, status: 503 }) : response({ customers: [LEE] });
+    return unlinkedRoutes()(path, init);
+  }));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  fireEvent.change(await screen.findByLabelText("Find a customer"), { target: { value: "Example" } });
+  // A failure never reads as "no one matched".
+  expect(await screen.findByText("Could not search customers")).toBeInTheDocument();
+  expect(screen.queryByText("No customer matches.")).toBeNull();
+  fail = false;
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByRole("button", { name: /Lee Example/ })).toBeEnabled();
+  expect(screen.queryByText("Could not search customers")).toBeNull();
+  expect(rawAdminFetch.mock.calls.filter(([p]) => p === SEARCH_EXAMPLE)).toHaveLength(2);
+});
+
+it("a search that finds no one says No customer matches, with no error", async () => {
+  rawAdminFetch.mockImplementation(noSuggestion((path, init) => (path === "/admin/customers?search=Nobody&limit=8&sort=name"
+    ? response({ customers: [] })
+    : unlinkedRoutes()(path, init))));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  fireEvent.change(await screen.findByLabelText("Find a customer"), { target: { value: "Nobody" } });
+  expect(await screen.findByText("No customer matches.")).toBeInTheDocument();
+  expect(screen.queryByText("Could not search customers")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+});
+
+it("a failure that answers after the term changed never shows over the new term's results", async () => {
+  let failOld;
+  const old = new Promise((resolve) => { failOld = resolve; });
+  rawAdminFetch.mockImplementation(noSuggestion((path, init) => {
+    if (path === "/admin/customers?search=Exam&limit=8&sort=name") return old.then(() => response({}, { ok: false, status: 503 }));
+    if (path === SEARCH_EXAMPLE) return response({ customers: [LEE] });
+    return unlinkedRoutes()(path, init);
+  }));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  const box = await screen.findByLabelText("Find a customer");
+  fireEvent.change(box, { target: { value: "Exam" } });
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/customers?search=Exam&limit=8&sort=name")).toBe(true));
+  fireEvent.change(box, { target: { value: "Example" } });
+  expect(await screen.findByRole("button", { name: /Lee Example/ })).toBeEnabled();
+  failOld();
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  expect(screen.queryByText("Could not search customers")).toBeNull();
+  expect(screen.getByRole("button", { name: /Lee Example/ })).toBeEnabled();
+});
+
 // ---- The found-codes bell links here with ?view=found ----
 
 it("a bell link (?view=found) opens Found in messages without a click", async () => {
@@ -646,4 +704,93 @@ it("with the switch off there is no unconfirmed box and no list request", async 
   fireEvent.click(screen.getAllByRole("button", { name: "Add entry" })[0]);
   expect(screen.queryByLabelText("I have not seen this work (file it as Needs confirm)")).toBeNull();
   expect(rawAdminFetch.mock.calls.some(([p]) => p.endsWith("/unplaced"))).toBe(false);
+});
+
+// The two help lists when a read fails, and refused actions from their rows.
+const BOTH_LISTS = { ...ALL, mergeEnabled: true, unplacedEnabled: true };
+const UNAVAILABLE = () => response({}, { ok: false, status: 503 });
+const panelOf = (heading) => screen.getByText(heading).parentElement;
+// A list row: the nearest bordered box around one of its buttons.
+const rowOf = (button) => button.parentElement.closest(".rounded-sm");
+
+it("a help list whose first read fails says it could not load, with Try again, never reading as empty", async () => {
+  let failing = true;
+  rawAdminFetch.mockImplementation((path) => {
+    if (path.endsWith("/merge-suggestions")) return failing ? UNAVAILABLE() : response(SUGGESTED);
+    if (path.endsWith("/unplaced")) return failing ? UNAVAILABLE() : response(UNPLACED);
+    return response(BOTH_LISTS);
+  });
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  await waitFor(() => expect(screen.getAllByText("Could not load this list.")).toHaveLength(2));
+  expect(within(panelOf("Possible duplicates")).getByText("Could not load this list.")).toBeInTheDocument();
+  failing = false;
+  fireEvent.click(within(panelOf("Possible duplicates")).getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("Possible duplicates (1)")).toBeInTheDocument();
+  expect(within(panelOf("Homes not placed")).getByText("Could not load this list.")).toBeInTheDocument();
+  fireEvent.click(within(panelOf("Homes not placed")).getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("Homes not placed (2)")).toBeInTheDocument();
+  expect(screen.queryByText("Could not load this list.")).toBeNull();
+});
+
+it("a help list whose refresh fails after a write keeps its rows and says they may be out of date", async () => {
+  let failing = false;
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/merge-suggestions")) return failing ? UNAVAILABLE() : response(SUGGESTED);
+    if (path.endsWith("/unplaced")) return failing ? UNAVAILABLE() : response(UNPLACED);
+    if (options?.method === "PATCH") { failing = true; return response({ id: "e1", status: "active" }); }
+    return response(BOTH_LISTS);
+  });
+  renderPage();
+  expect(await screen.findByText("Possible duplicates (1)")).toBeInTheDocument();
+  expect(await screen.findByText("Homes not placed (2)")).toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole("button", { name: "Confirm" })[0]);
+  // The write worked and says so; each list it could not read again stays, marked.
+  expect(await screen.findByText("Confirmed")).toBeInTheDocument();
+  expect(within(panelOf("Possible duplicates (1)")).getByText("Could not refresh this list. It may be out of date.")).toBeInTheDocument();
+  expect(within(panelOf("Homes not placed (2)")).getByText("Could not refresh this list. It may be out of date.")).toBeInTheDocument();
+  expect(screen.getByText("Synthetic Oaks Lwr · 2 properties → Synthetic Oaks · 3 properties")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Link to Heron Pointe at Sample Place" })).toBeInTheDocument();
+});
+
+it("a refused home link shows the server's message in that home's row, and a retry that works removes the home", async () => {
+  let refuse = true;
+  let linked = false;
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/merge-suggestions")) return response(SUGGESTED);
+    if (path.endsWith("/unplaced")) return response(linked ? { homes: [UNPLACED.homes[1]] } : UNPLACED);
+    if (options?.method === "PUT") {
+      if (refuse) return response({ error: "That neighborhood is switched off" }, { ok: false, status: 409 });
+      linked = true;
+      return response({ id: "p1" });
+    }
+    return response(BOTH_LISTS);
+  });
+  renderPage();
+  await screen.findByText("Possible duplicates (1)");
+  const link = await screen.findByRole("button", { name: "Link to Heron Pointe at Sample Place" });
+  fireEvent.click(link);
+  // Beside the button that failed, once: not under the directory filters.
+  expect(await within(rowOf(link)).findByRole("alert")).toHaveTextContent("That neighborhood is switched off");
+  expect(screen.getAllByText("That neighborhood is switched off")).toHaveLength(1);
+  refuse = false;
+  fireEvent.click(link);
+  expect(await screen.findByText("Linked 100 Synthetic Way, Lakewood Ranch to Heron Pointe at Sample Place")).toBeInTheDocument();
+  expect(screen.getByText("Homes not placed (1)")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Link to Heron Pointe at Sample Place" })).toBeNull();
+  expect(screen.queryByText("That neighborhood is switched off")).toBeNull();
+});
+
+it("a refused Not the same shows the server's message in that pair's row", async () => {
+  rawAdminFetch.mockImplementation((path) => {
+    if (path.endsWith("/merge-suggestions/dismiss")) return response({ error: "Neighborhood not found" }, { ok: false, status: 404 });
+    if (path.endsWith("/merge-suggestions")) return response(SUGGESTED);
+    return response(MERGE_LIST);
+  });
+  renderPage();
+  await screen.findByText("Possible duplicates (1)");
+  const notSame = screen.getByRole("button", { name: "Not the same" });
+  fireEvent.click(notSame);
+  expect(await within(rowOf(notSame)).findByRole("alert")).toHaveTextContent("Neighborhood not found");
+  expect(screen.getAllByText("Neighborhood not found")).toHaveLength(1);
 });
