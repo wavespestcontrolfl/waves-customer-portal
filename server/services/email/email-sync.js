@@ -568,6 +568,12 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       await trx('email_attachments').insert(parsed.attachments.map((att) => attachmentRow(rows[0].id, att)));
     }
     return rows;
+  }).catch((err) => {
+    // A live Zelle notice's retry mark rolls back with its row: like a mark
+    // that could not be written (offerZelleNotice), it holds the cursor for
+    // as long as it fails.
+    if (preMarked) err.zelleRetryLost = true;
+    throw err;
   });
   if (!inserted.length) {
     // Lost the insert race with a concurrent sync — already stored. The
