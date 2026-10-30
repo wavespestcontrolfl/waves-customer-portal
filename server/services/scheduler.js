@@ -4792,27 +4792,10 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM (weekdays) — 7-Day Late Payment SMS
-  // Checks invoices 7+ days overdue, sends tiered reminder SMS
-  // =========================================================================
-  cron.schedule('0 10 * * 1-5', async () => {
-    logger.info('Running: late payment check');
-    try {
-      await runExclusive('late-payment-check', async () => {
-        const LatePaymentService = require('./late-payment-checker');
-        const result = await LatePaymentService.checkAndNotify();
-        logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.emailedFallback || 0} email-only (SMS undeliverable), ${result.skipped} skipped`);
-      });
-    } catch (err) {
-      logger.error(`Late payment check failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 10:16AM (Tue–Fri) — Per-invoice follow-up sequences
   // Fires the next due touch for each unpaid invoice's automated chain.
   //
-  // The 10am-ET jobs are STAGGERED (:00 late-payment, :03 review-followups,
+  // The 10am-ET jobs are STAGGERED (:03 review-followups,
   // :07 billing-retries, :12 renewal-reminders, :16 this, :20 seasonal,
   // :31 payer-statement dunning) —
   // until 2026-08-04 six of them fired at exactly 10:00, each runExclusive

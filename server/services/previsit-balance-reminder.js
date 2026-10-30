@@ -151,7 +151,7 @@ async function smsTemplateActive() {
 // due_date (or old created_at when due_date is null). Mirror its predicate
 // and its 7-day default here, or past-due recurring invoices sitting at
 // 'sent'/'viewed' never count and non-member customers get no reminder
-// (Codex r5; late-payment-checker.js checkAndNotify).
+// (Codex r5; mirrors the retired late-payment checker).
 const OVERDUE_AFTER_DAYS = 7;
 
 // Past-due invoices that belong to the recurring relationship: linked to a

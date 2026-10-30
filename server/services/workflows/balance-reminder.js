@@ -55,7 +55,7 @@ function smsLogMetadata(row) {
 }
 
 // Account-level reminders stop if ANY invoice behind the balance is held.
-// Read failures skip this run; late-payment-checker owns verification nudges.
+// Read failures skip this run.
 async function customerDunningStopped(balance, selectedInvoiceId) {
   try {
     const ids = [...new Set([
@@ -773,14 +773,12 @@ class BalanceReminder {
   // replacing it. dailyCheck() has its own, separate coupling above.
   async latePaymentCheckRetired({ log = true } = {}) {
     if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF !== 'true') return false;
-    // An invoice with no follow-up sequence also needs an owner: the
-    // late-payment checker while it runs, or orphan adoption once it
-    // retires (Codex #5294 r1 P1). Otherwise this stays the fallback.
+    // An invoice with no follow-up sequence also needs an owner: orphan
+    // adoption (Codex #5294 r1 P1). Otherwise this stays the fallback.
     const InvoiceFollowUps = require('../invoice-followups');
-    const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
-      || InvoiceFollowUps.adoptOrphanInvoicesLive();
-    // Legacy `unpaid`-status invoices are covered by neither the checker
-    // nor adoption (both read sent/viewed/overdue), so while any exists
+    const sequencelessOwned = InvoiceFollowUps.adoptOrphanInvoicesLive();
+    // Legacy `unpaid`-status invoices are not covered by adoption (it reads
+    // sent/viewed/overdue), so while any exists
     // this stays the owner (Codex #5294 r2 P1; prod had none 2026-09-28).
     // An unreadable count keeps it running.
     let legacyUnpaidOpen = true;
@@ -794,12 +792,12 @@ class BalanceReminder {
       return false;
     }
     if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
-      if (log) logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
+      if (log) logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and orphan adoption own these');
       return true;
     }
     if (log) {
       logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
-        ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
+        ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: orphan adoption is not live'
         : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
     }
     return false;

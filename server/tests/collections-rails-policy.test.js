@@ -1,5 +1,5 @@
 /**
- * Collections policy wiring on the two SMS dunning rails (PR A, hardened by
+ * Collections policy wiring on the invoice-followups SMS dunning rail (PR A, hardened by
  * the 2026-08-14 codex round).
  *
  * Pins:
@@ -85,11 +85,7 @@ const ContactPolicy = require('../services/collections/contact-policy');
 const ContactLedger = require('../services/collections/contact-ledger');
 const StripeService = require('../services/stripe');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
-const LatePaymentChecker = require('../services/late-payment-checker');
-// Deliberately NOT mocked: the late-payment rail consults the REAL
-// invoice-followups hasActiveSequence/isDunningStopped (served by the
-// invoice_followup_sequences queues below), and the followups rail under
-// test IS this module.
+// Deliberately NOT mocked: the followups rail under test IS this module.
 const InvoiceFollowUps = require('../services/invoice-followups');
 
 function chain({ result = [], first, returning } = {}) {
@@ -110,12 +106,17 @@ function chain({ result = [], first, returning } = {}) {
   return q;
 }
 
-function setDbQueues(queues) {
+function setDbQueues(queues, { revivalRead = true } = {}) {
   const tableQueues = new Map(Object.entries(queues));
+  // runPending always starts with the reopened-invoice revival read on
+  // `invoice_followup_sequences as s` (nothing to revive here), then the batch.
+  // `revivalRead: false` for sendNextTouchNow, which has no revival read.
+  const batch = tableQueues.get('invoice_followup_sequences as s');
+  if (batch && revivalRead) tableQueues.set('invoice_followup_sequences as s', [chain({ result: [] }), ...batch]);
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
-      // The checker's active-plan gate (fail-closed) probes payment_plans
+      // The active-plan gate (fail-closed) probes payment_plans
       // per invoice — default to "no active plan" unless a test scripts one.
       if (table === 'payment_plans') return chain({ first: undefined });
       if (table === 'collections_contact_ledger') return chain({ result: [] });
@@ -164,352 +165,6 @@ beforeEach(() => {
 });
 
 afterEach(() => jest.useRealTimers());
-
-// ─── late-payment-checker rail ─────────────────────────────────────────────
-
-const LP_INVOICE = {
-  id: 'inv-1',
-  customer_id: 'cust-1',
-  token: 'token-1',
-  invoice_number: 'WPC-2026-1042',
-  status: 'sent',
-  title: 'Quarterly Pest Control',
-  total: '129.00',
-  due_date: '2026-05-10', // 16 days overdue → tier 14
-  service_date: '2026-05-01',
-  created_at: '2026-05-01T12:00:00.000Z',
-};
-const LP_CUSTOMER = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
-
-// Exact legacy delivery content plus billing routing metadata, independent
-// of whether the collections policy gate is enabled.
-const LP_EXPECTED_SEND = {
-  to: '+19415550101',
-  body: 'sms body for late_payment_14d',
-  channel: 'sms',
-  audience: 'customer',
-  purpose: 'payment_link',
-  customerId: 'cust-1',
-  invoiceId: 'inv-1',
-  entryPoint: 'late_payment_checker',
-  metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
-    notificationEventKey: 'late-payment:inv-1:14', collections_ledger_id: 'led-1' },
-  hasEmailLeg: true,
-  // The last ownership check, run by the canonical sender immediately before
-  // provider preparation — a Bill-To change during the render/ledger awaits
-  // must not reach the homeowner.
-  preDispatchCheck: expect.any(Function),
-};
-
-function armLatePaymentHappyPath(prefs = undefined, selectedCustomer = LP_CUSTOMER, episodeRows = null) {
-  setDbQueues({
-    invoices: [
-      chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, the last one before dispatch, and
-      // the email leg's own check (its handoff is later still)
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-    ],
-    activity_log: [chain({ first: null }), chain()],
-    customers: [chain({ first: selectedCustomer })],
-    ...(prefs ? { notification_prefs: [chain({ first: prefs })] } : {}),
-    ...(episodeRows ? { collections_contact_ledger: [chain({ result: [] }), chain({ result: episodeRows })] } : {}),
-    invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
-  });
-}
-
-describe('late-payment-checker rail', () => {
-  test('App-only selection consults push policy and sends despite do_not_text and no phone', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'sms'
-      ? { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
-      : ALLOWED);
-    armLatePaymentHappyPath({ billing_channels: ['push'] }, { ...LP_CUSTOMER, phone: null });
-
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
-    expect(ContactPolicy.evaluate.mock.calls.map(([, args]) => args.channel)).toEqual(['push']);
-    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
-      channel: 'push', idempotencyKey: 'late_payment_checker:inv-1:14:push',
-    }));
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
-      to: null, channel: 'push', metadata: {
-        billingDeliveryLeg: 'push', billingDeliveryCategory: 'billing', appOnly: true,
-      },
-    });
-  });
-
-  test('a global collections hold still suppresses an App-only reminder', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
-    armLatePaymentHappyPath({ billing_channels: ['push'] }, { ...LP_CUSTOMER, phone: null });
-
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
-    expect(ContactPolicy.evaluate.mock.calls.map(([, args]) => args.channel)).toEqual(['push']);
-    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('App and Text selection sends only policy-permitted App when do_not_text denies Text', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'sms'
-      ? { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
-      : ALLOWED);
-    armLatePaymentHappyPath({ billing_channels: ['push', 'sms'] });
-
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
-    expect(ContactPolicy.evaluate.mock.calls.map(([, args]) => args.channel)).toEqual(['push', 'sms']);
-    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['push']);
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe('push');
-  });
-
-  test('permitted App and Text reserve separate ledgers and dispatch each selected leg once', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'email'
-      ? { allowed: false, denialReasons: ['flag_do_not_email'], eligibleInvoiceIds: ['inv-1'] }
-      : ALLOWED);
-    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
-    armLatePaymentHappyPath({ billing_channels: ['push', 'sms'] });
-
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
-    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['push', 'sms']);
-    expect(sendCustomerMessage.mock.calls.map(([args]) => args.metadata.billingDeliveryLeg)).toEqual(['push', 'sms']);
-    expect(sendCustomerMessage.mock.calls.map(([args]) => args.channel)).toEqual(['push', 'sms']);
-    expect(ContactLedger.markDelivered.mock.calls.map(([ledger]) => ledger.id)).toEqual(['push-14', 'sms-14']);
-  });
-
-  test('a retryable Text sibling reuses accepted App ledger without repeating App', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'email'
-      ? { allowed: false, denialReasons: ['flag_do_not_email'], eligibleInvoiceIds: ['inv-1'] }
-      : ALLOWED);
-    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
-    let appClaimCount = 0;
-    ContactLedger.claimAttempt.mockImplementation(async (ledger) => ledger.id === 'push-14' && appClaimCount++ > 0
-      ? { allowed: false, delivered: true } : { allowed: true });
-    sendCustomerMessage
-      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' })
-      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, deferred: true, code: 'PROVIDER_FAILURE' })
-      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' });
-
-    armLatePaymentHappyPath({ billing_channels: ['push', 'sms'] });
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
-    expect(sendCustomerMessage.mock.calls.map(([args]) => args.metadata.billingDeliveryLeg)).toEqual(['push', 'sms']);
-
-    armLatePaymentHappyPath({ billing_channels: ['push', 'sms'] }, LP_CUSTOMER, [
-      { id: 'push-14', idempotency_key: 'late_payment_checker:inv-1:14:push' },
-      { id: 'sms-14', idempotency_key: 'late_payment_checker:inv-1:14:sms' },
-      { id: 'other-invoice', idempotency_key: 'late_payment_checker:inv-2:14:sms' },
-    ]);
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
-    expect(sendCustomerMessage.mock.calls.map(([args]) => args.metadata.billingDeliveryLeg)).toEqual(['push', 'sms', 'sms']);
-    expect(ContactLedger.claimAttempt.mock.calls.filter(([ledger]) => ledger.id === 'push-14')).toHaveLength(2);
-    expect(ContactPolicy.evaluate).toHaveBeenLastCalledWith('cust-1', expect.objectContaining({
-      channel: 'sms', excludeLedgerIds: ['push-14', 'sms-14'],
-    }));
-  });
-
-  test('a prior Text remains a spacing hold after preferences switch to App-only', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { excludeLedgerIds }) =>
-      excludeLedgerIds.includes('sms-14') ? ALLOWED
-        : { allowed: false, denialReasons: ['contact_within_24h'], eligibleInvoiceIds: ['inv-1'] });
-    armLatePaymentHappyPath({ billing_channels: ['push'] }, LP_CUSTOMER, [
-      { id: 'sms-14', idempotency_key: 'late_payment_checker:inv-1:14:sms' },
-    ]);
-
-    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-      channel: 'push', excludeLedgerIds: [],
-    }));
-    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test.each([
-    ['a durable do-not-email flag waives the selected Email', 'flag_do_not_email', false],
-    ['a spacing window keeps the selected Email owed', 'contact_within_24h', true],
-  ])('%s after Text delivers', async (_label, reason, stillPending) => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'email'
-      ? { allowed: false, denialReasons: [reason], eligibleInvoiceIds: ['inv-1'] }
-      : ALLOWED);
-    const activityInsert = chain();
-    setDbQueues({
-      invoices: [
-        chain({ result: [LP_INVOICE] }),
-        chain({ first: { payer_id: null, scheduled_send_error: null } }),
-        chain({ first: { payer_id: null, scheduled_send_error: null } }),
-        chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      ],
-      activity_log: [chain({ first: null }), chain(), activityInsert],
-      customers: [chain({ first: LP_CUSTOMER })],
-      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
-      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
-    });
-
-    await LatePaymentChecker.checkAndNotify();
-
-    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    const inserted = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
-    expect(inserted.pendingEmail === true).toBe(stillPending);
-  });
-
-  test('gate UNSET: policy never consulted, legacy content and billing routing metadata are preserved', async () => {
-    armLatePaymentHappyPath();
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0]).toEqual(LP_EXPECTED_SEND);
-    expect(result.notified).toBe(1);
-  });
-
-  test("gate 'false': still never consulted", async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'false';
-    armLatePaymentHappyPath();
-    await LatePaymentChecker.checkAndNotify();
-    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test("gate 'true' + both channels denied: nothing sent, nothing ledgered, invoice skipped without burning the tier", async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
-    setDbQueues({
-      invoices: [
-      chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, the last one before dispatch, and
-      // the email leg's own check (its handoff is later still)
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-    ],
-      activity_log: [chain({ first: null })],
-      customers: [chain({ first: LP_CUSTOMER })],
-      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
-    });
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-      channel: 'sms', purpose: 'late_payment', now: expect.any(Date),
-    }));
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-      channel: 'email', purpose: 'late_payment', now: expect.any(Date),
-    }));
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
-    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ notified: 0, skipped: 1 });
-  });
-
-  test("gate 'true' + allowed: the send is unchanged from the gate-off shape", async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    armLatePaymentHappyPath();
-    await LatePaymentChecker.checkAndNotify();
-    expect(sendCustomerMessage.mock.calls[0][0]).toEqual(LP_EXPECTED_SEND);
-  });
-
-  test('CHANNEL INDEPENDENCE: sms denied but email allowed ⇒ no text, email fallback still delivers', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockImplementation(async (cid, { channel }) => (
-      channel === 'email' ? ALLOWED : { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
-    ));
-    armLatePaymentHappyPath();
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledTimes(1);
-    expect(result.emailedFallback).toBe(1);
-    // Only the delivered channel is ledgered — the policy-denied sms leg
-    // never reached the record-then-send step.
-    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email' }));
-  });
-
-  test('INVOICE MEMBERSHIP: an allowed verdict about a DIFFERENT invoice is not permission for this one', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    // Two-invoice account: the target inv-1 was payer-dropped from the
-    // eligible set; sibling inv-2 is the one the verdict allows.
-    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-2'] });
-    setDbQueues({
-      invoices: [
-      chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, the last one before dispatch, and
-      // the email leg's own check (its handoff is later still)
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-    ],
-      activity_log: [chain({ first: null })],
-      customers: [chain({ first: LP_CUSTOMER })],
-      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
-    });
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ notified: 0, skipped: 1 });
-  });
-
-  test('RECORD-THEN-SEND: the sms ledger row is written BEFORE the send, and the email row before the sidecar', async () => {
-    armLatePaymentHappyPath();
-    await LatePaymentChecker.checkAndNotify();
-    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(2);
-    expect(ContactLedger.recordContact.mock.calls[0][0]).toEqual({
-      customerId: 'cust-1',
-      channel: 'sms',
-      purpose: 'late_payment',
-      invoiceIds: ['inv-1'],
-      source: 'late_payment_checker',
-      metadata: { tier_days: 14, days_overdue: 16 },
-      idempotencyKey: 'late_payment_checker:inv-1:14:sms',
-    });
-    expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
-      channel: 'email', purpose: 'late_payment', invoiceIds: ['inv-1'],
-    }));
-    // Strict ordering: sms record < sms send < email record < email send.
-    const smsRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[0];
-    const smsSendAt = sendCustomerMessage.mock.invocationCallOrder[0];
-    const emailRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[1];
-    const emailSendAt = BalanceReminder.sendLatePaymentEmail.mock.invocationCallOrder[0];
-    expect(smsRecordAt).toBeLessThan(smsSendAt);
-    expect(emailRecordAt).toBeLessThan(emailSendAt);
-    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
-  });
-
-  test('LEDGER FAILURE ⇒ NO SEND: an unledgerable contact is never attempted (and retries next run — no dedupe row)', async () => {
-    ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
-    setDbQueues({
-      invoices: [
-      chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, the last one before dispatch, and
-      // the email leg's own check (its handoff is later still)
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      chain({ first: { payer_id: null, scheduled_send_error: null } }),
-    ],
-      activity_log: [chain({ first: null })],
-      customers: [chain({ first: LP_CUSTOMER })],
-      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
-    });
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ notified: 0, skipped: 1 });
-  });
-
-  test('SEND FAILURE ⇒ the standing ledger row is stamped send_failed (over-suppression is the safe direction)', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
-    BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: true });
-    armLatePaymentHappyPath();
-    const result = await LatePaymentChecker.checkAndNotify();
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
-      { id: 'led-1', metadata: {} },
-      { code: 'NON_MOBILE' },
-    );
-    expect(result.emailedFallback).toBe(1); // email leg still delivered, with its own row
-  });
-});
 
 // ─── invoice-followups rail ────────────────────────────────────────────────
 
@@ -1587,7 +1242,7 @@ describe('invoice-followups rail', () => {
         chain({ result: 1 }), // touch claim
         claimClear,
       ],
-    });
+    }, { revivalRead: false });
     await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(claimClear.update).toHaveBeenCalledTimes(1);
@@ -1603,24 +1258,4 @@ describe('invoice-followups rail', () => {
       { code: 'NON_MOBILE' },
     );
   });
-});
-
-// The any-channel 24h window must not fence a sidecar with its own sibling.
-// Both decisions now precede the same-run ledger rows, so neither needs an
-// exclusion for a row that has not been reserved yet.
-test('late-payment channel decisions precede ledger reservations so both legs can deliver', async () => {
-  process.env.GATE_COLLECTIONS_POLICY = 'true';
-  try {
-    armLatePaymentHappyPath();
-    await LatePaymentChecker.checkAndNotify();
-    const emailEval = ContactPolicy.evaluate.mock.calls.find((c) => c[1]?.channel === 'email');
-    expect(emailEval).toBeTruthy();
-    expect(emailEval[1].excludeLedgerIds).toEqual([]);
-    expect(Math.max(...ContactPolicy.evaluate.mock.invocationCallOrder))
-      .toBeLessThan(Math.min(...ContactLedger.recordContact.mock.invocationCallOrder));
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledTimes(1);
-  } finally {
-    delete process.env.GATE_COLLECTIONS_POLICY;
-  }
 });

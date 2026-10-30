@@ -3,8 +3,8 @@
 //
 // Orphan-invoice adoption sweep (dunning unification, PR 3): invoices sent
 // outside the direct-send path (the only caller of scheduleForInvoice) never
-// got an invoice_followup_sequences row, so the legacy late-payment-checker.js
-// is still the only thing nagging them. Prod 2026-09-28: 6 open overdue
+// got an invoice_followup_sequences row, so the legacy late-payment checker
+// (deleted 2026-10-29) was the only thing nagging them. Prod 2026-09-28: 6 open overdue
 // invoices (4 customers) with no sequence row. This script is a read-only
 // production count before GATE_DUNNING_ADOPT_ORPHANS turns on; --execute
 // calls the real adoption (adoptOrphanInvoices in
@@ -15,7 +15,7 @@
 // Prints invoice/customer ids only — never a customer name.
 //
 // Usage (repo root):
-//   (export the web service's GATE_DUNNING_LADDER_90 / GATE_LATE_PAYMENT_CHECKER_OFF first —
+//   (export the web service's GATE_DUNNING_LADDER_90 first —
 //   railway run --service Postgres does not carry them; the script warns when unset)
 //   railway run --service Postgres -- node server/scripts/dunning-adopt-orphans-dry-run.js            # dry run
 //   railway run --service Postgres -- node server/scripts/dunning-adopt-orphans-dry-run.js --execute
@@ -48,10 +48,10 @@ const execute = process.argv.includes('--execute');
   // database's variables, not the web service's gates, so say which cadence
   // this count used and warn when it may not match production.
   const gate = (name) => process.env[name] === 'true';
-  console.log(`[dunning-adopt-orphans] gates in this run: GATE_DUNNING_LADDER_90=${gate('GATE_DUNNING_LADDER_90')} GATE_LATE_PAYMENT_CHECKER_OFF=${gate('GATE_LATE_PAYMENT_CHECKER_OFF')}`);
-  if (!gate('GATE_DUNNING_LADDER_90') || !gate('GATE_LATE_PAYMENT_CHECKER_OFF')) {
-    console.warn('[dunning-adopt-orphans] WARNING: a gate is unset here — this count uses the legacy Day 30 cadence and may not match production. '
-      + 'Export the web service\'s values for the run, e.g. GATE_DUNNING_LADDER_90=true GATE_LATE_PAYMENT_CHECKER_OFF=true railway run --service Postgres -- node …');
+  console.log(`[dunning-adopt-orphans] gates in this run: GATE_DUNNING_LADDER_90=${gate('GATE_DUNNING_LADDER_90')}`);
+  if (!gate('GATE_DUNNING_LADDER_90')) {
+    console.warn('[dunning-adopt-orphans] WARNING: GATE_DUNNING_LADDER_90 is unset here — this count uses the legacy Day 30 cadence and may not match production. '
+      + 'Export the web service\'s value for the run, e.g. GATE_DUNNING_LADDER_90=true railway run --service Postgres -- node …');
   }
   const { candidates, skipped = [] } = await adoptOrphanInvoices({ dryRun: true });
   console.log(`[dunning-adopt-orphans] ${execute ? 'EXECUTE' : 'DRY RUN'} — ${candidates.length} orphan invoice(s) with no follow-up sequence row, ${skipped.length} skipped`);

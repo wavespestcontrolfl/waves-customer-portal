@@ -7,7 +7,7 @@
  * { timeZone: ... })`) renders the PREVIOUS Eastern calendar day.
  *
  * Two customer-facing dunning paths hit this exact class (ADMIN-BUG-R23,
- * ADMIN-BUG-R51): server/services/invoice-followups.js and
+ * ADMIN-BUG-R51): server/services/invoice-followups.js and the since-deleted
  * server/services/late-payment-checker.js both used to build their SMS/email
  * "completed on <date>" clause with `new Date(row.service_date)
  * .toLocaleDateString('en-US', { ..., timeZone: 'America/New_York' })`
@@ -27,7 +27,6 @@ const path = require('path');
 const SERVER_ROOT = path.join(__dirname, '..');
 const GUARDED_FILES = [
   'services/invoice-followups.js',
-  'services/late-payment-checker.js',
 ];
 const WINDOW_SPAN = 6; // lines around a `service_date` mention to inspect
 
@@ -89,7 +88,7 @@ describe('service_date DATE column never routed through an instant timeZone form
     expect(scan(good).length).toBe(0);
   });
 
-  test('invoice-followups.js and late-payment-checker.js format service_date only through a calendar-safe helper', () => {
+  test('invoice-followups.js formats service_date only through a calendar-safe helper', () => {
     const violations = GUARDED_FILES.flatMap(findViolations);
     const message = violations
       .map((v) => `  server/${v.file}:${v.line}  ${v.snippet}`)

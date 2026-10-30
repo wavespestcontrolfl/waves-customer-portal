@@ -1,6 +1,6 @@
 /**
  * Sends the Waves-branded ACH micro-deposit verification email — the email arm
- * of the dunning diversion (see late-payment-checker.js / invoice-followups.js).
+ * of the dunning diversion (see invoice-followups.js).
  * Pairs with the `bank_verification_incomplete` SMS. Branding is automatic
  * (template mode: 'service' -> wrapServiceEmail).
  *

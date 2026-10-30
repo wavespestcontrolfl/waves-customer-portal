@@ -4,7 +4,7 @@
 // cron under GATE_BALANCE_REMINDER_LEGACY_OFF must not silently drop that
 // side effect. invoice-followups.js's fireTouch calls the SAME shared
 // helper (markAtRiskForLongOverdue, also used by balance-reminder.js's own
-// 60/90-day branches and late-payment-checker.js's tiers) right after a Day
+// 60/90-day branches) right after a Day
 // 60 or Day 90 step confirms delivery — fresh OR deduped (round-2 review:
 // a replay that only re-confirms an already-delivered leg must not lose the
 // stamp either), and BEFORE the freshDelivery early return, not after.
@@ -136,7 +136,7 @@ test('a delivered Day 60 touch stamps at_risk exactly as the legacy path would',
   const atRiskChain = chain();
   const sequenceUpdate = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -176,7 +176,7 @@ test('legacy retirement off: a delivered Day 60 touch leaves the stage alone (th
   const sequenceUpdate = chain();
   const atRiskChain = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -202,7 +202,7 @@ test('a Day 60 touch diverted to the bank-verification nudge (pending microdepos
   try {
     const atRiskChain = chain();
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+      'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
       customers: [chain({ first: customer() }), atRiskChain],
       invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
       notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -230,7 +230,7 @@ test('a deduped Day 60 replay (every leg already delivered — freshDelivery fal
   const atRiskChain = chain();
   const sequenceUpdate = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -257,7 +257,7 @@ test('a delivered Day 90 touch stamps at_risk', async () => {
   const atRiskChain = chain();
   const sequenceUpdate = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 5, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 5, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -280,7 +280,7 @@ test('a delivered Day 30 touch does not stamp at_risk', async () => {
   const atRiskChain = chain();
   const sequenceUpdate = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 3, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 3, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -304,7 +304,7 @@ test('an undelivered Day 60 touch (every selected channel policy-denied) does no
   RailGuard.collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
   const atRiskChain = chain();
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 4 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: {} })],
@@ -330,7 +330,7 @@ test('a transient at-risk stamp failure never blocks the touch itself (Codex P1:
   const atRiskChain = chain();
   atRiskChain.update = jest.fn(() => { throw new Error('connection reset'); });
   setDbQueues({
-    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
     invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
     notification_prefs: [chain({ first: { email_enabled: true } })],

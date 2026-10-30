@@ -35,10 +35,9 @@
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
 //
-// Only while both legacy senders are retired (late-payment-checker.js, and
-// balance-reminder.js's account late check, by its own full rule): either one
-// can still contact an invoice with no sequence, a finished one or a stopped
-// one, so "no overdue reminder is scheduled" would not hold. Otherwise the run
+// Only while the legacy sender is retired (balance-reminder.js's account late
+// check, by its own full rule): it can still contact an invoice with no
+// sequence, a finished one or a stopped one, so "no overdue reminder is scheduled" would not hold. Otherwise the run
 // is skipped and the standing row is left as it is.
 //
 // GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
@@ -270,12 +269,10 @@ async function closeList(database, dedupeKey) {
   });
 }
 
-// Both legacy senders retired, each by its own rule: the late-payment checker
-// and the balance reminder's account late check (its full retirement test:
-// gate, ladder, orphan adoption, no legacy `unpaid` invoice, an unreadable
-// count reads as running).
+// The legacy sender retired: the balance reminder's account late check (its
+// full retirement test: gate, ladder, orphan adoption, no legacy `unpaid`
+// invoice, an unreadable count reads as running).
 async function legacySendersRetired() {
-  if (!require('./invoice-followups').latePaymentCheckerRetiredLive()) return false;
   return require('./workflows/balance-reminder').latePaymentCheckRetired({ log: false });
 }
 

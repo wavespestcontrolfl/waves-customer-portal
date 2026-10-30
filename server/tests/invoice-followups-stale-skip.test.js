@@ -63,15 +63,25 @@ function setupDb({ batchRows, seqUpdateResult = 1 }) {
   const transaction = jest.fn(async () => {});
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.transaction = transaction;
+  // runPending opens with the reopened-invoice revival read (nothing to
+  // revive), then the batch select — both on `invoice_followup_sequences as s`.
+  let sReads = 0;
   db.mockImplementation((table) => {
     if (table === 'invoice_followup_sequences as s') {
+      if (sReads++ === 0) {
+        const empty = new Proxy({}, { get: (_t, prop) => (prop === 'then'
+          ? (resolve, reject) => Promise.resolve([]).then(resolve, reject)
+          : () => empty) });
+        return empty;
+      }
+      const rows = batchRows;
       const q = {
         join: jest.fn(() => q),
         where: jest.fn(() => q),
         whereNotIn: jest.fn(() => q),
         whereNull: jest.fn(() => q),
         select: jest.fn(() => q),
-        then: (resolve, reject) => Promise.resolve(batchRows).then(resolve, reject),
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
       };
       return q;
     }
