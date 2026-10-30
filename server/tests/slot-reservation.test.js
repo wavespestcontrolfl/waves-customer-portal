@@ -725,6 +725,90 @@ describe('slot reservation helpers', () => {
     }));
   });
 
+  // GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, Route Check Everywhere
+  // follow-up item 1): a graduating hold nothing numbered (capacity mode off)
+  // gets its stop number in the accept's own transaction.
+  describe('commitReservation — GATE_ROUTE_CHECK_ACCEPT_SAVES stop number', () => {
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    let placeSpy;
+    function wireCommit() {
+      const chain = (extra) => ({ where: jest.fn().mockReturnThis(), ...extra });
+      const reservationBuilder = chain({
+        select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      });
+      const conflictBuilder = chain({
+        modify: jest.fn(function (callback) { callback(this); return this; }),
+        whereNot: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(), andWhereRaw: jest.fn().mockReturnThis(),
+        andWhere: jest.fn(function (callback) { callback(this); return this; }),
+        whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null),
+      });
+      const updateBuilder = chain({
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1', technician_id: null }]),
+      });
+      const scheduledBuilders = [
+        chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) }),
+        reservationBuilder, conflictBuilder, makeGlobalProbeBuilder([]), updateBuilder,
+      ];
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return makeAssignableTechnicianBuilder();
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return trx;
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, serviceMode: 'recurring',
+      selectedFrequency: 'quarterly', trx,
+    });
+    const gateOn = () => {
+      process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    };
+    beforeEach(() => { placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(['scheduled-123']); });
+    afterEach(() => {
+      placeSpy.mockRestore();
+      delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
+      delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    });
+
+    test('gate off: no placement, and the graduated row is returned as before', async () => {
+      await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('gate on: one placement on the accept transaction, source estimate_accept, after the graduation update', async () => {
+      gateOn();
+      const trx = wireCommit();
+      await expect(commit(trx)).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'scheduled-123', staffSave: true, source: 'estimate_accept' });
+      expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
+    });
+
+    test('gate on: a throwing placement never fails the accept', async () => {
+      gateOn();
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123' });
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+    });
+
+    test('capacity mode: its own persisted order stands, so nothing places a second time', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../services/slot-reservation.js'), 'utf8');
+      const fn = src.slice(src.indexOf('async function commitReservation('));
+      expect(fn).toMatch(/if \(capacityFit\) await persistArrivalOrder\(client, capacityFit, scheduledServiceId\);[\s\S]{0,400}?else await require\('\.\/scheduling\/staff-save-route-check'\)\.placeAcceptedVisit\(client/);
+    });
+  });
+
   test('canonical service type emits exact catalog names per cadence', () => {
     expect(slotReservation._internals.canonicalServiceTypeForProfile({
       services: [{ service: 'pest_control', visitsPerYear: 12 }],

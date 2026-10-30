@@ -88,12 +88,14 @@ async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
  * no warning, no notification, no message. Reads only the road times already
  * bought (`staffSave: true`). A failure is logged on one line and returns null:
  * it never fails or rolls back the booking. Gate off (unset): touches nothing.
+ * `live` = the gate reader to ask (default: GATE_ROUTE_CHECK_AUTO_SAVES), so the
+ * accept and assign callers share this one placement function.
  */
-async function placeAutoSavedVisit(conn, { serviceId, visit, source } = {}) {
+async function placeAutoSavedVisit(conn, { serviceId, visit, source, live = routeCheckAutoLive } = {}) {
   const id = serviceId || (visit && visit.id);
   if (!conn || !id) return null;
   try {
-    if (!routeCheckAutoLive()) return null;
+    if (!live()) return null;
     return await require('./arrival-route').placeMovedVisit(conn, { serviceId: id, staffSave: true, ...(source ? { source } : {}) });
   } catch (err) {
     logger.warn(`[staff-save-route-check] auto-save placement skipped for ${id}${source ? ` (${source})` : ''}: ${err.message}`);
@@ -101,6 +103,29 @@ async function placeAutoSavedVisit(conn, { serviceId, visit, source } = {}) {
   }
 }
 
+// GATE_ROUTE_CHECK_ACCEPT_SAVES: an accepted estimate's visit (source 'estimate_accept').
+function routeCheckAcceptLive() {
+  const { routeCheckAcceptSavesLive } = require('./arrival-route');
+  return typeof routeCheckAcceptSavesLive === 'function' && routeCheckAcceptSavesLive() === true;
+}
+
+// GATE_ROUTE_CHECK_ASSIGN_SAVES: an office board assign (source 'dispatch_assign').
+function routeCheckAssignLive() {
+  const { routeCheckAssignSavesLive } = require('./arrival-route');
+  return typeof routeCheckAssignSavesLive === 'function' && routeCheckAssignSavesLive() === true;
+}
+
+/** Number an accepted estimate's visit inside the accept transaction. Never throws. */
+function placeAcceptedVisit(conn, { serviceId, visit } = {}) {
+  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'estimate_accept', live: routeCheckAcceptLive });
+}
+
+/** Number a board-assigned visit inside the assign transaction. Never throws. */
+function placeAssignedVisit(conn, { serviceId, visit } = {}) {
+  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'dispatch_assign', live: routeCheckAssignLive });
+}
+
 module.exports = {
-  routeCheckLive, routeCheckAutoLive, routeCheckArrivalWindow, staffSaveRouteWarnings, placeStaffSavedVisit, placeAutoSavedVisit,
+  routeCheckLive, routeCheckAutoLive, routeCheckAcceptLive, routeCheckAssignLive, routeCheckArrivalWindow, staffSaveRouteWarnings,
+  placeStaffSavedVisit, placeAutoSavedVisit, placeAcceptedVisit, placeAssignedVisit,
 };

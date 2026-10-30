@@ -7455,6 +7455,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       jobId: req.params.id,
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
+      place: true, // GATE_ROUTE_CHECK_ASSIGN_SAVES: the office board numbers the stop
     });
     res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {
