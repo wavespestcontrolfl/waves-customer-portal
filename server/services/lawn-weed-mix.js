@@ -205,13 +205,19 @@ async function decideMix({ base, lead, members, replacement, all, capped, svc, r
   const blocksOf = (item) => capped.get(idOf(item)) || [];
   // `blockedIds` (additive, read by the treatment guide only): the members whose limit WAS read as a named
   // limit, so a sibling's failed read never releases them. The mix is withheld as a whole either way.
+  // `limitMessages` (additive, only when a limit was read): each limited member's own words, for the sheet's warning
+  // (a limit is a warning, never a block: owner 2026-10-30).
+  const messagesOf = (items) => Object.fromEntries(items.map((item) => [idOf(item), blocksOf(item).find((block) => block.type)?.message]).filter(([, message]) => message));
+  const withMessages = (decision, items) => (Object.keys(messagesOf(items)).length ? { ...decision, limitMessages: messagesOf(items) } : decision);
   if (all.some((item) => blocksOf(item).some((block) => !block.type))) {
-    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: all.filter((item) => blocksOf(item).some((block) => block.type)).map(idOf) };
+    const typed = all.filter((item) => blocksOf(item).some((block) => block.type));
+    return withMessages({ ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: typed.map(idOf) }, typed);
   }
   const isCapped = (item) => blocksOf(item).length > 0;
   // Every decision names the products a limit that was READ forbids (`blockedIds`): the sheet's search lists every
   // lawn product but these, so a member at its own yearly cap while the lead stays open is named too.
   base = { ...base, blockedIds: all.filter(isCapped).map(idOf) };
+  base = withMessages(base, all.filter(isCapped));
   // Only the yearly count hands the visit to the replacement; any other limit on the lead (a
   // minimum interval, a blackout) just holds the weed mix, with the limit's own words.
   const yearlyCapped = (item) => blocksOf(item).some((block) => block.type === YEARLY_CAP);

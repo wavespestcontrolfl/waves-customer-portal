@@ -753,9 +753,9 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
       back: { item: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', unreadableIds: [P_ARENA] },
     },
   });
-  const openWithArenaRow = async (fresh, blockedProductIds = []) => {
+  const openWithArenaRow = async (fresh, blockedProductIds = [], extra = {}) => {
     // Arena is a planned row; the sheet opened with the context's own chinch decision.
-    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh, blockedProductIds };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh, blockedProductIds, ...extra };
     await open(placeContext({
       treatmentGuide: true, chinch: FRESH_CHINCH([]), planned: [{ ...ARENA_ITEM, treatedSqft: null }], addOns: [],
     }));
@@ -774,14 +774,18 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
     expect(chipOf(where, 'Back').disabled).toBe(false);
   });
 
-  test('the same answer with Arena read as at its limit at every place drops the row (proving the test can fail): Complete is held on the row', async () => {
+  // Owner 2026-10-30: a yearly limit is a warning, never a block. Arena at its limit at every place keeps its row, does not hold
+  // Complete, and the row says so in the limit's words (the office gets an alert after completion).
+  test('the same answer with Arena read as at its limit at every place keeps the row: a warning, Complete is not held', async () => {
     const capped = FRESH_CHINCH([]);
     await openWithArenaRow({
       ...capped, blockedIds: [P_ARENA], limitedIds: [P_ARENA],
       byPlace: { front: { ...capped.byPlace.front, limitedIds: [P_ARENA] }, back: { item: BIF_ITEM, note: null, unreadableIds: [], limitedIds: [P_ARENA] } },
-    }, [P_ARENA]);
-    // The first answer reconciles nothing (the taps were locked until it came); the same test holds Complete on the row.
-    await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Remove Arena 50 WDG: it is not offered for this lawn right now\./));
+    }, [P_ARENA], { limitWarned: { [P_ARENA]: 'Arena 50 WDG: 2/2 other applications in 2026 — LIMIT REACHED.' } });
+    expect(screen.getByRole('group', { name: 'Arena 50 WDG' })).toBeTruthy();
+    expect(screen.getByText('Arena 50 WDG: 2/2 other applications in 2026 — LIMIT REACHED. You can still complete. The office gets an alert.')).toBeTruthy();
+    expect(screen.queryByText(/^Removed:/)).toBeNull();
+    expect(footerNote() + completeButton().textContent).not.toMatch(/Remove Arena 50 WDG|not offered for this lawn/);
   });
 
   // The limits are judged at each place: Arena at its limit at the front and open at the back is still a real application at the back.
