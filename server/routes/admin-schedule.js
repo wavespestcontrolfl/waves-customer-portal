@@ -9411,8 +9411,13 @@ async function scheduleCreateHandler(req, res, next) {
     // A parent with a time, a technician and a location only; any refusal,
     // error or slow answer leaves the save on the cache and the model.
     if (windowStart && resolvedTechId) {
-      const stopLat = bookingProperty?.lat ?? customer?.latitude ?? null;
-      const stopLng = bookingProperty?.lng ?? customer?.longitude ?? null;
+      // A chosen property is stamped on the visit with its own pin (nulls
+      // included: the route read then excludes the primary address's pin), so
+      // only that pin is priced; the customer's pin is for a visit with none.
+      const stopPin = bookingProperty ? { lat: bookingProperty.lat, lng: bookingProperty.lng }
+        : { lat: customer?.latitude, lng: customer?.longitude };
+      const stopLat = stopPin.lat ?? null;
+      const stopLng = stopPin.lng ?? null;
       if (stopLat != null && stopLng != null) {
         await require('../services/scheduling/save-road-buy').buyRoadsBeforeSave({
           spender: req.technicianId, date: dateOnly(scheduledDate), technicianId: resolvedTechId,

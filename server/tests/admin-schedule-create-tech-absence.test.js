@@ -652,6 +652,37 @@ describe('POST / — admin create — GATE_SAVE_ROAD_BUY wiring', () => {
     expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
   });
 
+  // A chosen property is stamped on the visit with its own pin (nulls too), and
+  // the route read excludes the primary address's pin for it: price that pin only.
+  describe('a chosen property', () => {
+    const customerProps = require('../services/customer-properties');
+    const converter = require('../services/estimate-converter');
+    const stamp = (pin) => ({ property_id: 'prop-2', service_address_line1: '2 Side St', service_address_city: 'Bradenton',
+      service_address_state: 'FL', service_address_zip: '34202', lat: pin.lat, lng: pin.lng });
+    const gates = require('../config/feature-gates').gates;
+    const savedAddressGate = gates.editApptAddress;
+    beforeEach(() => {
+      gates.editApptAddress = true;
+      jest.spyOn(converter, 'buildSeriesAddressScope').mockResolvedValue(null);
+    });
+    afterEach(() => { gates.editApptAddress = savedAddressGate; jest.restoreAllMocks(); });
+    const book = (pin) => {
+      jest.spyOn(customerProps, 'bookingPropertyStamp').mockResolvedValue(stamp(pin));
+      return post({ ...body, technicianId: 'tech-no-absence', propertyId: 'prop-2' });
+    };
+
+    test('with its own pin: that pin is priced, not the customer\'s', async () => {
+      await book({ lat: 27.9, lng: -82.1 });
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0].prospective).toMatchObject({ lat: 27.9, lng: -82.1 });
+    });
+
+    test('with no pin: nothing is bought, never the customer\'s primary pin', async () => {
+      await book({ lat: null, lng: null });
+      expect(buySpy).not.toHaveBeenCalled();
+    });
+  });
+
   test('an unassigned, untimed or unlocated booking buys nothing', async () => {
     await post({ ...body, technicianId: undefined });
     await post({ ...body, technicianId: 'tech-no-absence', windowStart: undefined });

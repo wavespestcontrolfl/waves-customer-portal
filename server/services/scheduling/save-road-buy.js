@@ -46,26 +46,25 @@ async function buyRoadsBeforeSave(args = {}) {
 async function buyRoadsForVisitSave({ spender, serviceId, changes = {}, excludeServiceIds = [], conn, check = true } = {}) {
   try {
     const route = arrivalRoute();
-    if (!route || !route.saveRoadBuyLive()) return null;
-    if (!spender || !serviceId) return null;
     const db = conn || require('../../models/db');
-    if (db.isTransaction) return null;
-    const row = await db('scheduled_services').where({ id: serviceId })
+    if (!route?.saveRoadBuyLive() || !spender || !serviceId || db.isTransaction) return null;
+    const stored = await db('scheduled_services').where({ id: serviceId })
       .first('scheduled_date', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes');
-    if (!row) return null;
-    const has = (key) => Object.prototype.hasOwnProperty.call(changes, key) && changes[key] !== undefined;
-    const date = has('scheduled_date') ? day(changes.scheduled_date) : day(row.scheduled_date);
-    const technicianId = has('technician_id') ? changes.technician_id : row.technician_id;
-    const windowStart = hhmm(has('window_start') ? changes.window_start : row.window_start);
-    let windowEnd = hhmm(has('window_end') ? changes.window_end : (has('window_start') ? null : row.window_end));
-    if (windowStart && (!windowEnd || windowEnd <= windowStart)) {
+    if (!stored) return null;
+    // One view of the visit as the save leaves it: the stored row under the
+    // pending changes. A new start with no new end leaves the stored end stale.
+    const pending = Object.fromEntries(Object.entries(changes).filter(([, value]) => value !== undefined));
+    const saved = { ...stored, ...pending, ...(pending.window_start && !pending.window_end ? { window_end: null } : {}) };
+    const windowStart = hhmm(saved.window_start);
+    let windowEnd = hhmm(saved.window_end);
+    if (windowStart && !(windowEnd > windowStart)) {
       const [h, m] = windowStart.split(':').map(Number);
-      const duration = parseInt(changes.estimated_duration_minutes ?? row.estimated_duration_minutes, 10) || 60;
-      const end = Math.min(h * 60 + m + duration, 23 * 60 + 59);
+      const end = Math.min(h * 60 + m + (parseInt(saved.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
       windowEnd = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
     }
     return await route.buySaveRoads({
-      spender, serviceId, changes, date, technicianId, windowStart, windowEnd, excludeServiceIds, conn: db, check,
+      spender, serviceId, changes, date: day(saved.scheduled_date), technicianId: saved.technician_id,
+      windowStart, windowEnd, excludeServiceIds, conn: db, check,
     });
   } catch (error) {
     logger.warn(`[save-road-buy] skipped: ${error.message}`);

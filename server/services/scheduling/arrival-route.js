@@ -1131,61 +1131,53 @@ async function buySaveRoads({
   windowStart, windowEnd, excludeServiceIds = [], conn = db, check = true,
   maxLookups = SAVE_BUY_MAX_LOOKUPS, timeoutMs = SAVE_BUY_TIMEOUT_MS,
 } = {}) {
-  const skip = (skipped) => ({ lookups: 0, skipped });
-  try {
-    if (!saveRoadBuyLive()) return skip('gate');
-    if (conn?.isTransaction) return skip('in_transaction');
-    if (!spender) return skip('no_spender');
-    const day = dateOnly(date);
-    if (!day || !technicianId || !windowStart || (!serviceId && !prospective)) return skip('no_placement');
-    const roadTimes = require('./hint-road-times');
-    if (!roadTimes.onRoads(day, etDateString(new Date()))) return skip('not_road_day');
-    const controller = new AbortController();
-    const budget = roadTimes.createPickerBudget({ signal: controller.signal, maxLookups });
-    const start = String(windowStart).slice(0, 5);
-    const end = windowEnd ? String(windowEnd).slice(0, 5) : undefined;
-    const work = (async () => {
-      const load = (extra) => loadArrivalRouteContext({
-        conn, serviceId, ...(prospective ? { prospective } : {}), date: day, technicianId,
-        changes, cacheLocation: true, ...extra,
-      });
-      const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
-      if (!checkContext) return;
-      // The route number is read from a context with no exclusions and no
-      // active stop (placeMovedVisit); reuse the check's when it is the same.
-      const place = staffRouteInsertionLive() && !capacityEnabled();
-      const placeContext = !place ? null : (excludeServiceIds.length || checkContext.activeStop
-        ? await load({}) : checkContext);
-      const travel = roadTimes.createPickerTravel({ spender, budget });
-      checkContext.travel = travel;
-      if (placeContext) placeContext.travel = travel;
-      // Three passes, as checkArrivalPlacement: a re-timed leg is asked again.
-      for (let pass = 0; pass < 3 && !budget.refused && !controller.signal.aborted; pass++) {
-        const before = budget.traffic + budget.plain;
-        const legs = [];
-        // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
-        if (check) evaluateArrivalPlacement(checkContext, { windowStart: start, windowEnd: end, allowInsertion: false, collectLegs: legs });
-        if (placeContext) evaluateArrivalPlacement(placeContext, { windowStart: start, windowEnd: end, place: true, collectLegs: legs });
-        if (!legs.length) break;
-        await travel.preload(legs);
-        if (budget.traffic + budget.plain === before) break;
-      }
-    })();
-    let timer;
-    const outcome = await Promise.race([
-      work.then(() => 'done', (error) => { logger.warn(`[arrival-route] save road purchase skipped: ${error.message}`); return 'error'; }),
-      new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve('timeout'); }, timeoutMs); }),
-    ]);
-    clearTimeout(timer);
-    const lookups = budget.traffic + budget.plain;
-    if (lookups || outcome !== 'done' || budget.refused) {
-      logger.info(`[arrival-route] save road purchase: ${lookups} lookups, ${outcome}${budget.refused ? `, refused (${budget.refused})` : ''}`);
+  const roadTimes = require('./hint-road-times');
+  const day = dateOnly(date);
+  // The first refusal that applies, in order; a purchase runs only when none does.
+  const [, skipped] = [
+    [!saveRoadBuyLive(), 'gate'],
+    [conn?.isTransaction, 'in_transaction'],
+    [!spender, 'no_spender'],
+    [!(day && technicianId && windowStart && (serviceId || prospective)), 'no_placement'],
+    [!roadTimes.onRoads(day, etDateString(new Date())), 'not_road_day'],
+  ].find(([refused]) => refused) || [];
+  if (skipped) return { lookups: 0, skipped };
+  const controller = new AbortController();
+  const budget = roadTimes.createPickerBudget({ signal: controller.signal, maxLookups });
+  const [start, end] = [windowStart, windowEnd].map((value) => String(value ?? '').slice(0, 5) || undefined);
+  const work = async () => {
+    const load = (extra) => loadArrivalRouteContext({
+      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true, ...extra,
+    });
+    const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
+    // The route number is read from a context with no exclusions and no active
+    // stop (placeMovedVisit); reuse the check's when it is the same one.
+    const placeContext = staffRouteInsertionLive() && !capacityEnabled()
+      && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
+    const travel = roadTimes.createPickerTravel({ spender, budget });
+    // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
+    const reads = [[check && checkContext, { allowInsertion: false }], [placeContext, { place: true }]]
+      .filter(([context]) => context);
+    reads.forEach(([context]) => { context.travel = travel; });
+    // Three passes, as checkArrivalPlacement: a re-timed leg is asked again.
+    for (let pass = 0; pass < 3 && !budget.refused && !controller.signal.aborted; pass++) {
+      const before = budget.traffic + budget.plain;
+      const legs = [];
+      reads.forEach(([context, mode]) => evaluateArrivalPlacement(context, { windowStart: start, windowEnd: end, ...mode, collectLegs: legs }));
+      await travel.preload(legs);
+      if (budget.traffic + budget.plain === before) break;
     }
-    return { lookups, ...(budget.refused ? { refused: budget.refused } : {}), ...(outcome === 'timeout' ? { timedOut: true } : {}) };
-  } catch (error) {
-    logger.warn(`[arrival-route] save road purchase skipped: ${error.message}`);
-    return skip('error');
-  }
+  };
+  let timer;
+  // Never throws, never waits past the limit: any failure is an outcome, not an error.
+  const outcome = await Promise.race([
+    work().then(() => 'done', (error) => { logger.warn(`[arrival-route] save road purchase skipped: ${error.message}`); return 'error'; }),
+    new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve('timeout'); }, timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  const lookups = budget.traffic + budget.plain;
+  logger.info(`[arrival-route] save road purchase: ${lookups} lookups, ${outcome}, refused: ${budget.refused || 'no'}`);
+  return { lookups, refused: budget.refused || undefined, timedOut: outcome === 'timeout' };
 }
 
 async function checkArrivalPlacement({
