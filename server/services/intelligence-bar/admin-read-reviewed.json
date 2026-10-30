@@ -23,14 +23,14 @@
     },
     {
       "endpoint": "/admin/csr/overview",
-      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end.",
+      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end. Re-reviewed 2026-10-30 (#7142, CSR source question): avgScore and teamTotals.avgScore now put each csr_call_scores row on the 16-point scale by its own maximum (15 when its point_details has no source_question key). Two new pure callees, storedPointDetails (parses the same row's point_details) and totalOnCurrentScale (arithmetic), plus same-file constants; no new field, table, write or sent message.",
       "scope": "broad",
       "query": [
         "days"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "5e718afcf11382ca2fdfa8ae26482348",
+      "hash": "5285de6ae3be3e0d540249441f197a72",
       "freeText": {
         "lossReasons": "content",
         "reason": "content"
