@@ -173,14 +173,21 @@ describe('customersWithStreetLineHoldingLocality (daily lead-to-cash sweep check
 });
 
 describe('address gap checks (daily lead-to-cash sweep)', () => {
+  const PROFILE_PIN = 'c.latitude IS NOT NULL AND c.longitude IS NOT NULL AND c.latitude <> 0 AND c.longitude <> 0';
+  // The review queue's own effective pin: the profile's, or a pinned primary that is the same address.
+  const QUEUE_LEFT_OUT = [
+    ['customer_properties', 'where', 'p.is_primary', false],
+    ['customer_properties', 'orWhereRaw', PROFILE_PIN],
+    ['customer_properties', 'orWhereRaw', require('../services/customer-geocode-review').PRIMARY_HAS_PIN_SQL],
+  ];
   // Fake knex that records every filter, nested where-callbacks included, and answers per table.
   function fakeConn(rows) {
     const calls = [];
     const conn = (table) => {
       const name = table.split(' ')[0];
       const q = {};
-      for (const m of ['whereNull', 'whereNotNull', 'join', 'orWhereNull']) q[m] = (...args) => { calls.push([name, m, ...args]); return q; };
-      q.whereRaw = (sql) => { calls.push([name, 'whereRaw', sql]); return q; };
+      for (const m of ['whereNull', 'whereNotNull', 'join']) q[m] = (...args) => { calls.push([name, m, ...args]); return q; };
+      for (const m of ['whereRaw', 'orWhereRaw']) q[m] = (sql) => { calls.push([name, m, sql]); return q; };
       q.where = (arg, value) => {
         if (typeof arg === 'function') { calls.push([name, 'where(fn)']); arg(q); } else calls.push([name, 'where', arg, value]);
         return q;
@@ -201,11 +208,8 @@ describe('address gap checks (daily lead-to-cash sweep)', () => {
     expect(calls).toEqual(expect.arrayContaining([
       ['customer_properties', 'whereNull', 'c.deleted_at'],
       ['customer_properties', 'where', 'p.active', true],
-      ['customer_properties', 'whereNull', 'p.latitude'],
-      ['customer_properties', 'orWhereNull', 'p.longitude'],
-      ['customer_properties', 'where', 'p.is_primary', false],
-      ['customer_properties', 'whereNotNull', 'c.latitude'],
-      ['customer_properties', 'whereNotNull', 'c.longitude'],
+      ['customer_properties', 'whereRaw', '(p.latitude IS NULL OR p.longitude IS NULL OR p.latitude = 0 OR p.longitude = 0)'],
+      ...QUEUE_LEFT_OUT,
     ]));
   });
 
@@ -214,15 +218,13 @@ describe('address gap checks (daily lead-to-cash sweep)', () => {
     expect(await customersWithIncompleteAddress(conn)).toEqual(['c1', 'c2', 'c3']);
     const raws = calls.filter((c) => c[1] === 'whereRaw').map((c) => `${c[0]}: ${c[2]}`);
     expect(raws).toEqual([
+      `customers: ${PROFILE_PIN}`,
       "customers: btrim(coalesce(c.address_line1, '')) <> ''",
       "customers: (btrim(coalesce(c.city, '')) = '' OR btrim(coalesce(c.state, '')) = '' OR btrim(coalesce(c.zip, '')) = '')",
       "customer_properties: btrim(coalesce(p.address_line1, '')) <> ''",
       "customer_properties: (btrim(coalesce(p.city, '')) = '' OR btrim(coalesce(p.state, '')) = '' OR btrim(coalesce(p.zip, '')) = '')",
     ]);
-    // The profile query reads pinned customers only; the saved-address query leaves an unpinned customer's primary out.
-    expect(calls).toEqual(expect.arrayContaining([
-      ['customers', 'whereNotNull', 'c.latitude'], ['customers', 'whereNotNull', 'c.longitude'],
-      ['customer_properties', 'where', 'p.is_primary', false],
-    ]));
+    // A saved address counts unless it is the primary of a customer with no effective pin (the review queue's).
+    expect(calls).toEqual(expect.arrayContaining(QUEUE_LEFT_OUT));
   });
 });

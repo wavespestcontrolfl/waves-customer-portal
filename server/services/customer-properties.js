@@ -726,11 +726,15 @@ async function customersWithStreetLineHoldingLocality(conn = db) {
   return [...new Set([...profiles, ...saved].filter(streetLineHoldsLocality).map((row) => row.id))].sort();
 }
 
-// A customer whose profile has no map pin is the address-review queue's (its
-// 15-minute bell); the two address checks below leave that customer's primary
-// saved address to it and report everything else.
+// A customer with no effective map pin is the address-review queue's (its
+// 15-minute bell). The effective pin is the queue's own: the profile's pin, or
+// the pin of a primary saved address that is the same address
+// (customer-geocode-review PRIMARY_HAS_PIN_SQL). The two address checks below
+// leave that customer's primary saved address to the queue and report the rest.
+const PROFILE_HAS_PIN_SQL = 'c.latitude IS NOT NULL AND c.longitude IS NOT NULL AND c.latitude <> 0 AND c.longitude <> 0';
 const OUTSIDE_REVIEW_QUEUE = (q) => q.where('p.is_primary', false)
-  .orWhere((pinned) => pinned.whereNotNull('c.latitude').whereNotNull('c.longitude'));
+  .orWhereRaw(PROFILE_HAS_PIN_SQL)
+  .orWhereRaw(require('./customer-geocode-review').PRIMARY_HAS_PIN_SQL);
 
 /**
  * Live customers with an active saved address that has no map pin (owner
@@ -741,7 +745,7 @@ const OUTSIDE_REVIEW_QUEUE = (q) => q.where('p.is_primary', false)
 async function customersWithUnpinnedSavedAddress(conn = db) {
   const rows = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
     .whereNull('c.deleted_at').where('p.active', true)
-    .where((q) => q.whereNull('p.latitude').orWhereNull('p.longitude'))
+    .whereRaw('(p.latitude IS NULL OR p.longitude IS NULL OR p.latitude = 0 OR p.longitude = 0)')
     .where(OUTSIDE_REVIEW_QUEUE)
     .select('p.customer_id as id');
   return [...new Set(rows.map((row) => row.id))].sort();
@@ -750,15 +754,17 @@ async function customersWithUnpinnedSavedAddress(conn = db) {
 /**
  * Live customers with a street but no city, state or ZIP: on the profile of a
  * pinned customer, or on an active saved address (the booking screen calls
- * that saved address "Address incomplete"). Owner 2026-10-30: 37 pinned
- * customers had no ZIP or city, and the review queue only judges customers
- * without a pin. Read-only; the daily lead-to-cash sweep reports the ids.
+ * that saved address "Address incomplete"). A profile with no pin of its own
+ * whose matching primary is pinned is caught through that primary (same
+ * address, same blanks). Owner 2026-10-30: 37 pinned customers had no ZIP or
+ * city, and the review queue only judges customers without a pin. Read-only;
+ * the daily lead-to-cash sweep reports the ids.
  */
 async function customersWithIncompleteAddress(conn = db) {
   const street = (t) => `btrim(coalesce(${t}.address_line1, '')) <> ''`;
   const missing = (t) => ['city', 'state', 'zip'].map((f) => `btrim(coalesce(${t}.${f}, '')) = ''`).join(' OR ');
   const [profiles, saved] = await Promise.all([
-    conn('customers as c').whereNull('c.deleted_at').whereNotNull('c.latitude').whereNotNull('c.longitude')
+    conn('customers as c').whereNull('c.deleted_at').whereRaw(PROFILE_HAS_PIN_SQL)
       .whereRaw(street('c')).whereRaw(`(${missing('c')})`)
       .select('c.id'),
     conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
