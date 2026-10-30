@@ -709,11 +709,14 @@ function duplicateContractError(row = {}) {
   return err;
 }
 
+// Locks the customer row and returns it (the FULL live row) once no recent
+// guide for this template blocks a new one.
 async function assertNoRecentBulkContract(trx, { customerId, templateKey, skipRecentDays }) {
   const lockedCustomer = await trx('customers')
     .where({ id: customerId })
+    .whereNull('deleted_at')
     .forUpdate()
-    .first('id');
+    .first();
   if (!lockedCustomer) {
     const err = new Error('Customer is no longer available for bulk document send.');
     err.status = 404;
@@ -740,39 +743,40 @@ async function assertNoRecentBulkContract(trx, { customerId, templateKey, skipRe
     })
     .first('id', 'created_at');
   if (existing) throw duplicateContractError(existing);
+  return lockedCustomer;
 }
 
 async function createDocumentRequestForCustomer({ loaded, customer, productGuide, options, req, campaignId }) {
-  const context = buildCustomerDocumentContext(customer, options.values);
-  const rendered = renderDocumentTemplate({
-    template: loaded.template,
-    version: loaded.activeVersion,
-    context,
-  });
-  if (rendered.unresolvedVariables.length && options.allowUnresolved !== true) {
-    const err = new Error('Document has unresolved merge fields.');
-    err.status = 400;
-    err.unresolvedVariables = rendered.unresolvedVariables;
-    throw err;
-  }
-
-  const body = [rendered.body, productGuide.appendix].filter(Boolean).join('\n\n');
-  const recipientName = signerName(customer);
-  const renderSummary = {
-    ...rendered.renderSummary,
-    bulkSend: true,
-    campaignId,
-    guideType: options.guideType,
-    productCount: productGuide.productCount,
-    serviceGroups: productGuide.serviceGroups,
-  };
-
   return db.transaction(async (trx) => {
-    await assertNoRecentBulkContract(trx, {
+    // Render from the customer row read under its lock, not the audience row
+    // the campaign loaded before its loop: a name, address or phone corrected
+    // in between is what the guide and its recipient carry.
+    const liveCustomer = await assertNoRecentBulkContract(trx, {
       customerId: customer.id,
       templateKey: loaded.template.template_key,
       skipRecentDays: options.skipRecentDays,
     });
+    const context = buildCustomerDocumentContext(liveCustomer, options.values);
+    const rendered = renderDocumentTemplate({
+      template: loaded.template,
+      version: loaded.activeVersion,
+      context,
+    });
+    if (rendered.unresolvedVariables.length && options.allowUnresolved !== true) {
+      const err = new Error('Document has unresolved merge fields.');
+      err.status = 400;
+      err.unresolvedVariables = rendered.unresolvedVariables;
+      throw err;
+    }
+    const body = [rendered.body, productGuide.appendix].filter(Boolean).join('\n\n');
+    const renderSummary = {
+      ...rendered.renderSummary,
+      bulkSend: true,
+      campaignId,
+      guideType: options.guideType,
+      productCount: productGuide.productCount,
+      serviceGroups: productGuide.serviceGroups,
+    };
     // `loaded` was resolved once, before the campaign loop: a publish or a
     // content migration that activates a new version mid-campaign must not
     // keep snapshotting the old wording for the rest of the audience. The
@@ -788,9 +792,9 @@ async function createDocumentRequestForCustomer({ loaded, customer, productGuide
       contract_type: 'document_template',
       title: rendered.title || loaded.activeVersion.title || loaded.template.name,
       status: 'draft',
-      recipient_name: recipientName,
-      recipient_email: customer.email || null,
-      recipient_phone: customer.phone || null,
+      recipient_name: signerName(liveCustomer),
+      recipient_email: liveCustomer.email || null,
+      recipient_phone: liveCustomer.phone || null,
       service_name: context.service?.name || null,
       esign_disclosure_snapshot: loaded.activeVersion.signer_disclosure || ESIGN_DISCLOSURE,
       contract_text_snapshot: body,
