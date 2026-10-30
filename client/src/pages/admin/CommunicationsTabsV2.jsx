@@ -859,14 +859,6 @@ export function SmsTemplatesTabV2() {
 const COACH_SECTIONS = ["overview", "tasks", "weeklyRec", "leaderboard", "leadQuality"];
 const OPEN_TASK_STATUSES = ["pending", "in_progress"];
 
-// Same rule as GET /admin/csr/follow-up-tasks: only pending tasks count,
-// split by whether the deadline has passed.
-function countOpenTasks(list, now = new Date()) {
-  const pending = list.filter((t) => t.status === "pending");
-  const overdue = pending.filter((t) => new Date(t.deadline) < now).length;
-  return { overdue, pending: pending.length - overdue };
-}
-
 export function CSRCoachTabV2() {
   const [overview, setOverview] = useState(null);
   const [tasks, setTasks] = useState(null);
@@ -921,7 +913,7 @@ export function CSRCoachTabV2() {
       // Show the saved task right away; the server list below replaces it.
       setTasks((prev) => ({
         ...prev,
-        tasks: prev.tasks
+        tasks: (prev.tasks || [])
           .map((t) => (t.id === taskId ? { ...t, ...task } : t))
           .filter((t) => OPEN_TASK_STATUSES.includes(t.status)),
       }));
@@ -929,7 +921,7 @@ export function CSRCoachTabV2() {
         setTasks(await adminFetch("/admin/csr/follow-up-tasks"));
         setSectionErrors((prev) => ({ ...prev, tasks: false }));
       } catch {
-        setTasks((prev) => ({ ...prev, ...countOpenTasks(prev.tasks) }));
+        // The counts stay the server's last answer; the notice says so.
         setSectionErrors((prev) => ({ ...prev, tasks: true }));
       }
     } catch (err) {
@@ -1179,7 +1171,7 @@ export function CSRCoachTabV2() {
           {sectionErrors.tasks ? (
             <ActionFeedback error onRetry={retryFailedSections} className="mb-3">
               {tasks
-                ? "The task list could not refresh. Pending and overdue counts are worked out here and may be out of date."
+                ? "The task list could not refresh. The pending and overdue counts may be out of date."
                 : "Follow-up tasks could not load."}
             </ActionFeedback>
           ) : null}
@@ -1188,12 +1180,12 @@ export function CSRCoachTabV2() {
               {taskError}
             </ActionFeedback>
           ) : null}
-          {!tasks ? null : tasks.tasks.length === 0 ? (
+          {!tasks ? null : (tasks.tasks || []).length === 0 ? (
             <div className="p-5 text-center text-ink-tertiary text-13">
               No pending follow-up tasks
             </div>
           ) : (
-            tasks.tasks.slice(0, 10).map((t) => {
+            (tasks.tasks || []).slice(0, 10).map((t) => {
               const isOverdue =
                 t.status === "pending" && new Date(t.deadline) < new Date();
               return (

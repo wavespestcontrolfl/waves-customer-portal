@@ -259,7 +259,7 @@ describe("CSR Coach task actions", () => {
     expect(countCalls(calls, "/api/admin/csr/follow-up-tasks")).toBe(1);
   });
 
-  it("applies the saved task locally when the refresh fails, recomputes counts, and recovers on retry", async () => {
+  it("applies the saved task locally when the refresh fails, keeps the server's counts with a notice, and recovers on retry", async () => {
     let refreshUp = false;
     const open = [taskRow(1), taskRow(2, { deadline: pastIso })];
     const calls = coachFetch({
@@ -286,12 +286,16 @@ describe("CSR Coach task actions", () => {
     expect(alert).toHaveTextContent("The task list could not refresh");
     expect(screen.queryByText(/Action 1/)).not.toBeInTheDocument();
     expect(screen.getByText(/Action 2/)).toBeInTheDocument();
-    expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 0");
+    // The counts are not worked out in the browser: they stay the server's
+    // last answer, and the notice says they may be out of date.
+    expect(alert).toHaveTextContent("may be out of date");
+    expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 1");
     expect(screen.getByText(/Overdue:/)).toHaveTextContent("Overdue: 1");
 
     refreshUp = true;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 0");
     expect(countCalls(calls, "/api/admin/csr/follow-up-tasks")).toBe(3);
   });
 
