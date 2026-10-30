@@ -5255,7 +5255,21 @@ from the tier sweep the same way the lawn row above dropped its retired
 6x column), and `notes` reads "6 or 9 applications per year by tier"
 instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
 narrowing above, the published low is Standard's list-price floor on a
-typical lot (`low` ≈ $36), not a bundle-discounted value.
+typical lot, not a bundle-discounted value.
+Tree & shrub per application (2026-10-30, owner approved): the
+`tree_shrub_care` row is `unit: "per application"` (it was `"per month"`),
+`low`/`high` are the min/max `perApp` of the same standard/enhanced sweep
+(about $64-$140 on live config), and `notes` starts "Billed after each
+application; 6 or 9 applications per year by tier" followed by the monthly
+figure only as an average, "($35-$93 a month, averaged over the year)",
+computed from the same sweep's `monthly` with the same outward rounding. New
+residential plans bill after each application (owner ruling 2026-07-09) and
+"$X a month" is only ever an average (owner ruling 2026-10-20), so the feed
+no longer publishes a monthly price for this row. The row is no longer a plan
+total: the cost-guide price card (`PLAN_TOTAL_UNIT` in
+`server/services/content-astro/price-range.js`) reads the unit and now
+treats it like any per-application row; `trap_only_retainer` is the
+remaining `"per month"` row.
 Mosquito misting rows (2026-10-22, dark): with `GATE_MOSQUITO_MISTING`
 set (`1`/`true`/`on`, read at call time through the gated-row map in
 `server/services/pricing-engine/public-ranges.js`) the payload gains two

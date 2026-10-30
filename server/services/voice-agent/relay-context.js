@@ -1713,7 +1713,7 @@ async function pricingText(input = {}) {
     if (perAppInfo.visitsPerYear) bits.push(`${perAppInfo.visitsPerYear} applications per year`);
   } else if (monthly) {
     // No per-application signal on the line ⇒ a genuinely monthly-billed
-    // program (tree & shrub publishes `unit: 'per month'` in public-ranges.js);
+    // program (the trap-only retainer publishes `unit: 'per month'` in public-ranges.js);
     // the monthly IS its unit, and it is stated alone — never alongside an
     // annual roll-up.
     bits.push(`${monthly} per month`);

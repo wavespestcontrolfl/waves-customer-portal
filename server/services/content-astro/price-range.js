@@ -168,9 +168,9 @@ function mappedKeys(frontmatter) {
   return CANONICAL_PRICE_PHRASES[servicePhrase(source)] || [];
 }
 
-// A row whose feed unit is a per-month / per-year plan total (tree & shrub
-// care, the trap-only retainer) cannot go on the card: customer-facing
-// prices are per application or per job, never a combined "$X/mo" or
+// A row whose feed unit is a per-month / per-year plan total (the trap-only
+// retainer; tree & shrub moved to per application 2026-10-30) cannot go on
+// the card: customer-facing prices are per application or per job, never a combined "$X/mo" or
 // "$X/yr" plan total (AGENTS.md "Per application" price copy). Read from the
 // row's own `unit`, so a row that changes unit is handled without a list.
 const PLAN_TOTAL_UNIT = /\bper (?:month|year|mo|yr)\b/;
