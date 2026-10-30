@@ -1104,6 +1104,11 @@ async function processCancellationRequest({
   // legacy status AND a leading track_state whose status sync lagged (the two
   // queries are disjoint — the second excludes statuses the first matched;
   // terminal statuses there are stale-drift history, not live work).
+  // A flagged visit dated BEFORE today is a tech who never closed it out,
+  // not live work: it is still flagged for the office, and also listed in
+  // staleInProgressVisitIds so a caller may tell the customer the cancel is
+  // done (owner 2026-10-30).
+  const staleInProgressVisitIds = [];
   try {
     const inProgressByStatus = await db('scheduled_services')
       .where({ customer_id: customerId })
@@ -1116,18 +1121,19 @@ async function processCancellationRequest({
       .select('id', 'scheduled_date');
     for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
       if (scopedIds && !scopedIds.has(row.id)) continue;
+      const d = row.scheduled_date instanceof Date
+        ? row.scheduled_date.toISOString().slice(0, 10)
+        : String(row.scheduled_date || '').slice(0, 10);
       // Keep-through (end of paid coverage): a covered visit inside the
       // retained window is deliberately staying on the calendar, so a tech
       // mid-delivery on it needs no manual cancellation — flagging it would
       // report an otherwise clean end-of-coverage cancel as partial and skip
       // the term's cancel decision merely because a paid visit is underway.
       if (keepIds && keepIds.includes(String(row.id))) {
-        const d = row.scheduled_date instanceof Date
-          ? row.scheduled_date.toISOString().slice(0, 10)
-          : String(row.scheduled_date || '').slice(0, 10);
         if (d && d <= sweepAfter) continue;
       }
       errors.push(`in_progress_visit:${row.id}`);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) staleInProgressVisitIds.push(String(row.id));
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }
   } catch (err) {
@@ -1693,6 +1699,9 @@ async function processCancellationRequest({
 
   return {
     cancelledCount, cancelledIds, recurrenceStopped, churned, ok, errors,
+    // Subset of the in_progress_visit errors dated before today (see the
+    // in-progress check above).
+    staleInProgressVisitIds,
     // Rows a PRIOR attempt of this same request already cancelled (found by
     // its note) — disjoint from cancelledCount; a caller whose first-run
     // record was lost reconstructs the pull count from it.

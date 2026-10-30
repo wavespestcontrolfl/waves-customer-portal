@@ -2265,7 +2265,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // claim "will not renew" with the decision unpersisted. Any accumulated
   // error downgrades to the manual-review wording; the API response keeps
   // the honest processor verdict + errors for the operator.
-  const confirmationVerdict = processed && errors.length === 0;
+  // A visit stuck "on site" from an EARLIER day (a tech never closed it
+  // out) still bells the office, but the plan itself wound down (churned,
+  // or the scoped families pulled): a run whose ONLY errors are such visits
+  // confirms as done, not "a team member will confirm" (owner 2026-10-30).
+  const staleVisitErrors = new Set((result && Array.isArray(result.staleInProgressVisitIds) ? result.staleInProgressVisitIds : [])
+    .map((id) => `in_progress_visit:${id}`));
+  const onlyStaleVisitErrors = errors.length > 0 && errors.every((e) => staleVisitErrors.has(e));
+  const confirmationVerdict = (processed && errors.length === 0)
+    || (onlyStaleVisitErrors && !!result && !!(result.churned || result.scopedWoundDown));
   let confirmations = { smsSent: false, emailSent: false, channels: [] };
   if (input.sendConfirmation) {
     confirmations = await sendCancellationConfirmations({

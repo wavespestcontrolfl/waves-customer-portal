@@ -21,8 +21,54 @@
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { gsmSafeName } = require('./messaging/gsm-normalize');
-const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const { renderSmsTemplate, renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
+
+// Open-balance copy (owner 2026-10-30): when the customer still owes money
+// for completed visits, a whole-plan or end-of-coverage confirmation names
+// the amount and links the pay page instead of the generic "Completed visits
+// are still payable." Each base template has its own balance twin.
+const BALANCE_TEMPLATE_KEYS = Object.freeze({
+  service_cancellation_confirmation: 'service_cancellation_confirmation_balance',
+  service_cancellation_end_of_term_confirmation: 'service_cancellation_end_of_term_confirmation_balance',
+});
+
+/**
+ * { balance, pay_url } for the balance twin, or null for the generic copy.
+ * The figure and the linked invoice come from the pay page's own authority
+ * (customer-dunning/balance-set resolveDunnableSet), so the text never names
+ * an amount the link would not charge. Null on: no open balance, any hold
+ * that set reports (incomplete read, account credit, payer-owned, gate off),
+ * an active collection hold (no pay link while billing is on hold), or a
+ * failed short link (a long bearer URL would also break the two-segment
+ * budget). Never throws.
+ */
+async function openBalanceSmsVars(customerId) {
+  try {
+    const { shouldWithholdPayLink } = require('./collections/collection-hold');
+    if (await shouldWithholdPayLink(customerId)) return null;
+    const { resolveDunnableSet } = require('./customer-dunning/balance-set');
+    const set = await resolveDunnableSet(customerId);
+    if (!['single', 'multi'].includes(set.kind) || !set.anchor?.token || !(set.totalCents > 0)) return null;
+    const { createShortCode } = require('./short-url');
+    const { publicPortalUrl } = require('../utils/portal-url');
+    // No code prefix: the invoice-number prefix would push the worst-case
+    // body past two segments.
+    const { shortUrl } = await createShortCode(`${publicPortalUrl()}/pay/${set.anchor.token}`, {
+      kind: 'invoice',
+      entityType: 'invoices',
+      entityId: set.anchor.id,
+      customerId,
+      channel: 'sms',
+      purpose: 'cancellation_confirmation',
+    });
+    const balance = (set.totalCents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+    return { balance, pay_url: shortUrl };
+  } catch (err) {
+    logger.warn(`Cancellation confirmation: open-balance line skipped for customer ${customerId}: ${err.message}`);
+    return null;
+  }
+}
 
 function etDisplayDate(value) {
   const at = value ? new Date(value) : new Date();
@@ -130,11 +176,21 @@ async function sendCancellationConfirmations({
         remaining: (result.remaining || []).map(familyLabelOf).join(' and ') || 'your other services',
       } : {}),
     };
-    const body = await renderRequiredSmsTemplate(smsTemplateKey, smsVars, {
+    const renderContext = {
       workflow: smsTemplateKey,
       entity_type: 'service_request',
       entity_id: request.id,
-    });
+    };
+    // The balance twin renders only when a balance line applies; a missing,
+    // inactive or edited-away twin falls back to the base copy.
+    const balanceKey = BALANCE_TEMPLATE_KEYS[smsTemplateKey] || null;
+    const balanceVars = balanceKey && customer.phone ? await openBalanceSmsVars(customer.id) : null;
+    const body = (balanceVars
+      ? await renderSmsTemplate(balanceKey, { ...smsVars, ...balanceVars }, renderContext, {
+        requiredVars: require('../routes/admin-sms-templates').REQUIRED_TEMPLATE_PLACEHOLDERS[balanceKey],
+      })
+      : null)
+      || await renderRequiredSmsTemplate(smsTemplateKey, smsVars, renderContext);
     const smsResult = await sendCustomerMessage({
       to: customer.phone,
       body,
