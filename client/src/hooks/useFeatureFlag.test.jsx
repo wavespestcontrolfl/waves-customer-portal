@@ -144,13 +144,13 @@ it('re-reads per refreshKey and fails closed while a new account\'s read is in f
   let release;
   let first = true;
   vi.stubGlobal('fetch', vi.fn(() => {
-    if (first) { first = false; return Promise.resolve({ ok: true, status: 200, json: async () => ({ flags: { 'admin-navigation': true } }) }); }
-    return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ flags: { 'admin-navigation': true } }) }); });
+    if (first) { first = false; return Promise.resolve({ ok: true, status: 200, json: async () => ({ flags: { 'example-flag': true } }) }); }
+    return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ flags: { 'example-flag': true } }) }); });
   }));
   const mod = await import('./useFeatureFlag');
   function Probe({ who }) {
-    const enabled = mod.useFeatureFlag('admin-navigation', false, who);
-    const ready = mod.useFeatureFlagReady('admin-navigation', false, who);
+    const enabled = mod.useFeatureFlag('example-flag', false, who);
+    const ready = mod.useFeatureFlagReady('example-flag', false, who);
     return <output>{`${who}:${enabled}:${ready.ready}:${ready.enabled}`}</output>;
   }
   const view = render(<Probe who="a" />);

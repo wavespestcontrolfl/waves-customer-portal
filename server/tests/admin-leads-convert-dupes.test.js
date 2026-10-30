@@ -1479,3 +1479,41 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
     });
   });
 });
+
+// GATE_SAVE_ROAD_BUY (owner 2026-10-29): the booking buys the placement's Google
+// road times BEFORE its transaction opens (the router is requireAdmin: the staff
+// user pays). The helper is spied: it reads its own gate; only the wiring is
+// under test here (the purchase itself is proven in save-road-buy.test.js).
+describe('POST /admin/leads/:id/schedule-appointment — GATE_SAVE_ROAD_BUY', () => {
+  const roadBuy = require('../services/scheduling/save-road-buy');
+  const located = { ...existingLinked, latitude: '27.5', longitude: '-82.4' };
+  let buySpy;
+  beforeEach(() => {
+    db.mockReset();
+    buySpy = jest.spyOn(roadBuy, 'buyRoadsBeforeSave').mockResolvedValue({ lookups: 0 });
+  });
+  afterEach(() => buySpy.mockRestore());
+
+  const run = async (extra, resolverOptions = {}) => {
+    const knex = makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked, ...resolverOptions }), []);
+    install(knex);
+    await withServer(async (baseUrl) => { await post(baseUrl, { rebook: true, ...extra }); });
+    return knex;
+  };
+
+  it('a timed booking for a located customer with a technician buys first, as the staff user, before any transaction', async () => {
+    const knex = await run({ technicianId: 'tech-1' }, { linkedCustomer: located });
+    expect(buySpy).toHaveBeenCalledTimes(1);
+    expect(buySpy.mock.calls[0][0]).toMatchObject({
+      spender: 'admin-1', date: '2027-01-15', technicianId: 'tech-1', windowStart: '10:00',
+      prospective: { lat: '27.5', lng: '-82.4' },
+    });
+    expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(knex.transaction.mock.invocationCallOrder[0]);
+  });
+
+  it('no saved location, or no technician: nothing is bought', async () => {
+    await run({ technicianId: 'tech-1' });
+    await run({}, { linkedCustomer: located });
+    expect(buySpy).not.toHaveBeenCalled();
+  });
+});

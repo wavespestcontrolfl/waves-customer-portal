@@ -9382,6 +9382,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — a call the pipeline BOOKED where the caller chose annual prepay (GATE_CALL_PREPAY_CHOICE, checked
+  // each tick): files ONE admin-only Needs Review card per call whose tap accepts the customer's open estimate as
+  // annual prepay, and closes a card that stopped being true. Never accepts, invoices or texts. See
+  // server/services/call-prepay-choice.js.
+  cron.schedule('7,17,27,37,47,57 * * * *', async () => {
+    if (!require('../config/feature-gates').callPrepayChoiceLive()) return;
+    try {
+      await runExclusive('call-prepay-choice', async () => {
+        const result = await require('./call-prepay-choice').runCallPrepayChoiceSweep();
+        if (result.filed > 0 || result.closed > 0) logger.info(`[call-prepay-choice] scanned=${result.scanned} filed=${result.filed} closed=${result.closed}`);
+      });
+    } catch (err) {
+      logger.error(`[call-prepay-choice] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // Call booking-miss watchdog — every 30 min (offset from the ingest
   // watchdog), ring an admin bell for any call whose V2 extraction confirmed
