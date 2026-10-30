@@ -949,7 +949,78 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   };
 }
 
+// The scheduler cadence for an authored count of visits a year: a named cadence the New Appointment modal books, else an
+// even custom interval.
+const PROPOSAL_CADENCE_FOR_VISITS = Object.freeze({
+  52: 'weekly', 26: 'biweekly', 12: 'monthly', 6: 'bimonthly', 4: 'quarterly', 3: 'triannual', 2: 'semiannual', 1: 'annual',
+});
+function proposalCadence(visitsPerYear) {
+  const named = PROPOSAL_CADENCE_FOR_VISITS[visitsPerYear];
+  return named ? { cadence: named, intervalDays: null } : { cadence: 'custom', intervalDays: Math.round(365 / visitsPerYear) };
+}
+
+// An authored commercial proposal (estimate_data.proposal, services/estimate-proposal.js) is the agreement, and it
+// prices its own visits: a program bills its price per application at its visits a year, a building line bills its
+// amount once per period, and corrective work is one-time. The engine rows read below never see any of it, so a
+// programs-only proposal fell to the totals fallback: one quarterly line at the MONTHLY average, and a $300 application
+// prefilled at $100 (pipeline audit 2026-10-30, item 2). Commercial visits stay off the residential catalog (no service
+// id or key, as services/commercial-first-visit.js books them). Null when the estimate has no authored proposal.
+function authoredProposalScheduleLines(estimate) {
+  const { normalizeProposal, OCCURRENCES_PER_YEAR } = require('../services/estimate-proposal');
+  const proposal = normalizeProposal(estimate);
+  if (proposal.enabled !== true || proposal.synthesized === true) return null;
+  const line = ({ name, price, recurring, visitsPerYear = null, cadence = null, minutes = null, unitPrice = {} }) => ({
+    serviceId: null,
+    serviceKey: null,
+    name,
+    estimateLabel: name,
+    category: null,
+    billingType: recurring ? 'recurring' : 'one_time',
+    frequency: null,
+    visitsPerYear,
+    duration: minutes,
+    price,
+    ...(recurring ? cadence : { cadence: 'one_time', intervalDays: null }),
+    source: recurring ? 'recurring' : 'one_time',
+    estimateId: estimate.id,
+    ...unitPrice,
+  });
+  const lines = (proposal.programs || []).map((program) => line({
+    name: program.label,
+    price: program.pricePerApplication,
+    recurring: true,
+    visitsPerYear: program.frequencyPerYear,
+    cadence: proposalCadence(program.frequencyPerYear),
+    minutes: program.visitMinutes || null,
+    unitPrice: { perApplicationPrice: program.pricePerApplication },
+  }));
+  const multiBuilding = proposal.buildings.length > 1;
+  for (const building of proposal.buildings) {
+    for (const item of building.lineItems) {
+      if (!(item.amount > 0)) continue;
+      const name = `${multiBuilding ? `${building.name} — ` : ''}${item.description || 'Service'}`;
+      if (item.frequency === 'one_time') {
+        lines.push(line({ name, price: item.amount, recurring: false }));
+      } else if (item.frequency === 'per_application') {
+        if (!(item.visitsPerYear > 0)) continue;
+        lines.push(line({ name, price: item.amount, recurring: true, visitsPerYear: item.visitsPerYear,
+          cadence: proposalCadence(item.visitsPerYear), unitPrice: { perApplicationPrice: item.amount } }));
+      } else {
+        lines.push(line({ name, price: item.amount, recurring: true, visitsPerYear: OCCURRENCES_PER_YEAR[item.frequency] || null,
+          cadence: { cadence: item.frequency, intervalDays: null },
+          unitPrice: item.frequency === 'monthly' ? { monthlyPrice: item.amount } : {} }));
+      }
+    }
+  }
+  for (const work of proposal.correctiveWork || []) {
+    if (work.amount > 0) lines.push(line({ name: work.label || 'Corrective work', price: work.amount, recurring: false }));
+  }
+  return lines;
+}
+
 function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines = false } = {}) {
+  const authoredLines = authoredProposalScheduleLines(estimate);
+  if (authoredLines) return authoredLines;
   const estData = parseJsonObject(estimate.estimate_data);
   let recurringSvcList = [];
   let oneTimeList = [];
