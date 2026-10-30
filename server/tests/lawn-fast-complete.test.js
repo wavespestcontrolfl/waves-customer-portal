@@ -1411,16 +1411,20 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         expect((await read([{ ...AREA, type: 'fungus' }])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
       });
 
-      test('gate on: the stored place where the product is capped is not offered; with no other stored place the card is the check only', async () => {
+      // Owner 2026-10-30: a yearly limit warns, never blocks. A mapped place at its limit stays on the card, with the limit's words.
+      test('gate on: a stored place where the product is capped is still offered, with the limit warning', async () => {
         live();
         process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
         takeAllMonth();
         v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
           capped: new Map(items.filter((i) => i.product.id === P_ART && (!options?.place || options.place === 'back')).map((i) => [P_ART, YEARLY])), warnings: [], blocks: [],
         }));
-        expect((await read([AREA])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
-        // The same product capped at the back but a second stored area at the front: the card stands, naming the front only.
-        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.', allowedPlaces: ['front'] });
+        const answer = await read([AREA]);
+        expect(answer.cards[0]).toMatchObject({ productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.', allowedPlaces: ['back'] });
+        // The limit at the back rides the per-place answer: the sheet shows it as the footer warning once the row is on the back.
+        expect(answer.placeBlocked[P_ART].back).toBeTruthy();
+        // A second stored area at the front: both mapped places stay on the card.
+        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], allowedPlaces: ['back', 'front'] });
       });
 
       test('gate on: a failed read of the store is the check only, never a guess', async () => {

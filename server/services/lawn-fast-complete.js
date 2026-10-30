@@ -1066,12 +1066,12 @@ async function withSearchedProducts({ svc, knex, rows, ids, known, knownTypes })
 // GATE_LAWN_TROUBLE_AREAS: the lawn's active take_all areas (a stored area is server-confirmed; a cleared one is not active), less the
 // places where the month's take-all product is closed by a limit. `[]` while the gate is off, as the card always had it; a failed read is
 // `[]` too (the check-only card, never a guess).
-async function takeAllAreasOn({ svc, knex, offers }) {
+async function takeAllAreasOn({ svc, knex }) {
   if (!featureGates.lawnTroubleAreasLive()) return [];
   try {
-    const productId = offers?.fungus?.takeAll ? offers.fungus.item.productId : null;
-    const closed = (offers?.placeBlocked || {})[productId] || {};
-    return (await require('./lawn-trouble-areas').loadActive(knex, await require('./lawn-trouble-areas').propertyOf(knex, svc))).filter((area) => area.type === 'take_all' && !closed[area.place]);
+    // Every mapped take-all area stays on the card: a place at its yearly limit warns, never closes (owner 2026-10-30); the
+    // sheet's place warning (placeBlocked) names the limit there.
+    return (await require('./lawn-trouble-areas').loadActive(knex, await require('./lawn-trouble-areas').propertyOf(knex, svc))).filter((area) => area.type === 'take_all');
   } catch (err) {
     logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return [];
@@ -1167,8 +1167,8 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     month: visitMonthOf(svc),
     offers: { ...offers, chinch },
     weeds: guide.weedOffer(weedMix, sheet.addOns),
-    // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active) at places the take-all product is not closed at.
-    troubleAreas: await takeAllAreasOn({ svc, knex, offers }),
+    // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active).
+    troubleAreas: await takeAllAreasOn({ svc, knex }),
   }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
