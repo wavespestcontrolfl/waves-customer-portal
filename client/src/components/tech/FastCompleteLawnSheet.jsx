@@ -280,7 +280,9 @@ const chinchShape = (chinch) => {
   const limited = Array.isArray(chinch?.limitedIds) ? { limitedIds: chinch.limitedIds } : {};
   const byPlace = chinchByPlace(chinch);
   const chinchOnlyIds = Array.isArray(chinch?.chinchOnlyIds) ? chinch.chinchOnlyIds : null;
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...limited, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
+  // Each limited rung's own words (an interval says how long to wait), for its warning when the guide's answer is not there.
+  const messages = chinch?.limitMessages && typeof chinch.limitMessages === 'object' && !Array.isArray(chinch.limitMessages) ? { limitMessages: chinch.limitMessages } : {};
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...limited, ...messages, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });

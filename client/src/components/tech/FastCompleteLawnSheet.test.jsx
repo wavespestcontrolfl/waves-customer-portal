@@ -3391,13 +3391,18 @@ describe('suggested from this lawn', () => {
 
     test('a failed guide request keeps the context\'s read limits as warnings: Arena at its yearly limit and Talak are both listed', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
-      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA] };
+      const interval = 'Arena 50 WDG: last applied 20 days ago; the label needs 56 days between applications.';
+      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA], limitedIds: [P_ARENA], limitMessages: { [P_ARENA]: interval } };
       await mxOpen(mxContext({ plannedProducts: mxPlanned({ chinch }) }));
       await analyze();
       await waitFor(() => expect(guideCalls()).toHaveLength(1));
       await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
-      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('addable');
       expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('addable');
+      // The row added through the search carries the context decision's own words (the interval), not the generic yearly line.
+      fireEvent.click(screen.getAllByRole('button', { name: /^Arena 50 WDG/ })[0]);
+      const row = await screen.findByRole('group', { name: 'Arena 50 WDG' });
+      expect(within(row).getByText(`${interval} You can still complete. The office gets an alert.`)).toBeTruthy();
     });
 
     test('weed members are judged one by one: the member read as capped is listed (a warning), its sibling is released', async () => {
