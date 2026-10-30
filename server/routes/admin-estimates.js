@@ -5752,7 +5752,11 @@ function bookingLinkOneTimeLabel(estimateData) {
 function bookingLinkEligible(estimate, estimateData = estimate.estimate_data) {
   if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) return false;
   if (estimate.archived_at || estimate.bill_by_invoice) return false;
-  if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
+  try {
+    if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
+  } catch (_) {
+    return false; // unreadable estimate_data: hide the action, never fail the list
+  }
   return !!bookingLinkOneTimeLabel(estimateData) || !(Number(estimate.monthly_total || 0) > 0);
 }
 

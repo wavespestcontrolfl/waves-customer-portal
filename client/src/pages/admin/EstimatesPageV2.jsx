@@ -2838,7 +2838,7 @@ function EstimatePipelineViewV2({
                               }
                             }}
                           >
-                            {e.status === "send_failed" ? "Retry send" : "Send"}
+                            {sendActionVerb(e.status)}
                           </Button>
                         )}
 
@@ -3422,6 +3422,7 @@ function mobileStatusClass(status) {
   if (status === "accepted") return "text-zinc-900";
   if (
     status === "draft" ||
+    status === "send_failed" ||
     status === "scheduled" ||
     status === "sent" ||
     status === "viewed"
