@@ -83,6 +83,8 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['an inline correction in the other transcript keeps the card', ['Caller: J-A-N-E at gmail.com.', 'No, jane2@gmail.com.'], 'jane@gmail.com', false],
     ['an inline read-back of the same address is fine', ['Caller: J-A-N-E at gmail.com. Agent: jane@gmail.com, got it.'], 'jane@gmail.com', true],
     ['our own inline address is ignored', ['Caller: J-A-N-E at gmail.com. Agent: Our email is contact@wavespestcontrol.com.'], 'jane@gmail.com', true],
+    ['an agent-only spelling stays the agent\'s in the unlabeled copy', ['Agent: So that is J-A-N-E at gmail.com? Caller: Yes.', 'So that is J-A-N-E at gmail.com? Yes.'], 'jane@gmail.com', false],
+    ['the caller said it inline and the dictation pass has the letters', ['Caller: My email is jane@gmail.com.', 'My email is J-A-N-E at gmail.com.'], 'jane@gmail.com', true],
     ['an interrupted spelling never vouches for the joined address either', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
     ['a mixed spoken and spelled address keeps the card', ['my email is jane D-O-E at gmail.com'], 'doe@gmail.com', false],
     ['the spelling names a different provider', ['B-R-I-G-H-T at yahoo dot com'], 'bright@gmail.com', false],

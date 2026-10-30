@@ -166,16 +166,25 @@ function spelledEmailMatches({ transcripts = [], email } = {}) {
   const domain = value.slice(at + 1);
   if (!KNOWN_DOMAIN_SET.has(domain)) return false;
   if ((local.match(/[a-z]/g) || []).length < MIN_SPELLED_LETTERS) return false;
+  // Speaker rule as in contact-dictation.js callerTurnWithSpelling: a labeled
+  // Caller: spelling counts; an unlabeled copy (the dictation pass) counts
+  // unless a labeled transcript puts the spelling only in an Agent: turn (then
+  // the unlabeled copy is the employee's too).
   let callerSpelled = false;
+  let agentSpelled = false;
+  let unlabeledSpelled = false;
   for (const text of transcripts.filter(Boolean)) {
     const { mentions, labeled } = emailMentions(String(text));
     for (const m of mentions) {
       if (OWN_DOMAINS.has(m.domain)) continue;
       if (m.local !== local || m.domain !== domain) return false;
-      if (m.kind === 'spelled' && (m.speaker === 'caller' || (!labeled && m.speaker === null))) callerSpelled = true;
+      if (m.kind !== 'spelled') continue;
+      if (!labeled) unlabeledSpelled = true;
+      else if (m.speaker === 'caller') callerSpelled = true;
+      else if (m.speaker === 'agent') agentSpelled = true;
     }
   }
-  return callerSpelled;
+  return callerSpelled || (unlabeledSpelled && !agentSpelled);
 }
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
