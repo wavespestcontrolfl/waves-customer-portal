@@ -78,7 +78,7 @@ const redPage = (over = {}) => ({
 const mockWiki = (queue) => ({ getReviewQueue: jest.fn(async () => queue) });
 const mockMailer = (impl) => ({ isConfigured: () => true, sendOne: jest.fn(impl || (async () => ({}))) });
 
-const ENV_KEYS = ['GATE_WIKI_YELLOW_DIGEST', 'WIKI_DIGEST_EMAIL', 'SENDGRID_FROM_EMAIL', 'ADMIN_PORTAL_URL'];
+const ENV_KEYS = ['GATE_WIKI_YELLOW_DIGEST', 'GATE_LAWN_WIKI_PAUSE', 'WIKI_DIGEST_EMAIL', 'SENDGRID_FROM_EMAIL', 'ADMIN_PORTAL_URL'];
 const savedEnv = {};
 
 beforeEach(() => {
@@ -180,6 +180,23 @@ describe('sendYellowDigestIfDue — dark-ship gate', () => {
     expect(mailer.sendOne).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_update_log).toBeUndefined();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('gated OFF'));
+  });
+
+  test('GATE_LAWN_WIKI_PAUSE: no digest and the open bell is retired, even with the digest gate on', async () => {
+    process.env.GATE_LAWN_WIKI_PAUSE = 'true';
+    const state = useDb({ knowledge_update_log: [] });
+    const wiki = mockWiki({ pending: [redPage()], blocked: [], recentYellow: [yellowPage()] });
+    const mailer = mockMailer();
+    const { retireIfClean } = require('../services/ops-digest-fall-off');
+
+    const result = await sendYellowDigestIfDue({ wiki, sendgrid: mailer });
+
+    expect(result).toEqual({ skipped: 'paused' });
+    expect(wiki.getReviewQueue).not.toHaveBeenCalled();
+    expect(mailer.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('wiki-yellow-digest', { resolvedBy: 'wiki-yellow-digest:paused' });
+    // No marker: a resume sends the next morning.
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
 });
 

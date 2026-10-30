@@ -246,7 +246,7 @@ describe("Email draft and navigation preservation", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     const sends = fetch.mock.calls.filter(([url]) => url.endsWith("/email/send")).map(([, options]) => options);
     expect(sends.map(({ body }) => JSON.parse(body))).toEqual([
-      { to: a.from_address, subject: `Re: ${a.subject}`, body: "First line<br>Second line", threadId: a.gmail_thread_id },
+      { to: a.from_address, subject: `Re: ${a.subject}`, body: "First line<br>Second line", threadId: a.gmail_thread_id, replyEmailId: a.id },
       { to: "recipient@example.invalid", subject: "(no subject)", body: "New first line<br>New second line" },
     ]);
     for (const options of sends) expect(options).toMatchObject({ method: "POST", headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" } });

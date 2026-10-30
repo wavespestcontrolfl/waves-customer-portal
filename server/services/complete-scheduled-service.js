@@ -2049,10 +2049,21 @@ async function hardLimitedProductNames(database, ids) {
 // so a backdated closeout is judged against the applications recorded after it too.
 async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null, addOnRows }) {
   try {
-    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
-    const violations = await savepointRead(database, async (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(place ? { place } : {}) }));
-    return violations.map((violation) => overLimitFinding(productId, productName, violation));
+    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries places (`place`: one id, or the list of its places) is audited at EACH place
+    // (the yearly limits are per place, and one application on two places is one application at each). A limit it breaks at several places
+    // is one finding: the office hears of it once per product and limit type.
+    const placeList = [].concat(place || []);
+    const found = new Map();
+    for (const at of placeList.length ? placeList : [null]) {
+      const violations = await savepointRead(database, async (k) => require('../services/application-limits')
+        .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (at && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(at ? { place: at } : {}) }));
+      for (const violation of violations) {
+        const finding = overLimitFinding(productId, productName, violation);
+        const key = `${finding.code}:${finding.limitType || ''}`;
+        if (!found.has(key)) found.set(key, finding);
+      }
+    }
+    return [...found.values()];
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
     return [limitCheckUnavailableFinding(productId)];
@@ -2086,6 +2097,16 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
 // The hard-limit audit has always covered lawn visits under GATE_LAWN_V13.
 const lawnHostAudited = (svc) => require('../config/feature-gates').lawnV13Live?.() === true && detectServiceLine(svc.service_type) === 'lawn';
 
+// Product id -> every place its recorded rows name (a row names a list of places; a row with none is left out: it is judged lawn-wide).
+function placesByProduct(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    const places = require('../services/lawn-trouble-areas').placesOfRecord(row);
+    if (places.length) out.set(String(row.product_id), [...new Set([...(out.get(String(row.product_id)) || []), ...places])]);
+  }
+  return out;
+}
+
 // The findings for the products a committed closeout recorded, read from its ledger rows (so a
 // resume re-derives them). Lawn visits under GATE_LAWN_V13, and, whatever the host's line or the gate, the products of the rows
 // tagged to an area add-on (`addOnRows: true`). Never throws: ANY failure on the
@@ -2099,7 +2120,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
     // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
     const placed = require('../config/feature-gates').lawnTroubleAreasLive();
     const recorded = await savepointRead(database, (k) => k('property_application_history')
-      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place', 'treated_places'] : ['product_id'])));
     // Not a lawn host under the gate: only the add-on rows' products.
     const tagged = lawnHost ? null : await savepointRead(database, (k) => areaAddOnGovernedRate.taggedProductIds(k, record.id));
     const rows = (recorded || []).filter((row) => !tagged || tagged.has(String(row.product_id)));
@@ -2109,7 +2130,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
       serviceDate: serviceDateOnly(record.service_date),
       database,
       addOnRows,
-      ...(placed ? { places: new Map(rows.filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
+      ...(placed ? { places: placesByProduct(rows) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -12223,6 +12244,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // visit row lock (see refuseCoveredMemberMintInTrx).
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
+        // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
+        // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
+        // backlog closeout is never minted overdue). A failed read mints nothing: the catch below releases the
+        // closeout for resume, so no invoice is ever created due on the wrong date.
+        let proposalTermsDue = null;
+        try {
+          proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
+            db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          );
+        } catch (termsErr) {
+          throw Object.assign(new Error(`The proposal payment terms could not be read: ${termsErr.message}`), { code: 'PROPOSAL_TERMS_UNREAD' });
+        }
         const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
         })
@@ -12319,7 +12352,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
-          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),
           // Claimed plan-choice setup fee rides the SAME mint (one invoice,
           // one auto-charge) — the claim above is the idempotency authority.
           extraLineItems: secureSetupFee
@@ -12435,7 +12468,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               taxRate: mintInvoiceTaxRate,
               frozenTaxAuthority: true,
               frozenPayerId: mintInvoicePayerId,
-              dueDate: serviceDateOnly(record.service_date),
+              dueDate: proposalTermsDue || serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
           });
@@ -12820,6 +12853,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The proposal's Net term could not be read before the mint (proposalTermsDueDate): nothing was minted.
+        // Release for resume on EVERY lane (a required lane already took the release above), so the retry bills with the
+        // agreement's due date (pre-push Codex P1).
+        if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: the proposal payment terms could not be read — releasing for resume instead of minting: ${invErr.message}`);
+          const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: termsReleased
+              ? 'The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. Retry the closeout.'
+              : `The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'proposal_terms_unread',
+            ...(termsReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
         }

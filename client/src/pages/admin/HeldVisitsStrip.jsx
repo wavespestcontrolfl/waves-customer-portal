@@ -29,6 +29,10 @@ export const kindText = (row) => KIND_TEXT[row.kind] || KIND_TEXT.day_only;
 // The time column: the agreed time, else "Time not set" with the part of the day asked for.
 export const heldWhen = (row) => row.time_label || (row.daypart ? `Time not set · asked for the ${row.daypart}` : 'Time not set');
 
+// GATE_CALL_PREPAY_CHOICE: the plan the caller chose on the call (the server adds billing_choice to the row only with the gate on).
+const BILLING_CHOICE_TEXT = { annual_prepay: 'Caller chose annual prepay', per_application: 'Caller chose to pay per application' };
+export const billingChoiceText = (row) => BILLING_CHOICE_TEXT[row.billing_choice] || null;
+
 // "Fri Nov 6" for the old day of a move.
 const fromDayLabel = (row) => formatETDateOnly(row.from_date_et, { weekday: 'short', month: 'short', day: 'numeric' });
 
@@ -77,6 +81,9 @@ export function heldVisitFormDefaults(row) {
     windowStart: onTheHour ? `${String(row.minutes / 60).padStart(2, '0')}:00` : undefined,
     internalNotes: [`Booked from a phone call. Call ID: ${row.call_log_id}.`, ...said].filter(Boolean).join(' '),
     requireTimeChoice: !onTheHour,
+    // The caller chose annual prepay: the form preselects it once the customer's linked estimate is prepay-eligible. The server
+    // still enforces eligibility and pricing on save.
+    ...(row.billing_choice === 'annual_prepay' ? { annualPrepay: true } : {}),
   };
 }
 
@@ -108,6 +115,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                   {row.phone ? <> · <span className="u-nums">{row.phone}</span></> : null}
                 </div>
                 {row.notes && <div className="text-ink-secondary">From the call: {row.notes}</div>}
+                {billingChoiceText(row) && <div className="text-ink-secondary">{billingChoiceText(row)}</div>}
                 {offHour(row) && (
                   <div className="text-ink-secondary">
                     Visits start on the hour. Agree a whole-hour time with the caller; the form does not take {row.time_label} and opens with no time selected.

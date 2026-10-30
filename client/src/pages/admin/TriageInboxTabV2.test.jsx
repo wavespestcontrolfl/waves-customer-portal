@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { CallPrepayEvidence, ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -243,6 +243,43 @@ describe('email-disagreement confirm form', () => {
     const card = (await screen.findByText('Email Disagree')).closest('.py-4');
     expect(within(card).queryByRole('button', { name: /confirm email/i })).not.toBeInTheDocument();
     expect(within(card).getByText(/needs an admin/i)).toBeInTheDocument();
+  });
+});
+
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the server flags every email
+// read-back card for an admin (item.email_typed_confirm), and a plain card gets
+// the same form: the held address, or a typed correction.
+describe('typed email confirm on a plain email card', () => {
+  const plainCard = { ...ordinary, id: 'email-2', first_name: 'Email', last_name: 'Plain',
+    feedback_verdict: null, reason_code: 'email_unverified',
+    payload: JSON.stringify({ flag: 'email_unverified', email_release_target: 'heard@example.com' }) };
+
+  it('a flagged plain card shows the held address and a typed correction, and sends the typed value', async () => {
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) {
+        return { items: [{ ...plainCard, email_typed_confirm: true }], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-2/confirm-email') {
+        expect(JSON.parse(opts.body)).toEqual({ email: 'right@example.com', expected_updated_at: plainCard.updated_at });
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Email Plain')).closest('.py-4');
+    expect(within(card).getByLabelText('heard@example.com')).toBeInTheDocument();
+    fireEvent.change(within(card).getByPlaceholderText(/type the correct address/i), { target: { value: 'right@example.com' } });
+    fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/email-2/confirm-email', expect.anything()));
+  });
+
+  it('without the flag (gate off) a plain card shows no confirm form', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [plainCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Email Plain')).closest('.py-4');
+    expect(within(card).queryByRole('button', { name: /confirm email/i })).not.toBeInTheDocument();
   });
 });
 
@@ -1226,4 +1263,88 @@ describe('held lines panel on the page', () => {
 
 
 
+});
+
+// GATE_CALL_PREPAY_CHOICE: the caller chose annual prepay on a call the pipeline booked. The server decides what the tap can
+// do right now (item.call_prepay), so the screen holds no copy of the eligibility rule.
+describe('call_prepay_choice card', () => {
+  const prepayCard = {
+    id: 'pp', call_log_id: 'call-9', first_name: 'Pat', last_name: 'Sampleton', reason_code: 'call_prepay_choice', status: 'open',
+    updated_at: '2026-10-29T15:00:00.000Z', created_at: '2026-10-29T14:00:00.000Z', severity: 'advisory',
+    payload: JSON.stringify({
+      flag: 'call_prepay_choice', billing_choice: 'annual_prepay', service_type: 'Quarterly Pest Control Service', cadence: 'quarterly',
+      covered_visits: 4, first_visit_date: '2026-11-10', invoice_total: 472,
+    }),
+    call_prepay: { can_accept: true, amount: 472, message: null, preview_token: 'tok-terms-1' },
+  };
+  const load = (item = prepayCard) => adminFetch.mockImplementation(async (url) => (
+    String(url).startsWith('/admin/triage?')
+      ? { items: [item], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+
+  it('shows the plan and the amount, and the one tap runs the version-bound accept route, never a call verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText('Caller chose annual prepay — accept the estimate')).toBeInTheDocument();
+    expect(within(el).getByText(/Quarterly Pest Control Service · quarterly · 4 visits a year/)).toBeInTheDocument();
+    expect(within(el).getByText(/\$472 \(a draft; it is not sent\)/)).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^accept$/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    fireEvent.click(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/pp/accept-call-prepay', {
+      method: 'POST', body: JSON.stringify({ expected_updated_at: prepayCard.updated_at, preview_token: 'tok-terms-1' }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+
+  it('shows the live plan the terms token covers, not the facts the card was filed with', async () => {
+    load({ ...prepayCard, call_prepay: { ...prepayCard.call_prepay, plan: { service_type: 'Quarterly Pest Control Service', cadence: 'quarterly', covered_visits: 4, first_visit_date: '2026-11-12' } } });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText(/2026-11-12/)).toBeInTheDocument();
+  });
+
+  it('the button promises no text or email: the server files no card for a termite estimate', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).queryByText(/termite notice/)).toBeNull();
+    expect(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }).getAttribute('title')).toMatch(/The customer gets no text or email\./);
+  });
+
+  it('shows the server\'s plain reason and no accept button when the tap would be refused', async () => {
+    load({ ...prepayCard, call_prepay: { can_accept: false, amount: 472, message: 'That estimate is no longer open (it was accepted, declined or expired). Nothing was accepted.' } });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText(/That estimate is no longer open/)).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /Accept as annual prepay/ })).toBeNull();
+  });
+
+  it('a 409 refusal reloads the list and shows the server\'s message', async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (String(url).includes('/accept-call-prepay')) throw Object.assign(new Error('Someone already accepted this estimate. Nothing was accepted.'), { status: 409 });
+      return { items: [prepayCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /Accept as annual prepay/ }));
+    expect(await screen.findByText('Someone already accepted this estimate. Nothing was accepted.')).toBeInTheDocument();
+  });
+
+  it('Resolve is the only other action, admin-only; the evidence offers no accept to a non-admin', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+    cleanup();
+    render(<CallPrepayEvidence payload={prepayCard.payload} callPrepay={prepayCard.call_prepay} isOpenView isAdmin={false} onAcceptPrepay={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Accept as annual prepay/ })).toBeNull();
+    expect(screen.getByText('Accepting needs an admin.')).toBeInTheDocument();
+  });
+
+  it('a scheduling card whose call chose annual prepay says so in its evidence', () => {
+    render(<ConfirmEvidence reasonCode="not_confirmed" payload={JSON.stringify({ scheduling_window: { billing_choice: 'annual_prepay' } })} />);
+    expect(screen.getByText(/Billing:/).parentElement).toHaveTextContent('Caller chose annual prepay');
+  });
 });

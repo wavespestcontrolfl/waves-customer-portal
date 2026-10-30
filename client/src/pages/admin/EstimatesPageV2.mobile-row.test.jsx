@@ -215,3 +215,24 @@ describe("AcceptanceRecordDialog", () => {
     expect(await screen.findByText("No acceptance record for this estimate")).toBeInTheDocument();
   });
 });
+
+describe("MobileEstimateRow send and booking-link actions", () => {
+  const openActions = () => fireEvent.click(screen.getByRole("button", { name: "Actions for Ada Lovelace" }));
+
+  it("labels a failed send and offers Retry sending through the normal send dialog", () => {
+    renderRow({ estimate: { ...ESTIMATE, status: "send_failed" } });
+    expect(screen.getByText("Send failed")).toBeInTheDocument();
+    openActions();
+    expect(screen.getByRole("button", { name: "Retry sending estimate" })).toBeEnabled();
+  });
+
+  it("offers Send booking link only on a row the server marks eligible", () => {
+    renderRow({ estimate: { ...ESTIMATE, bookingLinkEligible: false } });
+    openActions();
+    expect(screen.queryByRole("button", { name: "Send booking link" })).not.toBeInTheDocument();
+    cleanup();
+    renderRow({ estimate: { ...ESTIMATE, bookingLinkEligible: true } });
+    openActions();
+    expect(screen.getByRole("button", { name: "Send booking link" })).toBeEnabled();
+  });
+});

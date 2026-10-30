@@ -25,7 +25,7 @@ jest.mock('../services/proposal-win', () => ({
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
   recordProposalBuildingUse: jest.fn(),
-  createProposalAcceptanceInvoice: jest.fn(),
+  assertProposalTermsMatchPayer: jest.fn(),
 }));
 
 const AccountMembershipEmail = require('../services/account-membership-email');

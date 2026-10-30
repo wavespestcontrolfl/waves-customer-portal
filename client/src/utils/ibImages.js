@@ -38,17 +38,25 @@ export async function fileToImagePart(file) {
   };
 }
 
-// Convert several Files, skipping non-images. Caps at MAX_ATTACHMENTS total
-// when `existingCount` is supplied. Uses allSettled so one undecodable file
-// (e.g. HEIC or a corrupt image) doesn't drop the whole selection — the
-// images that decode still attach.
+// Convert several Files. Caps at MAX_ATTACHMENTS total when `existingCount`
+// is supplied. Uses allSettled so one undecodable file (e.g. HEIC or a corrupt
+// image) doesn't drop the whole selection — the images that decode still
+// attach. Returns { parts, failed, skipped }: `failed` names the files that
+// are not images or did not decode; `skipped` counts images past the cap.
 export async function filesToImageParts(files, existingCount = 0) {
-  const list = Array.from(files || []).filter(isImageFile);
+  const selected = Array.from(files || []);
+  const images = selected.filter(isImageFile);
   const room = Math.max(0, MAX_ATTACHMENTS - existingCount);
-  const results = await Promise.allSettled(
-    list.slice(0, room).map(fileToImagePart),
-  );
-  return results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  const tried = images.slice(0, room);
+  const results = await Promise.allSettled(tried.map(fileToImagePart));
+  return {
+    parts: results.filter((r) => r.status === "fulfilled").map((r) => r.value),
+    failed: [
+      ...selected.filter((file) => !isImageFile(file)),
+      ...tried.filter((_, i) => results[i].status === "rejected"),
+    ].map((file) => file?.name || "photo"),
+    skipped: images.length - tried.length,
+  };
 }
 
 // Thin wrapper over the shared primitive. It resolves null on an undecodable

@@ -10,6 +10,7 @@
  *   - the new_job_application bell masks the applicant phone.
  */
 
+const { isDeepStrictEqual } = require('util');
 const {
   normalizeAnswers,
   normalizeSource,
@@ -19,20 +20,62 @@ const {
 const { __private: screenPrivate } = require('../services/job-application-screen');
 const { TRIGGER_REGISTRY, __private: triggerPrivate } = require('../services/notification-triggers');
 
-function mockDb() {
+// A fake knex over one in-memory job_applications table: the transaction,
+// the advisory-lock raw, and the filters the resubmission lookup uses
+// (jsonb equality compared as parsed JSON, key order ignored, like Postgres).
+function mockDb({ existing = [] } = {}) {
+  const rows = existing.map((row) => ({ ...row }));
   const inserts = [];
-  const database = (table) => {
-    if (table !== 'job_applications') throw new Error(`unexpected table ${table}`);
-    return {
-      insert: (row) => ({
-        returning: async () => {
-          inserts.push(row);
-          return [{ id: 'app-1', role: row.role, status: row.status, language: row.language, created_at: new Date() }];
-        },
-      }),
+  const raws = [];
+  const table = (name) => {
+    if (name !== 'job_applications') throw new Error(`unexpected table ${name}`);
+    const filters = [];
+    const query = {
+      where(column, op, value) {
+        if (typeof column === 'object') {
+          filters.push((row) => Object.entries(column).every(([key, want]) => row[key] === want));
+        } else if (op === '>=') {
+          filters.push((row) => new Date(row[column]) >= value);
+        } else {
+          throw new Error(`unexpected where ${column} ${op}`);
+        }
+        return query;
+      },
+      whereRaw(sql, [json]) {
+        const column = (sql.match(/^(\w+) = \?::jsonb$/) || [])[1];
+        if (!column) throw new Error(`unexpected whereRaw ${sql}`);
+        filters.push((row) => isDeepStrictEqual(row[column], JSON.parse(json)));
+        return query;
+      },
+      orderBy() { return query; },
+      async first() {
+        return rows.filter((row) => filters.every((keep) => keep(row)))
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+      },
+      insert(row) {
+        inserts.push(row);
+        return {
+          async returning() {
+            const stored = {
+              id: `app-${inserts.length}`,
+              created_at: new Date(),
+              ...row,
+              contact_snapshot: JSON.parse(row.contact_snapshot),
+              answers: JSON.parse(row.answers),
+            };
+            rows.push(stored);
+            return [{ id: stored.id, role: stored.role, status: stored.status, language: stored.language, created_at: stored.created_at }];
+          },
+        };
+      },
     };
+    return query;
   };
+  const database = (name) => table(name);
+  database.raw = async (sql, bindings) => { raws.push([sql, bindings]); };
+  database.transaction = async (work) => work(database);
   database.inserts = inserts;
+  database.raws = raws;
   return database;
 }
 
@@ -86,7 +129,8 @@ describe('normalizeSource', () => {
 describe('createJobApplication', () => {
   test('valid application inserts one normalized job_applications row', async () => {
     const database = mockDb();
-    const row = await createJobApplication({ body: VALID_BODY, database });
+    const { created, row } = await createJobApplication({ body: VALID_BODY, database });
+    expect(created).toBe(true);
     expect(row.id).toBe('app-1');
     expect(database.inserts).toHaveLength(1);
     const inserted = database.inserts[0];
@@ -138,6 +182,65 @@ describe('createJobApplication', () => {
       await createJobApplication({ body: { ...VALID_BODY, sms_consent: raw }, database });
       expect(database.inserts[0].sms_consent).toBe(expected);
     }
+  });
+
+  // The careers form re-sends identical content with a fresh Turnstile token
+  // when the answer to a committed POST is lost (team/staff audit F6).
+  test('the same application again within 15 minutes is the one already filed: no second row', async () => {
+    const database = mockDb();
+    const first = await createJobApplication({ body: VALID_BODY, database });
+    const again = await createJobApplication({
+      body: {
+        ...VALID_BODY,
+        turnstile_token: 'a-fresh-token',
+        source: { page_url: '/careers/apply?retry=1' },
+        answers: { judgment_gate_code: 'Call the office, then the customer.', experience: '2 years lawn crew' },
+      },
+      database,
+    });
+    expect(again).toEqual({ created: false, row: expect.objectContaining({ id: first.row.id }) });
+    expect(database.inserts).toHaveLength(1);
+  });
+
+  test('a changed answer, contact detail, language or SMS consent is a new application', async () => {
+    for (const changed of [
+      { answers: { ...VALID_BODY.answers, availability: 'Weekdays' } },
+      { email: 'jane.doe@example.com' },
+      { city: 'Sarasota' },
+      { phone: '941-555-0143' },
+      { language: 'es' },
+      { sms_consent: true },
+    ]) {
+      const database = mockDb();
+      await createJobApplication({ body: VALID_BODY, database });
+      const second = await createJobApplication({ body: { ...VALID_BODY, ...changed }, database });
+      expect(second.created).toBe(true);
+      expect(database.inserts).toHaveLength(2);
+    }
+  });
+
+  test('the same content after the window is a new application (a reapplication)', async () => {
+    const database = mockDb({
+      existing: [{
+        id: 'app-old',
+        role: 'technician',
+        status: 'new',
+        language: 'en',
+        sms_consent: false,
+        contact_snapshot: { name: 'Jane Doe', phone: '+19415550142', email: 'jane@example.com', city: 'Venice' },
+        answers: VALID_BODY.answers,
+        created_at: new Date(Date.now() - 16 * 60 * 1000),
+      }],
+    });
+    const out = await createJobApplication({ body: VALID_BODY, database });
+    expect(out.created).toBe(true);
+    expect(database.inserts).toHaveLength(1);
+  });
+
+  test('takes the per-phone lock the call path takes before it looks', async () => {
+    const database = mockDb();
+    await createJobApplication({ body: VALID_BODY, database });
+    expect(database.raws).toEqual([['SELECT pg_advisory_xact_lock(hashtext(?))', ['job_application_phone:9415550142']]]);
   });
 });
 

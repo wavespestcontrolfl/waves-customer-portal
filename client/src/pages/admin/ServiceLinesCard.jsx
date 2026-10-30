@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 
-// Service lines (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25): which technician is
-// the home tech and which covers the gaps for each service line. SHADOW ONLY: saving
-// this changes no booking; the six booking choice points only log what the map would
-// pick. The Team tab renders this card only while the server marks the roster response
-// `serviceLinesEnabled`.
+// Service lines (GATE_SERVICE_LINE_MAP=shadow|live, owner 2026-10-25 / 2026-10-30): which
+// technician is the home tech and which covers the gaps for each service line. In shadow,
+// saving this changes no booking (the booking choice points only log what the map would
+// pick); in live, new bookings for a line go to its home tech, else its gap tech. The
+// Team tab renders this card only while the server marks the roster response
+// `serviceLinesEnabled`; the line read says which mode it is (`mode`).
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -71,6 +72,7 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
   const [rows, setRows] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [mode, setMode] = useState("shadow");
 
   const load = useCallback(async () => {
     try {
@@ -83,6 +85,7 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
           gap_technician_id: byLine.get(key)?.gap_technician_id || "",
         })),
       );
+      setMode(res.mode === "live" ? "live" : "shadow");
       setError("");
     } catch {
       setError("Service lines could not be loaded.");
@@ -124,8 +127,10 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
     >
       <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 600, color: D.heading }}>Service lines</h3>
       <p style={{ margin: "0 0 12px", fontSize: 14, color: D.muted }}>
-        The home tech takes the line; the gap tech covers days the home tech is off or out. Shadow only:
-        this records what it would pick and changes no booking.
+        The home tech takes the line; the gap tech covers days the home tech is off or out.{" "}
+        {mode === "live"
+          ? "New bookings for a line go to its home technician, else its gap technician."
+          : "Shadow only: this records what it would pick and changes no booking."}
       </p>
       {error && (
         <p role="alert" style={{ margin: "0 0 12px", fontSize: 14, color: D.red }}>

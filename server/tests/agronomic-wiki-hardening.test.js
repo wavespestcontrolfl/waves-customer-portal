@@ -914,6 +914,91 @@ describe('weeklyRefreshIfDue', () => {
     const whereIn = staleSelect.ops.find(([m]) => m === 'whereIn');
     expect(whereIn[1]).toEqual(['category', ['product', 'track', 'seasonal', 'condition']]);
   });
+
+  test('GATE_LAWN_WIKI_PAUSE: the refresh keeps the stale flags current and stamps its marker, but writes no page', async () => {
+    process.env.GATE_LAWN_WIKI_PAUSE = 'true';
+    const writers = ['updateProductPage', 'updateTrackPage', 'updateSeasonalPage', 'updateConditionPage']
+      .map((m) => jest.spyOn(wiki, m).mockResolvedValue({ writeState: 'generated' }));
+    const staleSpy = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+    try {
+      const state = useDb({
+        knowledge_entries: [{
+          id: 'ke-t', slug: 'track/st-augustine', category: 'track',
+          title: 'Track st_augustine Performance', stale_flag: true,
+        }],
+        knowledge_update_log: [],
+        treatment_outcomes: (rec) => (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')
+          ? [{ id: 'o1', vision_scored_at: new Date() }]
+          : []),
+      });
+
+      const result = await wiki.weeklyRefresh();
+
+      expect(result).toEqual({ refreshed: 0, staleFound: 0, paused: true });
+      writers.forEach((spy) => expect(spy).not.toHaveBeenCalled());
+      // Database-only steps still run, so a resume finds every stale page.
+      expect(staleSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o1' }), { rethrow: true });
+      expect(state.updates.knowledge_entries).toContainEqual({ stale_flag: true });
+      expect(state.calls.knowledge_entries.some((rec) => rec.ops.some(([m]) => m === 'whereIn'))).toBe(false);
+      const marker = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+      expect(marker.description).toMatch(/paused/);
+    } finally {
+      delete process.env.GATE_LAWN_WIKI_PAUSE;
+      writers.forEach((spy) => spy.mockRestore());
+      staleSpy.mockRestore();
+    }
+  });
+});
+
+// ── linkTreatmentOutcome page writes vs GATE_LAWN_WIKI_PAUSE ───────────────
+
+describe('linkTreatmentOutcome page writes', () => {
+  // Confirms one lawn visit and waits until its background block has either
+  // written pages or flagged them (it awaits the weather backfill first).
+  const confirmVisit = async () => {
+    const state = useDb({
+      treatment_outcomes: [],
+      service_records: [{
+        id: 'sr-1', customer_id: 'c-1', service_date: '2026-07-01',
+        service_type: 'lawn', scheduled_service_id: null, visit_number: 1,
+      }],
+      lawn_assessments: (rec, idx) => (idx === 0
+        ? [{ id: 'post-1', service_date: '2026-07-01', turf_density: 5, weed_suppression: 5, color_health: 5, fungus_control: 5, thatch_level: 5 }]
+        : [{ id: 'pre-1', service_date: '2026-06-15', turf_density: 4, weed_suppression: 4, color_health: 4, fungus_control: 4, thatch_level: 4 }]),
+      service_products: [],
+      customers: [{ id: 'c-1' }],
+      knowledge_update_log: [],
+    });
+    const seasonal = jest.spyOn(wiki, 'updateSeasonalPage').mockResolvedValue(null);
+    const others = ['updateProductPage', 'updateTrackPage'].map((m) => jest.spyOn(wiki, m).mockResolvedValue(null));
+    const stale = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    for (let i = 0; i < 20 && !seasonal.mock.calls.length && !stale.mock.calls.length; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const calls = { seasonal: seasonal.mock.calls.length, stale: stale.mock.calls.map(([o]) => o) };
+    [seasonal, ...others, stale].forEach((spy) => spy.mockRestore());
+    return { state, outcome, calls };
+  };
+
+  test('with the gate unset, a confirmed visit writes its pages and flags nothing', async () => {
+    const { outcome, calls } = await confirmVisit();
+    expect(outcome).toBeTruthy();
+    expect(calls.seasonal).toBe(1);
+    expect(calls.stale).toHaveLength(0);
+  });
+
+  test('paused, the visit still records its outcome but flags its pages stale instead of writing them', async () => {
+    process.env.GATE_LAWN_WIKI_PAUSE = 'true';
+    try {
+      const { state, outcome, calls } = await confirmVisit();
+      expect(state.inserts.treatment_outcomes).toHaveLength(1);
+      expect(calls.seasonal).toBe(0);
+      expect(calls.stale).toEqual([expect.objectContaining({ id: outcome.id })]);
+    } finally {
+      delete process.env.GATE_LAWN_WIKI_PAUSE;
+    }
+  });
 });
 
 // ── linkTreatmentOutcome pairing windows ───────────────────────────────────

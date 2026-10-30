@@ -27,8 +27,10 @@ export function signed(n, fmt) {
 }
 
 // On mobile an odd tile count leaves a dead half-row cell — stretch the last
-// odd tile across both columns instead (owner whitespace feedback).
-export function KpiGrid({ children, className = "grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 max-md:[&>:last-child:nth-child(odd)]:col-span-2" }) {
+// odd tile across both columns instead (owner whitespace feedback). Four
+// columns wait for lg: from md the fixed admin sidebar leaves the pane about
+// 500px wide, which squeezed four gauge tiles until their captions spilled.
+export function KpiGrid({ children, className = "grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 max-lg:[&>:last-child:nth-child(odd)]:col-span-2" }) {
   return <div className={className}>{children}</div>;
 }
 
@@ -79,13 +81,14 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
   const chartLower = targetDef ? !!targetDef.lowerIsBetter : chart?.lowerIsBetter;
 
   // Gauge tiles let the ring BE the value (number in the center), with the
-  // sub beside it — no duplicate big number.
+  // sub beside it — no duplicate big number. When the card is too narrow to
+  // give the sub a readable column beside the ring, it wraps under the ring.
   if (chart?.kind === "gauge") {
     return (
       <UiSurface as={Card} className={cn(lowConfidence && "opacity-70")}>
         <CardBody>
         <div className="text-14 font-medium text-ink-secondary">{label}</div>
-        <div className="flex items-center gap-2.5 md:gap-3 mt-1.5 md:mt-2">
+        <div className="flex flex-wrap items-center gap-2.5 md:gap-3 mt-1.5 md:mt-2">
           <KpiRing
             value={chart.value}
             max={chart.max}
@@ -95,7 +98,7 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
             warn={warn}
             display={value}
           />
-          {subText && <div className="min-w-0 text-ui-caption text-ink-secondary">{subText}</div>}
+          {subText && <div className="min-w-0 grow basis-24 break-words text-ui-caption text-ink-secondary">{subText}</div>}
         </div>
         {series && (
           <div className="mt-2">

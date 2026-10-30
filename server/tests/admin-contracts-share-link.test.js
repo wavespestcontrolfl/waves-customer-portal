@@ -1,6 +1,7 @@
 /**
  * The contract share-link writers (GH Codex #3844 r3 P1 + pre-push P0):
- *   createShareLink — the Contracts page's deliberate mint, unchanged.
+ *   createShareLink — the Contracts page's deliberate mint; it refuses a
+ *   link the public sign handler could never complete (audit F8).
  *   activatePreparedShareLinks — the composer's send-time half: the Insert
  *   Link sheet mints its token in memory and writes NOTHING; the /sms send
  *   writes the hash here, under the row lock, before the provider call — a
@@ -61,7 +62,7 @@ test('deliveredLiveShareLink: hashed with the window open, or hashed with no win
   expect(deliveredLiveShareLink({ share_token_hash: null, share_token_expires_at: new Date(Date.now() + DAY) })).toBe(false);
 });
 
-describe('createShareLink — the Contracts page mint (unchanged)', () => {
+describe('createShareLink — the Contracts page mint', () => {
   test('stamps sent + shared_at + a 14-day window and rotates whatever was there', async () => {
     mockRows = { customer_contracts: { ...base, status: 'sent', share_token_hash: 'x'.repeat(64), share_token_expires_at: new Date(Date.now() + DAY), shared_at: new Date() } };
     const r = await createShareLink('k1', req);
@@ -89,6 +90,18 @@ describe('createShareLink — the Contracts page mint (unchanged)', () => {
   test('terminal contracts refuse before any write', async () => {
     mockRows = { customer_contracts: { ...base, status: 'signed' } };
     expect((await createShareLink('k1', req)).error.status).toBe(400);
+    expect(mockWrites).toHaveLength(0);
+  });
+
+  test('a link the customer could never sign refuses (409) with nothing written: an Auto Pay authorization whose method is gone, or a contract on an inactive customer (contracts audit F8)', async () => {
+    mockRows = { customer_contracts: { ...base, status: 'sent' }, payment_methods: null };
+    expect((await createShareLink('k1', req)).error).toEqual({ status: 409, message: expect.stringMatching(/payment method.*no longer available/) });
+    expect(mockWrites).toHaveLength(0);
+    mockRows = {
+      customer_contracts: { ...base, status: 'sent', contract_type: 'document_template', payment_method_id: null },
+      customers: { id: 'c1', active: false },
+    };
+    expect((await createShareLink('k1', req)).error).toEqual({ status: 409, message: expect.stringMatching(/inactive customer/) });
     expect(mockWrites).toHaveLength(0);
   });
 });

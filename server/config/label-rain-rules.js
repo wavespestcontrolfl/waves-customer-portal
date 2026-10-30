@@ -11,7 +11,7 @@
 //                  warns and the technician checks the site, so the dose always shows.
 //   dryBeforeRain  the label ADVISES hours to dry before rain ("Avoid making applications when rainfall
 //                  is expected before the product has sufficient time to dry (minimum 4 hours)"). A
-//                  caution only, never a hold.
+//                  caution above 60% and the Warning level above 80%, like every rain rule; never a hold.
 //   waterIn        rain or irrigation after the application helps (granules, root-zone products). No
 //                  rain check.
 //   heat           a label temperature line (owner 2026-10-29, plan page "Spray Weather Warnings",
@@ -59,6 +59,13 @@ const LABEL_RAIN_RULES = Object.freeze({
   '81880-24': { product: 'Sedgehammer Plus', label: '081880-00024-20200828.pdf', dryBeforeRain: { hours: 4, page: 6, quote: 'Avoid applications when rainfall is forecasted to occur within 4 hours.' } },
   '81880-1-10163': { product: 'Sedgehammer 75%', label: '081880-00001-20260901.pdf', dryBeforeRain: { hours: 4, page: 6, quote: 'Avoid applications when rainfall is forecasted to occur within 4 hours.' } },
   '101563-327': { product: 'Blindside Herbicide', label: '000279-03411-20100921.pdf', olderLabel: true, dryBeforeRain: { hours: 24, page: 5, quote: 'Best weed control results will be obtained when no rainfall or irrigation occurs within 24 hours after application.' } },
+  // Read from the current Envu label (the catalog's label_url) on 2026-10-30; the PPLS copy is a 1998 scan.
+  '101563-60': {
+    product: 'Merit 2F',
+    label: 'https://bynder.envu.com/m/24cd8422578a7725/original/Digital_TO_Merit-2F_label_NA_US_EN.pdf',
+    read: '2026-10-30',
+    waterIn: { page: 8, quote: 'For optimum control, if rainfall does not occur within 24 hours after application, irrigate to move the active ingredient through the thatch.' },
+  },
   '100-1323': { product: 'Heritage G', label: '000100-01323-20251117.pdf', waterIn: { page: 12, quote: 'Irrigate with at least 0.5 inches water within 24 hours after application if rainfall is not expected.' } },
   '100-1216': { product: 'Headway Fungicide', label: '000100-01216-20260403.pdf', waterIn: { page: 17, quote: 'Irrigate with 0.1 to 0.2 inches within 24 hours after application to facilitate movement into the root zone.' } },
   '228-631-10404': { product: 'LESCO T-Storm 2G', label: '000228-00631-20230831.pdf', waterIn: { page: 6, quote: 'For best results, activate the application within 24 hours with irrigation or natural rainfall.' } },

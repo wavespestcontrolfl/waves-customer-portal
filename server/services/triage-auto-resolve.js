@@ -1494,7 +1494,12 @@ const FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS = (() => {
 })();
 const UNAMBIGUOUS_MIN_CONFIDENCE = 0.9;
 const emailLc = (v) => String(v || '').trim().toLowerCase();
-function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS } = {}) {
+// GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED: a clearly spelled address files a
+// card with NO decoder candidates (the decoder heard one spelling, so the
+// card carries the release target and a confidence only). Strict opt-in,
+// read at call time; ships dark and only matters while the main gate is on.
+const spelledReleaseOn = () => process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED === 'true';
+function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS, spelled = spelledReleaseOn } = {}) {
   if (item.reason_code !== 'email_unverified' || !item.call_customer_id) return null;
   // An archived customer gets no first-touch mail (codex #4622 r4 P1): the
   // candidate join carries the soft-delete stamp, and the release engine
@@ -1515,9 +1520,16 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   const verdict = payload.arbiter?.verdict;
   if (verdict && verdict !== 'adopt') return null;
   const candidates = Array.isArray(payload.email_candidates) ? payload.email_candidates : [];
-  if (candidates.length !== 1) return null;
-  const top = candidates[0] || {};
-  if (!(Number(top.confidence) >= UNAMBIGUOUS_MIN_CONFIDENCE)) return null;
+  // No candidates: the caller's spelled letters were heard once. Only with
+  // the spelled gate on, and only for a card that carries its own filing-
+  // time confidence and no V1/V2 disagreement; every check below still runs.
+  const spelledCard = candidates.length === 0 && spelled();
+  if (candidates.length !== 1 && !spelledCard) return null;
+  if (spelledCard && (payload.email_disagreement
+    || typeof payload.confidence !== 'number'
+    || !(payload.confidence >= UNAMBIGUOUS_MIN_CONFIDENCE))) return null;
+  const top = spelledCard ? null : (candidates[0] || {});
+  if (top && !(Number(top.confidence) >= UNAMBIGUOUS_MIN_CONFIDENCE)) return null;
   // The FILING-TIME release target is required (codex r1 P1): a card with
   // no snapshot — legacy, or a recovery marker — treats its candidates as
   // spellings awaiting read-back and fails closed, the same contract the
@@ -1525,7 +1537,7 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   // substituted for it.
   const target = emailLc(payload.email_release_target);
   if (!target || !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(target)) return null;
-  if (emailLc(top.value) !== target) return null;
+  if (top && emailLc(top.value) !== target) return null;
   // V1 and V2 heard the same address as the target — three-way agreement.
   const v1 = parseMaybeJson(item.call_extraction_v1) || {};
   const v2 = parseMaybeJson(item.call_extraction) || {};

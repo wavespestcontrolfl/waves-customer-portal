@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
 const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
@@ -1180,6 +1181,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // Optional self-reported "How did you hear about us?" (+ the AI follow-up
+    // prompt): fixed allowlist, unknown values silently dropped, never required.
+    const wizardHeardAbout = heardAboutFromBody(req.body);
     // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
     // exact engine request for that product (plus the few site-collected
     // options the engine needs, e.g. lawn grass type), so the site never
@@ -2154,7 +2158,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
-    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    // leads.gclid is varchar(200) (migration 20260401000110), unlike the other click ids.
+    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 200) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
@@ -2293,6 +2298,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
       if (anonId) updateFields.anon_id = anonId;
+      // Self-reported "How did you hear about us?" — fills an EMPTY answer
+      // only, never replaces one already recorded (the property-lookup stage
+      // may have stored it; staff may have corrected it). One statement, so
+      // the answer and its prompt are judged on the same pre-write row.
+      Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
       const ownRow = () => db('leads')
         .where({ id: leadId })
@@ -2450,6 +2460,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
+        heard_about: wizardHeardAbout.heardAbout,
+        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
         extracted_data: duplicateOfLeadId
           ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
           : extractedData,

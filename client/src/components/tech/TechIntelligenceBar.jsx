@@ -88,7 +88,7 @@ export default function TechIntelligenceBar() {
     attachmentConversionRef.current = conversionId;
     setAttachmentBusy(true);
     try {
-      const parts = await filesToImageParts(files, attachments.length);
+      const { parts } = await filesToImageParts(files, attachments.length);
       if (attachmentConversionRef.current === conversionId && parts.length) {
         setAttachments(prev => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
       }

@@ -175,8 +175,9 @@ export default function GrowthSection({
         </ChartCard>}
       </div>
 
-      {/* Hero KPI row — sparkline + delta */}
-      {data?.kpis && <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4 md:mb-5 max-md:[&>:last-child:nth-child(odd)]:col-span-2">
+      {/* Hero KPI row — sparkline + delta. Column steps follow the pane, not
+          the viewport: the fixed sidebar takes 220-240px from md up. */}
+      {data?.kpis && <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 mb-4 md:mb-5 max-lg:[&>:last-child:nth-child(odd)]:col-span-2">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}

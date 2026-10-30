@@ -17,6 +17,7 @@ describe('TimeTrackingPage team account actions', () => {
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'admin-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'admin-1', role: 'admin' }));
   });
 
   afterEach(() => {
@@ -111,6 +112,25 @@ describe('TimeTrackingPage team account actions', () => {
     expect(showToast).toHaveBeenCalledWith('River Tech activated');
     expect(await screen.findByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
   });
+
+  it('shows a technician the roster with only its own Photo action: no add, edit, earnings or activation controls', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-2', role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn(async () => apiResponse({
+      technicians: [
+        { id: 'tech-1', name: 'River Tech', role: 'technician', active: true },
+        { id: 'tech-2', name: 'Sky Tech', email: 'sky@example.com', role: 'technician', active: true },
+      ],
+    })));
+
+    render(<TeamTab showToast={vi.fn()} />);
+
+    const ownRow = (await screen.findByText('Sky Tech')).closest('tr');
+    expect(within(ownRow).getByRole('button', { name: 'Photo' })).toBeInTheDocument();
+    expect(within(screen.getByText('River Tech').closest('tr')).queryByRole('button')).not.toBeInTheDocument();
+    for (const name of ['+ Add Technician', 'Edit', 'Earnings', 'Capabilities', 'Deactivate', 'Activate']) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+  });
 });
 
 describe('TimeTrackingPage pay-growth deep-link resolution', () => {
@@ -145,12 +165,67 @@ describe('TimeTrackingPage payroll deep-link resolution', () => {
 });
 
 describe('TimeTrackingPage pay stubs deep-link resolution (GATE_TECH_PAY_STUBS)', () => {
-  it('opens for any role once its request says ready, waits while pending, and falls back to Timesheet when off', () => {
+  it('opens for any role once its request says ready, waits while pending, and falls back when off (Timesheet for an admin, Dashboard for a technician)', () => {
     expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'ready')).toBe('pay-stubs');
     expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'ready')).toBe('pay-stubs');
     expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'loading')).toBeNull();
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'off')).toBe('timesheet');
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'error')).toBe('timesheet');
-    expect(resolveStaffTab('pay-stubs', false, 'technician')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'off')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'error')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'off')).toBe('dashboard');
+    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'error')).toBe('dashboard');
+    expect(resolveStaffTab('pay-stubs', false, 'technician')).toBe('dashboard');
+  });
+});
+
+describe('TimeTrackingPage office-only leaves', () => {
+  it('opens Dashboard for a technician link to Timesheet, Entries, Approvals or Analytics and leaves an admin where it asked', () => {
+    for (const leaf of ['timesheet', 'entries', 'approvals', 'analytics']) {
+      expect(resolveStaffTab(leaf, false, 'technician')).toBe('dashboard');
+      expect(resolveStaffTab(leaf, false, null)).toBe('dashboard');
+      expect(resolveStaffTab(leaf, false, 'admin')).toBe(leaf);
+    }
+    expect(resolveStaffTab('team', false, 'technician')).toBe('team');
+    expect(resolveStaffTab('documents', false, 'technician')).toBe('documents');
+  });
+});
+
+describe('TimeTrackingPage team edit form names', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'admin-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'admin-1', role: 'admin' }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('gives every edit field the name of its visible label', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => apiResponse({
+      technicians: [{
+        id: 'tech-1',
+        name: 'River Tech',
+        role: 'technician',
+        active: true,
+        employment_status: 'active',
+        pay_rate: '22.50',
+      }],
+    })));
+    render(<TeamTab showToast={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    // A pay rate on the row opens the payroll section with the form.
+    expect(screen.getByRole('textbox', { name: 'Name *' })).toHaveValue('River Tech');
+    for (const name of ['Phone', 'Email', 'Job title', 'Address', 'SSN (last 4)',
+      'Emergency contact name', 'Emergency contact phone']) {
+      expect(screen.getByRole('textbox', { name })).toBeInTheDocument();
+    }
+    for (const name of ['Employment', 'Tech line', 'Employment type']) {
+      expect(screen.getByRole('combobox', { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('spinbutton', { name: 'Pay rate ($/hr)' })).toHaveValue(22.5);
+    expect(screen.getByLabelText('Hire date')).toHaveAttribute('type', 'date');
+    expect(screen.getByLabelText('Date of birth')).toHaveAttribute('type', 'date');
   });
 });

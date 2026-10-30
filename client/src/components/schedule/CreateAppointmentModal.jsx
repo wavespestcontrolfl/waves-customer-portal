@@ -1248,6 +1248,13 @@ export function decideAnnualPrepayAttachment({
   return { attach, billingTerm: attach ? 'prepay_annual' : undefined };
 }
 
+// GATE_CALL_PREPAY_CHOICE: Book it on a held call where the caller chose annual prepay opens the form with "Annual prepay"
+// preselected, but only when the linked quote is open and the SERVER says it is prepay-eligible. Everything else stays Standard.
+// The save still goes through decideAnnualPrepayAttachment and the server's own eligibility and pricing checks.
+export function preselectAnnualPrepay({ preferAnnualPrepay, linkedEstimate }) {
+  return !!preferAnnualPrepay && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
+}
+
 // The series a manual prepay preview priced, matched by GROUP IDENTITY —
 // NOT "the first result" (a booking can post a one-time group first).
 export function matchesPrepayTarget({ targetKey, key, result }) {
@@ -1426,6 +1433,7 @@ const AUTO_UNASSIGNED_REASONS = {
   none_assignable: 'No technician is available that day.',
   several_assignable: 'More than one technician could take it.',
   none_free: 'No technician is free at that time.',
+  line_none: 'The technicians for this service are not free that day.',
   absent_on_series_date: 'The technician is out on a later date of the series.',
 };
 export function autoAssignWarning(results) {
@@ -1559,7 +1567,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -2065,7 +2073,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // quote — the option is quote-specific (eligibility + invoice amount).
   const linkedEstimateIdForPrepay = linkedEstimate?.id ?? null;
   useEffect(() => {
-    setBillAsAnnualPrepay(false);
+    const preselect = preselectAnnualPrepay({ preferAnnualPrepay: defaultAnnualPrepay, linkedEstimate });
+    setBillAsAnnualPrepay(preselect);
+    // Annual prepay and "collect prepayment in person" are mutually exclusive.
+    if (preselect) setCollectPrepay(false);
   }, [linkedEstimateIdForPrepay]);
   // Annual prepay on a MANUAL booking — the phone-"yes" case with no quote
   // behind it, where billAsAnnualPrepay above has nothing to price. Every

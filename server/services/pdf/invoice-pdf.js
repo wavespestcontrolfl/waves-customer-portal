@@ -16,6 +16,7 @@ const {
   drawFieldMasthead,
 } = require('./field-pdf');
 const { groupInvoiceLinesByProperty, propertyStreetLine } = require('@waves/invoice-property-groups');
+const { invoiceAmountDue } = require('../invoice-helpers');
 const {
   navy: NAVY, // headings, header bar
   ink: INK,
@@ -353,6 +354,10 @@ function invoiceTotalsFacts(invoice, customer = null) {
     depositCredit: depositCreditTotalFromLineItems(invoice.line_items),
     total,
     creditApplied: Number(invoice.credit_applied || 0),
+    // Part payments the office recorded on this still-open invoice (the paid flip resets amount_paid to 0).
+    amountPaid: Number(invoice.amount_paid || 0),
+    // What is still owed: total − credit − part payments, in cents (the charge base every pay path bills).
+    amountDue: invoiceAmountDue(invoice),
   };
 }
 
@@ -366,12 +371,15 @@ function invoiceBreakdownRows(invoice, customer = null) {
     f.depositCredit > 0 ? ['Deposit paid at acceptance', `− ${currency(f.depositCredit)}`] : null,
     ['Total', currency(f.total)],
     f.creditApplied > 0 ? ['Account credit applied', `− ${currency(f.creditApplied)}`] : null,
-    f.creditApplied > 0 ? ['Amount due', currency(Math.max(0, f.total - f.creditApplied))] : null,
+    f.amountPaid > 0 ? ['Paid so far', `− ${currency(f.amountPaid)}`] : null,
+    f.creditApplied > 0 || f.amountPaid > 0 ? ['Amount due', currency(f.amountDue)] : null,
   ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
 }
 
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
-  const { highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null } = opts;
+  const {
+    highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null, partPayments = false,
+  } = opts;
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 10;
@@ -409,12 +417,16 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     y += 20;
   }
 
-  // Account credit applied (referral reward etc.): a deduction from the gross
-  // total, surfacing the reduced Amount due the customer actually pays.
-  const creditApplied = Number(invoice.credit_applied || 0);
-  if (creditApplied > 0) {
-    row('Account credit applied', `− ${currency(creditApplied)}`);
-    row('Amount due', currency(Math.max(0, total - creditApplied)), NAVY, true);
+  // Account credit applied (referral reward etc.) and, on the invoice itself,
+  // part payments already received: deductions from the gross total,
+  // surfacing the reduced Amount due the customer actually pays. Receipts
+  // (paid/refunded rows) keep their credit-only rows.
+  const creditApplied = facts.creditApplied;
+  const amountPaid = partPayments ? facts.amountPaid : 0;
+  if (creditApplied > 0) row('Account credit applied', `− ${currency(creditApplied)}`);
+  if (amountPaid > 0) row('Paid so far', `− ${currency(amountPaid)}`);
+  if (creditApplied > 0 || amountPaid > 0) {
+    row('Amount due', currency(partPayments ? facts.amountDue : Math.max(0, total - creditApplied)), NAVY, true);
   }
 
   if (refundAmount > 0) {
@@ -554,7 +566,7 @@ function generateInvoicePDF(invoice, res) {
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
   y = lineItemsTable(doc, invoice.line_items, L, y, W);
-  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer });
+  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
   if (invoice.notes) {

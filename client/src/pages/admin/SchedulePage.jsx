@@ -1261,6 +1261,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
+  "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
