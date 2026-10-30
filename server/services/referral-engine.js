@@ -378,96 +378,113 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 
   const normalizedPhone = normalizePhone(phone);
   if (!normalizedPhone) throw new Error('Enter a valid phone number');
-  const promoter = await db('referral_promoters').where({ id: promoterId }).first();
-  if (!promoter) throw new Error('Promoter not found');
 
   const settings = await getSettings();
-  const referralLink = getPromoterReferralLink(promoter, settings);
 
-  // --- Fraud checks ---
-
-  // Monthly cap
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-  const monthCount = await db('referrals')
-    .where({ promoter_id: promoterId })
-    .where('created_at', '>=', monthStart)
-    .count('* as c')
-    .first();
-  if (parseInt(monthCount.c) >= settings.max_referrals_per_month) {
-    throw new Error(`Monthly referral limit reached (${settings.max_referrals_per_month})`);
-  }
-
-  // Duplicate phone (same promoter)
-  const dupCheck = await db('referrals')
-    .where({ promoter_id: promoterId })
-    .where(function () {
-      this.where('referee_phone', normalizedPhone)
-        .orWhere('referee_phone', phone.trim());
-    })
-    .first();
-  if (dupCheck) throw new Error('You have already referred this phone number');
-
-  // Self-referral — check phone (any format), email, AND existing customer link
-  const promoterCustomer = promoter.customer_id
-    ? await db('customers').where({ id: promoter.customer_id }).first()
-    : null;
-  const promoterPhone = normalizePhone(promoter.customer_phone || promoterCustomer?.phone);
-  const promoterEmail = (promoter.customer_email || promoterCustomer?.email || '').toLowerCase().trim();
-  const refEmailLc = (email || '').toLowerCase().trim();
-  if (promoterPhone && promoterPhone === normalizedPhone) {
-    throw new Error('Cannot refer yourself');
-  }
-  if (promoterEmail && refEmailLc && promoterEmail === refEmailLc) {
-    throw new Error('Cannot refer yourself');
-  }
-
-  // Already a customer (lookup by phone OR email — either disqualifies).
-  // Match phone by digits, not exact string: customers.phone mixes stored
-  // E.164 / domestic-formatted / bare-digit shapes (same reasoning as
-  // admin-customers.js's cross-account phone check and creditReferralOnFirstService
-  // below), so a legacy '(941) 555-1234' row must still match a typed
-  // '941-555-1234' that normalizes to the same E.164 number.
-  const phoneDigitVariants = phoneMatchDigits(normalizedPhone);
-  const existingCustomer = await db('customers')
-    .where(function () {
-      if (phoneDigitVariants.length) {
-        this.whereRaw(
-          `regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (${phoneDigitVariants.map(() => '?').join(',')})`,
-          phoneDigitVariants,
-        ).orWhere('phone', normalizedPhone).orWhere('phone', phone.trim());
-      } else {
-        this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
-      }
-      if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
-    })
-    .first();
-  if (existingCustomer) {
-    // Block self-referral via second account (same person, different phone+email)
-    if (promoter.customer_id && existingCustomer.id === promoter.customer_id) {
-      throw new Error('Cannot refer yourself');
-    }
-    throw new Error('This person is already a Waves customer');
-  }
-
-  // --- Create referral in the 007 referrals table ---
   const nameParts = name.trim().split(/\s+/);
   const firstName = nameParts[0];
   const lastName = nameParts.slice(1).join(' ');
 
-  const [referral] = await db('referrals').insert({
-    referrer_customer_id: promoter.customer_id,
-    referee_name: name.trim(),
-    referee_phone: normalizedPhone || phone.trim(),
-    referee_email: email?.trim() || null,
-    referral_code: promoter.referral_code,
-    status: 'pending',
-    source: source,
-    promoter_id: promoterId,
-    referrer_reward_amount: settings.referrer_reward_cents / 100,
-    referrer_reward_status: 'pending',
-  }).returning('*');
+  // The checks below read before the insert writes, so two overlapping
+  // submits could both pass the monthly cap and the duplicate-phone check
+  // (referrals audit 10-29, F6). Locking the promoter row makes check + insert
+  // one step per promoter: a second submit waits, then sees the first row.
+  const { promoter, referral } = await db.transaction(async (trx) => {
+    const promoter = await trx('referral_promoters').where({ id: promoterId }).forUpdate().first();
+    if (!promoter) throw new Error('Promoter not found');
+
+    // --- Fraud checks ---
+
+    // Monthly cap
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const monthCount = await trx('referrals')
+      .where({ promoter_id: promoterId })
+      .where('created_at', '>=', monthStart)
+      .count('* as c')
+      .first();
+    if (parseInt(monthCount.c) >= settings.max_referrals_per_month) {
+      throw new Error(`Monthly referral limit reached (${settings.max_referrals_per_month})`);
+    }
+
+    // Duplicate phone (same promoter)
+    const dupCheck = await trx('referrals')
+      .where({ promoter_id: promoterId })
+      .where(function () {
+        this.where('referee_phone', normalizedPhone)
+          .orWhere('referee_phone', phone.trim());
+      })
+      .first();
+    if (dupCheck) throw new Error('You have already referred this phone number');
+
+    // Self-referral — check phone (any format), email, AND existing customer link
+    const promoterCustomer = promoter.customer_id
+      ? await trx('customers').where({ id: promoter.customer_id }).first()
+      : null;
+    const promoterPhone = normalizePhone(promoter.customer_phone || promoterCustomer?.phone);
+    const promoterEmail = (promoter.customer_email || promoterCustomer?.email || '').toLowerCase().trim();
+    const refEmailLc = (email || '').toLowerCase().trim();
+    if (promoterPhone && promoterPhone === normalizedPhone) {
+      throw new Error('Cannot refer yourself');
+    }
+    if (promoterEmail && refEmailLc && promoterEmail === refEmailLc) {
+      throw new Error('Cannot refer yourself');
+    }
+
+    // Already a customer (lookup by phone OR email — either disqualifies).
+    // Match phone by digits, not exact string: customers.phone mixes stored
+    // E.164 / domestic-formatted / bare-digit shapes (same reasoning as
+    // admin-customers.js's cross-account phone check and creditReferralOnFirstService
+    // below), so a legacy '(941) 555-1234' row must still match a typed
+    // '941-555-1234' that normalizes to the same E.164 number.
+    const phoneDigitVariants = phoneMatchDigits(normalizedPhone);
+    const existingCustomer = await trx('customers')
+      .where(function () {
+        if (phoneDigitVariants.length) {
+          this.whereRaw(
+            `regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (${phoneDigitVariants.map(() => '?').join(',')})`,
+            phoneDigitVariants,
+          ).orWhere('phone', normalizedPhone).orWhere('phone', phone.trim());
+        } else {
+          this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
+        }
+        if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
+      })
+      .first();
+    if (existingCustomer) {
+      // Block self-referral via second account (same person, different phone+email)
+      if (promoter.customer_id && existingCustomer.id === promoter.customer_id) {
+        throw new Error('Cannot refer yourself');
+      }
+      throw new Error('This person is already a Waves customer');
+    }
+
+    // --- Create referral in the 007 referrals table ---
+    const [referral] = await trx('referrals').insert({
+      referrer_customer_id: promoter.customer_id,
+      referee_name: name.trim(),
+      referee_phone: normalizedPhone || phone.trim(),
+      referee_email: email?.trim() || null,
+      referral_code: promoter.referral_code,
+      status: 'pending',
+      source: source,
+      promoter_id: promoterId,
+      referrer_reward_amount: settings.referrer_reward_cents / 100,
+      referrer_reward_status: 'pending',
+    }).returning('*');
+
+    // --- Update promoter stats ---
+    await trx('referral_promoters').where({ id: promoterId }).increment({
+      total_referrals_sent: 1,
+    }).update({
+      last_referral_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    return { promoter, referral };
+  });
+  const referralLink = getPromoterReferralLink(promoter, settings);
 
   // --- Create lead via lead-attribution ---
   let leadId = null;
@@ -498,14 +515,6 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   } catch (err) {
     logger.warn(`[ReferralEngine] Lead creation failed: ${err.message}`);
   }
-
-  // --- Update promoter stats ---
-  await db('referral_promoters').where({ id: promoterId }).increment({
-    total_referrals_sent: 1,
-  }).update({
-    last_referral_at: new Date(),
-    updated_at: new Date(),
-  });
 
   // --- Send invite SMS ---
   const smsBody = await renderReferralSms('referral_invite', {
