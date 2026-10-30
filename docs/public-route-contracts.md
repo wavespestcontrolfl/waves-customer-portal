@@ -1531,6 +1531,28 @@ limits, the hours offered, signed offers and every commit check are
 unchanged; only which slots the lists hold can differ. With the gate off
 (the default, exactly `true` turns it on, read at call time) the payload is
 byte-identical to today's.
+**Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
+build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
+value leave these routes byte-identical, with no extra query).**
+`GET /api/public/estimates/:token/available-slots` and `/find-slots` (and the
+409 refresh on `/reserve`, which lists through the same builder) offer only
+slots on the home or gap technician of the line(s) the held visit carries: the
+estimate's primary program's line (the program the hold stamps), or every
+program's line for a combined capacity hold, so only a technician on every one of
+those lines is offered. A line with no technician set in `service_line_techs`
+adds no rule. At a date and start both have, the home technician's slot is the
+one listed; the gap technician's slots fill the starts the home technician has
+none for. Each listed slot stays a complete slot with its own `techId`,
+`techFirstName`, signed `slotId` and hold fields, so the page names the
+technician who will come, and `/reserve` holds that slot's technician exactly as
+today (no second line check at reserve or accept). A ranked list is neither read
+from nor written to the 5-minute result cache. Auth, token rules, rate limits,
+the hours offered, signed offers and every commit check are unchanged; only which
+slots the lists hold can differ. Fail-open: an unreadable map offers today's
+list. On accept, a program added to the picked trip whose line's technician is
+someone else is booked the same day with no time on that technician (unassigned
+if nobody can take it) instead of copying the picked hour and technician; its
+visit note says in plain words that its time will be set separately.
 **Customer rain rank (`GATE_CUSTOMER_RAIN_RANK`, owner 2026-10-08; ships
 dark).** Every caller of `buildBookingAvailability` except the active
 re-service rank profile — `/api/booking/availability`, `/find-slots`, the
