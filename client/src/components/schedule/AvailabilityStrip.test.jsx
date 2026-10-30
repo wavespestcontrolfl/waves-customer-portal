@@ -212,6 +212,17 @@ describe('calendar facts on the days', () => {
     expect(screen.getByText('Fri Jan 5')).toBeTruthy();
   });
 
+  it('picking an hour on an already-late day reads as a fit: the verdict has no "doesn\'t fit" sentence and the day keeps its tag', () => {
+    const late = { date: '2035-01-03', status: 'open', alreadyLate: true, hours: [hour('2035-01-03', '15:00', 4, { dayAlreadyLate: true })] };
+    const availability = answer({ start: '15:00', fits: true, reason: null, detourMinutes: 4, dayAlreadyLate: true }, [late, openDay]);
+    const v = availabilityVerdict(availability, at('2035-01-03', '15:00'));
+    expect(v).toMatchObject({ tone: 'ok', text: 'Wed Jan 3 · 3 PM fits.' });
+    render(<AvailabilityStrip availability={availability} currentDate="2035-01-03" currentStart="15:00" onPick={() => {}} />);
+    expect(screen.getByRole('status').textContent).not.toMatch(/doesn't fit|miss|late/i);
+    fireEvent.click(screen.getAllByTestId('availability-day')[0]);
+    expect(screen.getByText('Wed Jan 3 (already late)')).toBeTruthy();
+  });
+
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
     expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');

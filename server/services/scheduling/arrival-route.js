@@ -1376,11 +1376,13 @@ function staffSaveTravel(date) {
 }
 
 async function checkArrivalPlacement({
-  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, ...options
+  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
-  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
+  // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS): only the staff picked-hour verdict asks for it, so an hour the
+  // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
+  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
   const roadTimes = require('./hint-road-times');
   // A staff save reads the road times its picker bought; it never buys.
   if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);

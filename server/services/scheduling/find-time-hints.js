@@ -18,6 +18,7 @@ const { checkArrivalPlacement } = require('./arrival-route');
 const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
 const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
 const { etParts } = require('../../utils/datetime-et');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 function toMin(hhmm) {
   const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
@@ -232,6 +233,8 @@ async function pickedByArrivalChecker({
       // Staff only: a technician's own picker spends no Google (Codex #6881),
       // counted against the staff user who asked (picker-road-spend.js).
       roads: paidRoads === true, roadSpender, pickerBudget,
+      // GATE_ROUTE_CHECK_LATE_DAYS: the list offers hours on an already-late day, so the pick is judged the same way.
+      ...(gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}),
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at
@@ -245,6 +248,7 @@ async function pickedByArrivalChecker({
       return {
         start: pickedWindow.start, fits: true, detour_minutes: fit.detourMinutes ?? null,
         drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
+        ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
       };
     }
     if (fit.reason === 'route_unverified') return noVerdict('route_unverified');
