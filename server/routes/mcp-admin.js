@@ -25,6 +25,8 @@
  * tool adds later never leaves by default; every string is cut at STRING_CAP
  * characters; UNTRUSTED_NOTE rides every answer. Every call is recorded in
  * tool_health_events (source 'mcp-admin'), never its arguments or answer.
+ *
+ * Route contract (statuses, limits, headers): docs/public-route-contracts.md.
  */
 
 const express = require('express');
@@ -33,6 +35,7 @@ const config = require('../config');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
 const { verifyMcpAdminKey, mcpKeyEligible } = require('../services/mcp-admin-key');
 const { keepPaths } = require('../utils/response-projection');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -40,6 +43,8 @@ const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const { createMcpRpc, createBodyErrorHandler } = require('../services/mcp-rpc');
 
 const router = express.Router();
+// no-store, noindex, no-referrer on every outcome — middleware/no-store.js.
+router.use(noStore);
 
 const PROTOCOL_VERSION = '2025-03-26';
 const MAX_BATCH = 10;
@@ -186,7 +191,7 @@ router.get('/', mcpAdminAuth, (req, res) => res.status(405).json({ error: 'strea
 
 // Mounted by server/index.js on /api/mcp-admin AHEAD of the global body
 // parsers: authenticate and rate-limit first, then parse with a small cap.
-const mcpAdminPreParsers = [mcpAdminAuth, mcpAdminLimiter, express.json({ limit: '64kb' }), createBodyErrorHandler({ limitLabel: '64kb' })];
+const mcpAdminPreParsers = [noStore, mcpAdminAuth, mcpAdminLimiter, express.json({ limit: '64kb' }), createBodyErrorHandler({ limitLabel: '64kb' })];
 
 module.exports = router;
 module.exports.mcpAdminPreParsers = mcpAdminPreParsers;

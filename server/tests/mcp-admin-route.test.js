@@ -145,6 +145,23 @@ describe('auth — fail closed', () => {
     expect(get.status).toBe(405);
   });
 
+  test('every outcome carries the no-store privacy headers, dark and served alike', async () => {
+    mockGateOn = false;
+    const dark = await fetch(`${baseUrl}/api/mcp-admin`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(dark.status).toBe(403);
+    expect(dark.headers.get('cache-control')).toMatch(/no-store/);
+    mockGateOn = true;
+    const served = await fetch(`${baseUrl}/api/mcp-admin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerKey()}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(served.status).toBe(200);
+    expect(served.headers.get('cache-control')).toMatch(/no-store/);
+    expect(served.headers.get('x-robots-tag')).toMatch(/noindex/);
+    expect(served.headers.get('referrer-policy')).toBe('no-referrer');
+  });
+
   test('adminAuthenticate refuses the MCP admin key, so it is never a staff session', async () => {
     const { adminAuthenticate } = require('../middleware/admin-auth');
     const res = { statusCode: null, payload: null, status(code) { this.statusCode = code; return this; }, json(body) { this.payload = body; return this; } };
