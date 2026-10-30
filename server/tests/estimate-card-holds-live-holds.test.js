@@ -176,6 +176,15 @@ test('appointment-rail visit a payer took over drops; the hold rail never asks',
   expect(mockResolvePayer).toHaveBeenCalledTimes(2);
 });
 
+test('appointment-rail visit on a recurring plan drops — the fee rail never charges it (owner ruling 2026-10-29)', async () => {
+  mockRows.appointment_card_requests = [
+    visit({ service_id: 'svc-plan', scheduled_date: '2026-09-06', is_recurring: true, recurring_pattern: 'quarterly' }),
+    visit({ service_id: 'svc-child', scheduled_date: '2026-09-07', recurring_parent_id: 'svc-anchor' }),
+    visit({ service_id: 'svc-once', scheduled_date: '2026-09-08' }),
+  ];
+  expect(flat(await run()).map((r) => r[2])).toEqual(['svc-once']);
+});
+
 test('an unresolvable payer drops the appointment-rail row (fail closed) with a warning', async () => {
   mockRows.appointment_card_requests = [visit({ service_id: 'svc-x' })];
   mockResolvePayer.mockRejectedValue(new Error('payer db down'));

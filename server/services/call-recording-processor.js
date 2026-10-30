@@ -118,7 +118,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -141,7 +141,7 @@ const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedCo
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, callApplicantHandlingLive } = require('../config/feature-gates');
 
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its
 // prerequisite GATE_CALL_FAIL_OPEN_BOOKING (the Assessment fallback and the
@@ -10498,6 +10498,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
           customerId: customerId || null,
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
+        thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
       await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
       // ...and once more after the write: a confirm that landed between the read
@@ -10555,6 +10556,10 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
         historicalReplay,
+        // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises
+        // when the call asks no service of its own; a mixed-purpose call keeps its real service promises.
+        thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)
+          && v2Result?.status === 'valid' && thirdPartyCallMakesNoServiceAsk(v2Result.extraction),
       });
       logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
       // The pipeline ignores the summary; the commitments backfill reads it to
@@ -10566,6 +10571,29 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
     return { error: err.message };
   }
   return null;
+}
+
+// Careers row for a job applicant's call (GATE_CALL_APPLICANT_HANDLING, dark).
+// Files ONE job_applications row (services/job-applications.js
+// createJobApplicationFromCall): status new, role technician, source phone_call,
+// idempotent by call and deduped by phone. It sends nothing to the applicant: no
+// text, no email, no invite, no AI screen. Needs a VALID V2 extraction whose
+// call_nature is job_applicant; a spam call files nothing. Never blocks the call.
+async function fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration = null }) {
+  if (!callApplicantHandlingLive() || extracted?.is_spam) return null;
+  const extraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+  if (extraction?.call_nature !== 'job_applicant') return null;
+  try {
+    const outcome = await require('./job-applications').createJobApplicationFromCall({ call, extraction, database: db, procGeneration });
+    logger.info(`[call-proc] Careers row for ${maskSid(callSid)}: ${outcome.reason}`);
+    return outcome;
+  } catch (err) {
+    // Code/name only: a knex message embeds the bound row (the applicant's name,
+    // phone, email and call summary), so the raw message is never logged.
+    const code = err?.code || err?.name || 'error';
+    logger.warn(`[call-proc] Careers row failed (non-blocking) for ${maskSid(callSid)}: ${code}`);
+    return { created: false, id: null, reason: 'error', error: code };
+  }
 }
 
 // Reschedule apply — when a matched existing customer's call moved a visit
@@ -12719,6 +12747,11 @@ const CallRecordingProcessor = {
       // path; enrichment keys on the webhook's pre-linked customer if any.
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
 
+      // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
+      // number, no service ask) ends on this path too; the step skips spam and
+      // every non-applicant call itself, and is fenced like the main path.
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
+
       // Service-request voicemail that the workable-lead gate declined
       // (existing customer, or non-lead call_type veto): surface a callback
       // bell instead of ending silent. Bell only — never customer comms.
@@ -13502,6 +13535,8 @@ const CallRecordingProcessor = {
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
           // routing reason, so it is never in finalFlags.
           for (const code of noActionCallCards(v2Extraction, { canonicalStreet: extracted?.address_line1 })) unneededCards.add(code);
+          // GATE_CALL_APPLICANT_HANDLING: an applicant / vendor call files no customer-only card.
+          for (const code of thirdPartyCustomerOnlyCards(v2Extraction, { gateOn: callApplicantHandlingLive() })) unneededCards.add(code);
           // A voicemail whose office callback reached a solicitor (the standing
           // callback_verdict, written under the parent lock, so it is current
           // for this pass): the asks a return call would have answered are
@@ -13985,6 +14020,20 @@ const CallRecordingProcessor = {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
+        // GATE_CALL_APPLICANT_HANDLING: an applicant / vendor call files no customer-only
+        // review card (address, name, email read-back, consent). Removed in place, like
+        // the settled-email reasons above, so every later reader of needsConfirmation
+        // (cards, review_status, the email hold) sees the same list.
+        {
+          const applicantDropped = new Set(thirdPartyCustomerOnlyCards(
+            v2Result?.status === 'valid' ? v2Ext : null, { gateOn: callApplicantHandlingLive() },
+          ));
+          if (applicantDropped.size) {
+            for (let i = needsConfirmation.length - 1; i >= 0; i -= 1) {
+              if (applicantDropped.has(needsConfirmation[i])) needsConfirmation.splice(i, 1);
+            }
+          }
+        }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -14199,6 +14248,17 @@ const CallRecordingProcessor = {
         if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
+        }
+        // GATE_CALL_APPLICANT_HANDLING: no email read-back card for an applicant / vendor call.
+        {
+          const applicantDropped = new Set(thirdPartyCustomerOnlyCards(
+            v2Result?.status === 'valid' ? v2Result.extraction : null, { gateOn: callApplicantHandlingLive() },
+          ));
+          if (applicantDropped.size) {
+            for (let i = emailReasons.length - 1; i >= 0; i -= 1) {
+              if (applicantDropped.has(emailReasons[i])) emailReasons.splice(i, 1);
+            }
+          }
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
@@ -14537,7 +14597,17 @@ const CallRecordingProcessor = {
         // shared) in between, so the callback card no longer applies. Retire it (Codex #6419 r9).
         await require('./call-family-name-link').retireCallbackSpokenNumberCard({ callLogId: call.id, procToken });
       }
-      if (existing) {
+      // GATE_CALL_APPLICANT_HANDLING: where the gate drops this call's customer
+      // review cards (an applicant / vendor call that asks no service), a phone
+      // match is NOT linked. The number may be one the caller named, and with the
+      // cards gone nothing would review what a link feeds: the email / address
+      // backfill below and the profile enrichment (access codes, pets, notes).
+      const thirdPartyMatchUnlinked = !!existing && thirdPartyCustomerOnlyCards(
+        v2Result?.status === 'valid' ? v2Result.extraction : null, { gateOn: callApplicantHandlingLive() },
+      ).length > 0;
+      if (thirdPartyMatchUnlinked) {
+        logger.info(`[call-proc] ${maskSid(callSid)}: applicant/vendor call matched a customer by phone; not linked (GATE_CALL_APPLICANT_HANDLING)`);
+      } else if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
         // Update with any new info (email + address; shared with the
@@ -24622,6 +24692,9 @@ const CallRecordingProcessor = {
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
 
+      // GATE_CALL_APPLICANT_HANDLING: a job applicant's call files one Careers row, comms-free.
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
+
       // A callback once classified spam that this pass settled on any other
       // verdict gives the parent voicemail back what the spam verdict closed
       // (settleParentForCallbackVerdict, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
@@ -25662,6 +25735,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
+  fileApplicantCareersRowStep,
   applyCallRescheduleStep,
   applyRescheduleFollowUps,
   reviseDispositionAfterAppliedMove,

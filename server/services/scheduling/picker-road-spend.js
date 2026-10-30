@@ -25,6 +25,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const limitNotice = require('./picker-road-limit-notice');
 
 const MILLS = { pro: 10, plain: 5 }; // tenths of a cent per element
 const ACCOUNT = 'all';
@@ -77,6 +78,7 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
   const limits = caps();
   const day = etDateString(now);
   const monthStart = `${day.slice(0, 7)}-01`;
+  let monthMills = 0;
   try {
     await conn.transaction(async (trx) => {
       const earlier = await trx('picker_road_spend')
@@ -99,20 +101,26 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
       const accountDay = costMills(account.pro_elements, account.plain_elements);
       if (costMills(user.pro_elements, user.plain_elements) > limits.userDayMills) throw new CapReached('user_daily_cap');
       if (accountDay > limits.dayMills) throw new CapReached('daily_cap');
-      if (costMills(earlier?.pro, earlier?.plain) + accountDay > limits.monthMills) throw new CapReached('monthly_cap');
+      monthMills = costMills(earlier?.pro, earlier?.plain) + accountDay;
+      if (monthMills > limits.monthMills) throw new CapReached('monthly_cap');
       // The running day, so the logs read as the bill does (list price).
       logger.info(`[picker-road-spend] +${pro} traffic-aware, +${plain} plain lookups: today $${(accountDay / 1000).toFixed(2)}`
         + ` of $${(limits.dayMills / 1000).toFixed(2)}`);
     });
-    return { allowed: true, day };
   } catch (err) {
     if (err instanceof CapReached) {
       warn(`${err.message} reached: Google road times paused, the pickers use the model`);
+      limitNotice.noteRoadRefusal(err.message);
       return { allowed: false, reason: err.message };
     }
     warn(`counter unavailable, no Google (fail closed): ${err && err.message}`);
+    limitNotice.noteRoadRefusal('counter_unavailable');
     return { allowed: false, reason: 'counter_unavailable' };
   }
+  // GATE_PICKER_ROAD_LIMIT_NOTICE: the month's one 80% notice (never throws,
+  // and outside the transaction so a failed write never refuses a purchase).
+  await limitNotice.noteMonthSpend({ day, monthMills, capMills: limits.monthMills });
+  return { allowed: true, day };
 }
 
 /**
