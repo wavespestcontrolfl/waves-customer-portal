@@ -28,7 +28,7 @@ function fixture(url) {
   const p = url.pathname;
   if (p === "/api/admin/auth/me") return { id: "fixture-owner", name: "Fixture operator", role: "admin" };
   if (p === "/api/health") return { status: "ok", gates: {} };
-  if (p === "/api/admin/feature-flags") return { flags: { "admin-navigation": true } };
+  if (p === "/api/admin/feature-flags") return { flags: {} };
   if (p === "/api/admin/notifications/unread-count") return { count: 0 };
   if (p === "/api/admin/usage/track") return {};
   if (p === "/api/admin/communications/unread-count") return { conversations: 0, messages: 0 };

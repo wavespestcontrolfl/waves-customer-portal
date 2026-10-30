@@ -177,8 +177,13 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
     route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
     latest_start_min: timeToMinutes(windowStart),
     ...(fit.travelSource ? { drive_source: GOOGLE_SOURCES.has(fit.travelSource) ? 'google' : 'estimate' } : {}),
+    // GATE_ROUTE_CHECK_LATE_DAYS: this day's existing stops already arrive late; the hour adds no new late stop.
+    ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
   };
 }
+
+// GATE_ROUTE_CHECK_LATE_DAYS, read at call time: the enumerator's `lateDays` option, or nothing (byte-identical).
+const lateDayLimits = () => (gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {});
 
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
@@ -197,6 +202,10 @@ async function findArrivalWindowSlots(opts) {
   // driven on Google or re-checked (the source itself asks Google for
   // nothing until a route preloads through it).
   const roadCheck = opts.pickerRoadCheck === true;
+  // GATE_ROUTE_CHECK_LATE_DAYS (owner 2026-10-29): a day whose existing stops already break an arrival
+  // promise still lists the hours that add no new late stop, flagged day_already_late. Read at call time;
+  // every caller of this finder is a staff or technician list. Off: no limit added, byte-identical.
+  const lateLimits = lateDayLimits();
   const roads = require('./hint-road-times');
   const windows = roads.roadWindows();
   const roadTravel = roads.createPickerTravel({ spender: opts.roadSpender, budget: opts.pickerBudget });
@@ -239,7 +248,7 @@ async function findArrivalWindowSlots(opts) {
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES } });
+      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES, ...lateLimits } });
     }
   }
   // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK):

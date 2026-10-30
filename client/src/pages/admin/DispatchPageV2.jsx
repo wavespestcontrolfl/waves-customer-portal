@@ -1645,6 +1645,8 @@ export default function DispatchPageV2({
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
+          // GATE_CALL_PREPAY_CHOICE: Book it on a call where the caller chose annual prepay.
+          defaultAnnualPrepay={newApptDefaults?.annualPrepay === true}
           // GATE_NEW_APPT_ADDRESS_TIMES: a new caller's picked address alone answers the time box.
           addressFirstTimes={safeData.addressFirstTimes === true}
           // GATE_NEW_APPT_PHONE_MATCH: phone match as it is typed, and one Save adds and books a new caller.
