@@ -498,17 +498,35 @@ describe('customer estimate copy', () => {
     expect(text).not.toMatch(/\bhepa\b|epa-registered|disinfect|sanitiz/);
   });
 
-  test('the pack builder returns the entry for the sold row', () => {
-    const copy = resolveOneTimeServiceCopy({ service: KEY, name: NAME, price: 169 });
-    expect(copy).toMatchObject({ key: KEY, outcome: entry.outcome, terms: entry.terms });
-    expect(copy.includes).toEqual(entry.includes);
+  test('the pack builder returns the entry for the sold row, with the free recheck as its last bullet', () => {
+    const copy = resolveOneTimeServiceCopy({ service: KEY, name: NAME, price: 199 });
+    expect(copy).toMatchObject({ key: KEY, outcome: entry.outcome, terms: entry.terms, assurance: entry.assurance });
+    expect(copy.includes).toEqual([...entry.includes, entry.assurance]);
+  });
+
+  test('could not find it (owner 2026-10-30): the estimate says it up front, and the rodent claim scope shows every line', () => {
+    const { copyAllowedInScope } = require('../../shared/estimate-copy-claims.cjs');
+    const text = [entry.outcome, ...entry.includes, entry.assurance, entry.hero.sub].join(' ');
+    expect(text).toMatch(/If we can't find it, we treat the odor where it is strongest/);
+    expect(text).toMatch(/The price covers the search, so it is the same whether or not we find it/);
+    expect(text).toMatch(/two to four weeks/);
+    expect(entry.assurance).toBe('If flies or a stronger smell show where it is within 14 days, we come back once at no charge');
+    expect(text).toMatch(/We never open a wall or ceiling without your OK/);
+    // No line promises a find.
+    expect(text).not.toMatch(/is found and removed|finds and removes/);
+    // A rodent estimate shows only the satisfaction claim scope; none of these lines may be filtered out.
+    for (const line of [entry.outcome, ...entry.includes, entry.assurance, entry.hero.sub]) {
+      expect(copyAllowedInScope(line, 'satisfaction')).toBe(true);
+    }
   });
 });
 
 describe('every reader decision is wired', () => {
-  test('rain-fit keeps the default: a catalog key not on the rain-OK list keeps a dry hour (owner decides if it joins the list)', () => {
+  test('rain-fit books it as indoor work, like rodent sanitation (owner 2026-10-30: "THIS JOB IS NOT OUTDOORS")', () => {
     const rainFit = require('../services/scheduling/rain-fit');
-    expect(rainFit.rainClassOf({ name: NAME, serviceKey: KEY })).toBe('outdoor');
+    expect(rainFit.RAIN_OK_KEYS.has(KEY)).toBe(true);
+    expect(rainFit.rainClassOf({ name: NAME, serviceKey: KEY })).toBe('ok');
+    expect(rainFit.rainClassOf({ name: 'Rodent Sanitation', serviceKey: 'rodent_sanitation_light' })).toBe('ok');
   });
 
   test('visit facts: the key joins the rodent_sanitation line', () => {
@@ -524,5 +542,64 @@ describe('every reader decision is wired', () => {
 
   test('the job card lists it as a non-chemical rodent service', () => {
     expect(fs.readFileSync(path.join(__dirname, '..', 'services', 'job-card.js'), 'utf8')).toMatch(/'rodent_inspection', 'rodent_guarantee', 'rodent_dead_animal_removal'/);
+  });
+});
+
+describe('could not find it: the tech form and the service report (owner 2026-10-30)', () => {
+  const { buildTodaysResult, validateTypedFindings } = require('../services/service-report/activity-indicators');
+  const { PROJECT_TYPES } = require('../services/project-types');
+  const NOT_FOUND = {
+    sanitation_areas: 'Attic',
+    contamination_level: 'Light',
+    sanitation_work_completed: 'Rodent not found after search, Odor treated where strongest',
+    sanitation_limitations: 'Area not fully accessible',
+  };
+  const report = (values, extra = {}) => buildTodaysResult({
+    projectType: 'rodent_sanitation', reportTypeLabel: 'Rodent Sanitation Summary', values, activity: null, visitSequence: 1, ...extra,
+  });
+
+  test('the form the removal uses offers the two choices', () => {
+    const work = PROJECT_TYPES.rodent_sanitation.findingsFields.find((f) => f.key === 'sanitation_work_completed');
+    expect(work.options).toEqual(expect.arrayContaining(['Removed dead rodent', 'Rodent not found after search', 'Odor treated where strongest']));
+  });
+
+  test('a searched-not-found visit: the report says so, never claims a cleanup, and offers the free recheck', () => {
+    const result = report(NOT_FOUND);
+    expect(result.headline).toBe('We searched for the dead rodent today but could not find it.');
+    expect(result.body).toContain('We searched the attic.');
+    expect(result.body).toMatch(/searched for the dead rodent but could not find it/);
+    expect(result.body).toMatch(/treated the odor where it was strongest/);
+    expect(result.body).toContain('A dead rodent\'s smell usually fades within two to four weeks.');
+    expect(result.body).toContain('If flies or a stronger smell show where it is within 14 days, call us and we will come back once at no charge.');
+    expect(result.body).toContain('Some areas had limitations: area not fully accessible.');
+    expect(`${result.headline} ${result.body}`).not.toMatch(/cleaned and sanitized|Completed rodent sanitation/);
+  });
+
+  test('the tech\'s own report text replaces the description but never drops the recheck offer', () => {
+    const result = report(NOT_FOUND, { technicianReportBody: 'Checked the attic and garage. The smell was strongest near the north eave.' });
+    expect(result.headline).toBe('We searched for the dead rodent today but could not find it.');
+    expect(result.body).toMatch(/^Checked the attic and garage\./);
+    expect(result.body).toContain('within 14 days, call us and we will come back once at no charge.');
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('a removal that found it keeps the existing report', () => {
+    const result = report({ ...NOT_FOUND, sanitation_work_completed: 'Removed dead rodent, Deodorized affected areas' });
+    expect(result.headline).toBe('Light rodent contamination was cleaned and sanitized today.');
+    expect(result.body).not.toMatch(/within 14 days/);
+  });
+
+  test('"Removed dead rodent" and "Rodent not found after search" together are refused; not found alone is legal', () => {
+    const both = validateTypedFindings({
+      type: 'rodent_sanitation', expectedType: 'rodent_sanitation', enforceRequired: true,
+      values: { ...NOT_FOUND, sanitation_work_completed: 'Removed dead rodent, Rodent not found after search' },
+    });
+    expect(both.ok).toBe(false);
+    expect(both.errors.join(' ')).toMatch(/contradict each other/);
+    const alone = validateTypedFindings({
+      type: 'rodent_sanitation', expectedType: 'rodent_sanitation', enforceRequired: true,
+      values: { ...NOT_FOUND, sanitation_work_completed: 'Rodent not found after search' },
+    });
+    expect(alone.ok).toBe(true);
   });
 });

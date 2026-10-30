@@ -381,6 +381,19 @@ edit keeps its prices and minutes and the panel's inline edits save), and a Pric
 save strips it; a malformed or deleted row leaves the code defaults on the next sync). Migration `20261029160100` brings a row
 still holding the 10-29 seed, and the catalog's three price cells, to the one price.
 
+**Could not find it (owner 2026-10-30): the customer pays the full price.** The price
+covers the search. The estimate says so before the customer accepts
+(`estimate-one-time-copy.json`): if the rodent can't be found, the odor is treated
+where it is strongest, the smell usually fades in two to four weeks, and one free
+recheck comes within 14 days if flies or a stronger smell show where it is (the
+assurance bullet). No wall or ceiling is opened without the customer's OK. The tech
+records `Rodent not found after search` (and `Odor treated where strongest`) on the
+rodent sanitation form the removal uses; that report says the search happened, never
+claims a cleanup, and carries the recheck offer, and the form refuses it beside
+`Removed dead rodent`. The office books the recheck as a $0 visit. **Rain:** the key is
+on the scheduler's rain-OK list (`rain-fit.js`), like rodent sanitation (owner
+2026-10-30: indoor work).
+
 **Gate rule: NEW QUOTES ONLY.** With the gate off the estimator does not offer the
 service and the engine refuses a `services.deadAnimalRemoval` input with a 400
 `failClosed` `PricingError` (`DEAD_ANIMAL_REMOVAL_GATED`, thrown before the commercial

@@ -421,6 +421,9 @@ const PROJECT_TYPES = {
         'HEPA vacuum / controlled cleanup', 'Disinfected / sanitized affected areas',
         'Deodorized affected areas', 'Bagged / disposed contaminated debris',
         'Insulation removal recommended', 'Limited cleanup due to access',
+        // Dead Rodent Removal & Odor Treatment uses this form (owner 2026-10-30: when the rodent cannot be found,
+        // the customer pays the full price, the odor is treated, and one free recheck is offered within 14 days).
+        'Rodent not found after search', 'Odor treated where strongest',
       ] },
       { key: 'sanitation_limitations', label: 'Limitations', type: 'chips', section: 'Limitations', options: [
         'Area not fully accessible', 'Heavy storage limited cleaning',

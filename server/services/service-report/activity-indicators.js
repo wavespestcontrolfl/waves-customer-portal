@@ -1352,6 +1352,11 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (work.length && work.every((c) => c === 'Insulation removal recommended')) {
       errors.push('"Insulation removal recommended" alone records no cleanup work — add the cleanup performed or clear the chip');
     }
+    // Dead rodent removal: a visit either removed the rodent or searched and could not find it (the not-found report
+    // says so and offers the free recheck), never both.
+    if (work.includes('Removed dead rodent') && work.includes('Rodent not found after search')) {
+      errors.push('"Removed dead rodent" and "Rodent not found after search" contradict each other — keep the one that happened');
+    }
   }
   if (type === 'rodent_inspection' && enforceRequired && String(values.activity_found) === 'Yes') {
     // Evidence with activity_found "No" stays legal — old droppings with no
@@ -1717,6 +1722,8 @@ const WORK_PHRASE_FIELDS = {
       'Bagged / disposed contaminated debris': 'bagged and disposed of contaminated debris',
       'Insulation removal recommended': 'flagged contaminated insulation for removal',
       'Limited cleanup due to access': 'completed a limited cleanup where access allowed',
+      'Rodent not found after search': 'searched for the dead rodent but could not find it',
+      'Odor treated where strongest': 'treated the odor where it was strongest',
     },
   },
   one_time_lawn_treatment: {
@@ -3515,6 +3522,27 @@ function buildTodaysResult({
         evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
         whatWeDid,
       ].filter(Boolean);
+    // Dead rodent removal, searched and not found (owner 2026-10-30): the customer pays the full price, so the report
+    // must not claim a cleanup. It says the search happened and carries the free-recheck offer in every body.
+    const notFound = String(values.sanitation_work_completed || '')
+      .split(',').map((s) => s.trim()).includes('Rodent not found after search');
+    if (notFound) {
+      const notFoundBody = sanitationReportBody
+        ? [sanitationReportBody]
+        : [areas.length ? `We searched the ${joinPhrases(areas)}.` : null, whatWeDid].filter(Boolean);
+      return {
+        headline: 'We searched for the dead rodent today but could not find it.',
+        body: [
+          ...notFoundBody,
+          'A dead rodent\'s smell usually fades within two to four weeks.',
+          'If flies or a stronger smell show where it is within 14 days, call us and we will come back once at no charge.',
+          ...(limitations.length ? [`Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`] : []),
+          nextStep,
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
+        nextStep,
+        ...(sanitationReportBody ? { bodySource: 'technician_report' } : {}),
+      };
+    }
     return {
       headline: `${level.charAt(0).toUpperCase()}${level.slice(1)} rodent contamination was cleaned and sanitized today.`,
       body: [...descriptive, ...mandated].join(' ').replace(/\s+/g, ' ').trim(),
