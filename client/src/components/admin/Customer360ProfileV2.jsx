@@ -3440,6 +3440,7 @@ function AdminAutopayPanelV2({
 
   // Three distinct states: still reading, could not read (retry offered), and
   // the status the server returned. "unknown" is only for a 200 with no state.
+  // A failed re-read (e.g. after Charge now) keeps the last status, flagged.
   const readFailed = loadError && !state;
   const stateLabel = readFailed
     ? "Could not read"
@@ -3474,9 +3475,13 @@ function AdminAutopayPanelV2({
                 {stateLabel}
               </span>{" "}
             </div>
-            {readFailed && (
+            {loadError && (
               <div role="alert" className="text-ui-label text-alert-fg mt-1.5 flex items-center gap-2 flex-wrap">
-                <span>Couldn't read the auto-pay status.</span>
+                <span>
+                  {state
+                    ? "Couldn't refresh the auto-pay status. It may be out of date."
+                    : "Couldn't read the auto-pay status."}
+                </span>
                 <button data-ui-text-action
                   type="button"
                   className="underline"
@@ -10107,7 +10112,7 @@ function CustomerOverlayPresentation({
         aria-modal="true"
         aria-labelledby={CUSTOMER_OVERLAY_TITLE_ID}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900 outline-none"
       >
         <CustomerProfileStyles />
         <CustomerOverlayHeader {...headerProps} />

@@ -178,6 +178,21 @@ describe('Customer360ProfileV2 audit fixes (C04-C09)', () => {
     expect(await screen.findByText("Couldn't read the auto-pay status.")).toBeInTheDocument();
   });
 
+  it('flags a failed auto-pay re-read after Charge now instead of showing the old status as current (C07)', async () => {
+    const { state } = installFetch({ customer: { monthlyRate: 55 } });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await openOverlay();
+    expect(await screen.findByText('active')).toBeInTheDocument();
+
+    state.autopayFails = true;
+    fireEvent.click(screen.getByRole('button', { name: /Charge now/ }));
+
+    expect(await screen.findByText("Couldn't refresh the auto-pay status. It may be out of date.")).toBeInTheDocument();
+    state.autopayFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText("Couldn't refresh the auto-pay status. It may be out of date.")).not.toBeInTheDocument());
+  });
+
   it('keeps Unknown for an autopay read that returns no state (C07)', async () => {
     installFetch();
     const original = global.fetch;
