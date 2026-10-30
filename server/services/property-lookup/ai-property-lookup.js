@@ -3154,7 +3154,14 @@ function normalizeCountyCityName(value) {
 const STREET_SUFFIX_NEVER_CANONICALIZED = new Set(['TRLR']);
 // Not in the USPS table: Google abbreviates Loop as "Lp" (live miss: "SKIPPING
 // STONE LP" vs the roll's "… LOOP") and writes Pointe for Point.
-const STREET_SUFFIX_SUPPLEMENTAL_ALIASES = { LP: 'LOOP', POINTE: 'PT' };
+// "Tr" is the common hand abbreviation of Trail (live miss 10-30: a lead typed
+// "… Tr" and the audit hunted a street literally named "… TR", so a house the
+// Manatee roll lists as "… TRL" read "not on the county roll"). Some rolls
+// write TR too (live reads 10-30): Sarasota on 7 rows of a Trail whose other
+// 122 rows read TRL, Hillsborough beside the same streets' TRL rows. Sarasota
+// also writes TR for one Terrace (41 rows); a typed "Ter" missed those rows
+// before this alias and still does, and a typed "Tr" matches them either way.
+const STREET_SUFFIX_SUPPLEMENTAL_ALIASES = { LP: 'LOOP', POINTE: 'PT', TR: 'TRL' };
 // Long forms normalizeCountyStreetLine already replaces GLOBALLY.
 const GLOBAL_LONG_SUFFIXES = new Set([
   'AVENUE', 'BOULEVARD', 'CIRCLE', 'COURT', 'DRIVE', 'LANE', 'PARKWAY', 'PLACE', 'ROAD', 'STREET', 'TERRACE', 'TRAIL',
