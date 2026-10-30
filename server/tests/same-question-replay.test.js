@@ -29,6 +29,17 @@ test('the 10-20 run is not blocked by a post that did not exist yet, nor by its 
   expect(first.reason).toBe('no_owner');
 });
 
+test('a post dated the day AFTER the run is not an owner (calendar days in ET, not a 24-hour slack)', () => {
+  const nextDay = post('/pest-control/millipede-guide/', 'Millipede Guide', 'millipede guide', '2026-10-21');
+  const sameDay = post('/pest-control/millipede-basics/', 'Millipede Basics', 'millipede basics', '2026-10-20');
+  const run = { id: 'r6', claimed_at: '2026-10-20T13:00:00Z', target_keyword: 'florida millipede', voice_constraints: {} };
+  expect(replay([run], [nextDay])[0].would_block).toBe(false);
+  expect(replay([run], [sameDay])[0].would_block).toBe(true);
+  // 02:00Z on the 21st is still the evening of the 20th in New York.
+  expect(replay([{ ...run, claimed_at: '2026-10-21T02:00:00Z' }], [sameDay])[0].would_block).toBe(true);
+  expect(replay([{ ...run, claimed_at: '2026-10-21T02:00:00Z' }], [nextDay])[0].would_block).toBe(false);
+});
+
 test('a run with no brief falls back to the queue row query; the operator working title and slug are the next fallbacks', () => {
   const noBrief = { id: 'r3', claimed_at: '2026-10-29T09:00:00Z', opp_query: 'millipedes in sarasota', voice_constraints: null };
   expect(candidateOf(noBrief).query).toBe('millipedes in sarasota');

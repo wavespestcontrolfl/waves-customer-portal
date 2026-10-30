@@ -12,8 +12,9 @@
  * corrections so the replay matches what the runner would have seen:
  *   - the run's own published post is excluded (it is live now, it was not
  *     then), and
- *   - posts dated AFTER the run are excluded when their frontmatter carries a
- *     date (the 10-20 millipede run must not "match" the 10-28 post).
+ *   - posts dated on a LATER calendar day (ET) than the run are excluded when
+ *     their frontmatter carries a date (the 10-20 millipede run must not
+ *     "match" the 10-28 post, nor a post dated the next day).
  *
  * Usage:
  *   node server/scripts/same-question-replay.js                  # last 14 days, blocks + summary
@@ -50,14 +51,23 @@ function intFlag(args, name, fallback) {
   return Number(args[name]);
 }
 
+// A post's frontmatter date as a calendar day (YYYY-MM-DD), or null when it
+// has none. A date-only value is taken as written; a timestamp is read in ET
+// like every other date in the portal.
 function postDate(body) {
   try {
     const { parse } = require('../services/content-astro/frontmatter');
+    const { etDateString } = require('../utils/datetime-et');
     const data = parse(String(body || '')).data || {};
     for (const key of DATE_KEYS) {
-      if (data[key] == null) continue;
-      const t = Date.parse(String(data[key]));
-      if (Number.isFinite(t)) return t;
+      const v = data[key];
+      if (v == null) continue;
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.trim())) return v.trim();
+      const d = v instanceof Date ? v : new Date(String(v));
+      if (!Number.isFinite(d.getTime())) continue;
+      // yaml reads a bare date as UTC midnight: that is the day as written.
+      const utcMidnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
+      return utcMidnight ? d.toISOString().slice(0, 10) : etDateString(d);
     }
   } catch { /* undated posts always count */ }
   return null;
@@ -91,18 +101,19 @@ function replay(runs, corpus) {
   const dateByUrl = new Map();
   for (const item of corpus) {
     if (!item || typeof item.body !== 'string') continue;
-    const t = postDate(item.body);
-    if (t != null) dateByUrl.set(String(item.url || '').toLowerCase(), t);
+    const day = postDate(item.body);
+    if (day != null) dateByUrl.set(String(item.url || '').toLowerCase(), day);
   }
+  const { etDateString } = require('../utils/datetime-et');
   return runs.map((run) => {
-    const at = run.claimed_at ? new Date(run.claimed_at).getTime() : null;
+    const runDay = run.claimed_at ? etDateString(new Date(run.claimed_at)) : null;
     const selfUrl = run.published_url ? gate._internals.normalizeSlug(run.published_url) : null;
     const posts = index.posts.filter((p) => {
       if (selfUrl && p.url === selfUrl) return false;
-      const d = dateByUrl.get(String(p.url || '').toLowerCase());
-      // A post dated after the run did not exist for it. Compare by day: a
-      // frontmatter date has no time of day.
-      return !(d != null && at != null && d > at + 86400_000);
+      const day = dateByUrl.get(String(p.url || '').toLowerCase());
+      // A post dated on a LATER calendar day (ET) than the run did not exist
+      // for it. A same-day post counts: a frontmatter date has no time of day.
+      return !(day != null && runDay != null && day > runDay);
     });
     const cand = candidateOf(run);
     const r = gate.evaluateSameQuestion(cand, { index: { ...index, posts } });
