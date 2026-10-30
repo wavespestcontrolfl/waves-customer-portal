@@ -289,7 +289,9 @@ describeDb('call prepay choice (PostgreSQL)', () => {
         estimateStatus: 'sent', customerId: est.customer_id, bookedVisits: { ids: [visitId], pin: expect.any(String), noAddons: true },
       });
       expect(acceptSpy.mock.calls[0][0].expected.bookedVisits.pin).toContain(String(visitId));
-      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
+      // The link is the accept's own last step (under its lock); this service never links on the side,
+      // so with the accept stubbed the visit stays unlinked.
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
       expect(await cardsFor(callLogId).first()).toMatchObject({ status: 'resolved', resolution_source: 'human' });
     });
 

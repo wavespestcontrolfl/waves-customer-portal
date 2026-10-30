@@ -576,6 +576,21 @@ function bookedVisitsPinOf(rows = []) {
   return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');
 }
 
+// The call-prepay-choice card's last step INSIDE the accept: lock the booked visits (held only until the
+// commit, milliseconds), re-check them against the pin and link them to the estimate. A reschedule, cancel,
+// re-link or add-on that committed before the lock fails the check and rolls the whole accept back (no
+// invoice, no term); one that waits on the lock lands after the commit, an ordinary later edit. The lock is
+// taken last on purpose: settlement takes a visit FOR UPDATE NOWAIT, so the window it can collide in stays
+// as short as any other visit edit.
+async function linkPinnedBookedVisits(trx, estimateId, pinned) {
+  const ids = Array.isArray(pinned.ids) ? [...new Set(pinned.ids.map(String))] : [];
+  if (!ids.length) throw cardChanged();
+  const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate().select(BOOKED_VISIT_PIN_FIELDS);
+  if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== pinned.pin) throw cardChanged();
+  if (pinned.noAddons === true && await bookedVisitsHaveAddons(trx, ids)) throw cardChanged();
+  await trx('scheduled_services').whereIn('id', ids).update({ source_estimate_id: estimateId });
+}
+
 // Whether any booked visit carries an add-on line (annual prepay cannot cover one). A savepoint, so an
 // environment without the table (no add-on line can exist there) never aborts the accept.
 async function bookedVisitsHaveAddons(trx, ids) {
@@ -649,10 +664,9 @@ const CARD_PIN_CHECKS = [
   },
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
-  // The booked visits the term start and coverage came from (call-prepay-choice): a reschedule, cancel,
-  // re-owner or link since the card's check refuses before the invoice and term exist. Read with NO row
-  // lock: invoice settlement takes the visit FOR UPDATE NOWAIT, so a held lock would fail a payment
-  // (visit_busy). A change after this commit is an ordinary later reschedule, as on the New appointment form.
+  // The booked visits the term start and coverage came from (call-prepay-choice): an early, unlocked check so
+  // a change since the card's read refuses before the conversion runs. The authority is the last step,
+  // linkPinnedBookedVisits, which re-checks under a lock held only until the commit.
   {
     phase: 'customer',
     key: 'bookedVisits',
@@ -1350,6 +1364,7 @@ async function acceptInTransaction(trx, ctx) {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
   await recordTableChanges(trx, ctx, updatedEstimate);
+  if (ctx.expected?.bookedVisits) await linkPinnedBookedVisits(trx, ctx.estimateId, ctx.expected.bookedVisits);
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,

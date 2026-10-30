@@ -425,10 +425,12 @@ export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = fa
   const p = parsePayload(payload);
   if (!p) return null;
   const amount = prepayMoney(callPrepay?.amount ?? p.invoice_total);
+  // The live plan the tap's terms token covers (callPrepay.plan); the facts the card was filed with otherwise.
+  const plan = callPrepay?.plan || p;
   const rows = [
     ["Caller chose", "Annual prepay"],
-    ["Plan", [p.service_type, p.cadence && String(p.cadence).replace(/_/g, " "), p.covered_visits && `${p.covered_visits} visits a year`].filter(Boolean).join(" · ")],
-    ["First visit", p.first_visit_date],
+    ["Plan", [plan.service_type, plan.cadence && String(plan.cadence).replace(/_/g, " "), plan.covered_visits && `${plan.covered_visits} visits a year`].filter(Boolean).join(" · ")],
+    ["First visit", plan.first_visit_date],
     ["Invoice", amount && `${amount} (a draft; it is not sent)`],
     ["Customer gets", callPrepay?.consumer_notice ? "The state termite notice to sign (as with Mark accepted)" : null],
   ].filter(([, value]) => value);

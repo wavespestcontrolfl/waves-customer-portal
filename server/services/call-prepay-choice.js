@@ -451,18 +451,12 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken =
   // Another session accepted it between our read and the accept: the short-circuit made no invoice and no term.
   if (result?.alreadyAccepted) return refusal('already_accepted');
 
-  // Link the booked rows to the estimate, as the form does once the win is recorded. A failed link is not a
-  // failed accept: the invoice and term exist, so the answer carries a warning for the office.
+  // The accept linked the booked visits to the estimate inside its own transaction (the bookedVisits pin's
+  // last step). The property link stays best-effort, as on the form.
   const warnings = Array.isArray(result?.warnings) ? [...result.warnings] : [];
-  try {
-    await db('scheduled_services').whereIn('id', evaluation.bookedIds).update({ source_estimate_id: evaluation.estimate.id });
-    await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
-      estimateId: evaluation.estimate.id, customerId: call.customer_id, onlyServiceIds: evaluation.bookedIds,
-    }).catch((e) => logger.warn(`[call-prepay-choice] property link skipped for estimate ${evaluation.estimate.id}: ${e.code || e.name || 'error'}`));
-  } catch (e) {
-    logger.error(`[call-prepay-choice] FIX: estimate ${evaluation.estimate.id} accepted but the visits were not linked: ${e.code || e.name || 'error'}`);
-    warnings.push('The estimate was accepted, but the booked visit could not be linked to it. Link the visit to the estimate by hand.');
-  }
+  await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
+    estimateId: evaluation.estimate.id, customerId: call.customer_id, onlyServiceIds: evaluation.bookedIds,
+  }).catch((e) => logger.warn(`[call-prepay-choice] property link skipped for estimate ${evaluation.estimate.id}: ${e.code || e.name || 'error'}`));
   return { ok: true, invoiceId: result?.conversion?.draftInvoiceId || null, amount: evaluation.amount, warnings };
 }
 

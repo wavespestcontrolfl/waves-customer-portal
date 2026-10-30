@@ -1261,6 +1261,13 @@ describe('call_prepay_choice card', () => {
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
   });
 
+  it('shows the live plan the terms token covers, not the facts the card was filed with', async () => {
+    load({ ...prepayCard, call_prepay: { ...prepayCard.call_prepay, plan: { service_type: 'Quarterly Pest Control Service', cadence: 'quarterly', covered_visits: 4, first_visit_date: '2026-11-12' } } });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText(/2026-11-12/)).toBeInTheDocument();
+  });
+
   it('says before the tap when the accept also sends the state termite notice; says nothing is sent otherwise', async () => {
     load({ ...prepayCard, call_prepay: { can_accept: true, amount: 472, consumer_notice: true, message: null } });
     const first = render(<TriageInboxTabV2 isAdmin />);

@@ -1922,7 +1922,14 @@ async function stampCallPrepayActions(items, isAdmin = false) {
       const payload = parseCardPayload(item) || {};
       const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: item.customer_id, estimateId: payload.estimate_id || null });
       item.call_prepay = ev.ok
-        ? { can_accept: true, amount: ev.amount, consumer_notice: ev.consumerNotice === true, preview_token: previewTokenOf(ev), message: null }
+        ? {
+          can_accept: true, amount: ev.amount, consumer_notice: ev.consumerNotice === true, preview_token: previewTokenOf(ev), message: null,
+          // The plan the token covers, from the same read: the card shows these, not the facts it was filed with.
+          plan: {
+            service_type: ev.coverage.coverageServiceType, cadence: ev.coverage.coverageCadence,
+            covered_visits: ev.coverage.coverageVisitCount, first_visit_date: ev.termStart,
+          },
+        }
         : { can_accept: false, amount: payload.invoice_total ?? null, message: ev.message };
     } catch (err) {
       logger.warn(`[admin-triage] call prepay read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
