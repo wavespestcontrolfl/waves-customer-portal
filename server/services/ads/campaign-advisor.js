@@ -313,6 +313,20 @@ function summaryActionsBlock(advice) {
 }
 
 class CampaignAdvisor {
+  // True when today's (ET) report was written by a model (stampProvenance sets provider/model; the outage
+  // fallback has neither). The 8 AM cron skips then: the Max-plan runner on the office Mac (owner
+  // 2026-10-29) writes today's report at 7:30 AM, and a second API run would overwrite it and text the
+  // owner again. A missing or fallback row still runs, so a Mac that slept means the API run as before.
+  async hasModelReportToday(now = new Date()) {
+    const row = await db('ad_advisor_reports').where({ date: etDateString(now) }).first('report_data');
+    if (!row) return false;
+    let data = row.report_data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { return false; }
+    }
+    return Boolean(data && (data.provider || data.model));
+  }
+
   async generateDailyAdvice() {
     logger.info('Running AI Campaign Advisor...');
 
