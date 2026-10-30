@@ -4840,11 +4840,16 @@ export default function EstimateToolViewV2({
         // parked row's mark unless this is true.
         offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
-        // The current services staff ticked for the new tier
-        // (GATE_WAVEGUARD_EXTEND_PICK). Absent = the server's automatic plan.
+        // The current services staff ticked for the new tier, and the ones
+        // they saw and unticked (GATE_WAVEGUARD_EXTEND_PICK). Absent = the
+        // server's automatic plan.
         ...(savingInputs.tierExtensionPick
           && savingInputs.tierExtensionPick.customerId === (form.customerId || existingCustomerMatch?.id)
-          ? { tierExtensionKeys: savingInputs.tierExtensionPick.ticked }
+          ? {
+            tierExtensionKeys: savingInputs.tierExtensionPick.ticked,
+            tierExtensionKeptKeys: savingInputs.tierExtensionPick.offered
+              .filter((key) => !savingInputs.tierExtensionPick.ticked.includes(key)),
+          }
           : {}),
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this

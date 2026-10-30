@@ -2940,7 +2940,8 @@ describe('staff-picked tier extension (option B)', () => {
     mockExtendExistingGate = true;
     mockExtendPickGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
-      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), extensionPick: ['pest_control'],
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: ['lawn_care'] },
     });
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
     // $120 at Silver is $133.33 before discount; Gold is $113.33 — not the
@@ -2970,16 +2971,31 @@ describe('staff-picked tier extension (option B)', () => {
     mockExtendExistingGate = true;
     mockExtendPickGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
-      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(), extensionPick: [],
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
     });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx.extensionKeptKeys).toEqual(['pest_control']);
   });
 
+  test('a service the list never showed is never recorded as kept — it stays on the office review path', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // Lawn was not on the list staff saw (say its next visit was already
+    // invoiced), so it is neither ticked nor unticked.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: [] },
+    });
+    expect(ctx.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    expect(ctx.extensionKeptKeys).toEqual([]);
+  });
+
   test('pick gate off: a sent pick changes nothing', async () => {
     mockExtendExistingGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
-      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), extensionPick: ['pest_control', 'lawn_care'],
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] },
     });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx).not.toHaveProperty('extensionKeptKeys');

@@ -1101,6 +1101,7 @@ describe('admin estimate persistence', () => {
         customerId: 'cust-member',
         address: '100 Main St, Parrish, FL 34219',
         tierExtensionKeys: ['pest_control', 42],
+        tierExtensionKeptKeys: ['lawn_care'],
         estimateData: {
           engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { rodentBait: { frequency: 'quarterly' } } },
           inputs: { homeSqFt: 2000 },
@@ -1112,7 +1113,7 @@ describe('admin estimate persistence', () => {
       randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
     });
     expect(mockComputeMembershipContext).toHaveBeenCalledWith(database, expect.objectContaining({
-      customerId: 'cust-member', extensionPick: ['pest_control'],
+      customerId: 'cust-member', extensionPick: { ticked: ['pest_control'], unticked: ['lawn_care'] },
     }));
     mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
     // A client-priced save keeps the posted result, so the tick list (current

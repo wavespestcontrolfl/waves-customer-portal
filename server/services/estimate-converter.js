@@ -1176,14 +1176,24 @@ async function applyFrozenExistingServiceExtension({
     // another property (codex #3338 r8).
     appliedRowIds: [],
     monthlyRateReviewNeeded: false,
+    // Current services staff unticked in the estimate tool
+    // (GATE_WAVEGUARD_EXTEND_PICK): kept at their contracted price by that
+    // choice, so never a family for office review.
+    keptFamilies: [],
   };
   const snapshot = estimateData?.membershipSnapshot;
+  const keptKeys = new Set(Array.isArray(snapshot?.extensionKeptKeys) ? snapshot.extensionKeptKeys : []);
+  summary.keptFamilies = (priorQualifyingKeys || []).filter((key) => keptKeys.has(key));
   const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
     .filter((svc) => Number(svc?.currentPerVisit) > 0
       && Number(svc?.newPerVisit) > 0
       && Number(svc?.perVisitSavings) > 0
       && Array.isArray(svc?.keys) && svc.keys.length > 0);
-  if (!plan.length) return summary;
+  if (!plan.length) {
+    // Staff ticked nothing: the review names only what they did not keep.
+    if (keptKeys.size) summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !keptKeys.has(key));
+    return summary;
+  }
   // The frozen plan belongs to the tier the snapshot advertised — a stale
   // snapshot whose tier disagrees with the activated tier must not apply
   // its numbers.
@@ -1205,9 +1215,6 @@ async function applyFrozenExistingServiceExtension({
     return summary;
   }
   const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
-  // A current service staff left unticked (GATE_WAVEGUARD_EXTEND_PICK) keeps
-  // its contracted price by that choice — not a family for office review.
-  const keptKeys = new Set(Array.isArray(snapshot?.extensionKeptKeys) ? snapshot.extensionKeptKeys : []);
   summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key) && !keptKeys.has(key));
 
   // Monthly-lane members bill customers.monthly_rate — row writes and
@@ -9082,10 +9089,14 @@ const EstimateConverter = {
     // review alert the moment an accept actually moves the stored tier up.
     // An APPLIED extension always notifies, upgrade or not — money moved;
     // so does a frozen plan that parked for review.
+    // Staff kept every current service at its price on the estimate
+    // (GATE_WAVEGUARD_EXTEND_PICK): the upgrade itself leaves nothing to review.
+    const everyPriorKept = extension?.keptFamilies?.length === priorQualifyingKeys.length;
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier))) {
+      && (extensionApplied || extensionNeedsReview
+        || (isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier) && !everyPriorKept))) {
       const tierReviewPayload = buildTierReviewPayload({
         customer, customerId, estimateId, tier, discount, extension, extensionApplied, effectiveCustomer,
         estimateQualifyingKeys, priorQualifyingKeys, combinedServiceCount,

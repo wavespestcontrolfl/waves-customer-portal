@@ -111,6 +111,7 @@ describe("current services at the new tier in the Pricing summary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save draft", exact: true }));
     await waitFor(() => expect(committed()).toHaveLength(1));
     expect(committed()[0].tierExtensionKeys).toEqual(["pest_control"]);
+    expect(committed()[0].tierExtensionKeptKeys).toEqual(["lawn_care"]);
     expect(committed()[0].estimateData.inputs.tierExtensionPick).toEqual({
       customerId: "qa-cust", offered: ["lawn_care", "pest_control"], ticked: ["pest_control"],
     });
@@ -126,6 +127,7 @@ describe("current services at the new tier in the Pricing summary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save draft", exact: true }));
     await waitFor(() => expect(committed()).toHaveLength(1));
     expect(committed()[0].tierExtensionKeys).toEqual(["pest_control"]);
+    expect(committed()[0].tierExtensionKeptKeys).toEqual(["lawn_care"]);
   });
 
   it("a quote with no list shows no tick boxes and sends no pick", async () => {
@@ -138,5 +140,6 @@ describe("current services at the new tier in the Pricing summary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save draft", exact: true }));
     await waitFor(() => expect(committed()).toHaveLength(1));
     expect(committed()[0]).not.toHaveProperty("tierExtensionKeys");
+    expect(committed()[0]).not.toHaveProperty("tierExtensionKeptKeys");
   });
 });

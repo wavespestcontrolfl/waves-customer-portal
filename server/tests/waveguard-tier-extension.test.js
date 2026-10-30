@@ -343,6 +343,33 @@ describe('applyFrozenExistingServiceExtension', () => {
     // Lawn was unticked on purpose; tree & shrub was never offered, so it
     // still asks the office.
     expect(summary.reviewFamilies).toEqual(['tree_shrub']);
+    expect(summary.keptFamilies).toEqual(['lawn_care']);
+  });
+
+  test('nothing ticked: the review names only what staff did not keep, and nothing when they kept everything', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow()];
+    const keptOnly = (extensionKeptKeys) => ({
+      membershipSnapshot: { isExistingCustomer: true, tierLabel: 'Gold', existingServices: [], extensionKeptKeys },
+    });
+    const partial = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1', estimateData: keptOnly(['pest_control']), activatedTier: 'Gold',
+      priorQualifyingKeys: ['pest_control', 'lawn_care'],
+    });
+    expect(partial).toMatchObject({ applied: false, keptFamilies: ['pest_control'], reviewFamilies: ['lawn_care'] });
+    // Every current service kept: the converter sends no review bell for it.
+    const all = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1', estimateData: keptOnly(['pest_control', 'lawn_care']), activatedTier: 'Gold',
+      priorQualifyingKeys: ['pest_control', 'lawn_care'],
+    });
+    expect(all).toMatchObject({ applied: false, keptFamilies: ['pest_control', 'lawn_care'], reviewFamilies: [] });
+    // A legacy plan-less snapshot is untouched: no kept list, no review list.
+    const legacy = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1', estimateData: { membershipSnapshot: { tierLabel: 'Gold', existingServices: [] } },
+      activatedTier: 'Gold', priorQualifyingKeys: ['pest_control', 'lawn_care'],
+    });
+    expect(legacy).toMatchObject({ keptFamilies: [], reviewFamilies: [] });
+    expect(updates).toEqual([]);
   });
 
   test('a drifted contracted price parks for review — never a write the customer did not see', async () => {

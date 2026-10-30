@@ -1480,8 +1480,9 @@ async function computeMembershipContext(database, {
   // the global streetScope instead (their pricing scoped the same way), and
   // this bound is then redundant.
   extensionStreetScope = null,
-  // Option B (GATE_WAVEGUARD_EXTEND_PICK): the family keys staff ticked in
-  // the estimate tool — only those freeze, from any starting tier. Absent
+  // Option B (GATE_WAVEGUARD_EXTEND_PICK): { ticked, unticked } family keys
+  // from the estimate tool's list — only ticked families freeze, from any
+  // starting tier; unticked ones are the staff's keep-price choice. Absent
   // (an older tab, an agent lane) or the gate off: the Bronze-start-only
   // automatic plan.
   extensionPick,
@@ -1583,8 +1584,8 @@ async function computeMembershipContext(database, {
     })();
     // Staff pick (option B): ignored with the pick gate off, so the
     // Bronze-start-only automatic plan stays exactly as is.
-    const pickedKeys = Array.isArray(extensionPick) && isEnabled('waveguardExtendPick')
-      ? new Set(extensionPick.map(String))
+    const pickedKeys = Array.isArray(extensionPick?.ticked) && isEnabled('waveguardExtendPick')
+      ? new Set(extensionPick.ticked.map(String))
       : null;
     if (upgraded && (oldTier.discount === 0 || pickedKeys) && !monthlyLaneMember
       && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
@@ -1803,11 +1804,13 @@ async function computeMembershipContext(database, {
       currentServices: currentSpend.currentServices,
       currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,
-      // Current services staff left unticked (option B): the accept keeps
-      // their contracted price without listing them for office review.
-      // Staff-side only (never in publicMembershipView).
+      // Current services staff saw on the list and unticked (option B): the
+      // accept keeps their contracted price without asking the office to
+      // review them. A service the list never showed (parked, re-quoted) is
+      // never kept — it stays on the review path. Staff-side only (never in
+      // publicMembershipView).
       ...(pickedKeys
-        ? { extensionKeptKeys: existingKeys.filter((key) => !newKeys.includes(key) && !pickedKeys.has(key)) }
+        ? { extensionKeptKeys: existingKeys.filter((key) => extensionPick.unticked.includes(key) && !pickedKeys.has(key)) }
         : {}),
       newServices,
     };
@@ -1974,9 +1977,9 @@ async function currentServiceTierOffer(database, { customerId, estData, groupedE
     customerId,
     estData,
     ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
-    // Every WaveGuard family picked: the list is every service a save could
+    // Every WaveGuard family ticked: the list is every service a save could
     // freeze, and staff untick from it.
-    extensionPick: Object.keys(SERVICE_LABEL),
+    extensionPick: { ticked: Object.keys(SERVICE_LABEL), unticked: [] },
   });
   if (!ctx?.upgrade || !ctx.existingServices?.length) return null;
   const services = [];

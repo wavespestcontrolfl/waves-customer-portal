@@ -2198,11 +2198,14 @@ async function resolveEstimateWritePayload({
         // tools, estimator engine) pass no scope and deliberately stay
         // plan-less (codex #3338 r7).
         ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
-        // The current services staff ticked in the estimate tool
-        // (GATE_WAVEGUARD_EXTEND_PICK); absent = the automatic plan.
+        // The current services staff ticked and unticked in the estimate
+        // tool (GATE_WAVEGUARD_EXTEND_PICK); absent = the automatic plan.
         extensionPick: Array.isArray(body.tierExtensionKeys)
-          ? body.tierExtensionKeys.filter((key) => typeof key === 'string')
-          : null,
+          ? {
+            ticked: body.tierExtensionKeys.filter((key) => typeof key === 'string'),
+            unticked: [].concat(body.tierExtensionKeptKeys || []).filter((key) => typeof key === 'string'),
+          }
+          : undefined,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;
