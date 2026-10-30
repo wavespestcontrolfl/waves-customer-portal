@@ -114,6 +114,26 @@ function validateBulkSendSelectors(input = {}) {
   requireBulkSelector(input, ['channel', 'deliveryChannel', 'delivery_channel'], CHANNELS, 'delivery channel');
 }
 
+// The sendable count staff confirmed on the preview. The send recomputes the
+// audience from its own request, so the count is how it proves that request
+// is the one staff reviewed.
+function reviewedSendableCount(input = {}) {
+  const expected = input && input.expectedSendable;
+  if (Number.isInteger(expected) && expected >= 0) return expected;
+  const err = new Error('Preview the batch, then send it from that preview.');
+  err.status = 400;
+  err.code = 'BULK_PREVIEW_REQUIRED';
+  throw err;
+}
+
+function assertReviewedAudience(expected, counts) {
+  if (counts.sendable === expected) return;
+  const err = new Error(`The audience changed after the preview: ${counts.sendable} customer${counts.sendable === 1 ? '' : 's'} can get this guide now, not ${expected}. Run Preview again.`);
+  err.status = 409;
+  err.code = 'BULK_AUDIENCE_CHANGED';
+  throw err;
+}
+
 function channelsFor(channel) {
   const normalized = normalizeChannel(channel);
   if (normalized === 'both') return ['email', 'sms'];
@@ -865,6 +885,7 @@ async function cancelBulkContractAfterDeliveryFailure(contract, req, metadata = 
 
 async function sendBulkDocument(templateKey, input = {}, req = {}) {
   validateBulkSendSelectors(input);
+  const expectedSendable = reviewedSendableCount(input);
   const options = normalizeBulkOptions(input);
   const loaded = await loadTemplateByKey(templateKey);
   if (!loaded) {
@@ -889,6 +910,9 @@ async function sendBulkDocument(templateKey, input = {}, req = {}) {
     loadAudience(options, loaded.template.template_key),
     loadProductGuide(options.guideType),
   ]);
+  // A different count means another audience than the reviewed one: refuse
+  // before any document is created or any text is sent.
+  assertReviewedAudience(expectedSendable, buildCounts(audience.rows, requestedChannels));
   const campaignId = `bulk-doc-${Date.now().toString(36)}`;
   const results = [];
   const summary = {
