@@ -282,7 +282,8 @@ const placeGroup = (name) => screen.getByRole('group', { name });
 const chipOf = (group, label) => within(group).getByRole('button', { name: label });
 const pressed = (group) => within(group).getAllByRole('button').filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent);
 const addFungicide = () => fireEvent.click(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' }));
-const typeArea = (group, size) => fireEvent.click(within(group).getByRole('button', { name: `${size} sq ft` }));
+const AREA_LABEL = 'Area sprayed (sq ft), if you know it';
+const typeArea = (group, size) => fireEvent.change(within(group).getByLabelText(AREA_LABEL), { target: { value: String(size).replace(/,/g, '') } });
 
 describe('a place on every spot row', () => {
   test('no troubleAreas in the context (gate off, older server): no place anywhere, and the body carries none', async () => {
@@ -464,7 +465,7 @@ describe('Weed spots: the entry is one tap per place', () => {
     // The one shared control for the rows says where.
     expect(pressed(screen.getByRole('group', { name: 'Weed spots place' }))).toEqual(['Back']);
     expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' }).disabled).toBe(true);
-    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '500 sq ft' }));
+    fireEvent.change(within(screen.getByRole('group', { name: 'Weed spots' })).getByLabelText(AREA_LABEL), { target: { value: '500' } });
     await analyzeAndComplete();
     for (const id of [P_LEAD, P_CERT, P_SURF]) expect(sent(id)).toMatchObject({ areaPlace: 'back', troubleType: 'weeds', troubleSource: 'tech_tap' });
   });
@@ -517,7 +518,7 @@ describe('Weed spots: the entry is one tap per place', () => {
     const where = screen.getByRole('group', { name: 'Weed spots place' });
     expect(pressed(where)).toEqual([]);
     fireEvent.click(chipOf(where, 'Front'));
-    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '500 sq ft' }));
+    fireEvent.change(within(screen.getByRole('group', { name: 'Weed spots' })).getByLabelText(AREA_LABEL), { target: { value: '500' } });
     await analyzeAndComplete();
     expect(sent(P_LEAD).areaPlace).toBe('front');
   });
@@ -529,8 +530,8 @@ describe('Weed spots: the entry is one tap per place', () => {
     const where = screen.getByRole('group', { name: 'Weed spots place' });
     expect(card.contains(where)).toBe(true);
     expect(card.className).toContain('tech-product-editor');
-    // Under the area sizes: the size chips come before the place chips in the card.
-    const size = within(card).getByRole('button', { name: '500 sq ft' });
+    // Under the area box: the box comes before the place chips in the card.
+    const size = within(card).getByLabelText(AREA_LABEL);
     expect(size.compareDocumentPosition(where) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // A normal spot row keeps its place control inside its own card.
     addFungicide();
@@ -1393,7 +1394,6 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     const row = placeGroup('Spot Fungicide');
     fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '2' } });
     expect(within(row).getByText('About 1,000 sq ft at 2 gal per 1,000 sq ft.')).toBeTruthy();
-    expect(within(row).getByText('Spot area, 1,000 sq ft')).toBeTruthy();
     expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 1,000 sq ft/)).toBeTruthy();
     fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
     await analyzeAndComplete();
@@ -1408,7 +1408,6 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     // The visit area wins over the plan's size.
     expect(within(row).getByText('About 5,000 sq ft at 2 gal per 1,000 sq ft.')).toBeTruthy();
     expect(within(row).getByText("Capped at the lawn's 5,000 sq ft.")).toBeTruthy();
-    expect(within(row).getByText('Spot area, 5,000 sq ft')).toBeTruthy();
     // 12 gal at 2 gal per 1,000 sq ft covers 6,000 sq ft: 6 fl oz is what was mixed, not the 5,000 sq ft dose (5).
     expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 6,000 sq ft/)).toBeTruthy();
     expect(within(row).getByLabelText('Spot Fungicide').value).toBe('6');
@@ -1438,7 +1437,6 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '41' } });
     expect(within(row).getByText('That is more than 40 gallons. Check the number, or enter the area instead.')).toBeTruthy();
     expect(within(row).queryByText(/About .* sq ft at/)).toBeNull();
-    expect(within(row).queryByText(/^Spot area,/)).toBeNull();
   });
 
   test('an area typed after the gallons clears the gallons (one number, one way)', async () => {
@@ -1449,7 +1447,7 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     fireEvent.change(gallons, { target: { value: '2' } });
     typeArea(row, '100');
     expect(gallons.value).toBe('');
-    expect(within(row).getByText('Spot area, 100 sq ft')).toBeTruthy();
+    expect(within(row).getByLabelText(AREA_LABEL).value).toBe('100');
     fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
     await analyzeAndComplete();
     expect(sent(P_FUNG)).toMatchObject({ areaValue: 100 });
@@ -1511,7 +1509,7 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     const card = screen.getByRole('group', { name: 'Weed spots' });
     const gallons = within(card).getByLabelText('Gallons sprayed (instead of the area), Weed spots');
     fireEvent.change(gallons, { target: { value: '1' } });
-    fireEvent.click(within(card).getByRole('button', { name: '500 sq ft' }));
+    fireEvent.change(within(card).getByLabelText(AREA_LABEL), { target: { value: '500' } });
     expect(gallons.value).toBe('');
   });
 
