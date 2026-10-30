@@ -60,6 +60,9 @@ function fakeDb({
   migrationRow = null,
   // The creating estimate a tick-list margin reads (estimates .first()).
   marginEstimate = null,
+  // 'waveguard_tier_extension_applied' audit rows (activity_log).
+  extensionAudits = [],
+  extensionAuditsThrows = false,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -153,6 +156,10 @@ function fakeDb({
         if (table === 'scheduled_service_addons') {
           if (addonQueryThrows) throw new Error('relation does not exist');
           return addonRows;
+        }
+        if (table === 'activity_log') {
+          if (extensionAuditsThrows) throw new Error('relation does not exist');
+          return extensionAudits;
         }
         return [];
       },
@@ -3003,6 +3010,30 @@ describe('staff-picked tier extension (option B)', () => {
     expect(ctx.upgrade).toBeNull();
     expect(ctx.existingServices).toEqual([]);
     expect(ctx).not.toHaveProperty('extensionKeptKeys');
+  });
+
+  test('appointments an earlier extension already covered never freeze, so the card never shows a price the accept parks', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const pick = { extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] } };
+    const freeze = (database) => computeMembershipContext(database, {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), ...pick,
+    });
+    // A Bronze-to-Silver accept already repriced s1 and s2.
+    const covered = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: JSON.stringify({ estimateId: 'est-old', families: ['pest_control'], appliedRowIds: ['s1', 's2'] }) }],
+    }));
+    expect(covered.existingServices.map((svc) => [svc.key, svc.rowIds])).toEqual([['lawn_care', ['l1']], ['pest_control', ['s3']]]);
+    // An audit without appointment ids covers its whole family, as the converter reads it.
+    const wholeFamily = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: { estimateId: 'est-old', families: ['lawn_care'] } }],
+    }));
+    expect(wholeFamily.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    // An unreadable audit trail freezes nothing.
+    const unreadable = await freeze(fakeDb({ scheduledRows: silverRows(), extensionAuditsThrows: true }));
+    expect(unreadable.existingServices).toEqual([]);
   });
 
   test('pick gate off: a sent pick changes nothing', async () => {

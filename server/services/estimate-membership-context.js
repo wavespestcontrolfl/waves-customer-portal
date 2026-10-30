@@ -1617,13 +1617,22 @@ async function computeMembershipContext(database, {
       //  - the PERSISTED price is the rounded tier rate; the savings figure
       //    derives from it (codex #3338 r20 — never an extra half-cent of
       //    discount from rounding the savings first).
+      // Appointments an earlier accepted extension already repriced or
+      // credited park at accept (the converter's at-most-once audit check),
+      // so they never freeze here either — the card must not advertise a
+      // price the apply refuses (a Silver-to-Gold quote after a Bronze-to-
+      // Silver extension, say).
+      const priorCovered = await priorExtensionCoverage(database, customerId);
       for (const [familyKey, familyRows] of existingByKey) {
         // A family this estimate re-quotes is already a priced line of the
         // estimate itself — never also listed as an existing extension; a
-        // family staff left unticked is not frozen either.
-        if (newKeys.includes(familyKey) || (pickedKeys && !pickedKeys.has(familyKey))) continue;
+        // family staff left unticked is not frozen either, nor one a prior
+        // audit covers without naming its appointments.
+        if (newKeys.includes(familyKey) || (pickedKeys && !pickedKeys.has(familyKey))
+          || priorCovered.families.has(familyKey)) continue;
         let eligibleRows = familyRows.filter((row) => {
           if (planEligibleIds && !planEligibleIds.has(String(row.id))) return false;
+          if (priorCovered.rowIds.has(String(row.id))) return false;
           if (isCallbackServiceRow(row)) return false;
           const day = visitDateKey(row.scheduled_date);
           if (!day || day < today) return false;
@@ -1920,6 +1929,32 @@ function publicMembershipView(snapshot, { committed = false } = {}) {
         perApplicationSavings: service?.perApplicationSavings ?? null,
       })),
   };
+}
+
+// What earlier accepted extensions already covered, read from the same
+// 'waveguard_tier_extension_applied' audit rows the converter's at-most-once
+// check reads: their appointment ids, and the whole family for an audit that
+// names none (the converter blocks those families too). FAIL CLOSED: an
+// unreadable audit trail covers every family, so nothing freezes.
+async function priorExtensionCoverage(database, customerId) {
+  const covered = { rowIds: new Set(), families: new Set() };
+  try {
+    const audits = await database('activity_log')
+      .where({ customer_id: customerId, action: 'waveguard_tier_extension_applied' })
+      .select('metadata');
+    for (const audit of audits) {
+      let meta = null;
+      try {
+        meta = typeof audit.metadata === 'string' ? JSON.parse(audit.metadata) : audit.metadata;
+      } catch { /* unreadable row: nothing to read */ }
+      if (Array.isArray(meta?.appliedRowIds)) meta.appliedRowIds.forEach((id) => covered.rowIds.add(String(id)));
+      else (Array.isArray(meta?.families) ? meta.families : []).forEach((key) => covered.families.add(key));
+    }
+  } catch (probeErr) {
+    logger.warn(`[membership-context] prior-extension audit probe failed — no extension plan: ${probeErr.message}`);
+    Object.keys(SERVICE_LABEL).forEach((key) => covered.families.add(key));
+  }
+  return covered;
 }
 
 // The property scope a save gives computeMembershipContext (codex #3338 r8

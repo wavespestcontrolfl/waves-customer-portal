@@ -2666,6 +2666,24 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
 
+  // A tick on the current-services list (GATE_WAVEGUARD_EXTEND_PICK) changes
+  // what an accept reprices, never this quote's price: the generated estimate
+  // stays, and the saved state is invalidated like the other delivery options
+  // so Review and send cannot go out with the previously saved choice.
+  const toggleTierExtension = useCallback((key) => {
+    setForm((f) => (f.tierExtensionPick ? {
+      ...f,
+      tierExtensionPick: {
+        ...f.tierExtensionPick,
+        unticked: f.tierExtensionPick.unticked.includes(key)
+          ? f.tierExtensionPick.unticked.filter((k) => k !== key)
+          : [...f.tierExtensionPick.unticked, key],
+      },
+    } : f));
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, []);
+
   const mosquitoRecommendations = useMemo(
     () => buildMosquitoRecommendations(form),
     [form],
@@ -8525,15 +8543,7 @@ export default function EstimateToolViewV2({
                           <Checkbox
                             id={`estimate-tier-extension-${svc.key}`}
                             checked={!form.tierExtensionPick.unticked.includes(svc.key)}
-                            onChange={() => setForm((f) => (f.tierExtensionPick ? {
-                              ...f,
-                              tierExtensionPick: {
-                                ...f.tierExtensionPick,
-                                unticked: f.tierExtensionPick.unticked.includes(svc.key)
-                                  ? f.tierExtensionPick.unticked.filter((key) => key !== svc.key)
-                                  : [...f.tierExtensionPick.unticked, svc.key],
-                              },
-                            } : f))}
+                            onChange={() => toggleTierExtension(svc.key)}
                             label={`${svc.label}: ${fmt(svc.currentPerVisit)} → ${fmt(svc.newPerVisit)} / application${svc.marginPct != null ? ` · est. margin ${svc.marginPct}%` : ""}`}
                           />
                         </div>

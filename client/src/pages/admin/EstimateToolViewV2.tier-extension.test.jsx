@@ -121,6 +121,19 @@ describe("current services at the new tier in the Pricing summary", () => {
     });
   });
 
+  it("changing a tick after a save clears the saved state, so Send cannot go out with the old choice", async () => {
+    renderEditor();
+    await screen.findByDisplayValue("QA Member");
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate", exact: true }));
+    const lawn = await screen.findByRole("checkbox", { name: /^Lawn Care:/ });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft", exact: true }));
+    await screen.findByText(/Draft saved/);
+    expect(screen.getByRole("button", { name: "Review and send", exact: true })).toBeEnabled();
+    fireEvent.click(lawn);
+    await waitFor(() => expect(screen.queryByText(/Draft saved/)).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Review and send", exact: true })).toBeDisabled();
+  });
+
   it("a reopened draft saves the same choice without a regenerate", async () => {
     currentSource = {
       ...structuredClone(source),
