@@ -27,7 +27,7 @@ let clock;
 beforeEach(() => {
   db.rows.clear();
   db.failing = false;
-  _test.saved.clear();
+  _test.seen.clear();
   jest.clearAllMocks();
   now = Date.parse('2026-10-30T12:00:00Z');
   clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
@@ -42,6 +42,9 @@ test('a failed check uses the last answer for up to 7 days, then says unavailabl
   expect(row.category).toBe('epa_label_check');
   expect(JSON.parse(row.value)).toEqual({ ...source, status: 'current', checkedAt: '2026-10-30T12:00:00.000Z' });
   now += 7 * DAY - 60000;
+  expect(await keptEpaSourceStatus(source)).toBe('current');
+  // A deploy clears memory: the stored row answers.
+  _test.seen.clear();
   expect(await keptEpaSourceStatus(source)).toBe('current');
   now += 60000;
   expect(await keptEpaSourceStatus(source)).toBe('unavailable');
@@ -78,11 +81,28 @@ test('the same answer is written at most once an hour', async () => {
   expect(JSON.parse(db.rows.values().next().value.value).checkedAt).toBe('2026-10-30T13:00:00.000Z');
 });
 
-test('a database error or a source with no checksum leaves the fresh answer', async () => {
+test('a newer answer that failed to save still beats the stored older one, and is saved on a later call (pre-push audit P1)', async () => {
+  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('inactive').mockResolvedValue('unavailable');
+  await keptEpaSourceStatus(source);
+  db.failing = true;
+  now += 60000;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+  now += 60000;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+  db.failing = false;
+  now += 60000;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+  expect(JSON.parse(db.rows.values().next().value.value).status).toBe('inactive');
+  _test.seen.clear();
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+});
+
+test('a database error never fails the check; a source with no checksum is never kept', async () => {
   db.failing = true;
   currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('unavailable');
   expect(await keptEpaSourceStatus(source)).toBe('current');
-  expect(await keptEpaSourceStatus(source)).toBe('unavailable');
+  // This process still has the answer.
+  expect(await keptEpaSourceStatus(source)).toBe('current');
   db.failing = false;
   db.mockClear();
   currentEpaSourceStatus.mockResolvedValue('current');

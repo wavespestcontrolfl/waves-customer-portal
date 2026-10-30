@@ -6,44 +6,55 @@
 // 60-second memory cache (epa-product-label.js), so the answer is kept in system_settings. Only a failed check
 // ('unavailable': EPA did not answer) reads it back, and only for the same label file and checksum. An answer that
 // the label changed or the registration is no longer active is kept like 'current', so an outage never revives an
-// older 'current'. Approval never uses it: it checks fresh (product-label-review.js). A database error never fails
-// the check; the fresh answer stands.
+// older 'current': the newest answer goes into memory before any write, and the newer of memory and the stored row
+// wins. Approval never uses it: it checks fresh (product-label-review.js). A database error never fails the check.
 const { createHash } = require('crypto');
 const db = require('../models/db');
 const { currentEpaSourceStatus } = require('./epa-product-label');
 
 const KEEP_MS = 7 * 24 * 3600000;
+const KEPT = ['current', 'superseded', 'inactive'];
 // The same answer is written again at most once an hour, so the kept age stays within an hour of the last check.
 const SAVE_EVERY_MS = 3600000;
-const saved = new Map();
+// key -> { status, at, savedAt }: the newest answer this process got for a label, and when it was stored.
+const seen = new Map();
 
 // system_settings.key is varchar(100): a fixed-length hash of the label identity; the value names it.
 const keyOf = (source) => `epa_label_check:${createHash('sha256').update(`${source.registration}:${source.filename}:${source.sha256}`).digest('hex').slice(0, 40)}`;
+
+async function store(key, source, answer, now) {
+  const value = JSON.stringify({ registration: source.registration, filename: source.filename, sha256: source.sha256, status: answer.status, checkedAt: new Date(answer.at).toISOString() });
+  await db('system_settings')
+    .insert({ key, value, category: 'epa_label_check', description: 'Last EPA label check that got an answer (kept 7 days)' })
+    .onConflict('key')
+    .merge({ value, updated_at: new Date(now) });
+  answer.savedAt = now;
+}
+
+// The stored answer for this label file and checksum, or null.
+async function storedAnswer(key, source) {
+  const row = await db('system_settings').where({ key }).first();
+  const stored = row?.value ? JSON.parse(row.value) : null;
+  const at = Date.parse(stored?.checkedAt);
+  return stored?.sha256 === source.sha256 && stored?.filename === source.filename && Number.isFinite(at) ? { status: stored.status, at } : null;
+}
 
 async function keptEpaSourceStatus(source) {
   const status = await currentEpaSourceStatus(source);
   if (!source?.sha256) return status;
   const key = keyOf(source);
-  try {
-    const now = Date.now();
-    if (status !== 'unavailable') {
-      const last = saved.get(key);
-      if (last?.status === status && now - last.at < SAVE_EVERY_MS) return status;
-      const value = JSON.stringify({ registration: source.registration, filename: source.filename, sha256: source.sha256, status, checkedAt: new Date(now).toISOString() });
-      await db('system_settings')
-        .insert({ key, value, category: 'epa_label_check', description: 'Last EPA label check that got an answer (kept 7 days)' })
-        .onConflict('key')
-        .merge({ value, updated_at: new Date(now) });
-      saved.set(key, { status, at: now });
-      return status;
-    }
-    const row = await db('system_settings').where({ key }).first();
-    const kept = row?.value ? JSON.parse(row.value) : null;
-    const fresh = kept && kept.sha256 === source.sha256 && kept.filename === source.filename && now - Date.parse(kept.checkedAt) < KEEP_MS;
-    return fresh && ['current', 'superseded', 'inactive'].includes(kept.status) ? kept.status : status;
-  } catch {
-    return status;
-  }
+  const now = Date.now();
+  const answered = status !== 'unavailable';
+  let mine = seen.get(key);
+  if (answered && mine?.status === status) mine.at = now;
+  else if (answered) seen.set(key, (mine = { status, at: now, savedAt: null }));
+  // Stored at most once an hour while unchanged; a write that failed is tried again on the next call.
+  if (mine && (mine.savedAt == null || (answered && now - mine.savedAt >= SAVE_EVERY_MS))) await store(key, source, mine, now).catch(() => {});
+  if (answered) return status;
+  // EPA did not answer: the newer of this process's answer and the stored one, up to 7 days old.
+  const stored = await storedAnswer(key, source).catch(() => null);
+  const kept = stored && (!mine || stored.at > mine.at) ? stored : mine;
+  return kept && now - kept.at < KEEP_MS && KEPT.includes(kept.status) ? kept.status : status;
 }
 
-module.exports = { keptEpaSourceStatus, _test: { KEEP_MS, saved } };
+module.exports = { keptEpaSourceStatus, _test: { KEEP_MS, seen } };
