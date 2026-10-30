@@ -289,8 +289,9 @@ describeDb('call prepay choice (PostgreSQL)', () => {
         estimateStatus: 'sent', customerId: est.customer_id, bookedVisits: { ids: [visitId], pin: expect.any(String), noAddons: true },
       });
       expect(acceptSpy.mock.calls[0][0].expected.bookedVisits.pin).toContain(String(visitId));
-      // The link is the accept's own last step (under its lock); this service never links on the side,
-      // so with the accept stubbed the visit stays unlinked.
+      // The link is the accept's own last step (beforeCommit, under its locks); this service never links on
+      // the side, so with the accept stubbed the visit stays unlinked.
+      expect(acceptSpy.mock.calls[0][0].beforeCommit).toEqual(expect.any(Function));
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
       expect(await cardsFor(callLogId).first()).toMatchObject({ status: 'resolved', resolution_source: 'human' });
     });
@@ -379,6 +380,29 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect(acceptSpy).not.toHaveBeenCalled();
       await runCallPrepayChoiceSweep();
       expect(await trx('triage_items').where({ id: card.id }).first()).toMatchObject({ status: 'dismissed', resolution_source: 'auto' });
+    });
+
+    test("the accept's last step against real rows: links when unchanged, throws on a moved visit or a relinked call", async () => {
+      const { lastStepInAccept } = require('../services/call-prepay-choice');
+      const { customerId, est, callLogId, visitId } = await booked();
+      const rowsNow = async () => trx('scheduled_services').whereIn('id', [visitId]).select('*');
+      // Unchanged: the step links the visit (inside the test's transaction, rolled back after).
+      await trx.transaction(async (sp) => {
+        await lastStepInAccept({ callLogId, customerId, bookedRows: await rowsNow() })(sp, { estimate: est });
+        expect((await sp('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
+        throw Object.assign(new Error('undo'), { undo: true });
+      }).catch((e) => { if (!e.undo) throw e; });
+      // A visit moved after the check: the step refuses before linking.
+      const checked = await rowsNow();
+      await trx('scheduled_services').where({ id: visitId }).update({ scheduled_date: inDays(16) });
+      await expect(lastStepInAccept({ callLogId, customerId, bookedRows: checked })(trx, { estimate: est }))
+        .rejects.toMatchObject({ callPrepayRefusal: 'changed_since_check' });
+      // A call relinked to another customer: the step refuses.
+      const other = await customer();
+      await trx('call_log').where({ id: callLogId }).update({ customer_id: other });
+      await expect(lastStepInAccept({ callLogId, customerId, bookedRows: await rowsNow() })(trx, { estimate: est }))
+        .rejects.toMatchObject({ callPrepayRefusal: 'customer_changed' });
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
     });
 
     test('a record that changed inside the accept (preview_changed) is a plain refusal; the card stays open', async () => {

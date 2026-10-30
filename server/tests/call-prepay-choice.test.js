@@ -13,7 +13,7 @@ const gates = require('../config/feature-gates');
 const { buildTriageItem } = require('../services/call-routing-gates');
 const { computeHeldVisits } = require('../services/call-held-visits');
 const {
-  billingChoiceOf, quotePlanOf, derivePrepayCoverage, runCallPrepayChoiceSweep, REFUSALS, cardSummary,
+  billingChoiceOf, quotePlanOf, derivePrepayCoverage, runCallPrepayChoiceSweep, REFUSALS, cardSummary, lastStepInAccept,
 } = require('../services/call-prepay-choice');
 
 const GATE = 'GATE_CALL_PREPAY_CHOICE';
@@ -47,6 +47,62 @@ describe('the gate', () => {
     for (const word of ['sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice', 'notifyAdmin', 'sendNewRecurringWelcome']) {
       expect(service).not.toContain(word);
     }
+  });
+});
+
+describe("the accept's last step: lock the call then the visits, re-check, link", () => {
+  const visitRow = (over = {}) => ({
+    id: 'svc-1', customer_id: 'cust-1', property_id: null, scheduled_date: '2026-11-05', window_start: '10:00:00', status: 'pending',
+    service_type: 'Quarterly Pest Control Service', is_recurring: true, recurring_pattern: 'quarterly', recurring_interval_days: null,
+    pending_setup_fee: 0, source_estimate_id: null, ...over,
+  });
+  const callRow = (over = {}) => ({
+    id: 'call-1', customer_id: 'cust-1', processing_status: 'processed', answered_by: null, v2_extraction_status: 'valid',
+    ai_extraction_enriched: JSON.stringify({ service_request: { billing_choice: 'annual_prepay' }, meta: {} }), ...over,
+  });
+  // A fake transaction: records the lock order and the link.
+  function fakeTrx({ call = callRow(), visits = [visitRow()], addon = null } = {}) {
+    const log = { locks: [], links: [] };
+    const trx = (table) => {
+      if (table === 'call_log') {
+        const q = { where: () => q, forShare: () => { log.locks.push('call_log FOR SHARE'); return q; }, first: async () => call };
+        return q;
+      }
+      if (table === 'scheduled_services') {
+        return { whereIn: (_c, ids) => {
+          const q = {
+            forUpdate: () => { log.locks.push('scheduled_services FOR UPDATE'); return q; },
+            select: async () => visits.filter((v) => ids.includes(String(v.id))),
+            update: async (patch) => { log.links.push({ ids, patch }); return ids.length; },
+          };
+          return q;
+        } };
+      }
+      if (table === 'scheduled_service_addons') return { whereIn: () => ({ first: async () => addon }) };
+      throw new Error(`unexpected table ${table}`);
+    };
+    return { trx, log };
+  }
+  const step = () => lastStepInAccept({ callLogId: 'call-1', customerId: 'cust-1', bookedRows: [visitRow()] });
+
+  test('unchanged: locks the call, then the visits, and links them to the accepted estimate', async () => {
+    const { trx, log } = fakeTrx();
+    await step()(trx, { estimate: { id: 'est-1' } });
+    expect(log.locks).toEqual(['call_log FOR SHARE', 'scheduled_services FOR UPDATE']);
+    expect(log.links).toEqual([{ ids: ['svc-1'], patch: { source_estimate_id: 'est-1' } }]);
+  });
+
+  test.each([
+    ['the call was relinked to another customer', { call: callRow({ customer_id: 'cust-2' }) }, 'customer_changed'],
+    ['the call was re-read to pay per application', { call: callRow({ ai_extraction_enriched: JSON.stringify({ service_request: { billing_choice: 'per_application' }, meta: {} }) }) }, 'choice_changed'],
+    ['the call is being re-read', { call: callRow({ processing_status: 'processing' }) }, 'call_reprocessing'],
+    ['the visit was moved', { visits: [visitRow({ scheduled_date: '2026-11-12' })] }, 'changed_since_check'],
+    ['the visit was cancelled away', { visits: [] }, 'changed_since_check'],
+    ['an add-on line was added', { addon: { id: 'addon-1' } }, 'changed_since_check'],
+  ])('%s: throws (the accept rolls back) and links nothing', async (_name, state, reason) => {
+    const { trx, log } = fakeTrx(state);
+    await expect(step()(trx, { estimate: { id: 'est-1' } })).rejects.toMatchObject({ callPrepayRefusal: reason, message: REFUSALS[reason] });
+    expect(log.links).toEqual([]);
   });
 });
 

@@ -2146,27 +2146,16 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
     customerBilling: 'per_application|49||active_customer|',
   };
-  // bookedRows: what the early (unlocked) visit read sees; lockedRows: what the final locked read sees
-  // (default the same), so a change between the two can be staged. linked records the in-accept link.
-  function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [], lockedRows = null, addon = null } = {}) {
+  function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [], addon = null } = {}) {
     const made = makeDb(estimate);
     const inner = made.database;
-    const linked = [];
     const database = jest.fn((table) => {
       const builder = inner(table);
       if (table === 'customers') builder.first = async () => customer;
       if (table === 'scheduled_services') {
         const q = {
           where: () => q, whereNotNull: () => q, whereNull: () => q, first: async () => linkedVisit,
-          whereIn: (_col, ids) => {
-            let locked = false;
-            const sel = {
-              forUpdate: () => { locked = true; return sel; },
-              select: async () => (locked && lockedRows ? lockedRows : bookedRows).filter((r) => ids.includes(String(r.id))),
-              update: async (patch) => { linked.push({ ids, patch }); return ids.length; },
-            };
-            return sel;
-          },
+          whereIn: (_col, ids) => ({ select: async () => bookedRows.filter((r) => ids.includes(String(r.id))) }),
         };
         return q;
       }
@@ -2176,7 +2165,7 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     database.fn = inner.fn;
     database.raw = inner.raw;
     database.transaction = jest.fn(async (callback) => callback(database));
-    return { ...made, database, linked };
+    return { ...made, database };
   }
   const accept = (database, estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) }, extraPins = {}) => markEstimateManuallyAccepted({
     estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: { ...pins, ...extraPins },
@@ -2255,27 +2244,12 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
       expect(converter.convertEstimate).not.toHaveBeenCalled();
     });
 
-    test('the same booked visits accept, and the accept links them to the estimate inside its own transaction', async () => {
+    test('the same booked visits accept', async () => {
       const rows = [visit()];
-      const { database, linked } = dbWith(estimateRow(), customerRow(), { bookedRows: rows });
+      const { database } = dbWith(estimateRow(), customerRow(), { bookedRows: rows });
       const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
       await expect(accept(database, converter, pinFor(rows))).resolves.toMatchObject({ estimate: expect.objectContaining({ status: 'accepted' }) });
       expect(converter.convertEstimate).toHaveBeenCalled();
-      expect(linked).toEqual([{ ids: ['svc-booked-1'], patch: { source_estimate_id: 'estimate-pins' } }]);
-    });
-
-    test('a visit that changed after the early check but before the final lock rolls the whole accept back, unlinked', async () => {
-      const rows = [visit()];
-      const { database, linked } = dbWith(estimateRow(), customerRow(), { bookedRows: rows, lockedRows: [visit({ scheduled_date: '2026-11-12' })] });
-      const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
-      await expect(accept(database, converter, pinFor(rows))).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
-      expect(linked).toEqual([]);
-    });
-
-    test('without the pin, the accept links nothing (every other caller is unchanged)', async () => {
-      const { database, linked } = dbWith(estimateRow(), customerRow(), { bookedRows: [visit()] });
-      await expect(accept(database)).resolves.toMatchObject({ estimate: expect.objectContaining({ status: 'accepted' }) });
-      expect(linked).toEqual([]);
     });
 
     test.each([
@@ -2292,6 +2266,33 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
       expect(updates).toEqual([]);
       expect(inserts).toEqual([]);
       expect(converter.convertEstimate).not.toHaveBeenCalled();
+    });
+  });
+
+  // beforeCommit: a caller's last step inside the accept's transaction (the call-prepay-choice card's
+  // lock, re-check and link).
+  describe('beforeCommit', () => {
+    const run = (database, converter, beforeCommit) => markEstimateManuallyAccepted({
+      estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: pins,
+      database, estimateConverter: converter, beforeCommit,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+    });
+
+    test('runs once, after the conversion, inside the transaction, with the accepted estimate', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const order = [];
+      const converter = { convertEstimate: jest.fn(async () => { order.push('convert'); return { customerId: 'customer-pins' }; }) };
+      const beforeCommit = jest.fn(async (trx, { estimate }) => { order.push('beforeCommit'); expect(trx).toBe(database); expect(estimate.status).toBe('accepted'); });
+      await expect(run(database, converter, beforeCommit)).resolves.toMatchObject({ estimate: expect.objectContaining({ status: 'accepted' }) });
+      expect(beforeCommit).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['convert', 'beforeCommit']);
+    });
+
+    test('a throw rejects the whole accept with that error', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+      const stop = Object.assign(new Error('changed'), { callPrepayRefusal: 'changed_since_check' });
+      await expect(run(database, converter, async () => { throw stop; })).rejects.toBe(stop);
     });
   });
 

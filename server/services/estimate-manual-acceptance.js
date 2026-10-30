@@ -576,21 +576,6 @@ function bookedVisitsPinOf(rows = []) {
   return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');
 }
 
-// The call-prepay-choice card's last step INSIDE the accept: lock the booked visits (held only until the
-// commit, milliseconds), re-check them against the pin and link them to the estimate. A reschedule, cancel,
-// re-link or add-on that committed before the lock fails the check and rolls the whole accept back (no
-// invoice, no term); one that waits on the lock lands after the commit, an ordinary later edit. The lock is
-// taken last on purpose: settlement takes a visit FOR UPDATE NOWAIT, so the window it can collide in stays
-// as short as any other visit edit.
-async function linkPinnedBookedVisits(trx, estimateId, pinned) {
-  const ids = Array.isArray(pinned.ids) ? [...new Set(pinned.ids.map(String))] : [];
-  if (!ids.length) throw cardChanged();
-  const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate().select(BOOKED_VISIT_PIN_FIELDS);
-  if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== pinned.pin) throw cardChanged();
-  if (pinned.noAddons === true && await bookedVisitsHaveAddons(trx, ids)) throw cardChanged();
-  await trx('scheduled_services').whereIn('id', ids).update({ source_estimate_id: estimateId });
-}
-
 // Whether any booked visit carries an add-on line (annual prepay cannot cover one). A savepoint, so an
 // environment without the table (no add-on line can exist there) never aborts the accept.
 async function bookedVisitsHaveAddons(trx, ids) {
@@ -665,8 +650,8 @@ const CARD_PIN_CHECKS = [
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
   // The booked visits the term start and coverage came from (call-prepay-choice): an early, unlocked check so
-  // a change since the card's read refuses before the conversion runs. The authority is the last step,
-  // linkPinnedBookedVisits, which re-checks under a lock held only until the commit.
+  // a change since the card's read refuses before the conversion runs. The authority is the caller's
+  // beforeCommit step, which re-checks under locks held only until the commit.
   {
     phase: 'customer',
     key: 'bookedVisits',
@@ -1364,7 +1349,9 @@ async function acceptInTransaction(trx, ctx) {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
   await recordTableChanges(trx, ctx, updatedEstimate);
-  if (ctx.expected?.bookedVisits) await linkPinnedBookedVisits(trx, ctx.estimateId, ctx.expected.bookedVisits);
+  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link). A throw rolls the
+  // whole accept back: no invoice, no term.
+  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate });
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,
@@ -1456,6 +1443,10 @@ async function markEstimateManuallyAccepted({
   // Run every step in the accept's own transaction, collect the effects, roll
   // back and return them. Nothing commits and nothing is sent.
   dryRun = false,
+  // async (trx, { estimate }) => void: the caller's last step inside the accept's transaction, after the
+  // conversion and before the commit. A throw rolls the whole accept back. Null for every caller but the
+  // call-prepay-choice card.
+  beforeCommit = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
@@ -1466,7 +1457,7 @@ async function markEstimateManuallyAccepted({
     estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
-    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService,
+    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit,
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
@@ -1505,5 +1496,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   isCommercialProposalEstimate,
   estimateRowPin,
   bookedVisitsPinOf,
+  bookedVisitsHaveAddons,
+  BOOKED_VISIT_PIN_FIELDS,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

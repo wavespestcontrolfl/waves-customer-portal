@@ -207,15 +207,40 @@ async function termOverlap(conn, customerId, termStart) {
 // valid extraction of a real two-party call with billing_choice annual_prepay. A reprocess that re-read the plan
 // (per application, none) or failed the extraction makes the card obsolete ('choice_changed', moot); a pass
 // still running is only a wait ('call_reprocessing'), so the card stays.
-async function callChoiceState(conn, callLogId) {
+const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+function choiceStateOf(call) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
-  const call = await conn('call_log').where({ id: callLogId })
-    .first('id', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched');
   if (!call) return 'choice_changed';
   if (!call.processing_status || call.processing_status === 'processing') return 'call_reprocessing';
   const extraction = call.v2_extraction_status === 'valid' ? parseExtraction(call.ai_extraction_enriched) : null;
   const still = !!extraction && isRealConversation(call, extraction) && billingChoiceOf(extraction) === 'annual_prepay';
   return still ? 'ok' : 'choice_changed';
+}
+async function callChoiceState(conn, callLogId) {
+  return choiceStateOf(await conn('call_log').where({ id: callLogId }).first(CALL_CHOICE_COLUMNS));
+}
+
+// The accept's last step (its beforeCommit), inside its transaction: lock the call row, then the booked visits
+// (both held only until the commit), re-check that the call still belongs to this customer and still shows the
+// annual prepay choice, that the visits still match what was checked with no add-on line, then link them to the
+// estimate. A change committed before a lock rolls the whole accept back (no invoice, no term); one that waits
+// on a lock lands after the commit, an ordinary later edit. The locks are taken last on purpose: settlement
+// takes a visit FOR UPDATE NOWAIT, so the window it can collide in stays as short as any visit edit.
+function lastStepInAccept({ callLogId, customerId, bookedRows }) {
+  const { bookedVisitsPinOf, bookedVisitsHaveAddons, BOOKED_VISIT_PIN_FIELDS } = require('./estimate-manual-acceptance');
+  const ids = bookedRows.map((r) => String(r.id));
+  const pin = bookedVisitsPinOf(bookedRows);
+  const stop = (reason) => Object.assign(new Error(REFUSALS[reason] || REFUSALS.not_eligible), { callPrepayRefusal: reason });
+  return async (trx, { estimate }) => {
+    const callRow = await trx('call_log').where({ id: callLogId }).forShare().first(CALL_CHOICE_COLUMNS);
+    if (!callRow || String(callRow.customer_id || '') !== String(customerId)) throw stop('customer_changed');
+    const state = choiceStateOf(callRow);
+    if (state !== 'ok') throw stop(state);
+    const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate().select(BOOKED_VISIT_PIN_FIELDS);
+    if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== pin) throw stop('changed_since_check');
+    if (await bookedVisitsHaveAddons(trx, ids)) throw stop('changed_since_check');
+    await trx('scheduled_services').whereIn('id', ids).update({ source_estimate_id: estimate.id });
+  };
 }
 
 async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, conn = db, now = new Date() }) {
@@ -450,6 +475,7 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken =
         ...estimateRowPin(evaluation.estimate),
         bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(bookedRowsOf(evaluation)), noAddons: true },
       },
+      beforeCommit: lastStepInAccept({ callLogId: call.id, customerId: call.customer_id, bookedRows: bookedRowsOf(evaluation) }),
       bookedAppointmentIds: evaluation.bookedIds,
       adminUserId,
       source: 'verbal_annual_prepay_booking',
@@ -463,6 +489,7 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken =
     // The accept and its invoice and term are one transaction: nothing is half-applied.
     logger.warn(`[call-prepay-choice] accept failed for estimate ${evaluation.estimate.id}: ${err.code || err.name || 'error'}`);
     if (err.annualPrepayOverlap) return refusal('term_overlap');
+    if (err.callPrepayRefusal) return refusal(err.callPrepayRefusal);
     if (err.code === 'preview_changed') return refusal('changed_since_check');
     const message = err.statusCode && err.statusCode < 500 && err.message ? `${err.message} Nothing was accepted.` : REFUSALS.accept_failed;
     return { ok: false, reason: 'accept_failed', message };
@@ -492,4 +519,5 @@ module.exports = {
   closeMootCards,
   cardSummary,
   previewTokenOf,
+  lastStepInAccept,
 };
