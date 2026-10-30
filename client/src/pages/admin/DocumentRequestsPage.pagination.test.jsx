@@ -5,6 +5,11 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import DocumentRequestsPage from "./DocumentRequestsPage";
 
+// The 100+ row cases render a full page twice or more; on a loaded CI runner
+// they need more than vitest's 5,000 ms default (main runs 41018887505 and
+// 41019750762 timed out with no code change).
+const PAGED_QUEUE_TIMEOUT_MS = 20_000;
+
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
@@ -85,7 +90,7 @@ it("pages through a queue longer than 100 rows", async () => {
   await screen.findByText("Showing 1–100 of 101");
   expect(lastParams().get("page")).toBe("1");
   expect(rowTitles()).toHaveLength(100);
-});
+}, PAGED_QUEUE_TIMEOUT_MS);
 
 it("hides the page buttons when everything fits on one page", async () => {
   mockList(3);
@@ -113,7 +118,7 @@ it("returns to page 1 when the search text changes or is cleared", async () => {
   await waitFor(() => expect(lastParams().get("search")).toBeNull());
   expect(lastParams().get("page")).toBe("1");
   await screen.findByText("Showing 1–100 of 101");
-});
+}, PAGED_QUEUE_TIMEOUT_MS);
 
 it("returns to page 1 when the status tab changes", async () => {
   mockList(101);
@@ -126,7 +131,7 @@ it("returns to page 1 when the status tab changes", async () => {
   await waitFor(() => expect(lastParams().get("status")).toBe("signed"));
   expect(lastParams().get("page")).toBe("1");
   await screen.findByText("Showing 1–100 of 101");
-});
+}, PAGED_QUEUE_TIMEOUT_MS);
 
 it("goes to the last page when a reload returns a page past the end", async () => {
   adminFetch.mockImplementation((path) => {
