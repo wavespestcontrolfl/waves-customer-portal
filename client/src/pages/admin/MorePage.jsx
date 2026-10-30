@@ -6,17 +6,18 @@ import {
   SlidersHorizontal,
   ExternalLink,
   ChevronRight,
+  User,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
-import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
+import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS, getAdminMobileTabs } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSaveNotice";
 import { UiSurface } from "../../components/ui";
-import { PinnedWorkspaceLinks, WorkspaceGroup } from "../../components/admin/AdminWorkspaceNavigation";
+import { PinnedWorkspaceLinks, WorkspaceGroup, WorkspaceLink } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 
 // The Settings leaves this page lists inline: every entry of the former
@@ -32,7 +33,6 @@ const NAV_PATHS = new Set(
 const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
   (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
 );
-const MOBILE_PRIMARY_IDS = new Set(ADMIN_MOBILE_TABS.map(({ id }) => id));
 
 export default function MorePage() {
   const navigate = useNavigate();
@@ -64,9 +64,16 @@ export default function MorePage() {
   const visibleSettingsLeaves = [...workspaceSettings, ...SETTINGS_LEAVES].filter(
     (sec) => currentRole === "admin" || !sec.adminOnly,
   );
+  // On a phone this page is the one full menu (owner 2026-10-29). A page that
+  // is one of THIS login's bottom tabs is not listed again (an owner has no
+  // Today tab, so Today is listed). A group whose main page is a tab
+  // (Schedule, Customers) shows its other pages as plain rows, so no row
+  // repeats a tab's name.
+  const tabIds = new Set(getAdminMobileTabs(currentRole).map(({ id }) => id));
   const mobileWorkspaces = navigation?.groups.filter(({ id }) => id !== 'settings').map((group) => {
-    const items = group.items.filter(({ id }) => !MOBILE_PRIMARY_IDS.has(id));
-    return { ...group, items, target: items.includes(group.target) ? group.target : undefined };
+    const items = group.items.filter(({ id }) => !tabIds.has(id));
+    const flat = Boolean(group.target && tabIds.has(group.target.id));
+    return { ...group, items, flat, target: items.includes(group.target) ? group.target : undefined };
   }).filter(({ items }) => items.length);
 
   return (
@@ -78,7 +85,12 @@ export default function MorePage() {
       {navigation && <UiSurface className="space-y-1 border-y border-zinc-200 py-3" density="comfortable">
         <PinnedWorkspaceLinks source="more" />
         <h2 className="m-0 px-4 py-2 text-14 font-medium text-zinc-500">Workspaces</h2>
-        {mobileWorkspaces.map((group) => <WorkspaceGroup key={group.id} group={group} source="more" />)}
+        {mobileWorkspaces.map((group) => (group.flat ? group.items.map((item) => {
+          const Icon = item.icon;
+          return <WorkspaceLink key={item.id} item={item} source="more" active={navigation.selection.itemId === item.id}>
+            <Icon size={18} strokeWidth={1.75} className="shrink-0" aria-hidden /><span className="min-w-0 flex-1">{item.label}</span>
+          </WorkspaceLink>;
+        }) : <WorkspaceGroup key={group.id} group={group} source="more" />))}
       </UiSurface>}
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
@@ -116,6 +128,12 @@ export default function MorePage() {
         {" "}
         <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
           {" "}
+          {/* The phone has no side menu, so the signed-in account shows here. */}
+          {outletContext?.user?.name && <li className="flex items-center gap-3 px-4 h-14 text-14 text-zinc-600">
+            <User size={20} strokeWidth={1.75} className="shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1 truncate">Signed in as <span className="font-medium text-zinc-900">{outletContext.user.name}</span></span>
+            <span>{currentRole === "admin" ? "Admin" : "Technician"}</span>
+          </li>}
           <li>
             {" "}
             <Link

@@ -130,7 +130,11 @@ describe("AdminLayoutV2", () => {
       <Route path="/admin/schedule" element={<div>Schedule content</div>} />
     </Route></Routes></MemoryRouter>);
     await screen.findByText(path.startsWith("/admin/schedule") ? "Schedule content" : "Today content");
-    expect(screen.getByRole("button", { name: "Open menu" })).toBeInTheDocument();
+    // No menu button and no side menu on a phone: the Settings tab is the one
+    // full menu (owner 2026-10-29). The top bar keeps search, Ask and the bell.
+    expect(screen.queryByRole("button", { name: "Open menu" })).not.toBeInTheDocument();
+    expect(document.getElementById("admin-sidebar")).toBeNull();
+    expect(screen.getByRole("button", { name: "Search pages" })).toBeInTheDocument();
     const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
     expect(tabs).toEqual(["Today", "Schedule", "Customers", "Messages", "Settings"]);
     const padding = document.getElementById("admin-main").style;

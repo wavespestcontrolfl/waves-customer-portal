@@ -9,8 +9,15 @@ Communications and Billing. Operations, Marketing, Team and Accounting
 expand below them; Agent Ops stays direct and Settings stays in the footer.
 Every leaf retains its canonical route, individual role requirement and
 feature flag. Contracts stays owner-only under Customers; System health
-stays owner-only under Settings. Mobile keeps its five existing tabs and
-all the Settings preferences, with the same workspace destinations.
+stays owner-only under Settings.
+
+A phone has no side menu and no menu button (owner 2026-10-29). The five
+bottom tabs stay, and the Settings tab (`/admin/more`) is the one full menu:
+every page that is not one of that login's tabs (an owner, who has no Today
+tab, sees Today there), the other pages of a group whose main page is a tab
+(Schedule, Customers) as plain rows so no row repeats a tab, the Settings
+preferences, and the signed-in account. `MorePage` is a static import, so
+this menu opens with no signal like the drawer it replaced.
 
 Parent links open their default page, and a group lists only its other
 pages, so no page appears twice (Sales opens Pipeline, Billing opens
@@ -39,15 +46,13 @@ frees a slot; invalid IDs are ignored and restricted destinations are hidden.
 Pins share the existing account-specific expansion preferences and store only
 known destination IDs. Searches are neither stored nor sent to the server or
 assistant. Selecting a result retains the existing `palette` usage source;
-same-page selections dismiss both search and an open mobile menu.
+same-page selections dismiss search.
 
 Ask Waves opens the existing assistant and preserves its unsent question
-when switching between modes. It also closes the originating mobile menu.
+when switching between modes.
 The palette retains the original focus target across mode switches, so
-closing the assistant returns to the control that opened page search.
-Closing the assistant returns focus to the persistent Open menu button when
-it was opened from that menu, directly or through page search.
-With the flag off, Cmd/Ctrl+K continues opening the assistant directly.
+closing the assistant returns to the control that opened page search (on a
+phone, the top-bar Search or Ask button).
 
 The implementation retains UI foundation PR #4168's density and shared
 controls, the field-recovery ScheduleSaveNotice beside Outlet (#4091), and

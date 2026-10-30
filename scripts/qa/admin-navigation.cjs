@@ -140,39 +140,38 @@ async function main() {
     await desktop.keyboard.press('Escape');
     check('Repeated mode switches retain the original keyboard focus target', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
 
-    for (const width of [700, 820, 1024, 1440]) {
+    for (const width of [820, 1024, 1440]) {
       await desktop.setViewportSize({ width, height: 900 });
-      if (width < 768) await desktop.getByRole('button', { name: 'Open menu' }).click();
       const row = desktop.getByRole('link', { name: 'Sales', exact: true });
       const height = (await row.boundingBox()).height;
       check(`Fine pointer target at ${width}`, height >= (width < 1024 ? 44 : 36));
     }
+    await desktop.setViewportSize({ width: 700, height: 900 });
+    await desktop.getByRole('navigation', { name: 'Primary' }).waitFor();
+    check('Below the phone breakpoint there is no side menu and no menu button', await desktop.locator('#admin-sidebar').count() === 0
+      && await desktop.getByRole('button', { name: 'Open menu' }).count() === 0);
     const touch = await openPage({ width: 1440, hasTouch: true });
     await touch.goto(`${server.baseUrl}/admin/customers`);
     const touchRow = touch.getByRole('link', { name: 'Sales', exact: true });
     await touchRow.waitFor();
     check('Coarse pointer desktop keeps 44px targets', (await touchRow.boundingBox()).height >= 44);
 
+    // On a phone the Settings tab is the one full menu (owner 2026-10-29).
     const mobile = await openPage({ width: 390, hasTouch: true });
     await mobile.goto(`${server.baseUrl}/admin/more`);
     await mobile.getByRole('heading', { name: 'Workspaces', exact: true }).waitFor();
     check('Mobile keeps all settings leaves', await mobile.getByRole('link', { name: 'Features' }).count() === 1 && await mobile.getByRole('link', { name: 'Usage' }).count() === 1);
     await shot(mobile, 'mobile-directory-390');
-    await mobile.getByRole('button', { name: 'Open menu' }).click();
-    const drawer = mobile.getByRole('dialog', { name: 'Admin menu' });
-    await drawer.waitFor();
-    await mobile.waitForTimeout(240);
-    await shot(mobile, 'mobile-drawer-390');
-    await mobile.keyboard.press('Shift+Tab');
-    check('Drawer traps keyboard focus', await drawer.evaluate((el) => el.contains(document.activeElement)));
-    await mobile.keyboard.press('Escape');
-    check('Escape restores menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
-    check('Hidden drawer is inert', await mobile.locator('#admin-sidebar').getAttribute('inert') !== null);
+    const settingsPage = mobile.locator('#admin-main');
+    check('The Settings tab lists Today for the owner', await settingsPage.getByRole('link', { name: 'Today', exact: true }).getAttribute('href') === '/admin/today');
+    check('No Settings row repeats a bottom tab', await settingsPage.getByRole('link', { name: /^(Dashboard|Schedule|Customers|Communications)$/ }).count() === 0
+      && await settingsPage.getByRole('button', { name: /^(Dashboard|Schedule|Customers|Communications)$/ }).count() === 0);
+    check('Phone has no menu button and no side menu', await mobile.getByRole('button', { name: 'Open menu' }).count() === 0 && await mobile.locator('#admin-sidebar').count() === 0);
     check('No horizontal mobile overflow', await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
 
     await mobile.goto(`${server.baseUrl}/admin/customers`);
-    await mobile.getByRole('button', { name: 'Open menu' }).click();
-    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    const topSearch = mobile.getByRole('button', { name: 'Search pages', exact: true });
+    await topSearch.click();
     const mobileFinder = mobile.getByRole('dialog', { name: 'Go to a page' });
     const mobileSearch = mobileFinder.getByRole('searchbox');
     check('New browser starts without saved pins', await mobileFinder.getByRole('button', { name: /^Unpin / }).count() === 0);
@@ -181,26 +180,23 @@ async function main() {
     await shot(mobile, 'mobile-search-390');
     await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).focus();
     await mobile.keyboard.press('Tab');
-    check('Page search owns focus above the mobile drawer', await mobileFinder.getByRole('button', { name: 'Close page search' }).evaluate((el) => el === document.activeElement));
+    check('Page search owns focus', await mobileFinder.getByRole('button', { name: 'Close page search' }).evaluate((el) => el === document.activeElement));
     await mobile.keyboard.press('Escape');
-    check('Closing page search returns focus to the still-open drawer', await drawer.isVisible() && await drawer.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
-    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    check('Closing page search returns focus to the top-bar search button', await topSearch.evaluate((el) => el === document.activeElement));
+    await topSearch.click();
     await mobileSearch.fill('Customers');
     await mobileSearch.press('Enter');
-    check('Same-page search dismisses both overlays', await mobileFinder.count() === 0 && await drawer.count() === 0);
-    await mobile.getByRole('button', { name: 'Open menu' }).click();
-    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    check('Same-page search dismisses page search', await mobileFinder.count() === 0);
+    await topSearch.click();
     await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
     await mobile.getByPlaceholder(/Ask anything/).waitFor();
-    check('Ask Waves dismisses the originating mobile drawer', await drawer.count() === 0);
     await mobile.keyboard.press('Escape');
-    check('Closing Ask Waves from page search returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
-    await mobile.getByRole('button', { name: 'Open menu' }).click();
-    await drawer.getByRole('button', { name: 'Ask', exact: true }).click();
+    check('Closing Ask Waves from page search returns focus to the top-bar search button', await topSearch.evaluate((el) => el === document.activeElement));
+    const topAsk = mobile.getByRole('button', { name: 'Ask Waves', exact: true });
+    await topAsk.click();
     await mobile.getByPlaceholder(/Ask anything/).waitFor();
-    check('Opening Ask Waves directly dismisses the mobile drawer', await drawer.count() === 0);
     await mobile.keyboard.press('Escape');
-    check('Closing Ask Waves from the drawer returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
+    check('Closing Ask Waves returns focus to the top-bar Ask button', await topAsk.evaluate((el) => el === document.activeElement));
     await mobile.goto(`${server.baseUrl}/admin/more`);
     await mobile.getByRole('group', { name: 'Pinned pages' }).waitFor();
     check('Mobile Settings shares saved pinned pages', await mobile.getByRole('group', { name: 'Pinned pages' }).getByRole('link', { name: 'Inventory', exact: true }).isVisible());
