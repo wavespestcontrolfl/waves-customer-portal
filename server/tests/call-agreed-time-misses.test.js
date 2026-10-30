@@ -298,6 +298,14 @@ describe('case: calls after midnight (v33)', () => {
     expect(rule).toContain('Outside 12:00 AM to 4:00 AM, "tomorrow" is the day after the call date as usual.');
   });
 
+  test('a reschedule day that rests only on "tomorrow" stays null on such a call (the reschedule grounding reads it as the next day)', () => {
+    const rule = afterMidnightDayRule('2026-11-06');
+    expect(rule).toContain('This reading is for the slot of a NEW visit only.');
+    expect(rule).toContain('rests only on "tomorrow" or "the day after tomorrow" (no weekday or calendar date said for it), leave confirmed_start_at, proposed_start_at and moved_appointment_date null');
+    expect(rule).toContain('the office confirms that day. A weekday or calendar date said for it still sets it.');
+    expect(rule).not.toContain('follow-up and callback times');
+  });
+
   test('the rule sits right after the day/time conflict rule, before the existing-appointment line, in both layouts', () => {
     const { system } = buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-11-06', { callTimeET: '12:40 AM' });
     for (const [text, ref] of [[PROMPT, '2026-10-05'], [system, SYSTEM_REF]]) {
