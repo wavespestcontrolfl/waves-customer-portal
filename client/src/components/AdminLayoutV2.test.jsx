@@ -53,6 +53,8 @@ describe("AdminLayoutV2", () => {
       setItem: (key, value) => store.set(key, String(value)),
       removeItem: (key) => store.delete(key),
       clear: () => store.clear(),
+      key: (index) => [...store.keys()][index] ?? null,
+      get length() { return store.size; },
     });
     adminFetch.mockResolvedValue({ id: 1, name: "Admin", role: "admin" });
   });
@@ -212,9 +214,12 @@ describe("AdminLayoutV2", () => {
     expect(screen.queryByRole("button", { name: "Open Intelligence Bar" })).not.toBeInTheDocument();
   });
 
-  it("explicit sign-out clears local Email recovery and invalidates pending callbacks", async () => {
+  it("explicit sign-out clears local Email recovery and Ask prompts, and invalidates pending callbacks", async () => {
     const session = loadEmailDrafts(1);
     updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Private unsent edit" } }));
+    const askPrompts = ["admin_ib_recents:1", "admin_ib_recents:2", "admin_ib_recents", "ib.recents.schedule"];
+    for (const key of askPrompts) localStorage.setItem(key, JSON.stringify(["Fixture private prompt"]));
+    localStorage.setItem("ib.favorites.schedule", JSON.stringify(["Fixture starred prompt"]));
     render(<MemoryRouter initialEntries={["/admin/dashboard"]}><Routes>
       <Route element={<AdminLayoutV2 />}><Route path="/admin/dashboard" element={<div>Admin child</div>} /></Route>
       <Route path="/admin/login" element={<div>Signed out</div>} />
@@ -224,6 +229,9 @@ describe("AdminLayoutV2", () => {
     await screen.findByText("Signed out");
     expect(loadEmailDrafts(1).drafts.replies).toEqual({});
     expect(updateEmailDrafts(session, () => ({ replies: { fixture: "Late result" } }))).toBeNull();
+    // Every login's recent Ask prompts go; starred prompts are deliberate saves and stay.
+    for (const key of askPrompts) expect(localStorage.getItem(key), key).toBeNull();
+    expect(localStorage.getItem("ib.favorites.schedule")).not.toBeNull();
   });
 
   // Sign-out calls navigate() from a plain button — no popstate, no <a

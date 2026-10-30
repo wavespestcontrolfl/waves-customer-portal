@@ -1,6 +1,9 @@
 /**
  * Intelligence Bar localStorage — persistent recents + favorites per context.
  * client/src/utils/ibStorage.js
+ *
+ * Recents are deleted when a staff session ends (lib/adminAuth.js
+ * clearStaffDeviceData, by the `ib.recents.` prefix); favorites stay.
  */
 
 const MAX_RECENTS = 5;
