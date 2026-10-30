@@ -14,9 +14,11 @@
 // Styling matches the light/zinc detail sheet it opens over (not the tech
 // app's dark palette) — neutral chrome only, per the admin design spec.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
+import useModalFocus from '../../hooks/useModalFocus';
+import { summarizeQuickMoveResult } from '../../lib/quickMoveResult';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
@@ -313,6 +315,13 @@ function authHeaders() {
 // scope 'route' for): this stop only, no whole-route chip.
 export default function RainOutSheet({ service, onClose, onDone, allowRouteScope = true }) {
   const isMobile = useIsMobile();
+  // Shared dialog focus contract (hooks/useModalFocus): focus moves into the
+  // sheet on open, Tab stays inside, Escape closes it, and focus returns to the
+  // control that opened it. Escape runs the same onClose as Cancel / the ×, so
+  // a parent that dismisses on a committed warning still does.
+  const dialogRef = useModalFocus(true, onClose);
+  const customDateId = useId();
+  const customStartId = useId();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
   const [reason, setReason] = useState('weather_rain');
@@ -614,45 +623,20 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(ERROR_COPY[data.error] || data.error || `HTTP ${res.status}`);
-      const failedCount = data.failedCount || 0;
-      const movedCount = data.movedCount || 0;
-      // "customer texted" must come from what actually HAPPENED, not the
-      // request flag — a disabled template or missing phone moves the visit
-      // without an SMS (smsSent:false on that result row), and telling the
-      // dispatcher it was texted buries the manual follow-up.
-      const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
-      const notTexted = notify && texted < movedCount;
+      // Shared reading of the commit result (lib/quickMoveResult.js): what moved,
+      // who was texted, which stops need follow-up.
+      const result = summarizeQuickMoveResult(data, { notify, display: selected.display });
+      const { summary, movedCount, failedCount, notTexted, overlapCount, overlapWarnings } = result;
       // Stops that moved onto an occupied slot: the move COMMITS (schedule
       // overlaps are advisory on every staff surface) — say so and keep the
       // sheet open so the dispatcher eyeballs the day's route.
-      const overlapWarnings = Array.isArray(data.overlapWarnings)
-        ? data.overlapWarnings
-        : (data.results || []).flatMap((r) => (r.ok && Array.isArray(r.warnings) ? r.warnings : []));
-      const overlapCount = overlapWarnings.length;
-      const notifyClause = !notify ? ''
-        : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
-          : texted === 0 ? ', customer NOT texted'
-            : `, ${texted}/${movedCount} texted`;
-      const summary =
-        `Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}`;
-      if (failedCount > 0 || notTexted || overlapCount > 0) {
+      if (result.needsAttention) {
         setCommitted(movedCount > 0);
         // Partial success (a stop raced to terminal or slot-conflicted) or a
         // silent non-send. The server still returns 200 when at least one
         // moved, so keep the sheet open with the warning instead of silently
         // closing; the parent still refreshes the board for the moved stops.
-        const failClause = failedCount > 0
-          ? ` ${failedCount} stop${failedCount === 1 ? '' : 's'} could not be moved — review dispatch.`
-          : '';
-        const smsClause = notTexted
-          ? ' Some customers were NOT texted (no phone or template disabled) — follow up manually.'
-          : '';
-        // The dated warnings themselves (one per clashing occurrence — a
-        // series shift can report several future dates), never a bare count.
-        const overlapClause = overlapCount > 0
-          ? ` ${overlapWarnings.join(' ')} Check the route on ${overlapCount === 1 ? 'that day' : 'those days'}.`
-          : '';
-        setError(`${summary}.${failClause}${smsClause}${overlapClause}`);
+        setError(result.message);
         setBusy(false);
       }
       onDone?.({ summary, movedCount, failedCount, notTexted, overlapCount, overlapWarnings });
@@ -663,16 +647,17 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   };
 
   const chipStyle = (active) => ({
-    padding: '7px 14px', borderRadius: 16, fontSize: 13, fontWeight: 500,
+    padding: '7px 14px', borderRadius: 16, fontSize: 14, fontWeight: 500,
     border: `1px solid ${active ? '#18181B' : '#D4D4D8'}`,
     background: active ? '#18181B' : '#FFFFFF',
     color: active ? '#FFFFFF' : '#18181B', cursor: 'pointer',
   });
 
-  const sectionLabel = { fontSize: 12, fontWeight: 500, color: '#71717A', letterSpacing: '0.04em', marginBottom: 8 };
+  const sectionLabel = { fontSize: 14, fontWeight: 500, color: '#71717A', letterSpacing: '0.04em', marginBottom: 8 };
 
   return createPortal(
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Quick Move Appointment"
@@ -712,14 +697,14 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             ×
           </button>
         </div>
-        <div style={{ fontSize: 13, color: '#71717A', marginBottom: 16 }}>
+        <div style={{ fontSize: 14, color: '#71717A', marginBottom: 16 }}>
           {service.customerName || 'Customer'}
           {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
         </div>
 
         {error && (
           <div style={{
-            marginBottom: 12, fontSize: 13, padding: '8px 10px', borderRadius: 8,
+            marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 8,
             background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C',
           }}>
             {error}
@@ -727,7 +712,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
         )}
 
         {!options && !error && (
-          <div style={{ color: '#71717A', fontSize: 13, padding: 20, textAlign: 'center' }}>Loading options…</div>
+          <div style={{ color: '#71717A', fontSize: 14, padding: 20, textAlign: 'center' }}>Loading options…</div>
         )}
 
         {options && (
@@ -767,7 +752,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             <div style={sectionLabel}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
               {visibleOptions.length === 0 && (
-                <div style={{ fontSize: 13, color: '#71717A' }}>No preset slots — pick a custom time below.</div>
+                <div style={{ fontSize: 14, color: '#71717A' }}>No preset slots — pick a custom time below.</div>
               )}
               {visibleOptions.map((opt) => {
                 const key = keyOf(opt);
@@ -796,10 +781,10 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                           <span data-testid="already-late-tag" style={{ fontSize: 12, fontWeight: 500, color: '#854D0E' }}>already late</span>
                         )}
                         {conflictsFor(opt).length > 0 && (
-                          <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: '#B45309' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (
-                          <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
                             {opt.rainChance}% rain{opt.rainScope === 'day' ? ' that day' : ''}
                           </span>
                         )}
@@ -824,7 +809,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               >
                 <span>Custom time</span>
                 {customOption && (
-                  <span style={{ fontSize: 12, fontWeight: 500, color: '#18181B' }}>
+                  <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>
                     {fmtDateLabel(customDate, todayStr)} · {fmtTime(customOption.window.start)}
                   </span>
                 )}
@@ -834,8 +819,9 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             {isCustom && (
               <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
                 <div style={{ flex: 1 }}>
-                  <div style={sectionLabel}>DATE</div>
+                  <label htmlFor={customDateId} style={{ ...sectionLabel, display: 'block' }}>DATE</label>
                   <input
+                    id={customDateId}
                     type="date"
                     value={customDate}
                     min={todayStr}
@@ -851,8 +837,9 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                   />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={sectionLabel}>START (ON THE HOUR)</div>
+                  <label htmlFor={customStartId} style={{ ...sectionLabel, display: 'block' }}>START (ON THE HOUR)</label>
                   <input
+                    id={customStartId}
                     type="time"
                     step="3600"
                     value={customStart}
@@ -895,7 +882,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             />
 
             {customElapsed && (
-              <div style={{ fontSize: 12, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
+              <div style={{ fontSize: 14, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
                 {runningLateFloorMin > 0 && hhmmToMin(customWindow?.start) < runningLateFloorMin
                   ? `Running late needs a time after the current window — pick ${fmtTime(minTodayStart)} or later.`
                   : `That hour has already started today — pick ${fmtTime(minTodayStart)} or later.`}
@@ -907,7 +894,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                 check at commit is the enforcer and rejects real overlaps. */}
             {activeConflicts.length > 0 && selected && (
               <div style={{
-                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
+                fontSize: 14, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
                 background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
               }}>
                 {`⚠️ This time overlaps ${conflictLabel(activeConflicts[0])}`}
@@ -952,7 +939,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                     background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit', resize: 'vertical',
                   }}
                 />
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 4, fontSize: 12, color: '#71717A' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 4, fontSize: 14, color: '#71717A' }}>
                   <span>
                     {noteBlocked
                       ? <span style={{ color: '#B91C1C' }}>{noteBlockedCopy}</span>
