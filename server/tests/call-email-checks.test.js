@@ -47,8 +47,10 @@ describe('emailMentions', () => {
     ['one word after a clean start is a said address', 'Agent: So sclay18 at yahoo.com, got it.', [{ kind: 'said', local: 'sclay18', domain: 'yahoo.com', speaker: 'agent' }]],
     ['times and places are not addresses', 'We are at 107 Rodeo Drive at 4 o\'clock.', []],
     ['an inline address', 'No, jane2@gmail.com.', [{ kind: 'said', local: 'jane2', domain: 'gmail.com', speaker: null }]],
+    ['a bare provider name marks a said address', 'So jane2 at gmail', [{ kind: 'said', local: 'jane2', domain: 'gmail', speaker: null }]],
+    ['an everyday word after "at" is not an address', 'Okay, look at me. We are at home.', []],
     ['an inline address with hyphen-joined letters', 'J-A-N-E@gmail.com', [{ kind: 'said', local: 'jane', domain: 'gmail.com', speaker: null }]],
-    ['fewer than three letters is not a spelling', 'J-O at gmail', []],
+    ['fewer than three spelled letters is a said word, not a spelling', 'J-O at gmail', [{ kind: 'said', local: 'jo', domain: 'gmail', speaker: null }]],
   ])('%s', (_label, text, mentions) => {
     expect(emailMentions(text).mentions).toEqual(mentions);
   });
@@ -64,7 +66,8 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['spelled letter by letter on gmail', ['Okay, B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com.'], 'brightonkayla@gmail.com', true],
     ['spelled with a number on yahoo', ['D-R-A-Y 22 at yahoo.com'], 'dray22@yahoo.com', true],
     ['phonetic markers on iCloud', ['T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com'], 'thebaitshopgm@icloud.com', true],
-    ['only one of two transcripts needs the spelling', ['my email is the bait shop gm at icloud', 'T-H-E-B-A-I-T-S-H-O-P-G-M at iCloud.com'], 'thebaitshopgm@icloud.com', true],
+    ['only one of two transcripts needs the spelling', ['my email is the bait shop GM, let me spell it', 'T-H-E-B-A-I-T-S-H-O-P-G-M at iCloud.com'], 'thebaitshopgm@icloud.com', true],
+    ['an address said in several words with "at" keeps the card', ['my email is the bait shop gm at icloud', 'T-H-E-B-A-I-T-S-H-O-P-G-M at iCloud.com'], 'thebaitshopgm@icloud.com', false],
     ['said, not spelled', ['My email is jane.doe@gmail.com'], 'jane.doe@gmail.com', false],
     ['a word between the spelled parts', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
     ['a custom domain is never trusted this way', ['J-A-Y at J-D-O-E dot me'], 'jay@jdoe.me', false],
@@ -83,6 +86,8 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['an inline correction in the other transcript keeps the card', ['Caller: J-A-N-E at gmail.com.', 'No, jane2@gmail.com.'], 'jane@gmail.com', false],
     ['an inline read-back of the same address is fine', ['Caller: J-A-N-E at gmail.com. Agent: jane@gmail.com, got it.'], 'jane@gmail.com', true],
     ['our own inline address is ignored', ['Caller: J-A-N-E at gmail.com. Agent: Our email is contact@wavespestcontrol.com.'], 'jane@gmail.com', true],
+    ['a bare-provider correction keeps the card', ['Caller: J-A-N-E at gmail.com. Caller: No, jane2 at gmail'], 'jane@gmail.com', false],
+    ['a bare-provider read-back of the same address is fine', ['Caller: J-A-N-E at gmail.com. Agent: So jane at gmail, got it.'], 'jane@gmail.com', true],
     ['an agent-only spelling stays the agent\'s in the unlabeled copy', ['Agent: So that is J-A-N-E at gmail.com? Caller: Yes.', 'So that is J-A-N-E at gmail.com? Yes.'], 'jane@gmail.com', false],
     ['the caller said it inline and the dictation pass has the letters', ['Caller: My email is jane@gmail.com.', 'My email is J-A-N-E at gmail.com.'], 'jane@gmail.com', true],
     ['an interrupted spelling never vouches for the joined address either', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],

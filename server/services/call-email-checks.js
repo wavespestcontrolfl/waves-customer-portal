@@ -72,6 +72,19 @@ const stripQuotes = (token) => String(token || '').replace(/^["“(']+|["”)]+$
 const SPEAKER_LABELS = [[/^(?:caller|customer):$/i, 'caller'], [/^(?:agent|staff|csr|rep):$/i, 'agent']];
 // Our own addresses, which staff say on calls ("email us at ..."). Never the caller's.
 const OWN_DOMAINS = new Set(['wavespestcontrol.com']);
+// Provider names that mark "<word> at gmail" as an address even with no ".com".
+// Everyday words among the provider labels (me, live, mac, cox, charter, att)
+// are left out, so "look at me" is never an address.
+const BARE_PROVIDER_LABELS = new Set(['gmail', 'googlemail', 'yahoo', 'ymail', 'hotmail', 'outlook', 'msn', 'icloud', 'aol', 'comcast', 'verizon', 'sbcglobal', 'bellsouth', 'earthlink', 'protonmail', 'proton']);
+
+// "J-O" or "J-A-N-E" said as one word is the letters joined.
+const joinHyphenLetters = (word) => (/^(?:[a-z0-9]-)+[a-z0-9]$/i.test(word) ? word.replace(/-/g, '') : word);
+
+// An address written inline ("jane2@gmail.com", "J-A-N-E@gmail.com"), or null.
+function inlineMention(bare, speaker) {
+  const inline = bare.replace(/[.:]+$/, '').match(/^([^@\s]+)@([^@\s]+)$/);
+  return inline ? { kind: 'said', local: joinHyphenLetters(inline[1]).toLowerCase(), domain: inline[2].toLowerCase(), speaker } : null;
+}
 
 // Every email address mentioned in one transcript: "<local> at <domain>".
 //  - spelled: a spelled run (three or more spelled letters) ending directly on
@@ -79,10 +92,11 @@ const OWN_DOMAINS = new Set(['wavespestcontrol.com']);
 //    { kind: 'spelled', local: 'fletchershyla', domain: 'gmail.com' }. A run that
 //    was interrupted ("T-A-M-I, Rowe, R-O-W-E") or follows a spoken word that may
 //    belong to the address ("jane D-O-E") has local: null.
-//  - said: words before "at" with a dotted domain ("sclay18 at yahoo.com",
-//    "jane two at gmail dot com"). Only one word right after a clean start can
-//    stand for the whole local part; anything else has local: null. An address
-//    written inline ("jane2@gmail.com") is a said mention too.
+//  - said: words before "at" with a dotted domain or a provider name
+//    ("sclay18 at yahoo.com", "jane two at gmail dot com", "jane2 at gmail").
+//    Only one word right after a clean start can stand for the whole local
+//    part; anything else has local: null. An address written inline
+//    ("jane2@gmail.com") is a said mention too.
 // A spelled name that runs into a word ("S-M-I-T-H. My email is ...") is not a
 // mention by itself. Returns { mentions, labeled }.
 function emailMentions(text) {
@@ -114,23 +128,12 @@ function emailMentions(text) {
       continue;
     }
     const bare = raw.replace(/[,;!?]+$/, '');
-    // An address written inline ("jane2@gmail.com", "J-A-N-E@gmail.com"): a said
-    // mention, so a correction typed out this way still conflicts.
-    const inline = bare.replace(/[.:]+$/, '').match(/^([^@\s]+)@([^@\s]+)$/);
-    if (inline) {
-      const inlineLocal = /^(?:[a-z0-9]-)+[a-z0-9]$/i.test(inline[1]) ? inline[1].replace(/-/g, '') : inline[1];
-      mentions.push({ kind: 'said', local: inlineLocal.toLowerCase(), domain: inline[2].toLowerCase(), speaker });
-      endRun(i);
-      continue;
-    }
-    if (/^(?:at|@)$/i.test(bare.replace(/[.:]+$/, ''))) {
-      const domain = spokenDomainFrom(tokens, i + 1);
-      if (domain && letters >= MIN_SPELLED_LETTERS) {
-        mentions.push({ kind: 'spelled', local: clean ? run : null, domain, speaker });
-      } else if (domain && domain.includes('.') && i > 0) {
-        const word = stripQuotes(tokens[i - 1]).toLowerCase().replace(/[,;:!?.]+$/, '');
-        mentions.push({ kind: 'said', local: cleanStartAt(i - 1) && word ? word : null, domain, speaker });
-      }
+    // An address written inline is a said mention, so a correction typed out
+    // this way still conflicts.
+    const inline = inlineMention(bare, speaker);
+    if (inline || /^(?:at|@)$/i.test(bare.replace(/[.:]+$/, ''))) {
+      const mention = inline || atMention(tokens, i, { run, letters, clean, speaker, cleanStartAt });
+      if (mention) mentions.push(mention);
       endRun(i);
       continue;
     }
@@ -147,7 +150,29 @@ function emailMentions(text) {
   return { mentions, labeled };
 }
 
+// The mention an "at" at token i closes: the spelled run before it, or the one
+// word said before it (a dotted domain or a provider name after it), or null.
+function atMention(tokens, i, { run, letters, clean, speaker, cleanStartAt }) {
+  const domain = spokenDomainFrom(tokens, i + 1);
+  if (!domain) return null;
+  if (letters >= MIN_SPELLED_LETTERS) return { kind: 'spelled', local: clean ? run : null, domain, speaker };
+  if (i === 0 || !(domain.includes('.') || BARE_PROVIDER_LABELS.has(domain))) return null;
+  const word = joinHyphenLetters(stripQuotes(tokens[i - 1]).toLowerCase().replace(/[,;:!?.]+$/, ''));
+  return { kind: 'said', local: cleanStartAt(i - 1) && word ? word : null, domain, speaker };
+}
+
 const KNOWN_DOMAIN_SET = new Set(KNOWN_DOMAINS);
+
+// How one mention bears on the saved address: 'conflict' (a different or
+// unclear address), 'agrees' (consistent, not evidence: a said mention or a
+// bare provider), or 'spelled' (a spelled mention of exactly this address).
+// A bare provider ("at gmail") agrees only when its word and provider name both
+// match, and it is never evidence: the domain itself was not said.
+function mentionVerdict(m, local, domain) {
+  const bare = !m.domain.includes('.');
+  if (m.local !== local || m.domain !== (bare ? domain.split('.')[0] : domain)) return 'conflict';
+  return m.kind === 'spelled' && !bare ? 'spelled' : 'agrees';
+}
 
 // The 2026-10-05 rule without AI. True only when:
 //  - the saved address is on a known consumer mail provider (a custom domain is
@@ -170,21 +195,16 @@ function spelledEmailMatches({ transcripts = [], email } = {}) {
   // Caller: spelling counts; an unlabeled copy (the dictation pass) counts
   // unless a labeled transcript puts the spelling only in an Agent: turn (then
   // the unlabeled copy is the employee's too).
-  let callerSpelled = false;
-  let agentSpelled = false;
-  let unlabeledSpelled = false;
+  const spelledBy = { caller: false, agent: false, unlabeled: false };
   for (const text of transcripts.filter(Boolean)) {
     const { mentions, labeled } = emailMentions(String(text));
-    for (const m of mentions) {
-      if (OWN_DOMAINS.has(m.domain)) continue;
-      if (m.local !== local || m.domain !== domain) return false;
-      if (m.kind !== 'spelled') continue;
-      if (!labeled) unlabeledSpelled = true;
-      else if (m.speaker === 'caller') callerSpelled = true;
-      else if (m.speaker === 'agent') agentSpelled = true;
+    for (const m of mentions.filter((x) => !OWN_DOMAINS.has(x.domain))) {
+      const verdict = mentionVerdict(m, local, domain);
+      if (verdict === 'conflict') return false;
+      if (verdict === 'spelled') spelledBy[labeled ? m.speaker || 'none' : 'unlabeled'] = true;
     }
   }
-  return callerSpelled || (unlabeledSpelled && !agentSpelled);
+  return spelledBy.caller || (spelledBy.unlabeled && !spelledBy.agent);
 }
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
