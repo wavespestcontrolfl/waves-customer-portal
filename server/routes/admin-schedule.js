@@ -206,10 +206,10 @@ const {
   uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
-const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../services/service-report/application-conditions');
 
-// Office coordinates for office-level rain outlooks (matches the NWS point
-// used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
+// Office coordinates for office-level rain outlooks and the day board's
+// weather bar (matches the NWS point used by feed.js / forecast-analyzer.js —
+// Lakewood Ranch HQ area).
 const OFFICE_LAT = 27.4217;
 const OFFICE_LNG = -82.4065;
 
@@ -7191,23 +7191,6 @@ router.get('/', async (req, res, next) => {
     const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
     const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
-    // Fetch live weather for Lakewood Ranch area
-    let weather = {};
-    try {
-      const forecast = await fetchPropertyForecast({
-        latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
-        longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
-      });
-      if (forecast.status === 'ok' && forecast.current) {
-        const current = forecast.current;
-        weather = {
-          temp: Math.round(current.temperature_f || 0),
-          windSpeed: Math.round(current.wind_mph || 0),
-          rainProbability: current.precipitation_probability_pct || 0,
-        };
-      }
-    } catch { /* weather is optional */ }
-
     // Requested-date rain chance (office point) + per-zone chances for the
     // zones actually on this day's board. Office and every zone resolve in
     // ONE parallel bounded wave — total added wait is capped by the bounded
@@ -7217,13 +7200,17 @@ router.get('/', async (req, res, next) => {
     // The per-zone HOURLY outlook rides the same wave and stamps each row's
     // rainAtStop (chance at its window-start hour in its zone) for the day
     // list card — bounded the same way, null when the forecast is late.
+    // So does the weather bar: temp, wind and chance for the hour now at the
+    // office point (owner 2026-10-30: NWS in place of Open-Meteo, which now
+    // answers only when NWS fails); `{}` when the forecast is late.
     let rainChance = null;
     let zoneRain;
-    const { attachStopRain, zoneHourlyOutlooks } = require('../services/scheduling/stop-rain');
+    let weather = {};
+    const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
     attachStopRain(enriched, date, {});
     try {
       const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
-      const [outlook, perZone, hourlyByZone] = await Promise.all([
+      const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
           const zoneOutlook = await getDailyRainOutlookBounded(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
@@ -7231,7 +7218,9 @@ router.get('/', async (req, res, next) => {
           return [z, Number.isFinite(chance) ? chance : null];
         })),
         zoneHourlyOutlooks(zonesPresent, ZONE_COORDS).catch(() => ({})),
+        weatherNow(OFFICE_LAT, OFFICE_LNG).catch(() => ({})),
       ]);
+      weather = officeWeather;
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);

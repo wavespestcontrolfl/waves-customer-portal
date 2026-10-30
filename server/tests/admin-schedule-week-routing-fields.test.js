@@ -28,8 +28,9 @@ jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlookBounded: jest.fn(async () => null),
 }));
 
-// The day route also fetches current weather directly. Keep these database
-// contracts independent of the network as well as the mocked rain forecast.
+// The day route also reads its weather bar over fetch (NWS, Open-Meteo when
+// NWS fails). Keep these database contracts independent of the network as
+// well as the mocked rain forecast.
 let weatherFetch;
 beforeEach(() => {
   weatherFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
