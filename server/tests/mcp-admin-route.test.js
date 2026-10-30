@@ -209,7 +209,7 @@ describe('answers', () => {
       total_open: 1,
       returned: 1,
       counts: { byArea: { billing: 1 }, byWho: { person: 1 }, bySeverity: { high: 1 } },
-      items: [{ id: 7, area: 'billing', who: 'person', headline: 'h'.repeat(200), why: 'Card failed', detail: 'long engineering digest', report_link: 'https://example.test/r/abc', link: '/admin/invoices', subject: 'Invoice 1042', done_when: 'paid', created_at: '2026-10-30T11:00:00Z' }],
+      items: [{ id: 7, area: 'billing', who: 'person', headline: 'h'.repeat(200), why: 'Card failed', detail: 'long engineering digest', report_link: 'https://example.test/r/abc', link: '/admin/invoices', subject: { type: 'invoice', id: 'inv-1042' }, done_when: 'paid', created_at: new Date('2026-10-30T11:00:00Z') }],
       unsorted: [],
       next_cursor: 'c'.repeat(200),
       note: 'guidance',
@@ -226,6 +226,9 @@ describe('answers', () => {
     expect(item).not.toHaveProperty('report_link');
     expect(item.headline).toBe(`${'h'.repeat(160)}…`);
     expect(item.link).toBe('/admin/invoices');
+    // Real shapes: subject is an object and created_at a pg Date.
+    expect(item.subject).toEqual({ type: 'invoice', id: 'inv-1042' });
+    expect(item.created_at).toBe('2026-10-30T11:00:00.000Z');
     expect(answer.data.counts.byArea).toEqual({ billing: 1 });
     expect(answer.data.next_cursor).toHaveLength(200);
     expect(answer.data).not.toHaveProperty('note');
