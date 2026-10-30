@@ -306,5 +306,81 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
       expect(within(column('Mon')).queryByText('Second Customer')).not.toBeInTheDocument();
     });
   });
+
+  describe('navigating to another week while a post-write request is pending', () => {
+    const nextWeek = () => week('2026-11-09', 'Next Week Customer');
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      return { promise, resolve };
+    };
+    const drag = () => act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+
+    // Serves the first week read at once, then holds every later read of the
+    // first week on `readGate`; the next week always answers immediately.
+    async function start({ postGate = null, readGate = null, onChange } = {}) {
+      let reads = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') {
+          if (postGate) await postGate.promise;
+          return response({ success: true });
+        }
+        if (String(url).includes('start=2026-11-09')) return response(nextWeek());
+        reads += 1;
+        return reads === 1 || !readGate ? response(payload([[service], []])) : readGate.promise;
+      });
+      const view = render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+      await screen.findByText('Synthetic Customer');
+      await drag();
+      await act(async () => { void modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+      return view;
+    }
+
+    it('a delayed refresh success does not overwrite the new week', async () => {
+      const readGate = deferred();
+      const view = await start({ readGate });
+      expect(screen.getByRole('status')).toHaveTextContent('Refreshing…');
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { readGate.resolve(response(payload([[], [service]]))); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('a delayed refresh failure does not attach a retry notice to the new week', async () => {
+      const readGate = deferred();
+      const onChange = vi.fn();
+      const view = await start({ readGate, onChange });
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} onChange={onChange} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { readGate.resolve(unavailable); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('a late POST response does not promote the old week into the new one', async () => {
+      const postGate = deferred();
+      const view = await start({ postGate });
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { postGate.resolve(); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(modal.props.open).toBe(false);
+    });
+  });
 });
 

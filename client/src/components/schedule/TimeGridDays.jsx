@@ -738,8 +738,15 @@ export default function TimeGridDays({
 
   const monday = useMemo(() => startOfWeek(date), [date]);
 
+  // Request generation. The week load below owns one value per week/refreshKey/
+  // retry; every post-write re-read (reloadWeek) bumps it; navigating away or
+  // unmounting bumps it. An async continuation applies its result only while
+  // the generation it captured is still current, so a late week, refresh or
+  // POST response can never land on a week the grid no longer shows.
+  const genRef = useRef(0);
+
   useEffect(() => {
-    let active = true;
+    const gen = genRef.current;
     setLoading(true);
     setLoadError(null);
     setData(null);
@@ -747,17 +754,17 @@ export default function TimeGridDays({
     setStatus(null);
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         setData(j);
         setLoading(false);
       })
       .catch((err) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         console.error(err);
         setLoadError(err);
         setLoading(false);
       });
-    return () => { active = false; };
+    return () => { genRef.current += 1; };
   }, [monday, refreshKey, retryKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -952,20 +959,25 @@ export default function TimeGridDays({
   // The one week re-read after a committed write, used by the commit path and
   // the refresh-only retry. A failed read never undoes the committed result.
   const reloadWeek = useCallback(async () => {
+    const gen = ++genRef.current;
     setStatus({ text: 'Refreshing…' });
+    let next = null;
     try {
-      setData(await adminFetch(`/admin/schedule/week?start=${monday}`));
-      setStatus(null);
+      next = await adminFetch(`/admin/schedule/week?start=${monday}`);
     } catch (err) {
       console.error(err);
-      setStatus({ text: 'Moved. Could not refresh the schedule.', retry: true });
     }
+    // Navigated away or superseded by a newer re-read: drop everything.
+    if (gen !== genRef.current) return;
+    if (next) setData(next);
+    setStatus(next ? null : { text: 'Moved. Could not refresh the schedule.', retry: true });
     onChange?.();
   }, [monday, onChange]);
 
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { mode, svc, toDate, newWindow } = pending;
+    const gen = genRef.current;
     setStatus({ text: 'Saving…' });
     try {
       if (mode === 'assign') {
@@ -1014,9 +1026,12 @@ export default function TimeGridDays({
     // drag, or a cancelled one, starts from it; a good refresh replaces it
     // with server data), close the confirmation and tell the parent either
     // way (its own read may also fail).
+    setPending(null);
+    // The week changed while the write was in flight: the move is saved, but
+    // this week's optimistic copy must not become the new week's baseline.
+    if (gen !== genRef.current) return;
     setData(optimistic || data);
     setOptimistic(null);
-    setPending(null);
     await reloadWeek();
   }, [pending, optimistic, data, reloadWeek]);
 
