@@ -441,6 +441,7 @@ describe("completionResumeOwedError", () => {
       "invoice_hold_handover_failed",
       "deferred_prepay_lookup_failed",
       "membership_dues_coverage_unverified",
+      "proposal_terms_unread",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

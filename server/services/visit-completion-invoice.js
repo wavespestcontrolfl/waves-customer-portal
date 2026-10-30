@@ -403,9 +403,12 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   // against the committed packet invoice.
   if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
   const deposit = sourceEstimateId ? await pendingDepositCredit(sourceEstimateId, trx) : null;
+  // An invoice-mode commercial proposal's visits are due on the agreement's Net term (owner 2026-10-30).
+  const proposalTermsDue = sourceEstimateId
+    ? await require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date) : null;
   const invoice = await InvoiceService.create({
     database: trx, customerId: customer.id, scheduledServiceId: billed[0].member.id,
-    serviceRecordId: billed[0].member.record_id, serviceDate: visit.scheduled_date, dueDate: dateOnly(visit.scheduled_date),
+    serviceRecordId: billed[0].member.record_id, serviceDate: visit.scheduled_date, dueDate: proposalTermsDue || dateOnly(visit.scheduled_date),
     title: 'Combined service visit', lineItems, trustedStoredDiscountSources: ['scheduled_service'],
     ...(deposit ? { depositCredit: { amount: deposit.amount, estimateId: sourceEstimateId } } : {}),
   }, { packetId: packet.id });
