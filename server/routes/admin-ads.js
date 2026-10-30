@@ -470,21 +470,6 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
       return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before holding its budget.` });
     }
 
-    // Apply the mode now, push first. A campaign already in the held mode has
-    // nothing to push (setMode would refuse it as a no-op), so only the hold
-    // is saved. Nothing is saved when the push or persist fails.
-    if (campaign.budget_mode !== mode) {
-      const applied = await applyLive(async () => {
-        try {
-          return await getBudgetManager().setMode(campaign.id, mode, `Hold: ${mode} until ${until} (set in the portal)`, { requireLivePush: true, requireActive: true, trigger: 'manual' });
-        } catch (err) {
-          if (err.code === 'mode_noop') return null; // another writer already made this change
-          throw err;
-        }
-      }, res);
-      if (applied === APPLY_FAILED) return undefined;
-    }
-
     const hold = {
       mode,
       until,
@@ -492,7 +477,16 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
       set_by: req.technicianId || null,
       reason: `Held ${mode} until ${until} from the portal`,
     };
-    const updated = await updateCampaignMetadata(campaign.id, (meta) => ({ ...meta, budget_hold: hold }));
+    // One locked operation: setMode checks the campaign, pushes the mode to
+    // Google first, then saves the mode AND the hold in the same commit (a
+    // campaign already in the held mode saves only the hold). A failed push or
+    // save leaves no hold, and the 2-hour job cannot run between the steps.
+    const applied = await applyLive(
+      () => getBudgetManager().setMode(campaign.id, mode, `Hold: ${mode} until ${until} (set in the portal)`, { requireLivePush: true, requireActive: true, trigger: 'manual', hold }),
+      res,
+    );
+    if (applied === APPLY_FAILED) return undefined;
+    const updated = await db('ad_campaigns').where({ id: campaign.id }).first();
     if (!updated) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ campaign: updated, hold });
   } catch (err) { next(err); }

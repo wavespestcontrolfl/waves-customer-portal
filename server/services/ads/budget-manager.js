@@ -737,8 +737,17 @@ class BudgetManager {
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
    * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual' } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual', hold = null } = {}) {
     reason = boundReason(reason);
+    // `hold` (the owner's budget hold, saved as metadata.budget_hold) commits in
+    // the SAME locked transaction as the mode change, so the 2-hour job can never
+    // run between the two and undo the mode. Only the live-push path supports it.
+    if (hold && !requireLivePush) {
+      throw new Error('A budget hold can only be saved with requireLivePush.');
+    }
+    const withHold = (campaign) => (hold
+      ? { metadata: JSON.stringify({ ...(parseJsonObject(campaign.metadata) || {}), budget_hold: hold }) }
+      : {});
     // This operation's identity stamp on its audit row (lets the rollback —
     // and the no-push catch below — recognize a lost-COMMIT-ack as "actually
     // committed"). The rollback's supersession anchor is taken in-lock.
@@ -779,6 +788,12 @@ class BudgetManager {
           // Under the lock: two concurrent applies of the same rec both pass
           // the route's unlocked no-op check; the loser must not re-push the
           // already-current mode and count a second "applied" change.
+          if (mode === campaign.budget_mode && hold) {
+            // Decided under the lock: the campaign already runs the held mode, so
+            // only the hold is saved (no push, no mode change, no audit row).
+            await trx('ad_campaigns').where({ id: campaignId }).update({ ...withHold(campaign), updated_at: new Date() });
+            return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget: campaign.daily_budget_current, googleAdsUpdated: false, livePushAttempted: false, holdOnly: true };
+          }
           if (mode === campaign.budget_mode) {
             const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
             err.code = 'mode_noop';
@@ -821,6 +836,7 @@ class BudgetManager {
           await trx('ad_campaigns').where({ id: campaignId }).update({
             budget_mode: mode,
             daily_budget_current: newBudget,
+            ...withHold(campaign),
             updated_at: new Date(),
           });
           await trx('ad_budget_log').insert({

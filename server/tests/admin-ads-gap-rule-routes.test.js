@@ -199,23 +199,25 @@ describe('PUT /gap-rule/settings', () => {
 });
 
 describe('POST /campaigns/:id/hold', () => {
-  test('applies the mode first with a live push, then saves the hold and keeps other metadata', async () => {
+  test('hands the hold to setMode so mode and hold commit together under its lock', async () => {
     const until = inDays(5);
     const res = await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'base', until });
     expect(res.status).toBe(200);
-    expect(BudgetManager.setMode).toHaveBeenCalledWith(CAMPAIGN_ID, 'base', `Hold: base until ${until} (set in the portal)`, { requireLivePush: true, requireActive: true, trigger: 'manual' });
+    expect(BudgetManager.setMode).toHaveBeenCalledTimes(1);
+    const [id, mode, reason, opts] = BudgetManager.setMode.mock.calls[0];
+    expect([id, mode, reason]).toEqual([CAMPAIGN_ID, 'base', `Hold: base until ${until} (set in the portal)`]);
+    expect(opts).toEqual({ requireLivePush: true, requireActive: true, trigger: 'manual', hold: res.body.hold });
     expect(res.body.hold).toMatchObject({ mode: 'base', until, set_by: 'admin-1', set_at: expect.any(String) });
-    const saved = JSON.parse(campaignWrites[0].metadata);
-    expect(saved.keep).toBe('me');
-    expect(saved.budget_hold).toEqual(res.body.hold);
+    // The route itself writes nothing: setMode owns the single locked write.
+    expect(campaignWrites).toHaveLength(0);
     expect(res.body.campaign.id).toBe(CAMPAIGN_ID);
   });
 
-  test('a hold on the mode the campaign is already in saves the hold without a push', async () => {
+  test('a campaign already in the held mode still goes through setMode (the lock decides)', async () => {
     const res = await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'stop', until: inDays(1) });
     expect(res.status).toBe(200);
-    expect(BudgetManager.setMode).not.toHaveBeenCalled();
-    expect(campaignWrites).toHaveLength(1);
+    expect(BudgetManager.setMode).toHaveBeenCalledTimes(1);
+    expect(campaignWrites).toHaveLength(0);
   });
 
   test.each([
@@ -231,13 +233,6 @@ describe('POST /campaigns/:id/hold', () => {
     expect(res.status).toBe(status);
     expect(res.body).toMatchObject({ applied: false, error: 'refused' });
     expect(campaignWrites).toHaveLength(0);
-  });
-
-  test('a race where another writer already made the change still saves the hold', async () => {
-    BudgetManager.setMode.mockRejectedValue(Object.assign(new Error('already'), { code: 'mode_noop' }));
-    const res = await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'base', until: inDays(3) });
-    expect(res.status).toBe(200);
-    expect(campaignWrites).toHaveLength(1);
   });
 
   test.each([
