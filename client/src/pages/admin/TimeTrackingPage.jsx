@@ -347,7 +347,7 @@ export default function TimeTrackingPage() {
           gap: 8,
           boxShadow: "0 8px 32px rgba(0,0,0,.4)",
           zIndex: 300,
-          fontSize: 12,
+          fontSize: 14,
           transform: toast ? "translateY(0)" : "translateY(80px)",
           opacity: toast ? 1 : 0,
           transition: "all .3s",
@@ -445,7 +445,14 @@ export function DashboardTab({ showToast }) {
     (s, d) => s + parseFloat(d.revenue_generated || 0),
     0,
   );
-  const weekOT = Math.max(0, weekPaidMin - 2400);
+  // Overtime is per technician per week: the server allocates each tech's
+  // minutes past 40 h to that tech's days (overtime_minutes, the same field
+  // the bar chart stacks). One 40 h threshold on the whole team's hours
+  // reported overtime when nobody had worked 40 h.
+  const weekOT = weekDailies.reduce(
+    (s, d) => s + parseFloat(d.overtime_minutes || 0),
+    0,
+  );
   // Only show techs with activity — hide inactive techs with 0 hours/jobs
   const liveTechs = allTechs.filter((tech) => {
     const active = activeShifts.find((s) => s.technician_id === tech.id);
@@ -538,7 +545,7 @@ export function DashboardTab({ showToast }) {
                   </span>{" "}
                 </div>
                 {active && (
-                  <div style={{ fontSize: 12, color: D.muted }}>
+                  <div style={{ fontSize: 14, color: D.muted }}>
                     Shift: {fmtHrs(shiftDur)} |{" "}
                     {active.onBreak
                       ? "On Break"
@@ -575,7 +582,7 @@ export function DashboardTab({ showToast }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {" "}
                     <UtilRing pct={dayUtil} size={32} />{" "}
-                    <span style={{ fontSize: 11, color: D.muted }}>
+                    <span style={{ fontSize: 14, color: D.muted }}>
                       Utilization: {dayUtil.toFixed(0)}%
                     </span>{" "}
                   </div>
@@ -648,20 +655,32 @@ export function DashboardTab({ showToast }) {
           style={{
             display: "flex",
             justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 8,
             marginBottom: 8,
           }}
         >
           {" "}
-          <span style={{ fontSize: 12, color: D.muted }}>
+          <span style={{ fontSize: 14, color: D.muted }}>
             Week total: {fmtHrs(weekPaidMin)}
             {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>}
             {/* overtime_minutes is a per-tech field the server never sends a
-                restricted viewer (techSafeDailySummary) — this weekly OT
-                figure is a flat 40h/week heuristic on total_shift_minutes,
-                not that field, but it's still coworker performance framing
-                a technician viewer shouldn't see. */}
+                restricted viewer (techSafeDailySummary); the weekly OT
+                figure is hidden for that viewer. */}
             {!isRestrictedViewer && <> | OT: {fmtHrs(weekOT)}</>}
           </span>{" "}
+          {/* The bar chart's key, as text beside the chart instead of 9px
+              text inside it. */}
+          <span style={{ fontSize: 14, color: D.muted, display: "flex", gap: 12 }}>
+            <span>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.teal, marginRight: 4 }} />
+              Reg
+            </span>
+            <span>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.red, marginRight: 4 }} />
+              OT
+            </span>
+          </span>
         </div>{" "}
         <WeekBarChart
           weekDailies={weekDailies}
@@ -687,7 +706,7 @@ function MiniStat({ label, value }) {
       >
         {value}
       </div>{" "}
-      <div style={{ fontSize: 10, color: D.muted }}>{label}</div>{" "}
+      <div style={{ fontSize: 14, color: D.muted }}>{label}</div>{" "}
     </div>
   );
 }
@@ -705,9 +724,33 @@ function StatCard({ label, value, color }) {
       <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: MONO }}>
         {value}
       </div>{" "}
-      <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+      <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
         {label}
       </div>{" "}
+    </div>
+  );
+}
+
+// A read that failed, said plainly with a Retry that reads it again, so a
+// failure never looks like an empty list.
+function LoadFailedNotice({ children, onRetry }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        ...sCard,
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap",
+        color: D.red,
+        fontSize: 14,
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 200 }}>{children}</span>
+      <button type="button" onClick={onRetry} style={sBtn(D.card, D.text)}>
+        Retry
+      </button>
     </div>
   );
 }
@@ -748,12 +791,14 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
   const maxMin = 720; // 12 hours as max bar
   const barH = 120;
   const barW = isMobile ? 28 : 50;
+  // Room above the bars for a 14px hours label, so a full day is not cut off.
+  const top = 18;
 
   return (
     <svg
       width="100%"
-      height={barH + 30}
-      viewBox={`0 0 ${7 * (barW + 12) + 20} ${barH + 30}`}
+      height={top + barH + 30}
+      viewBox={`0 0 ${7 * (barW + 12) + 20} ${top + barH + 30}`}
     >
       {DAYS.map((day, i) => {
         const dateStr = addDays(weekStart, i);
@@ -782,7 +827,7 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             {/* Regular time */}
             <rect
               x={x}
-              y={barH - regH}
+              y={top + barH - regH}
               width={barW}
               height={regH}
               fill={D.teal}
@@ -793,7 +838,7 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             {otH > 0 && (
               <rect
                 x={x}
-                y={barH - regH - otH}
+                y={top + barH - regH - otH}
                 width={barW}
                 height={otH}
                 fill={D.red}
@@ -805,9 +850,9 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             {shiftMin > 0 && (
               <text
                 x={x + barW / 2}
-                y={barH - regH - otH - 4}
+                y={top + barH - regH - otH - 4}
                 textAnchor="middle"
-                fontSize={9}
+                fontSize={14}
                 fill={D.muted}
                 fontFamily={MONO}
               >
@@ -817,9 +862,9 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             {/* Day label */}
             <text
               x={x + barW / 2}
-              y={barH + 16}
+              y={top + barH + 20}
               textAnchor="middle"
-              fontSize={10}
+              fontSize={14}
               fill={D.muted}
             >
               {day}
@@ -827,29 +872,6 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
           </g>
         );
       })}
-      {/* Legend */}
-      <rect
-        x={7 * (barW + 12) - 60}
-        y={2}
-        width={8}
-        height={8}
-        fill={D.teal}
-        rx={2}
-      />{" "}
-      <text x={7 * (barW + 12) - 48} y={10} fontSize={9} fill={D.muted}>
-        Reg
-      </text>{" "}
-      <rect
-        x={7 * (barW + 12) - 60}
-        y={14}
-        width={8}
-        height={8}
-        fill={D.red}
-        rx={2}
-      />{" "}
-      <text x={7 * (barW + 12) - 48} y={22} fontSize={9} fill={D.muted}>
-        OT
-      </text>{" "}
     </svg>
   );
 }
@@ -862,8 +884,16 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
   const [dailies, setDailies] = useState([]);
   const [techs, setTechs] = useState([]);
   const [expanded, setExpanded] = useState(null); // { techId, date }
-  const [cellEntries, setCellEntries] = useState([]);
+  // null while the open day's entries load or after a failed read; only the
+  // latest request may fill it, so a slow answer for another day never shows
+  // under this day's heading.
+  const [cellEntries, setCellEntries] = useState(null);
+  const [cellLoadFailed, setCellLoadFailed] = useState(false);
+  const cellRequestRef = useRef(0);
   const [loading, setLoading] = useState(true);
+  // A failed week read shows a notice instead of a grid of "--" days.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const loadRequestRef = useRef(0);
   // Unpaid lunch controls show only while GATE_AUTO_LUNCH is on (the
   // dashboard read says so).
   const [autoLunch, setAutoLunch] = useState(false);
@@ -873,7 +903,9 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
   const weekEnd = useMemo(() => addDays(weekStart, 6), [weekStart]);
 
   const load = useCallback(async () => {
+    const request = ++loadRequestRef.current;
     setLoading(true);
+    setLoadFailed(false);
     try {
       const [dailyRes, dashRes] = await Promise.all([
         adminFetch(
@@ -881,10 +913,17 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
         ),
         adminFetch("/admin/timetracking"),
       ]);
+      if (request !== loadRequestRef.current) return;
       setDailies(dailyRes);
       setTechs(dashRes.allTechs || []);
       setAutoLunch(dashRes.autoLunch === true);
     } catch (e) {
+      if (request !== loadRequestRef.current) return;
+      // The rows on hand belong to another week; drop them so the grid
+      // never shows that week's people as this week's empty days.
+      setDailies([]);
+      setTechs([]);
+      setLoadFailed(true);
       showToast("Failed to load timesheet");
     }
     setLoading(false);
@@ -894,24 +933,38 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
     load();
   }, [load]);
 
+  // Another week closes the open day, including a read still on its way.
+  useEffect(() => {
+    cellRequestRef.current += 1;
+    setExpanded(null);
+  }, [weekStart]);
+
+  const loadCellEntries = useCallback(async (techId, date) => {
+    const request = ++cellRequestRef.current;
+    setCellEntries(null);
+    setCellLoadFailed(false);
+    try {
+      const res = await adminFetch(
+        `/admin/timetracking/entries?technicianId=${techId}&startDate=${date}&endDate=${date}`,
+      );
+      if (request === cellRequestRef.current) setCellEntries(res.entries || []);
+    } catch (e) {
+      if (request === cellRequestRef.current) setCellLoadFailed(true);
+    }
+  }, []);
+
   const expandCell = useCallback(
-    async (techId, date) => {
+    (techId, date) => {
       if (expanded && expanded.techId === techId && expanded.date === date) {
+        cellRequestRef.current += 1;
         setExpanded(null);
         return;
       }
       setExpanded({ techId, date });
       setLunchReason("");
-      try {
-        const res = await adminFetch(
-          `/admin/timetracking/entries?technicianId=${techId}&startDate=${date}&endDate=${date}`,
-        );
-        setCellEntries(res.entries || []);
-      } catch (e) {
-        setCellEntries([]);
-      }
+      loadCellEntries(techId, date);
     },
-    [expanded],
+    [expanded, loadCellEntries],
   );
 
   // Admin set/clear of a day's "No lunch" flag. The reason is required and is
@@ -1035,11 +1088,16 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
           Export Approved CSV
         </button>{" "}
       </div>
+      {loadFailed && (
+        <LoadFailedNotice onRetry={load}>
+          Could not load the timesheet for {weekStart} to {weekEnd}.
+        </LoadFailedNotice>
+      )}
       {/* Timesheet grid */}
       <div style={{ overflowX: "auto" }}>
         {" "}
         <table
-          style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+          style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
         >
           {" "}
           <thead>
@@ -1051,7 +1109,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                 <th key={d} style={thStyle}>
                   {d}
                   <br />
-                  <span style={{ fontSize: 9, color: D.muted }}>
+                  <span style={{ fontSize: 14, color: D.muted }}>
                     {addDays(weekStart, i).slice(5)}
                   </span>
                 </th>
@@ -1106,8 +1164,15 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                         : d.status === "edited" || d.status === "pending"
                           ? D.amber
                           : D.red;
+                    const lunchNote = !d
+                      ? ""
+                      : lunchMin > 0
+                        ? `lunch -${(lunchMin / 60).toFixed(1)}`
+                        : d.no_lunch
+                          ? "no lunch"
+                          : "";
                     const isExp =
-                      expanded &&
+                      !!expanded &&
                       expanded.techId === tech.id &&
                       expanded.date === dt;
                     return (
@@ -1115,27 +1180,34 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                         key={dt}
                         style={{
                           ...tdStyle,
-                          cursor: "pointer",
                           background: isExp ? D.input : "transparent",
                         }}
-                        onClick={() => expandCell(tech.id, dt)}
                       >
-                        {" "}
-                        <span
-                          style={{ color, fontFamily: MONO, fontWeight: 500 }}
+                        {/* A button, so the day opens from the keyboard too. */}
+                        <button
+                          type="button"
+                          aria-expanded={isExp}
+                          aria-label={`${tech.name}, ${DAYS[i]} ${dt}: ${d ? `${hrs} hours` : "no time"}${lunchNote ? `, ${lunchNote}` : ""}`}
+                          onClick={() => expandCell(tech.id, dt)}
+                          style={dayCellButton}
                         >
-                          {hrs}
-                        </span>{" "}
-                        {d && d.no_lunch && lunchMin === 0 && (
-                          <div style={{ fontSize: 10, color: D.muted }}>
-                            no lunch
-                          </div>
-                        )}
-                        {d && lunchMin > 0 && (
-                          <div style={{ fontSize: 10, color: D.muted }}>
-                            lunch -{(lunchMin / 60).toFixed(1)}
-                          </div>
-                        )}
+                          <span
+                            style={{ color, fontFamily: MONO, fontWeight: 500 }}
+                          >
+                            {hrs}
+                          </span>
+                          {lunchNote && (
+                            <span
+                              style={{
+                                display: "block",
+                                fontSize: 14,
+                                color: D.muted,
+                              }}
+                            >
+                              {lunchNote}
+                            </span>
+                          )}
+                        </button>
                       </td>
                     );
                   })}
@@ -1182,7 +1254,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
           {" "}
           <div
             style={{
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               color: D.heading,
               marginBottom: 8,
@@ -1190,7 +1262,10 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
           >
             Entries for {expanded.date}
           </div>
+          {/* The lunch wording reads the day's recorded breaks, so it waits
+              for this day's entries instead of describing another day's. */}
           {autoLunch &&
+            cellEntries &&
             (() => {
               const day = byTech.find((t) => t.tech.id === expanded.techId)
                 ?.days[expanded.date];
@@ -1216,7 +1291,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                     borderBottom: `1px solid ${D.border}`,
                   }}
                 >
-                  <div style={{ fontSize: 13, color: D.text, marginBottom: 8 }}>
+                  <div style={{ fontSize: 14, color: D.text, marginBottom: 8 }}>
                     {day.no_lunch
                       ? recordedMeal > 0
                         ? `No lunch waives only the automatic 30 minutes. Recorded lunch ${Math.round(recordedMeal)} min stays unpaid.`
@@ -1226,7 +1301,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                         : "No unpaid lunch on this day."}
                   </div>
                   {approved ? (
-                    <div style={{ fontSize: 13, color: D.muted }}>
+                    <div style={{ fontSize: 14, color: D.muted }}>
                       This day is approved. Unlock the week to change lunch.
                     </div>
                   ) : (
@@ -1267,15 +1342,30 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                 </div>
               );
             })()}
-          {cellEntries.length === 0 ? (
-            <div style={{ color: D.muted, fontSize: 12 }}>No entries</div>
+          {cellLoadFailed ? (
+            <div role="alert" style={{ color: D.red, fontSize: 14 }}>
+              Could not load this day's entries.{" "}
+              <button
+                type="button"
+                onClick={() => loadCellEntries(expanded.techId, expanded.date)}
+                style={sBtn(D.card, D.text)}
+              >
+                Retry
+              </button>
+            </div>
+          ) : cellEntries === null ? (
+            <div role="status" style={{ color: D.muted, fontSize: 14 }}>
+              Loading entries…
+            </div>
+          ) : cellEntries.length === 0 ? (
+            <div style={{ color: D.muted, fontSize: 14 }}>No entries</div>
           ) : (
             <div style={{ overflowX: "auto" }}>
             <table
               style={{
                 width: "100%",
                 borderCollapse: "collapse",
-                fontSize: 11,
+                fontSize: 14,
               }}
             >
               {" "}
@@ -1290,7 +1380,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                     "Customer",
                     "Status",
                   ].map((h) => (
-                    <th key={h} style={{ ...thStyle, fontSize: 10 }}>
+                    <th key={h} style={{ ...thStyle, fontSize: 14 }}>
                       {h}
                     </th>
                   ))}
@@ -1322,10 +1412,10 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                         </span>
                       )}
                     </td>{" "}
-                    <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
+                    <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 14 }}>
                       {e.clock_in ? formatETTime(e.clock_in) : "--"}
                     </td>{" "}
-                    <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
+                    <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 14 }}>
                       {e.clock_out ? formatETTime(e.clock_out) : "--"}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
@@ -1362,11 +1452,22 @@ const thStyle = {
   padding: "8px 6px",
   textAlign: "left",
   color: D.muted,
-  fontSize: 11,
+  fontSize: 14,
   fontWeight: 500,
   borderBottom: `1px solid ${D.border}`,
 };
-const tdStyle = { padding: "8px 6px", color: D.text, fontSize: 12 };
+const tdStyle = { padding: "8px 6px", color: D.text, fontSize: 14 };
+// A timesheet day cell's button: fills the cell and looks like the cell text.
+const dayCellButton = {
+  width: "100%",
+  padding: 0,
+  background: "transparent",
+  border: "none",
+  color: "inherit",
+  font: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+};
 
 // =============================================================================
 // ENTRIES TAB
@@ -1473,7 +1574,7 @@ function EntriesTab({ showToast }) {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -1502,7 +1603,7 @@ function EntriesTab({ showToast }) {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -1524,7 +1625,7 @@ function EntriesTab({ showToast }) {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -1546,7 +1647,7 @@ function EntriesTab({ showToast }) {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -1575,7 +1676,7 @@ function EntriesTab({ showToast }) {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -1605,7 +1706,7 @@ function EntriesTab({ showToast }) {
       <div style={{ overflowX: "auto" }}>
         {" "}
         <table
-          style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+          style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
         >
           {" "}
           <thead>
@@ -1682,10 +1783,10 @@ function EntriesTab({ showToast }) {
                       </span>
                     )}
                   </td>{" "}
-                  <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
+                  <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 14 }}>
                     {e.clock_in ? formatETTime(e.clock_in) : "--"}
                   </td>{" "}
-                  <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
+                  <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 14 }}>
                     {e.clock_out ? formatETTime(e.clock_out) : "--"}
                   </td>{" "}
                   <td style={{ ...tdStyle, fontFamily: MONO }}>
@@ -1765,7 +1866,7 @@ function EntriesTab({ showToast }) {
           >
             Prev
           </button>{" "}
-          <span style={{ color: D.muted, fontSize: 12, padding: "8px 0" }}>
+          <span style={{ color: D.muted, fontSize: 14, padding: "8px 0" }}>
             Page {page + 1} of {totalPages} ({total} entries)
           </span>{" "}
           <button
@@ -1859,7 +1960,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
         {entry.original_clock_in && (
           <div
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.amber,
               marginBottom: 12,
               padding: 8,
@@ -1879,7 +1980,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1905,7 +2006,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1926,7 +2027,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1947,7 +2048,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1967,7 +2068,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.red,
                 display: "block",
                 marginBottom: 4,
@@ -2123,7 +2224,7 @@ function AnalyticsTab() {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -2142,7 +2243,7 @@ function AnalyticsTab() {
           {" "}
           <label
             style={{
-              fontSize: 10,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -2171,13 +2272,13 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {serviceTypeStats.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>
+          <div style={{ color: D.muted, fontSize: 14 }}>
             No job data in this period
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
           >
             {" "}
             <thead>
@@ -2267,11 +2368,11 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {comparison.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>No comparison data</div>
+          <div style={{ color: D.muted, fontSize: 14 }}>No comparison data</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
           >
             {" "}
             <thead>
@@ -2482,11 +2583,11 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {Object.keys(rpmhMap).length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>No RPMH data yet</div>
+          <div style={{ color: D.muted, fontSize: 14 }}>No RPMH data yet</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
           >
             {" "}
             <thead>
@@ -2561,7 +2662,7 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {utilWeeks.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>No trend data yet</div>
+          <div style={{ color: D.muted, fontSize: 14 }}>No trend data yet</div>
         ) : (
           <UtilizationLineChart weeks={utilWeeks} />
         )}
@@ -2579,7 +2680,7 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {(overtimeTrend || []).length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>No overtime data</div>
+          <div style={{ color: D.muted, fontSize: 14 }}>No overtime data</div>
         ) : (
           <OvertimeTable data={overtimeTrend || []} />
         )}
@@ -2591,7 +2692,7 @@ function AnalyticsTab() {
 function UtilizationLineChart({ weeks }) {
   const w = isMobile ? 300 : 600;
   const h = 150;
-  const pad = { t: 20, r: 20, b: 30, l: 40 };
+  const pad = { t: 20, r: 20, b: 30, l: 44 };
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
 
@@ -2633,9 +2734,9 @@ function UtilizationLineChart({ weeks }) {
             />{" "}
             <text
               x={pad.l - 4}
-              y={y + 3}
+              y={y + 5}
               textAnchor="end"
-              fontSize={8}
+              fontSize={14}
               fill={D.muted}
             >
               {v}%
@@ -2654,10 +2755,12 @@ function UtilizationLineChart({ weeks }) {
         strokeDasharray="4 3"
         opacity={0.5}
       />{" "}
+      {/* Inside the plot, above the line: a 14px label past the right
+          edge would widen the page on a phone. */}
       <text
-        x={w - pad.r + 2}
-        y={pad.t + innerH - (70 / maxUtil) * innerH + 3}
-        fontSize={8}
+        x={pad.l + 4}
+        y={pad.t + innerH - (70 / maxUtil) * innerH - 4}
+        fontSize={14}
         fill={D.green}
       >
         70% target
@@ -2669,12 +2772,12 @@ function UtilizationLineChart({ weeks }) {
         <g key={i}>
           {" "}
           <circle cx={p.x} cy={p.y} r={3} fill={D.teal} />
-          {i % 2 === 0 && (
+          {i % (isMobile ? 3 : 2) === 0 && (
             <text
               x={p.x}
               y={h - 5}
               textAnchor="middle"
-              fontSize={7}
+              fontSize={14}
               fill={D.muted}
             >
               {p.week.slice(5)}
@@ -2697,7 +2800,7 @@ function OvertimeTable({ data }) {
 
   return (
     <div style={{ overflowX: "auto" }}>
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
       {" "}
       <thead>
         {" "}
@@ -2871,6 +2974,9 @@ function describeStartPoint(tech) {
 export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
+  // A failed roster read is not an empty team: the empty-state invitation to
+  // add a first technician shows only after a read that succeeded.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_TECH_FORM);
@@ -2955,8 +3061,10 @@ export function TeamTab({ showToast }) {
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
+      setLoadFailed(false);
     } catch {
-      /* ignore */
+      // A roster already on screen stays; the notice says it may be stale.
+      setLoadFailed(true);
     }
     setLoading(false);
   }, []);
@@ -3194,6 +3302,13 @@ export function TeamTab({ showToast }) {
           </button>
         )}{" "}
       </div>
+      {loadFailed && (
+        <LoadFailedNotice onRetry={load}>
+          {techs.length === 0
+            ? "Could not load the team."
+            : "Could not refresh the team. This list may be out of date."}
+        </LoadFailedNotice>
+      )}
       {/* Add / Edit form */}
       {showAdd && (
         <div style={{ ...sCard, marginBottom: 16 }}>
@@ -3219,10 +3334,11 @@ export function TeamTab({ showToast }) {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <label htmlFor="tech-form-name" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Name *
-              </div>{" "}
+              </label>{" "}
               <input
+                id="tech-form-name"
                 value={form.name}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, name: e.target.value }))
@@ -3233,10 +3349,11 @@ export function TeamTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <label htmlFor="tech-form-phone" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Phone
-              </div>{" "}
+              </label>{" "}
               <input
+                id="tech-form-phone"
                 value={form.phone}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, phone: e.target.value }))
@@ -3247,10 +3364,11 @@ export function TeamTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <label htmlFor="tech-form-email" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Email
-              </div>{" "}
+              </label>{" "}
               <input
+                id="tech-form-email"
                 value={form.email}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, email: e.target.value }))
@@ -3261,10 +3379,11 @@ export function TeamTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <label htmlFor="tech-form-employment" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Employment
-              </div>{" "}
+              </label>{" "}
               <select
+                id="tech-form-employment"
                 value={form.employmentStatus}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, employmentStatus: e.target.value }))
@@ -3278,14 +3397,15 @@ export function TeamTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <label htmlFor="tech-form-tech-line" style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Tech line
-              </div>{" "}
+              </label>{" "}
               {/* Which Waves Twilio line this tech answers on (Field Team
                   Program, Phase 0). One line per tech — the server refuses a
                   line another tech already holds. Texts to it reach the tech
                   and the office; calls ring the tech's cell first. */}
               <select
+                id="tech-form-tech-line"
                 value={form.twilioNumber}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, twilioNumber: e.target.value }))
@@ -3306,7 +3426,7 @@ export function TeamTab({ showToast }) {
             {editingId && (
               <div style={{ gridColumn: "1 / -1" }}>
                 {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   Starts the day from
                 </div>{" "}
                 <select
@@ -3359,7 +3479,7 @@ export function TeamTab({ showToast }) {
                       style={sInput}
                     />
                     {startPointNeedsPick(form) && (
-                      <div style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>
+                      <div style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
                         Pick the address from the list
                       </div>
                     )}
@@ -3374,7 +3494,7 @@ export function TeamTab({ showToast }) {
             {workDaysEnabled && (
               <div style={{ gridColumn: "1 / -1" }}>
                 {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   Work days
                 </div>{" "}
                 <div role="group" aria-label="Work days" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -3403,7 +3523,7 @@ export function TeamTab({ showToast }) {
                   })}
                 </div>{" "}
                 {form.workDays.length === 0 && (
-                  <div role="alert" style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>
+                  <div role="alert" style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
                     Pick at least one work day
                   </div>
                 )}
@@ -3433,10 +3553,10 @@ export function TeamTab({ showToast }) {
               }
               style={{ width: 14, height: 14, cursor: "pointer" }}
             />{" "}
-            <span style={{ fontSize: 12, color: D.heading }}>
+            <span style={{ fontSize: 14, color: D.heading }}>
               Can be assigned field work
             </span>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
+            <span style={{ fontSize: 14, color: D.muted }}>
               (off: never offered as a booking slot or a dispatch target)
             </span>{" "}
           </label>
@@ -3460,10 +3580,10 @@ export function TeamTab({ showToast }) {
               }
               style={{ width: 14, height: 14, cursor: "pointer" }}
             />{" "}
-            <span style={{ fontSize: 12, color: D.heading }}>
+            <span style={{ fontSize: 14, color: D.heading }}>
               Can move visits
             </span>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
+            <span style={{ fontSize: 14, color: D.muted }}>
               (off: Quick Move and Reschedule say to ask the office)
             </span>{" "}
           </label>
@@ -3490,10 +3610,10 @@ export function TeamTab({ showToast }) {
               }
               style={{ width: 14, height: 14, cursor: "pointer" }}
             />{" "}
-            <span style={{ fontSize: 12, color: D.heading }}>
+            <span style={{ fontSize: 14, color: D.heading }}>
               Auto-flip on EXIT enabled
             </span>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
+            <span style={{ fontSize: 14, color: D.muted }}>
               (when off, EXIT events for this tech skip the en-route auto-flip
               pipeline)
             </span>{" "}
@@ -3510,7 +3630,7 @@ export function TeamTab({ showToast }) {
               background: "transparent",
               border: "none",
               color: D.teal,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               marginBottom: 8,
@@ -3531,7 +3651,7 @@ export function TeamTab({ showToast }) {
               {" "}
               <div
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   marginBottom: 8,
                   textTransform: "uppercase",
@@ -3551,12 +3671,14 @@ export function TeamTab({ showToast }) {
                 {" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-pay-rate"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Pay rate ($/hr)
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-pay-rate"
                     type="number"
                     step="0.25"
                     min="0"
@@ -3570,12 +3692,14 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-job-title"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Job title
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-job-title"
                     value={form.jobTitle}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, jobTitle: e.target.value }))
@@ -3586,12 +3710,14 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-employment-type"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Employment type
-                  </div>{" "}
+                  </label>{" "}
                   <select
+                    id="tech-form-employment-type"
                     value={form.employmentType}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, employmentType: e.target.value }))
@@ -3605,12 +3731,14 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-hire-date"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Hire date
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-hire-date"
                     type="date"
                     value={form.hireDate}
                     onChange={(e) =>
@@ -3622,7 +3750,7 @@ export function TeamTab({ showToast }) {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   marginBottom: 8,
                   textTransform: "uppercase",
@@ -3642,12 +3770,14 @@ export function TeamTab({ showToast }) {
                 {" "}
                 <div style={{ gridColumn: "1 / -1" }}>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-address"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Address
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-address"
                     value={form.address}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, address: e.target.value }))
@@ -3658,12 +3788,14 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-dob"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Date of birth
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-dob"
                     type="date"
                     value={form.dob}
                     onChange={(e) =>
@@ -3674,12 +3806,14 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-ssn-last4"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     SSN (last 4)
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-ssn-last4"
                     inputMode="numeric"
                     maxLength={4}
                     value={form.ssnLast4}
@@ -3696,7 +3830,7 @@ export function TeamTab({ showToast }) {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   marginBottom: 8,
                   textTransform: "uppercase",
@@ -3716,12 +3850,15 @@ export function TeamTab({ showToast }) {
                 {" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-emergency-name"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Name
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-emergency-name"
+                    aria-label="Emergency contact name"
                     value={form.emergencyContactName}
                     onChange={(e) =>
                       setForm((f) => ({
@@ -3735,12 +3872,15 @@ export function TeamTab({ showToast }) {
                 </div>{" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
+                  <label
+                    htmlFor="tech-form-emergency-phone"
+                    style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
                   >
                     Phone
-                  </div>{" "}
+                  </label>{" "}
                   <input
+                    id="tech-form-emergency-phone"
+                    aria-label="Emergency contact phone"
                     value={form.emergencyContactPhone}
                     onChange={(e) =>
                       setForm((f) => ({
@@ -3794,7 +3934,7 @@ export function TeamTab({ showToast }) {
         {" "}
         <div style={{ overflowX: "auto" }}>
         <table
-          style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+          style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
         >
           {" "}
           <thead>
@@ -3808,7 +3948,7 @@ export function TeamTab({ showToast }) {
                       textAlign: "left",
                       padding: "8px 12px",
                       borderBottom: `1px solid ${D.border}`,
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 0.5,
@@ -3854,7 +3994,7 @@ export function TeamTab({ showToast }) {
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
-                        fontSize: 11,
+                        fontSize: 14,
                         fontWeight: 500,
                       }}
                     >
@@ -3878,19 +4018,19 @@ export function TeamTab({ showToast }) {
                   {" "}
                   <div>{t.name}</div>
                   {isAdmin && (
-                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
                       {describeStartPoint(t)}
                     </div>
                   )}
                   {workDaysEnabled && describeWorkDays(t.work_days) && (
-                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
                       {`Works ${describeWorkDays(t.work_days)}`}
                     </div>
                   )}
                   {(t.job_title || t.pay_rate) && (
                     <div
                       style={{
-                        fontSize: 11,
+                        fontSize: 14,
                         fontWeight: 400,
                         color: D.muted,
                         marginTop: 2,
@@ -3913,12 +4053,12 @@ export function TeamTab({ showToast }) {
                     borderBottom: `1px solid ${D.border}`,
                     color: D.muted,
                     fontFamily: MONO,
-                    fontSize: 12,
+                    fontSize: 14,
                   }}
                 >
                   {t.phone || "\u2014"}
                   {t.twilio_number && (
-                    <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
                       Line {TECH_LINE_NUMBERS.find((n) => n.number === t.twilio_number)?.formatted || t.twilio_number}
                     </div>
                   )}
@@ -3928,7 +4068,7 @@ export function TeamTab({ showToast }) {
                     padding: "10px 12px",
                     borderBottom: `1px solid ${D.border}`,
                     color: D.muted,
-                    fontSize: 12,
+                    fontSize: 14,
                   }}
                 >
                   {t.email || "\u2014"}
@@ -3949,17 +4089,17 @@ export function TeamTab({ showToast }) {
                     );
                   })()}{" "}
                   {t.employment_status === "active" && !t.field_dispatchable && (
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       Office only
                     </div>
                   )}
                   {t.employment_status === "active" && t.field_dispatchable && (
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       Field dispatchable
                     </div>
                   )}
                   {t.hire_action === "resend" && (
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
                     </div>
                   )}
@@ -3991,7 +4131,7 @@ export function TeamTab({ showToast }) {
                             border: `1px solid ${D.border}`,
                             borderRadius: 6,
                             color: D.teal,
-                            fontSize: 11,
+                            fontSize: 14,
                             cursor: "pointer",
                           }}
                         >
@@ -4005,7 +4145,7 @@ export function TeamTab({ showToast }) {
                             border: `1px solid ${D.border}`,
                             borderRadius: 6,
                             color: D.green,
-                            fontSize: 11,
+                            fontSize: 14,
                             cursor: "pointer",
                           }}
                         >
@@ -4037,7 +4177,7 @@ export function TeamTab({ showToast }) {
                           border: `1px solid ${D.border}`,
                           borderRadius: 6,
                           color: D.teal,
-                          fontSize: 11,
+                          fontSize: 14,
                           cursor: uploadingId !== null ? "wait" : "pointer",
                           opacity:
                             uploadingId !== null && uploadingId !== t.id
@@ -4063,7 +4203,7 @@ export function TeamTab({ showToast }) {
                           border: `1px solid ${D.teal}`,
                           borderRadius: 6,
                           color: D.white,
-                          fontSize: 11,
+                          fontSize: 14,
                           cursor: "pointer",
                         }}
                       >
@@ -4080,7 +4220,7 @@ export function TeamTab({ showToast }) {
                           border: `1px solid ${D.border}`,
                           borderRadius: 6,
                           color: D.teal,
-                          fontSize: 11,
+                          fontSize: 14,
                           cursor: "pointer",
                         }}
                       >
@@ -4105,7 +4245,7 @@ export function TeamTab({ showToast }) {
                           border: `1px solid ${D.border}`,
                           borderRadius: 6,
                           color: t.active ? D.amber : D.green,
-                          fontSize: 11,
+                          fontSize: 14,
                           cursor: "pointer",
                         }}
                       >
@@ -4116,7 +4256,7 @@ export function TeamTab({ showToast }) {
                 </td>{" "}
               </tr>
             ))}
-            {techs.length === 0 && (
+            {techs.length === 0 && !loadFailed && (
               <tr>
                 <td
                   colSpan={6}
@@ -4213,7 +4353,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
   };
   const field = (id, label, input, required) => (
     <div style={{ marginBottom: 12 }}>
-      <label htmlFor={`${titleId}-${id}`} style={{ display: "block", fontSize: 11, color: D.muted, marginBottom: 4 }}>
+      <label htmlFor={`${titleId}-${id}`} style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}>
         {label}
         {required ? " *" : ""}
       </label>
@@ -4860,7 +5000,7 @@ function EarningsModal({ tech, onClose, showToast }) {
             <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
               {tech.name}
             </div>{" "}
-            <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+            <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
               Earnings statement
             </div>{" "}
           </div>{" "}
@@ -4899,7 +5039,7 @@ function EarningsModal({ tech, onClose, showToast }) {
               background: "#FEF3C7",
               border: `1px solid ${D.amber}`,
               borderRadius: 6,
-              fontSize: 12,
+              fontSize: 14,
               color: "#78350F",
             }}
           >
@@ -4934,7 +5074,7 @@ function EarningsBlock({ label, data }) {
         {" "}
         <span
           style={{
-            fontSize: 12,
+            fontSize: 14,
             fontWeight: 500,
             color: D.muted,
             textTransform: "uppercase",
@@ -4943,7 +5083,7 @@ function EarningsBlock({ label, data }) {
         >
           {label}
         </span>{" "}
-        <span style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>
+        <span style={{ fontSize: 14, color: D.muted, fontFamily: MONO }}>
           {data.from} → {data.to}
         </span>{" "}
       </div>{" "}
@@ -4964,7 +5104,7 @@ function EarningsBlock({ label, data }) {
         style={{
           borderTop: `1px solid ${D.border}`,
           paddingTop: 8,
-          fontSize: 12,
+          fontSize: 14,
           color: D.muted,
           fontFamily: MONO,
         }}
@@ -5029,6 +5169,9 @@ function DocumentsTab({ showToast }) {
   const [docs, setDocs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
+  // A failed list read is not an empty library: "No documents yet" and its
+  // upload invitation show only after a read that succeeded.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [catFilter, setCatFilter] = useState("all");
   const [techFilter, setTechFilter] = useState("all"); // 'all' | 'company' | <techId>
   const [showUpload, setShowUpload] = useState(false);
@@ -5071,8 +5214,12 @@ function DocumentsTab({ showToast }) {
         `/admin/timetracking/documents?${params.toString()}`,
       );
       setDocs(res.documents || []);
+      setLoadFailed(false);
     } catch {
+      // The list on screen may belong to another filter, so it is cleared;
+      // the notice below says the read failed.
       setDocs([]);
+      setLoadFailed(true);
     }
     setLoading(false);
   }, [catFilter, techFilter]);
@@ -5236,7 +5383,7 @@ function DocumentsTab({ showToast }) {
           {" "}
           <span
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.muted,
               textTransform: "uppercase",
               letterSpacing: 0.5,
@@ -5256,7 +5403,7 @@ function DocumentsTab({ showToast }) {
               style={{
                 padding: "6px 12px",
                 borderRadius: 20,
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
                 border: `1px solid ${techFilter === c.value ? D.teal : D.border}`,
@@ -5282,7 +5429,7 @@ function DocumentsTab({ showToast }) {
         {" "}
         <span
           style={{
-            fontSize: 11,
+            fontSize: 14,
             color: D.muted,
             textTransform: "uppercase",
             letterSpacing: 0.5,
@@ -5298,7 +5445,7 @@ function DocumentsTab({ showToast }) {
             style={{
               padding: "6px 14px",
               borderRadius: 20,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               border: `1px solid ${catFilter === c.value ? D.teal : D.border}`,
@@ -5335,7 +5482,7 @@ function DocumentsTab({ showToast }) {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Title
               </div>{" "}
               <input
@@ -5349,7 +5496,7 @@ function DocumentsTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Category
               </div>{" "}
               <select
@@ -5369,7 +5516,7 @@ function DocumentsTab({ showToast }) {
           </div>{" "}
           <div style={{ marginBottom: 12 }}>
             {" "}
-            <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+            <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
               Description (optional)
             </div>{" "}
             <input
@@ -5392,7 +5539,7 @@ function DocumentsTab({ showToast }) {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Assigned to (optional)
               </div>{" "}
               <select
@@ -5413,7 +5560,7 @@ function DocumentsTab({ showToast }) {
             </div>{" "}
             <div>
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Expiration (optional)
               </div>{" "}
               <input
@@ -5431,7 +5578,7 @@ function DocumentsTab({ showToast }) {
           </div>{" "}
           <div style={{ marginBottom: 12 }}>
             {" "}
-            <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+            <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
               File
             </div>{" "}
             <input
@@ -5447,11 +5594,11 @@ function DocumentsTab({ showToast }) {
                     }));
                 }
               }}
-              style={{ fontSize: 13, color: D.text }}
+              style={{ fontSize: 14, color: D.text }}
               accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg"
             />
             {file && (
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                 {file.name} ({fmtSize(file.size)})
               </div>
             )}
@@ -5504,7 +5651,7 @@ function DocumentsTab({ showToast }) {
                 {" "}
                 <div
                   style={{
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: 500,
                     color: D.heading,
                     marginBottom: 10,
@@ -5515,7 +5662,7 @@ function DocumentsTab({ showToast }) {
                 <div style={{ marginBottom: 8 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}
+                    style={{ fontSize: 14, color: D.muted, marginBottom: 3 }}
                   >
                     Title
                   </div>{" "}
@@ -5530,7 +5677,7 @@ function DocumentsTab({ showToast }) {
                 <div style={{ marginBottom: 8 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}
+                    style={{ fontSize: 14, color: D.muted, marginBottom: 3 }}
                   >
                     Category
                   </div>{" "}
@@ -5553,7 +5700,7 @@ function DocumentsTab({ showToast }) {
                 <div style={{ marginBottom: 10 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}
+                    style={{ fontSize: 14, color: D.muted, marginBottom: 3 }}
                   >
                     Description
                   </div>{" "}
@@ -5580,7 +5727,7 @@ function DocumentsTab({ showToast }) {
                   <div>
                     {" "}
                     <div
-                      style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}
+                      style={{ fontSize: 14, color: D.muted, marginBottom: 3 }}
                     >
                       Assigned to
                     </div>{" "}
@@ -5606,7 +5753,7 @@ function DocumentsTab({ showToast }) {
                   <div>
                     {" "}
                     <div
-                      style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}
+                      style={{ fontSize: 14, color: D.muted, marginBottom: 3 }}
                     >
                       Expiration
                     </div>{" "}
@@ -5683,16 +5830,16 @@ function DocumentsTab({ showToast }) {
                         {}
                       ).label || doc.category}
                     </span>{" "}
-                    <span style={{ fontSize: 11, color: D.muted }}>
+                    <span style={{ fontSize: 14, color: D.muted }}>
                       {doc.file_type?.toUpperCase()}
                     </span>{" "}
-                    <span style={{ fontSize: 11, color: D.muted }}>
+                    <span style={{ fontSize: 14, color: D.muted }}>
                       {fmtSize(doc.file_size)}
                     </span>{" "}
                   </div>
                   {doc.description && (
                     <div
-                      style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
+                      style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}
                     >
                       {doc.description}
                     </div>
@@ -5738,7 +5885,7 @@ function DocumentsTab({ showToast }) {
                               : D.muted;
                           return (
                             <span
-                              style={{ fontSize: 11, color, fontFamily: MONO }}
+                              style={{ fontSize: 14, color, fontFamily: MONO }}
                             >
                               {expired ? "Expired " : "Expires "}
                               {fmtYmdDate(doc.expiration_date)}
@@ -5752,7 +5899,7 @@ function DocumentsTab({ showToast }) {
                         })()}
                     </div>
                   )}
-                  <div style={{ fontSize: 11, color: D.muted }}>
+                  <div style={{ fontSize: 14, color: D.muted }}>
                     Uploaded {fmtDate(doc.created_at)}
                   </div>{" "}
                 </div>{" "}
@@ -5775,7 +5922,7 @@ function DocumentsTab({ showToast }) {
                     border: "none",
                     borderRadius: 6,
                     color: D.teal,
-                    fontSize: 12,
+                    fontSize: 14,
                     fontWeight: 500,
                     cursor: "pointer",
                   }}
@@ -5801,7 +5948,7 @@ function DocumentsTab({ showToast }) {
                     border: `1px solid ${D.border}`,
                     borderRadius: 6,
                     color: D.muted,
-                    fontSize: 12,
+                    fontSize: 14,
                     cursor: "pointer",
                   }}
                 >
@@ -5815,7 +5962,7 @@ function DocumentsTab({ showToast }) {
                     border: `1px solid ${D.border}`,
                     borderRadius: 6,
                     color: D.red,
-                    fontSize: 12,
+                    fontSize: 14,
                     cursor: "pointer",
                   }}
                 >
@@ -5826,7 +5973,10 @@ function DocumentsTab({ showToast }) {
           );
         })}
       </div>
-      {docs.length === 0 && !showUpload && (
+      {loadFailed && (
+        <LoadFailedNotice onRetry={load}>Could not load documents.</LoadFailedNotice>
+      )}
+      {docs.length === 0 && !loadFailed && !showUpload && (
         <div style={{ ...sCard, textAlign: "center", padding: 40 }}>
           {" "}
           <div style={{ fontSize: 32, marginBottom: 12 }}>
@@ -5842,7 +5992,7 @@ function DocumentsTab({ showToast }) {
           >
             No documents yet
           </div>{" "}
-          <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, color: D.muted, marginBottom: 16 }}>
             Upload SOPs, onboarding packets, offer letters, and other internal
             documents.
           </div>{" "}
@@ -5867,23 +6017,37 @@ export function ApprovalsTab({ showToast }) {
   }, []);
   const [weekStart, setWeekStart] = useState(lastMonday);
   const [techs, setTechs] = useState([]);
+  // The week the cards in `techs` were read for. Cards and their actions show
+  // only while it is the week on screen and the last read did not fail, so a
+  // failed week switch never leaves the previous week's cards under the new
+  // heading.
+  const [loadedWeek, setLoadedWeek] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const loadRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [expanded, setExpanded] = useState(null);
   const [detail, setDetail] = useState(null);
 
   const load = useCallback(async () => {
+    const request = ++loadRequestRef.current;
     setLoading(true);
+    setLoadFailed(false);
     try {
       const data = await adminFetch(
         `/admin/timesheets/pending?weekStart=${weekStart}`,
       );
+      if (request !== loadRequestRef.current) return;
       setTechs(data.techs || []);
+      setLoadedWeek(weekStart);
       setSelected(new Set());
     } catch (e) {
+      if (request !== loadRequestRef.current) return;
+      setLoadFailed(true);
       showToast(`Load failed: ${e.message}`);
     } finally {
-      setLoading(false);
+      if (request === loadRequestRef.current) setLoading(false);
     }
   }, [weekStart, showToast]);
 
@@ -5891,21 +6055,34 @@ export function ApprovalsTab({ showToast }) {
     load();
   }, [load]);
 
+  // Another week drops the old week's selection and open detail at once,
+  // including a detail read still on its way.
+  useEffect(() => {
+    detailRequestRef.current += 1;
+    setSelected(new Set());
+    setExpanded(null);
+    setDetail(null);
+  }, [weekStart]);
+
   const loadDetail = async (techId) => {
     if (expanded === techId) {
+      detailRequestRef.current += 1;
       setExpanded(null);
       setDetail(null);
       return;
     }
+    const request = ++detailRequestRef.current;
     setExpanded(techId);
     setDetail(null);
     try {
       const d = await adminFetch(
         `/admin/timesheets/week-detail?technicianId=${techId}&weekStart=${weekStart}`,
       );
-      setDetail(d);
+      if (request === detailRequestRef.current) setDetail(d);
     } catch (e) {
-      showToast(`Detail load failed: ${e.message}`);
+      if (request === detailRequestRef.current) {
+        showToast(`Detail load failed: ${e.message}`);
+      }
     }
   };
 
@@ -5915,10 +6092,13 @@ export function ApprovalsTab({ showToast }) {
     setSelected(next);
   };
 
+  const current = loadedWeek === weekStart && !loadFailed;
+  const rows = current ? techs : [];
+
   const selectAllPending = () => {
     setSelected(
       new Set(
-        techs
+        rows
           .filter((t) => t.status !== "approved")
           .map((t) => t.technician_id),
       ),
@@ -6013,10 +6193,11 @@ export function ApprovalsTab({ showToast }) {
       showToast("Clock-out confirmed");
       load();
       if (expanded) {
+        const request = ++detailRequestRef.current;
         const d = await adminFetch(
           `/admin/timesheets/week-detail?technicianId=${expanded}&weekStart=${weekStart}`,
         );
-        setDetail(d);
+        if (request === detailRequestRef.current) setDetail(d);
       }
     } catch (e) {
       showToast(`Confirm failed: ${e.message}`);
@@ -6044,8 +6225,8 @@ export function ApprovalsTab({ showToast }) {
   };
 
   const totalOT =
-    techs.reduce((s, t) => s + parseFloat(t.overtime_minutes || 0), 0) / 60;
-  const pendingCount = techs.filter((t) => t.status !== "approved").length;
+    rows.reduce((s, t) => s + parseFloat(t.overtime_minutes || 0), 0) / 60;
+  const pendingCount = rows.filter((t) => t.status !== "approved").length;
 
   return (
     <div>
@@ -6107,7 +6288,7 @@ export function ApprovalsTab({ showToast }) {
         >
           {" "}
           <span style={{ fontSize: 18 }}>{"\u26A0\uFE0F"}</span>{" "}
-          <div style={{ fontSize: 13, color: "#78350F" }}>
+          <div style={{ fontSize: 14, color: "#78350F" }}>
             {" "}
             <strong>{totalOT.toFixed(1)}h overtime</strong>across the team this
             week. Review before approving.
@@ -6126,10 +6307,12 @@ export function ApprovalsTab({ showToast }) {
         }}
       >
         {" "}
-        <div style={{ fontSize: 13, color: D.muted }}>
+        <div style={{ fontSize: 14, color: D.muted }}>
           {loading
             ? "Loading…"
-            : `${techs.length} tech${techs.length === 1 ? "" : "s"} · ${pendingCount} pending`}
+            : current
+              ? `${rows.length} tech${rows.length === 1 ? "" : "s"} · ${pendingCount} pending`
+              : ""}
         </div>{" "}
         <div style={{ flex: 1 }} />
         {pendingCount > 0 && (
@@ -6137,13 +6320,18 @@ export function ApprovalsTab({ showToast }) {
             Select all pending
           </button>
         )}
-        {selected.size > 0 && (
+        {current && selected.size > 0 && (
           <button onClick={bulkApprove} style={sBtn(D.green, D.white)}>
             Approve {selected.size} selected
           </button>
         )}
       </div>
-      {techs.length === 0 && !loading && (
+      {loadFailed && !loading && (
+        <LoadFailedNotice onRetry={load}>
+          Could not load timesheets for week of {weekStart}.
+        </LoadFailedNotice>
+      )}
+      {current && rows.length === 0 && !loading && (
         <div
           style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
         >
@@ -6151,7 +6339,7 @@ export function ApprovalsTab({ showToast }) {
         </div>
       )}
 
-      {techs.map((t) => {
+      {rows.map((t) => {
         const approved = t.status === "approved";
         const otHrs = parseFloat(t.overtime_minutes || 0) / 60;
         // Paid hours when an unpaid lunch is on the week (regular + overtime
@@ -6185,6 +6373,7 @@ export function ApprovalsTab({ showToast }) {
               {!approved && (
                 <input
                   type="checkbox"
+                  aria-label={`Select ${t.tech_name || "this technician"} for bulk approval`}
                   checked={selected.has(t.technician_id)}
                   onChange={() => toggleSelect(t.technician_id)}
                   style={{ width: 18, height: 18, cursor: "pointer" }}
@@ -6199,7 +6388,7 @@ export function ApprovalsTab({ showToast }) {
                 </div>{" "}
                 <div
                   style={{
-                    fontSize: 12,
+                    fontSize: 14,
                     color: D.muted,
                     marginTop: 2,
                     display: "flex",
@@ -6292,7 +6481,7 @@ export function ApprovalsTab({ showToast }) {
                 }}
               >
                 {!detail && (
-                  <div style={{ color: D.muted, fontSize: 13 }}>
+                  <div style={{ color: D.muted, fontSize: 14 }}>
                     Loading detail…
                   </div>
                 )}
@@ -6301,7 +6490,7 @@ export function ApprovalsTab({ showToast }) {
                     {" "}
                     <div
                       style={{
-                        fontSize: 13,
+                        fontSize: 14,
                         fontWeight: 500,
                         color: D.heading,
                         marginBottom: 8,
@@ -6315,7 +6504,7 @@ export function ApprovalsTab({ showToast }) {
                         style={{
                           width: "100%",
                           borderCollapse: "collapse",
-                          fontSize: 12,
+                          fontSize: 14,
                         }}
                       >
                         {" "}
@@ -6401,7 +6590,7 @@ export function ApprovalsTab({ showToast }) {
                         <div style={{ marginTop: 16 }}>
                           <div
                             style={{
-                              fontSize: 13,
+                              fontSize: 14,
                               fontWeight: 500,
                               color: D.amber,
                               marginBottom: 4,
@@ -6411,7 +6600,7 @@ export function ApprovalsTab({ showToast }) {
                           </div>
                           <div
                             style={{
-                              fontSize: 12,
+                              fontSize: 14,
                               color: D.muted,
                               marginBottom: 8,
                             }}
@@ -6428,7 +6617,7 @@ export function ApprovalsTab({ showToast }) {
                               <div
                                 key={e.id}
                                 style={{
-                                  fontSize: 12,
+                                  fontSize: 14,
                                   padding: 8,
                                   background: "#FEF3C7",
                                   borderRadius: 6,
@@ -6448,7 +6637,7 @@ export function ApprovalsTab({ showToast }) {
                                   onClick={() => confirmAutoClose(e.id)}
                                   style={{
                                     ...sBtn(D.card, D.teal),
-                                    fontSize: 11,
+                                    fontSize: 14,
                                     padding: "4px 8px",
                                   }}
                                 >
@@ -6466,7 +6655,7 @@ export function ApprovalsTab({ showToast }) {
                           {" "}
                           <div
                             style={{
-                              fontSize: 13,
+                              fontSize: 14,
                               fontWeight: 500,
                               color: D.red,
                               marginBottom: 8,
@@ -6480,7 +6669,7 @@ export function ApprovalsTab({ showToast }) {
                               <div
                                 key={e.id}
                                 style={{
-                                  fontSize: 12,
+                                  fontSize: 14,
                                   padding: 8,
                                   background: "#FEF2F2",
                                   borderRadius: 6,
@@ -6506,7 +6695,7 @@ export function ApprovalsTab({ showToast }) {
                         {" "}
                         <div
                           style={{
-                            fontSize: 12,
+                            fontSize: 14,
                             color: D.muted,
                             marginBottom: 6,
                           }}
@@ -6525,7 +6714,7 @@ export function ApprovalsTab({ showToast }) {
                                 onClick={() => disputeEntry(e.id)}
                                 style={{
                                   ...sBtn(D.card, D.red),
-                                  fontSize: 11,
+                                  fontSize: 14,
                                   padding: "4px 8px",
                                 }}
                               >
@@ -6553,7 +6742,7 @@ function Stat({ label, value, warn }) {
       {" "}
       <div
         style={{
-          fontSize: 10,
+          fontSize: 14,
           color: "#64748B",
           textTransform: "uppercase",
           letterSpacing: 0.5,
