@@ -102,6 +102,9 @@ router.get('/promoters', async (req, res, next) => {
       query = query.where(function () {
         this.whereILike('referral_promoters.first_name', s)
           .orWhereILike('referral_promoters.last_name', s)
+          // A full name ("Jane Smith") spans both columns, as the old
+          // client-side filter matched it.
+          .orWhereRaw("concat_ws(' ', referral_promoters.first_name, referral_promoters.last_name) ILIKE ?", [s])
           .orWhereILike('referral_promoters.customer_phone', s)
           .orWhereILike('referral_promoters.referral_code', s);
       });

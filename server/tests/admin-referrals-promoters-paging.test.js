@@ -105,6 +105,14 @@ describe('GET /admin/referrals/promoters paging', () => {
     expect(likes.every((c) => c[2] === '%Promoter 60%')).toBe(true);
   });
 
+  it('matches a full name across first and last name, as the old page filter did', async () => {
+    await get('?status=all&search=Jane%20Smith');
+    const fullName = mockCalls.find((c) => c[0] === 'search.orWhereRaw');
+    expect(fullName).toBeDefined();
+    expect(fullName[1]).toMatch(/concat_ws\(' ', referral_promoters\.first_name, referral_promoters\.last_name\) ILIKE \?/);
+    expect(fullName[2]).toEqual(['%Jane Smith%']);
+  });
+
   it('applies no search filter when search is blank', async () => {
     await get('?status=all&search=%20%20');
     expect(mockCalls.some((c) => /ILike$/.test(c[0]))).toBe(false);
