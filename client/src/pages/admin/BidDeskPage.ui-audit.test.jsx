@@ -331,3 +331,24 @@ it("still sends a newer note draft queued behind a save that lost its reply", as
   input.blur(); // queued behind the first save, which then loses its reply
   await waitFor(() => expect(notePatches).toEqual(["One", "One and two"]));
 });
+
+it("keeps the saves locked until the recovery reload after a lost reply has landed", async () => {
+  let reads = 0;
+  let releaseReload;
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
+    if (path === "/admin/bid-desk/b1") {
+      reads += 1;
+      if (reads === 1) return reply(detail());
+      return new Promise((resolve) => { releaseReload = () => resolve({ ok: true, status: 200, json: async () => detail() }); });
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(reads).toBe(2));
+  expect(screen.getByRole("button", { name: "Save decision" })).toBeDisabled();
+  await act(async () => { releaseReload(); });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save decision" })).not.toBeDisabled());
+});

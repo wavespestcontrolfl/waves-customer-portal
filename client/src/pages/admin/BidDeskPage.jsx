@@ -311,9 +311,10 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         setMessage(`Not saved: ${err.message}`);
       } else {
         // No answer arrived (the network dropped): the server may have written the change, so show what it has.
+        // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
         setMessage(UNCONFIRMED_MESSAGE);
         onChanged();
-        load({ keepDueDraft: true });
+        await load({ keepDueDraft: true });
       }
       return false;
     } finally {
