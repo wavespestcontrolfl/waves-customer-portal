@@ -741,7 +741,15 @@ function describeLateness({ date, candidates, baselines, simulate, target, own, 
     return simulation.arrivals.map((arrival, index) => ({ row: order[index], arrivalMin: arrival.arrivalMin,
       lateMinutes: arrival.lateMinutes || 0, number: completedCount + index + 1 })).filter(stop => stop.lateMinutes > 0);
   };
-  const baselineLate = new Set(baselines.flatMap(order => lateStops(order) || []).map(stop => String(stop.row.id)));
+  // The day WITHOUT the visit: each stop's own arrival and lateness there. A "without this visit"
+  // sentence must quote these, never the candidate route's times (which carry the visit's delay). Where
+  // two baselines disagree the least late one is quoted, the only claim both support.
+  const baselineStops = new Map();
+  for (const stop of baselines.flatMap(order => lateStops(order) || [])) {
+    const seen = baselineStops.get(String(stop.row.id));
+    if (!seen || stop.lateMinutes < seen.lateMinutes) baselineStops.set(String(stop.row.id), stop);
+  }
+  const baselineLate = new Set(baselineStops.keys());
   let best = null;
   for (const order of candidates) {
     const late = lateStops(order);
@@ -764,7 +772,11 @@ function describeLateness({ date, candidates, baselines, simulate, target, own, 
     sentences.push(`${String(target.id) === '__candidate__' ? who : `${who} is this visit and`} would arrive ${warningDetail.clockText(best.mine.arrivalMin)}, ${best.mine.lateMinutes} min late, so it cannot keep its own window.`);
   }
   if (!others.length && !best.mine) {
-    for (const stop of [...best.old].sort(byLate).slice(0, 2)) {
+    const withoutVisit = best.old.map((stop) => {
+      const base = baselineStops.get(String(stop.row.id));
+      return { ...stop, arrivalMin: base.arrivalMin, lateMinutes: base.lateMinutes };
+    });
+    for (const stop of withoutVisit.sort(byLate).slice(0, 2)) {
       sentences.push(warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes, { already: true }));
     }
   }

@@ -131,6 +131,38 @@ describe('gate on: arrival_window names the stop', () => {
     expect(fit.diagnostics.lateStopIds).toEqual(['B']);
   });
 
+  // Codex pre-push P1: "without this visit" quotes the day WITHOUT the visit. The visit inserted ahead of B
+  // pushes B from 12:40 PM (160 min late) to 2 PM (240 min late); the sentence must say 12:40 PM, 160.
+  test('"without this visit" uses the baseline arrival, not the candidate route\'s (audit case)', () => {
+    const rows = [stop('A', '08:00', 240, { route_order: 1 }), stop('B', '08:00', 60, { route_order: 3 })];
+    const saved = stop('T', '12:00', 60, { route_order: 2 });
+    const fit = run(rows, saved, { detail: true }, { prospective: false });
+    expect(fit.reason).toBe('arrival_window');
+    expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (8–10 AM window) would already arrive 12:40 PM, 160 min late without this visit.`);
+    expect(fit.warning).not.toMatch(/2 PM|240/);
+    expect(fit.diagnostics.lateStopIds).toEqual(['B']);
+  });
+
+  test('a stop the visit makes late quotes the route WITH the visit (its time is the candidate\'s)', () => {
+    // Without T: A then B, B on time (arrives 12:20+20... B window 12:00 so fine). With T ahead of B, B is late.
+    const rows = [stop('A', '08:00', 240, { route_order: 1 }), stop('B', '12:30', 60, { route_order: 3 })];
+    const saved = stop('T', '12:00', 120, { route_order: 2 });
+    const fit = run(rows, saved, { detail: true }, { prospective: false });
+    // Baseline: B arrives 12:40 PM, inside its 12:30-2:30 window. With T ahead (12:40-2:40) B arrives 3 PM.
+    expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (12:30–2:30 PM window) would arrive 3 PM, 30 min late.`);
+    expect(fit.warning).not.toMatch(/without this visit/);
+  });
+
+  test('day_overcommitted (capacity) names the stop already late, with its time from the day as it stands', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const rows = [stop('A', '08:00', 240, { route_order: 1 }), stop('B', '08:00', 60, { route_order: 2 })];
+    const fit = run(rows, candidate('15:00', 60), { detail: true });
+    expect(fit.reason).toBe('day_overcommitted');
+    expect(fit.warning).toMatch(/^Route on 2027-03-01: Stop 2 \(8–10 AM window\) would already arrive \d+(:\d\d)? PM, \d+ min late without this visit\.$/);
+    // The day without the visit: A 8:20-12:20, B arrives 12:40 (160 min past its 10 AM close).
+    expect(fit.warning).toContain('12:40 PM, 160 min late');
+  });
+
   test('a day already late in several places: at most two stops are named', () => {
     const rows = [stop('A', '08:00', 240), stop('B', '08:20', 30), stop('C', '08:40', 30), stop('D', '09:00', 30), stop('E', '09:20', 30)];
     const fit = run(rows, candidate('15:00', 60), { detail: true });
