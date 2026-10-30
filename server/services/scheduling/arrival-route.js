@@ -1256,33 +1256,47 @@ async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lat
   if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
-    return await conn.transaction(async (sp) => {
-      const row = await sp('scheduled_services').where({ id: serviceId })
-        .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
-      const date = row ? dateOnly(row.scheduled_date) : '';
-      if (!row?.technician_id || !row.window_start || !date) return null;
-      if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return null;
-      // From the office, like every commit-time check (tech-start-point.js):
-      // the save probe certified this day from there, so the same order wins.
-      const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
-      if (!context || context.grouped) return null;
-      if (staffSave === true) context.travel = staffSaveTravel(date);
-      // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS, the staff saves' callers only): the save numbers the day in
-      // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
-      const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
-        windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
-        ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
-      if (!fit.feasible || !fit.routeOrder) return null;
-      const order = await writeRouteOrder(sp, fit, serviceId);
-      await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
-        resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
-        metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
-      return order;
-    });
+    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }));
   } catch (error) {
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
     return null;
   }
+}
+
+// One line for every refusal past the gate checks (Route Check Everywhere,
+// step 0): the reason a visit kept no stop number. Log only, no data write.
+function refusePlacement(serviceId, source, reason, date) {
+  logger.info(`[arrival-route] route order not placed: service=${String(serviceId).slice(0, 8)} source=${source || '-'} reason=${reason} date=${date || '-'}`);
+  return null;
+}
+
+async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) {
+  const row = await sp('scheduled_services').where({ id: serviceId })
+    .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
+  const date = row ? dateOnly(row.scheduled_date) : '';
+  const refuse = reason => refusePlacement(serviceId, source, reason, date);
+  if (!row) return refuse('no_context');
+  if (!row.technician_id) return refuse('unassigned');
+  if (!row.window_start || !date) return refuse('untimed');
+  if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
+  // From the office, like every commit-time check (tech-start-point.js):
+  // the save probe certified this day from there, so the same order wins.
+  const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  if (!context) return refuse('no_context');
+  if (context.grouped) return refuse('grouped');
+  if (staffSave === true) context.travel = staffSaveTravel(date);
+  // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS, the staff saves' callers only): the save numbers the day in
+  // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
+  const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
+    windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
+    ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
+  if (!fit.feasible) return refuse(fit.reason || 'no_order');
+  if (!fit.routeOrder) return refuse('no_order');
+  const order = await writeRouteOrder(sp, fit, serviceId);
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
+    resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
+    metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
+  return order;
 }
 
 // Conversion expands a certified combined anchor without changing its route position.
@@ -1371,6 +1385,26 @@ function routeCheckStaffSavesLive() {
 // message, no Google call. Needs the arrival-window route check itself.
 function routeCheckAutoSavesLive() {
   return gateEnvValue('GATE_ROUTE_CHECK_AUTO_SAVES') && arrivalWindowRoutingEnabled();
+}
+
+// GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, "ok go", Route Check
+// Everywhere follow-up item 1): an accepted estimate's visit gets its stop
+// number in the accept's own save. A held slot that graduates
+// (slot-reservation.js commitReservation, also a one-tap booking) and the
+// converter's same-trip standalone parent are numbered (placeMovedVisit,
+// source 'estimate_accept'). Stop numbers only: no message, no notification,
+// no Google call. Needs the arrival-window route check itself.
+function routeCheckAcceptSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_ACCEPT_SAVES') && arrivalWindowRoutingEnabled();
+}
+
+// GATE_ROUTE_CHECK_ASSIGN_SAVES (same follow-up, item 1): an office board
+// assign (PUT /api/admin/dispatch/jobs/:id/assign) numbers the visit on its
+// new technician's day (placeMovedVisit, source 'dispatch_assign') instead of
+// leaving it unnumbered after the assign cleared the old number. Stop numbers
+// only; the assign itself is unchanged. Needs the arrival-window route check.
+function routeCheckAssignSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_ASSIGN_SAVES') && arrivalWindowRoutingEnabled();
 }
 
 // A staff save's travel for `date`: on a road day, the road times the pickers
@@ -1499,3 +1533,5 @@ module.exports = {
 };
 module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
 module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;
+module.exports.routeCheckAcceptSavesLive = routeCheckAcceptSavesLive;
+module.exports.routeCheckAssignSavesLive = routeCheckAssignSavesLive;

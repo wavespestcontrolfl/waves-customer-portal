@@ -821,7 +821,8 @@ export default function DispatchPageV2({
   // (a plain refresh of the same day does not).
   useEffect(() => { bookHeldSeq.current += 1; }, [date, viewMode, activeTab]);
   useEffect(() => {
-    if (viewMode !== "day" || activeTab !== "board") {
+    // The strip is office-only: a technician login would only get a 403.
+    if (viewMode !== "day" || activeTab !== "board" || verifiedRole !== "admin") {
       setHeldVisits([]);
       return undefined;
     }
@@ -838,7 +839,7 @@ export default function DispatchPageV2({
       }
     })();
     return () => { cancelled = true; };
-  }, [date, viewMode, activeTab, scheduleRefreshKey]);
+  }, [date, viewMode, activeTab, scheduleRefreshKey, verifiedRole]);
 
   // Auto-Dispatch audit links open the existing appointment detail sheet.
   // Inspecting a move must never enter the completion or new-booking flows.
@@ -1724,7 +1725,7 @@ export default function DispatchPageV2({
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
-          onChange={() => fetchSchedule(date)}
+          onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
@@ -1756,7 +1757,7 @@ export default function DispatchPageV2({
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
-          onChange={() => fetchSchedule(date)}
+          onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
@@ -1889,7 +1890,8 @@ export default function DispatchPageV2({
         document.body,
       )}
 
-      {viewMode === "day" && <RecurringAlertsBannerV2 />}
+      {/* Recurring-series alerts are office-only on the server. */}
+      {viewMode === "day" && verifiedRole === "admin" && <RecurringAlertsBannerV2 />}
 
       {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
       {viewMode === "day" && activeTab === "protocols" && (

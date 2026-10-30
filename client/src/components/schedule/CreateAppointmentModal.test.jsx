@@ -1000,6 +1000,11 @@ describe('autoAssignWarning (GATE_UNASSIGNED_VISIT_GUARD)', () => {
       .toBe("Saved with no technician: it is on no technician's route yet. More than one technician could take it. Assign one on the schedule board.");
   });
 
+  it('says the service line\'s technicians are not free when the live line map finds nobody', () => {
+    expect(autoAssignWarning([{ autoAssign: { result: 'unassigned', reason: 'line_none' } }]))
+      .toBe("Saved with no technician: it is on no technician's route yet. The technicians for this service are not free that day. Assign one on the schedule board.");
+  });
+
   it('still warns, without a reason line, for a reason it does not know', () => {
     expect(autoAssignWarning([{ autoAssign: { result: 'unassigned', reason: 'something_new' } }]))
       .toBe("Saved with no technician: it is on no technician's route yet. Assign one on the schedule board.");

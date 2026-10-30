@@ -208,10 +208,12 @@ export default function DashboardPageV2() {
       )}
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
-          by default; the model only proposes SQL, the server sandboxes it. */}
-      {aiChartsEnabled && sectionVisible("today") && (
-        <div className="mb-5">
-          <AiChartsPanel />
+          by default; the model only proposes SQL, the server sandboxes it. On
+          mobile it stays mounted but hidden outside Today, so a section switch
+          keeps the prompt, the preview and a request still in flight. */}
+      {aiChartsEnabled && (
+        <div className="mb-5" hidden={!sectionVisible("today")}>
+          <AiChartsPanel active={sectionVisible("today")} />
         </div>
       )}
 

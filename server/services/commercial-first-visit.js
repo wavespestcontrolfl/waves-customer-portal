@@ -93,8 +93,7 @@ function visitMinutesFor(programs, estimateData) {
 
 // The visit the signer may book, or null (the office books it). Pure.
 function firstVisitPlan(estimate = {}) {
-  // An invoice-mode proposal bills its first period when it is marked won (proposal-win.js), so a completion invoice
-  // on the first visit would bill that visit twice: the office keeps it.
+  // An invoice-mode (Net terms) proposal stays with the office: online booking is for Auto Pay or no terms.
   if (estimate.bill_by_invoice === true) return null;
   const { normalizeProposal, computeProposalTotals } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);
@@ -516,6 +515,12 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
   });
   if (!result.ok) {
     const known = BOOKING_REFUSALS[result.code];
+    // A first visit that landed after bookingContext's read (another tab won the estimate guard): answer it with the
+    // booked visit, as bookingContext does, so the picker can show its date and time.
+    if (result.code === 'ALREADY_BOOKED') {
+      const booked = await linkedFirstVisit(estimate.id).catch(() => null);
+      if (booked) return { ...refusal(409, ...known), visit: publicVisit(booked) };
+    }
     if (known) return refusal(409, ...known);
     return result.status === 409 ? refusal(409, 'slot_taken', result.error) : refusal(result.status || 500, 'booking_failed', CALL_US);
   }

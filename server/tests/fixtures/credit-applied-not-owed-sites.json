@@ -3,6 +3,7 @@
   "server/routes/admin-invoices.js": { "max": 1, "reason": "credit-context response echoes credit_applied; its amount_due beside it subtracts amount_paid." },
   "server/routes/admin-tax.js": { "max": 1, "reason": "Cash received on paid invoices (payments-ledger gap rows)." },
   "server/routes/estimate-public.js": { "max": 2, "reason": "computeApplication on an amount already due (creditApplied 0) for an estimate prepay invoice that cannot hold a part payment." },
+  "server/routes/mcp-admin.js": { "max": 2, "reason": "Response field allow-list for the billing readers (keepPaths): credit_applied and total are output key names passed through, not arithmetic; the owed amount the route returns is the reader's balance_due (invoiceAmountDue)." },
   "server/routes/pay-v2.js": { "max": 1, "reason": "Echoes credit_applied for the Account credit line; amountDue comes from invoice.js amount_due (invoiceAmountDue)." },
   "server/routes/receipt-v2.js": { "max": 1, "reason": "Receipt shows the credit line; a receipt reports cash paid." },
   "server/routes/stripe-webhook.js": { "max": 3, "reason": "The ACH amount check (amount due comes from invoiceAmountDue; the spread keeps amount_paid) and the dispute reopen/restore of a card surcharge in total. The settlement rewrites now carry amount_paid. Known limit: a chargeback on a card payment that completed a part-paid invoice reopens it for the part again." },

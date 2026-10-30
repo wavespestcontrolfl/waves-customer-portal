@@ -8,10 +8,12 @@
 const mockMarkInboundSmsRead = jest.fn(async () => ({ updated: 1, notificationsCleared: 1 }));
 jest.mock('../services/inbound-sms-read', () => ({ markInboundSmsRead: (...a) => mockMarkInboundSmsRead(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The signed-in staff member: a technicians.id, as admin-auth sets it.
+const mockStaffId = 'bbbbbbbb-0000-4000-8000-000000000001';
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
-    req.technicianId = 'tech-1';
+    req.technicianId = mockStaffId;
     req.techRole = 'admin';
     next();
   },
@@ -48,7 +50,18 @@ jest.mock('../services/recruiting-comms', () => ({
 
 function makeDb() {
   let rows = [];
+  // Staff names for History (null = the read fails).
+  let staff = [];
   function tableApi(table) {
+    if (table === 'technicians') {
+      if (staff === null) throw new Error('technicians read failed');
+      let ids = [];
+      const query = {
+        whereIn(_column, list) { ids = list; return query; },
+        select: () => Promise.resolve(staff.filter((s) => ids.includes(s.id)).map((s) => ({ ...s }))),
+      };
+      return query;
+    }
     if (table !== 'job_applications') throw new Error(`unexpected table ${table}`);
     let whereCond = {};
     const builder = {
@@ -78,6 +91,7 @@ function makeDb() {
   db.transaction = async (fn) => fn(tableApi);
   db.__rows = () => rows;
   db.__setRows = (r) => { rows = r; };
+  db.__setStaff = (list) => { staff = list; };
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 }
@@ -137,6 +151,7 @@ beforeEach(() => {
   mockSubstituteInterviewLinkPlaceholder.mockImplementation((body, url) => body.split('[interview link]').join(url));
   mockSendStageComms.mockResolvedValue({ sms: 'sent', email: 'sent' });
   mockDb.__setRows([]);
+  mockDb.__setStaff([]);
 });
 
 async function patch(id, payload) {
@@ -226,7 +241,7 @@ describe('PATCH /:id/status', () => {
     expect(mockSendStageComms).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'aaaaaaaa-0000-4000-8000-000000000001' }),
       'interview_invite',
-      expect.objectContaining({ sms: true, email: false, by: 'tech-1' }),
+      expect.objectContaining({ sms: true, email: false, by: mockStaffId }),
     );
   });
 
@@ -578,5 +593,46 @@ describe('GET /:id detail never exposes the raw token', () => {
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
     const body = await res.json();
     expect(body.application.interview_url).toBeNull();
+  });
+});
+
+describe('History names the staff member behind each stage change (audit F10)', () => {
+  const STAFF = mockStaffId;
+  const GONE = 'bbbbbbbb-0000-4000-8000-000000000002';
+  const history = () => [
+    { from: 'new', to: 'reviewed', note: null, by: STAFF, at: '2026-10-27T14:00:00Z' },
+    { from: 'reviewed', to: 'reviewed', note: 'Left a voicemail', by: GONE, at: '2026-10-28T14:00:00Z' },
+    { from: 'reviewed', to: 'reviewed', note: 'Withdrew', by: 'applicant', at: '2026-10-29T14:00:00Z' },
+  ];
+
+  test('the detail adds by_name for a staff id on file and leaves other entries and the stored history alone', async () => {
+    mockDb.__setRows([appRow({ status_history: history() })]);
+    mockDb.__setStaff([{ id: STAFF, name: 'Sam Office' }]);
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.application.status_history.map((e) => e.by_name)).toEqual(['Sam Office', undefined, undefined]);
+    expect(mockDb.__rows()[0].status_history.some((e) => 'by_name' in e)).toBe(false);
+  });
+
+  test('a stage change response names the history it returns, so the page shows it at once', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed', status_history: history() })]);
+    mockDb.__setStaff([{ id: STAFF, name: 'Sam Office' }]);
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'reviewed', note: 'Second call' });
+    expect(status).toBe(200);
+    expect(body.application.status_history).toHaveLength(4);
+    // The entry this request just wrote carries the signed-in staff name.
+    expect(body.application.status_history[3]).toMatchObject({ note: 'Second call', by: STAFF, by_name: 'Sam Office' });
+    expect(body.application.status_history[0].by_name).toBe('Sam Office');
+    expect(mockDb.__rows()[0].status_history.some((e) => 'by_name' in e)).toBe(false);
+  });
+
+  test('a failed name read still answers the detail, without names', async () => {
+    mockDb.__setRows([appRow({ status_history: history() })]);
+    mockDb.__setStaff(null);
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.application.status_history.some((e) => 'by_name' in e)).toBe(false);
   });
 });

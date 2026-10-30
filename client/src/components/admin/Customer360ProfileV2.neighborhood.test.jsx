@@ -83,6 +83,29 @@ describe('CustomerNeighborhoodBlock', () => {
     expect(calls[0].path).toBe(PROPS_URL);
   });
 
+  it('a failed read shows its message with Try again, which reloads the block without leaving the customer', async () => {
+    let fail = true;
+    stubFetch(() => (fail ? response({ error: 'Database unavailable' }, 503) : response({ properties: [linked()] })));
+    render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    expect(await screen.findByText('Database unavailable')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Synthetic Oaks')).toBeInTheDocument();
+    expect(screen.queryByText('Database unavailable')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(calls.filter((c) => c.path === PROPS_URL)).toHaveLength(2);
+  });
+
+  it('a retry that finds the directory off (404) hides the block', async () => {
+    let fail = true;
+    stubFetch(() => (fail ? response({ error: 'Database unavailable' }, 503) : response({ enabled: false }, 404)));
+    const { container } = render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    expect(await screen.findByText('Database unavailable')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+  });
+
   it('an office pick reads "Set by office"; no link reads "Not linked"', async () => {
     stubFetch(() => response({ properties: [linked({ neighborhoodSource: 'office' }), unlinked({ id: 'p2', addressLine1: '200 Sample Ct' })] }));
     render(<CustomerNeighborhoodBlock customerId="customer-a" />);

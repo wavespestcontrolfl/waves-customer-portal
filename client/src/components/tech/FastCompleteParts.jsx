@@ -610,8 +610,8 @@ export function useProductPicker({ products, waiting = null, waitingNote = null,
 // The reason sits above full-width actions, so neither squeezes the other on
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
-// own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
+// own label instead of a line above it. `warnings`: lines that do not hold the button.
+export function CompleteFooter({ submission, missingReason, warn, warnings = [], label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -619,6 +619,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {warnings.map((line) => <p key={line} className="tech-visit-status--warn" role="status">{line}</p>)}
       <div className="tech-visit-actions">
         {children}
         <Button

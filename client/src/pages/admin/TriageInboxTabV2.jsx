@@ -599,10 +599,15 @@ export function PropertyRoleEvidence({ payload }) {
 // "Confirm email" action satisfies it in-band. Controlled: draft state
 // (which radio, the typed value) lives in the parent, keyed by item id, so
 // multiple open disagreement cards never share a draft.
-export function EmailConfirmForm({ itemId, payload, draft, onChange, onConfirm, busy }) {
+// typedConfirm (GATE_CALL_EMAIL_CHECKS, owner 2026-10-29): the server flags every
+// email read-back card for an admin, and the same form confirms the held address
+// or a typed correction in place.
+export function EmailConfirmForm({ itemId, payload, draft, onChange, onConfirm, busy, typedConfirm = false }) {
   const p = parsePayload(payload);
-  if (!p?.email_disagreement) return null;
-  const candidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  if (!p?.email_disagreement && !typedConfirm) return null;
+  const candidates = p?.email_disagreement
+    ? (Array.isArray(p.email_candidates) ? p.email_candidates : [])
+    : (p?.email_release_target ? [{ value: p.email_release_target }] : []);
   const selected = draft?.selected || null;
   const typed = draft?.typed || "";
   const canConfirm = selected === "other" ? !!typed.trim() : !!selected;
@@ -1374,6 +1379,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // V1/V2 email disagreement — Accept/Deny 400/409 on this
                 // card until the confirm-email form below satisfies it.
                 const isEmailDisagreementCard = isTriage && !!parsePayload(item.payload)?.email_disagreement;
+                const isEmailTypedConfirmCard = isTriage && item.email_typed_confirm === true;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -1536,10 +1542,11 @@ export default function TriageInboxTabV2({ isAdmin }) {
                         Confirming the email spelling needs an admin.
                       </div>
                     )}
-                    {isEmailDisagreementCard && isOpenView && isAdmin && (
+                    {(isEmailDisagreementCard || isEmailTypedConfirmCard) && isOpenView && isAdmin && (
                       <EmailConfirmForm
                         itemId={item.id}
                         payload={item.payload}
+                        typedConfirm={isEmailTypedConfirmCard}
                         draft={emailConfirmDrafts[item.id]}
                         busy={actioning === item.id}
                         onChange={(patch) => setEmailConfirmDraft(item.id, patch)}

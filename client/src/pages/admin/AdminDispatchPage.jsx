@@ -192,7 +192,9 @@ export default function AdminDispatchPage() {
           ariaLabel="Schedule section"
           navGridClassName={navGridClassName}
           actions={[
-            ...(tab === TABS.SCHEDULE ? [{
+            // Creating an appointment is office-only on the server; a
+            // technician login never sees the button.
+            ...(tab === TABS.SCHEDULE && isAdmin ? [{
                   label: "Add Appointment",
                   icon: CalendarPlus,
                   onClick: handleAddAppointment,

@@ -9,11 +9,25 @@ export const TECH_ROUTE_SNAPSHOT_KEY = 'waves_tech_route_snapshot';
 // another login) or an expired token never matches, so no stale profile —
 // and no stale route — opens offline.
 export const STAFF_OFFLINE_PASS_KEY = 'waves_tech_offline_pass';
+// Ask (Intelligence Bar) prompt text saved on the device: the palette's recent
+// prompts (`${ASK_RECENTS_KEY}:<staff id>`, and the older key shared by every
+// login) and the page bar's per-page recents (utils/ibStorage.js). A prompt
+// can name a customer or a private business question. The staff id is gone
+// by the time a session ends, so every login's prompts go, by key prefix.
+// Starred prompts (ib.favorites.*) are deliberate saves and stay.
+export const ASK_RECENTS_KEY = 'admin_ib_recents';
+const ASK_PROMPT_KEY_PREFIXES = [ASK_RECENTS_KEY, 'ib.recents.'];
 
 export function clearStaffDeviceData() {
   for (const key of [TECH_ROUTE_SNAPSHOT_KEY, STAFF_OFFLINE_PASS_KEY]) {
     try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
   }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key && ASK_PROMPT_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) localStorage.removeItem(key);
+    }
+  } catch { /* storage unavailable */ }
 }
 
 function tokenBinding(token) {

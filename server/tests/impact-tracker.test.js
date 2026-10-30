@@ -1,11 +1,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/content-astro/github-client', () => ({ getPr: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ aiChangeCheckLive: jest.fn(() => true) }));
 
 const tracker = require('../services/seo/impact-tracker');
 const GitHubClient = require('../services/content-astro/github-client');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { computeVerdict } = tracker;
+const { computeVerdict, aiChangeVerdict } = tracker;
+const { aiChangeCheckLive } = require('../config/feature-gates');
 const { median, clicksPct, positionDelta, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl } = tracker._internals;
 
 describe('normalizeQueryCohort — frozen target-query cohort', () => {
@@ -596,3 +598,243 @@ function chain({ selectResult = [], firstResult = null, sumResult = [], insertSi
   builder.then = (resolve, reject) => Promise.resolve(selectResult).then(resolve, reject);
   return builder;
 }
+
+
+describe('aiChangeVerdict — before-and-after AI citations, control-adjusted', () => {
+  // Same site-wide rate on both sides unless a test says otherwise.
+  const win = (answers, cites, siteCites) => ({ answers, cites, siteCites });
+
+  test('the motivating case: 11 cites before, 2 after, site flat -> lost', () => {
+    const out = aiChangeVerdict({ pre: win(60, 11, 30), post: win(60, 2, 30) });
+    expect(out.verdict).toBe('lost');
+    expect(out.ratio).toBeCloseTo(2 / 11, 5);
+  });
+
+  test('no_data: fewer than 3 cites in total, or an empty window', () => {
+    expect(aiChangeVerdict({ pre: win(50, 1, 10), post: win(50, 1, 10) }).verdict).toBe('no_data');
+    expect(aiChangeVerdict({ pre: win(0, 0, 0), post: win(50, 9, 20) }).verdict).toBe('no_data');
+    expect(aiChangeVerdict({ pre: win(50, 9, 20), post: win(0, 0, 0) }).verdict).toBe('no_data');
+    expect(aiChangeVerdict({}).verdict).toBe('no_data');
+  });
+
+  test('exactly 3 cites in total is enough to judge', () => {
+    expect(aiChangeVerdict({ pre: win(50, 3, 10), post: win(50, 0, 10) }).verdict).toBe('lost');
+  });
+
+  test('lost edge: ratio exactly 0.5 is lost, just above is flat', () => {
+    expect(aiChangeVerdict({ pre: win(100, 10, 40), post: win(100, 5, 40) }).verdict).toBe('lost');
+    expect(aiChangeVerdict({ pre: win(100, 10, 40), post: win(100, 6, 40) }).verdict).toBe('flat');
+  });
+
+  test('lost needs 3 or more cites before: 2 before and 0 after is flat', () => {
+    expect(aiChangeVerdict({ pre: win(50, 2, 10), post: win(50, 1, 10) }).verdict).toBe('flat');
+    expect(aiChangeVerdict({ pre: win(50, 2, 10), post: win(50, 0, 10) }).verdict).toBe('no_data');
+  });
+
+  test('a site-wide drop is not blamed on the page: both halve -> flat', () => {
+    // Page cites 10 -> 5 would be lost on its own; the site also halved (40 -> 20).
+    const out = aiChangeVerdict({ pre: win(100, 10, 40), post: win(100, 5, 20) });
+    expect(out.verdict).toBe('flat');
+    expect(out.ratio).toBeCloseTo(1, 5);
+  });
+
+  test('a site-wide rise hides nothing: page flat while the site doubled -> lost', () => {
+    const out = aiChangeVerdict({ pre: win(100, 10, 20), post: win(100, 10, 40) });
+    expect(out.verdict).toBe('lost');
+  });
+
+  test('different answer counts per window use rates, not raw counts', () => {
+    // 10/100 before, 10/50 after: the page rate doubled; site rate unchanged.
+    const out = aiChangeVerdict({ pre: win(100, 10, 40), post: win(50, 10, 20) });
+    expect(out.verdict).toBe('gained');
+    expect(out.ratio).toBeCloseTo(2, 5);
+  });
+
+  test('gained: from nothing to 3 cites; 2 cites is not enough', () => {
+    expect(aiChangeVerdict({ pre: win(50, 0, 10), post: win(50, 3, 12) }).verdict).toBe('gained');
+    expect(aiChangeVerdict({ pre: win(50, 0, 10), post: win(50, 2, 12) }).verdict).toBe('no_data');
+    expect(aiChangeVerdict({ pre: win(50, 1, 10), post: win(50, 2, 10) }).verdict).toBe('flat');
+  });
+
+  test('gained edge: ratio exactly 2 is gained, just below is flat', () => {
+    expect(aiChangeVerdict({ pre: win(100, 5, 40), post: win(100, 10, 40) }).verdict).toBe('gained');
+    expect(aiChangeVerdict({ pre: win(100, 5, 40), post: win(100, 9, 40) }).verdict).toBe('flat');
+  });
+
+  test('gained from a nonzero base still needs 3 cites after', () => {
+    expect(aiChangeVerdict({ pre: win(100, 1, 40), post: win(100, 2, 40) }).verdict).toBe('flat');
+    expect(aiChangeVerdict({ pre: win(100, 1, 40), post: win(100, 3, 40) }).verdict).toBe('gained');
+  });
+
+  test('no site-wide citations after (a blackout) cannot be pinned on the page -> flat, no divide by zero', () => {
+    const out = aiChangeVerdict({ pre: win(50, 5, 20), post: win(50, 0, 0) });
+    expect(out.verdict).toBe('flat');
+    expect(out.ratio).toBeNull();
+  });
+});
+
+describe('aiChangeWindows — ET calendar days around the deploy', () => {
+  const { aiChangeWindows } = tracker._internals;
+
+  test('14 days before (exclusive of deploy day) and days 2-16 after (inclusive)', () => {
+    const w = aiChangeWindows(new Date('2026-10-27T18:00:00Z'));
+    expect(w.deploy).toBe('2026-10-27');
+    expect(w.pre).toEqual({ from: '2026-10-13', to: '2026-10-26' });
+    expect(w.post).toEqual({ from: '2026-10-29', to: '2026-11-12' });
+  });
+
+  test('a late-evening ET deploy keeps its ET day (UTC date is already tomorrow)', () => {
+    const w = aiChangeWindows(new Date('2026-10-28T02:30:00Z')); // 10:30 PM EDT on Oct 27
+    expect(w.deploy).toBe('2026-10-27');
+    expect(w.post.from).toBe('2026-10-29');
+  });
+
+  test('windows crossing the November fall-back keep whole calendar days', () => {
+    const w = aiChangeWindows(new Date('2026-10-25T15:00:00Z'));
+    expect(w.post).toEqual({ from: '2026-10-27', to: '2026-11-10' });
+  });
+});
+
+describe('tallyAiChangeWindows', () => {
+  const { aiChangeWindows, tallyAiChangeWindows } = tracker._internals;
+  const page = 'https://www.wavespestcontrol.com/pest-control/seasonal-pest-calendar-sarasota-fl/';
+  const windows = aiChangeWindows(new Date('2026-10-27T18:00:00Z'));
+  const obs = (check_date, urls, extra = {}) => ({
+    check_date, measurement_version: 2, answer_available: true, citations_complete: true,
+    waves_cited_urls: JSON.stringify(urls), ...extra,
+  });
+
+  test('counts measured answers, page cites and any-Waves cites per window', () => {
+    const out = tallyAiChangeWindows([
+      obs('2026-10-20', [page]),
+      obs('2026-10-21', ['https://www.wavespestcontrol.com/other/']),
+      obs('2026-10-22', []),
+      obs('2026-11-01', [page, 'https://www.wavespestcontrol.com/other/']),
+      obs('2026-11-02', []),
+    ], page, windows);
+    expect(out.pre).toMatchObject({ from: '2026-10-13', to: '2026-10-26', answers: 3, cites: 1, siteCites: 2 });
+    expect(out.post).toMatchObject({ from: '2026-10-29', to: '2026-11-12', answers: 2, cites: 1, siteCites: 1 });
+  });
+
+  test('ignores days outside both windows (deploy day, deploy + 1, after deploy + 16)', () => {
+    const out = tallyAiChangeWindows([
+      obs('2026-10-27', [page]), obs('2026-10-28', [page]), obs('2026-11-13', [page]), obs('2026-10-12', [page]),
+    ], page, windows);
+    expect(out.pre.answers + out.post.answers).toBe(0);
+  });
+
+  test('unmeasured answers (old version, no answer, incomplete citations) never count', () => {
+    const out = tallyAiChangeWindows([
+      obs('2026-10-20', [page], { measurement_version: 1 }),
+      obs('2026-10-20', [page], { answer_available: false }),
+      obs('2026-10-20', [page], { citations_complete: false }),
+      obs('2026-10-20', [page], { measurement_version: null }),
+    ], page, windows);
+    expect(out.pre.answers).toBe(0);
+  });
+
+  test('a non-Waves citation is not a site cite; a Date check_date works', () => {
+    const out = tallyAiChangeWindows([
+      obs(new Date('2026-10-20T00:00:00Z'), ['https://example.com/x']),
+      obs(new Date('2026-10-21T00:00:00Z'), [page]),
+    ], page, windows);
+    expect(out.pre).toMatchObject({ answers: 2, cites: 1, siteCites: 1 });
+  });
+});
+
+describe('checkAiChange', () => {
+  const page = 'https://www.wavespestcontrol.com/pest-control/seasonal-pest-calendar-sarasota-fl/';
+  const NOW = new Date('2026-11-20T13:00:00Z');
+  const obs = (check_date, urls) => ({
+    check_date, measurement_version: 2, answer_available: true, citations_complete: true,
+    waves_cited_urls: JSON.stringify(urls),
+  });
+
+  // Chainable fake: records the pending-scan filters and each update.
+  function fakeDb({ pending, mentions }) {
+    const state = { updates: [], pendingWhere: [], mentionRange: null, limit: null, tables: [] };
+    const database = (table) => {
+      state.tables.push(table);
+      const q = {};
+      if (table === 'content_optimization_impact') {
+        q.whereNotNull = (c) => { state.pendingWhere.push(['notnull', c]); return q; };
+        q.whereNull = (c) => { state.pendingWhere.push(['null', c]); return q; };
+        q.where = (a, b, c) => { if (typeof a === 'string' && b === '<=') state.pendingWhere.push(['lte', a, c]); else if (typeof a === 'string') state.updateId = b; return q; };
+        q.orderBy = () => q;
+        q.limit = (n) => { state.limit = n; return q; };
+        q.select = async () => pending;
+        q.update = async (patch) => { state.updates.push({ id: state.updateId, patch }); return 1; };
+      } else {
+        q.whereBetween = (c, range) => { state.mentionRange = range; return q; };
+        q.select = async () => mentions;
+      }
+      return q;
+    };
+    database.state = state;
+    return database;
+  }
+
+  beforeEach(() => { aiChangeCheckLive.mockReturnValue(true); });
+
+  test('does nothing while the gate is off', async () => {
+    aiChangeCheckLive.mockReturnValue(false);
+    const database = fakeDb({ pending: [{ id: 1 }], mentions: [] });
+    expect(await tracker.checkAiChange({ db: database, now: NOW })).toEqual({ skipped: 'gated', checked: 0 });
+    expect(database.state.tables).toEqual([]);
+  });
+
+  test('scans only unchecked rows with a page and a deploy date, settled 17 days, in a bounded batch', async () => {
+    const database = fakeDb({ pending: [], mentions: [] });
+    await tracker.checkAiChange({ db: database, now: NOW });
+    const w = database.state.pendingWhere;
+    expect(w).toEqual(expect.arrayContaining([['notnull', 'page_url'], ['notnull', 'deployed_at'], ['null', 'ai_change_checked_at']]));
+    const lte = w.find((x) => x[0] === 'lte');
+    expect(etDateString(lte[2])).toBe(etDateString(addETDays(NOW, -17)));
+    expect(database.state.limit).toBe(50);
+  });
+
+  test('grades a lost row from one read of the 32-day span and stamps pre, post, verdict', async () => {
+    const mentions = [];
+    for (let i = 0; i < 12; i++) mentions.push(obs('2026-10-20', i < 11 ? [page] : []));
+    for (let i = 0; i < 12; i++) mentions.push(obs('2026-11-02', i < 1 ? [page] : []));
+    for (let i = 0; i < 40; i++) { mentions.push(obs('2026-10-21', ['https://www.wavespestcontrol.com/x/'])); mentions.push(obs('2026-11-03', ['https://www.wavespestcontrol.com/x/'])); }
+    const database = fakeDb({ pending: [{ id: 7, bucket: 'decay_refresh', page_url: page, deployed_at: new Date('2026-10-27T18:00:00Z') }], mentions });
+    const out = await tracker.checkAiChange({ db: database, now: NOW });
+    expect(out).toMatchObject({ checked: 1, lost: 1 });
+    expect(database.state.mentionRange).toEqual(['2026-10-13', '2026-11-12']);
+    const { id, patch } = database.state.updates[0];
+    expect(id).toBe(7);
+    expect(patch.ai_change_verdict).toBe('lost');
+    expect(patch.ai_change_checked_at).toBe(NOW);
+    expect(JSON.parse(patch.ai_change_pre)).toMatchObject({ from: '2026-10-13', to: '2026-10-26', answers: 52, cites: 11 });
+    expect(JSON.parse(patch.ai_change_post)).toMatchObject({ from: '2026-10-29', to: '2026-11-12', answers: 52, cites: 1 });
+  });
+
+  test('no stored answers -> no_data, stamped so it is not rescanned', async () => {
+    const database = fakeDb({ pending: [{ id: 3, bucket: 'new_page', page_url: page, deployed_at: new Date('2026-10-01T18:00:00Z') }], mentions: [] });
+    const out = await tracker.checkAiChange({ db: database, now: NOW });
+    expect(out).toMatchObject({ checked: 1, no_data: 1 });
+    expect(database.state.updates[0].patch.ai_change_verdict).toBe('no_data');
+  });
+
+  test('one row failing to read leaves it unchecked and does not stop the next row', async () => {
+    const database = fakeDb({ pending: [
+      { id: 1, bucket: 'a', page_url: page, deployed_at: new Date('2026-10-01T18:00:00Z') },
+      { id: 2, bucket: 'a', page_url: page, deployed_at: new Date('2026-10-02T18:00:00Z') },
+    ], mentions: [] });
+    const base = database;
+    let calls = 0;
+    const flaky = (table) => {
+      const q = base(table);
+      if (table === 'seo_llm_mentions') {
+        const real = q.select;
+        q.select = async () => { calls += 1; if (calls === 1) throw new Error('boom'); return real(); };
+      }
+      return q;
+    };
+    flaky.state = base.state;
+    const out = await tracker.checkAiChange({ db: flaky, now: NOW });
+    expect(out.checked).toBe(1);
+    expect(base.state.updates).toHaveLength(1);
+  });
+});

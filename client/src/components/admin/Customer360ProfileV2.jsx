@@ -7732,25 +7732,44 @@ function PropertyNeighborhood({ property, showAddress, onUpdated }) {
 export function CustomerNeighborhoodBlock({ customerId }) {
   const [properties, setProperties] = useState(null);
   const [loadError, setLoadError] = useState("");
+  const seq = useRef(0);
+
+  // Try again reruns this read in place, as on the access codes block below:
+  // no need to leave the customer and come back.
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    try {
+      const data = await adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`);
+      if (mine !== seq.current) return;
+      setLoadError("");
+      setProperties(Array.isArray(data?.properties) ? data.properties : null);
+    } catch (err) {
+      if (mine !== seq.current) return;
+      // Off (404) or not a full admin (403): the block is not shown at all.
+      if (err?.status === 404 || err?.status === 403) {
+        setLoadError("");
+        setProperties(null);
+        return;
+      }
+      setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
+    }
+  }, [customerId]);
 
   useEffect(() => {
-    let cancelled = false;
     setProperties(null);
     setLoadError("");
-    adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`)
-      .then((data) => { if (!cancelled) setProperties(Array.isArray(data?.properties) ? data.properties : null); })
-      .catch((err) => {
-        if (cancelled || err?.status === 404 || err?.status === 403) return;
-        setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
-      });
-    return () => { cancelled = true; };
-  }, [customerId]);
+    load();
+    return () => { seq.current += 1; };
+  }, [load]);
 
   if (loadError) {
     return (
       <div className="mt-3">
         <AccessPrefsSubheading>Neighborhood</AccessPrefsSubheading>
-        <div className="text-ui-label text-ink-secondary">{loadError}</div>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
       </div>
     );
   }

@@ -1014,6 +1014,9 @@ describe('rain-out service', () => {
       );
       // Series path replaces the single move entirely.
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      // The shared effects pass owns the board broadcast; callers that emit per
+      // stop (the tech Quick Move route) read this marker and skip the stop.
+      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true, boardBroadcastBySeriesEffects: true });
       // Sibling effects (reminder sync, board, conflict card) run through the
       // shared durable pass — marker-fenced and reconciled — with the text
       // OFF (Quick Move's own moved-SMS is the customer notice); nothing runs
@@ -1041,7 +1044,7 @@ describe('rain-out service', () => {
     // forces every OTHER wantsSeriesShift precondition to be irrelevant: a
     // restricted (technician) caller NEVER takes the series branch, full
     // stop, and always lands on the single-job path with its own CAS.
-    test('a technician-scoped call (requireAssignedTechnicianId set) never takes the series branch even though every other series-shift condition holds', async () => {
+    test('a technician-scoped call (requireAssignedTechnicianId set) never takes the series branch by default, even though every other series-shift condition holds', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
@@ -1058,6 +1061,41 @@ describe('rain-out service', () => {
           expect: { technician_id: 'tech-1' },
         }),
       );
+    });
+
+    // The tech-portal Quick Move (owner ruling 2026-10-28) keeps the series
+    // shift, fenced to the technician through the series writer's own
+    // expectAnchor (rebooker assertAnchorPin).
+    test('allowSeriesForAssignedTechnician: the series branch stays reachable and its anchor pin carries the technician', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
+      });
+
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, requireAssignedTechnicianId: 'tech-1', allowSeriesForAssignedTechnician: true });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].expectAnchor).toEqual({
+        scheduled_date: '2026-06-11', window_start: '09:00', technician_id: 'tech-1',
+      });
+      expect(result.results[0]).toMatchObject({ id: 'svc-1', ok: true, boardBroadcastBySeriesEffects: true });
+    });
+
+    test('allowSeriesForAssignedTechnician: a series refusal falls back to the single write, which keeps the technician fence and refuses too', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      const stale = Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409 });
+      SmartRebooker.rescheduleSeries.mockRejectedValueOnce(stale);
+      SmartRebooker.reschedule.mockRejectedValueOnce(stale);
+
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true, requireAssignedTechnicianId: 'tech-1', allowSeriesForAssignedTechnician: true });
+
+      expect(result.ok).toBe(false);
+      expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
     });
 
     test('gate on: a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {

@@ -90,3 +90,13 @@ describe("automatic clock-outs on the approvals tab", () => {
     expect(screen.queryByRole("button", { name: "Confirm clock-out" })).not.toBeInTheDocument();
   });
 });
+
+describe("bulk approval selection", () => {
+  it("names each week's checkbox after its technician", async () => {
+    stub({ weekly: week({}), entries: [] });
+    render(<ApprovalsTab showToast={() => {}} />);
+    const box = await screen.findByRole("checkbox", { name: "Select Field Tech for bulk approval" });
+    fireEvent.click(box);
+    expect(screen.getByRole("button", { name: "Approve 1 selected" })).toBeInTheDocument();
+  });
+});

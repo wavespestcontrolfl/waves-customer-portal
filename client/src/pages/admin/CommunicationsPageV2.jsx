@@ -1304,6 +1304,10 @@ export function SmsTab({
   const smsRequestRef = useRef(null);
   const activeThreadRef = useRef(activeThread);
   activeThreadRef.current = activeThread;
+  // The activity counts are office-wide and admin-only on the server, so a
+  // technician login never asks for them (it would only get a 403).
+  const smsSkipsStatsRef = useRef(smsIsTechnicianRole);
+  smsSkipsStatsRef.current = smsIsTechnicianRole;
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
@@ -1489,7 +1493,7 @@ export function SmsTab({
     });
     return Promise.allSettled([
       logRequest,
-      options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
+      options.background || smsSkipsStatsRef.current ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
@@ -1525,9 +1529,11 @@ export function SmsTab({
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
       }
       if (!options.background) {
-        const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
-        setSmsStatsError(!statsData || !!statsData.error);
-        if (statsData && !statsData.error) setStats(statsData);
+        if (!smsSkipsStatsRef.current) {
+          const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
+          setSmsStatsError(!statsData || !!statsData.error);
+          if (statsData && !statsData.error) setStats(statsData);
+        }
         const blockedData = blockedResult.status === "fulfilled" ? blockedResult.value : null;
         if (blockedData && Array.isArray(blockedData.numbers)) {
           setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
@@ -3179,7 +3185,7 @@ export function SmsTab({
         {smsStatsError && <ActionFeedback error>Activity counts are unavailable. Previously loaded counts may be out of date.</ActionFeedback>}
       </div>}
       {/* Stats + auto-reply */}
-      {!customer && (!smsStatsError || stats) && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && !smsIsTechnicianRole && (!smsStatsError || stats) && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
