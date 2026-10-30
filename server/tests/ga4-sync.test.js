@@ -227,3 +227,78 @@ describe('GA4 daily sync', () => {
     }));
   });
 });
+
+describe('GA4 traffic overview', () => {
+  const OVERVIEW_METRICS = 'sessions,totalUsers,newUsers,screenPageViews,bounceRate,averageSessionDuration';
+  let runReport;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = {
+      ...ORIGINAL_ENV,
+      GA4_PROPERTY_ID: '123456789',
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: 'svc@example.com', private_key: 'key' }),
+    };
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    // One user active on both days: the daily rows would sum to 2 users and a
+    // 0.5 bounce rate, but the period report holds the true session-weighted figures.
+    runReport = jest.fn(async ({ requestBody }) => {
+      const dims = (requestBody.dimensions || []).map((d) => d.name).join(',');
+      const metrics = (requestBody.metrics || []).map((m) => m.name).join(',');
+      if (metrics !== OVERVIEW_METRICS) throw new Error(`Unexpected GA4 report dims=${dims} metrics=${metrics}`);
+      if (dims === 'date') {
+        return { data: { rows: [
+          makeRow(['20260610'], [1, 1, 1, 1, 1, 100]),
+          makeRow(['20260611'], [99, 1, 0, 99, 0, 0]),
+        ] } };
+      }
+      if (dims === '') return { data: { rows: [makeRow([], [100, 1, 1, 100, 0.01, 1])] } };
+      throw new Error(`Unexpected GA4 report dims=${dims}`);
+    });
+    jest.doMock('googleapis', () => ({
+      google: {
+        auth: { GoogleAuth: jest.fn() },
+        analyticsdata: jest.fn(() => ({ properties: { runReport } })),
+      },
+    }));
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  test('period totals come from the dimensionless report, not the daily rows', async () => {
+    const GA4 = require('../services/analytics/google-analytics');
+
+    const result = await GA4.getTrafficOverview('2026-06-10', '2026-06-11');
+
+    expect(result.configured).toBe(true);
+    expect(result.totals).toEqual({
+      sessions: 100,
+      users: 1,
+      newUsers: 1,
+      pageviews: 100,
+      bounceRate: 0.01,
+      avgSessionDuration: 1,
+    });
+    expect(result.daily).toEqual([
+      expect.objectContaining({ date: '20260610', sessions: 1, users: 1, bounceRate: 1, avgSessionDuration: 100 }),
+      expect.objectContaining({ date: '20260611', sessions: 99, users: 1, bounceRate: 0, avgSessionDuration: 0 }),
+    ]);
+    expect(result.period).toEqual({ startDate: '2026-06-10', endDate: '2026-06-11' });
+  });
+
+  test('returns zero totals when GA4 has no period row', async () => {
+    runReport.mockImplementation(async () => ({ data: {} }));
+    const GA4 = require('../services/analytics/google-analytics');
+
+    const result = await GA4.getTrafficOverview('2026-06-10', '2026-06-11');
+
+    expect(result.totals).toEqual({
+      sessions: 0, users: 0, newUsers: 0, pageviews: 0, bounceRate: 0, avgSessionDuration: 0,
+    });
+    expect(result.daily).toEqual([]);
+  });
+});
