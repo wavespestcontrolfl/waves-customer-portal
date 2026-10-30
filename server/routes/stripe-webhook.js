@@ -6948,16 +6948,18 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
       source: 'payment_intent.canceled',
     },
   });
+  if (!alert) {
+    // notifyAdmin swallows a failed insert and returns null. Throw so the webhook 500s and Stripe
+    // redelivers BEFORE the canceled flip; returning would let the flip take the month out of every
+    // recovery reader with no alert anywhere.
+    throw new Error(`office alert for canceled monthly autopay PI ${piId} was not filed (customer ${customerId}, payment ${row.id})`);
+  }
   const { logAutopay } = require('../services/autopay-log');
   await logAutopay(customerId, 'charge_canceled', {
     amountCents: Number.isFinite(amount) ? Math.round(amount * 100) : null,
     paymentId: row.id,
     details: { source: 'autopay_canceled', stripe_payment_intent_id: piId, billed_month: obligationMonth, payment_status: row.status },
   }).catch(() => {});
-  if (!alert) {
-    logger.error(`[stripe-webhook] Monthly autopay PI ${piId} canceled (${row.status}) — ${obligationMonth || 'unknown month'} unpaid, and the office alert was NOT filed (customer ${customerId}, payment ${row.id})`);
-    return;
-  }
   logger.warn(`[stripe-webhook] Monthly autopay PI ${piId} canceled (${row.status}) — ${obligationMonth || 'unknown month'} unpaid; office alerted, no retry armed`);
 }
 

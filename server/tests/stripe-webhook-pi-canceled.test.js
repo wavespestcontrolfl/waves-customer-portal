@@ -332,6 +332,14 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/^The September 2026 \$55\.30 dues payment/);
   });
 
+  test('an alert that was not filed (notifyAdmin returns null on a failed insert) fails the webhook before the flip', async () => {
+    mockState.processingRow = duesRow();
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    await expect(handleCanceled(DUES_PI)).rejects.toThrow(/office alert for canceled monthly autopay PI pi_dues_1 was not filed/);
+    expect(paymentUpdates()).toHaveLength(0);
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
   test('an alert that throws fails the webhook before the flip, so the redelivery finds the row still processing', async () => {
     mockState.processingRow = duesRow();
     raiseAdminAlert.mockRejectedValueOnce(new Error('notifications down'));
