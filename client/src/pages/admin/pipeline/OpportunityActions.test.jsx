@@ -25,6 +25,7 @@ function createEstimateRoute(opportunity) {
   return new URL(screen.getByLabelText("Current route").textContent, "http://localhost");
 }
 
+// The shape GET /admin/pipeline/opportunities returns (no rawLead / rawEstimate).
 const opportunity = {
   opportunityId: "lead:synthetic-lead",
   leadId: "synthetic-lead",
@@ -34,21 +35,13 @@ const opportunity = {
   stage: PIPELINE_STAGES.CONTACTED,
 };
 
-it("Create Estimate sends the lead's whole address when its city and ZIP sit in their own columns", () => {
-  const route = createEstimateRoute({
-    ...opportunity,
-    address: "100 Test Palm Way",
-    rawLead: { id: "synthetic-lead", address: "100 Test Palm Way", city: "Parrish", zip: "34219" },
-  });
+it("Create Estimate sends the lead's street line with the lead's own city and ZIP", () => {
+  const route = createEstimateRoute({ ...opportunity, address: "100 Test Palm Way", addressCity: "Parrish", addressZip: "34219" });
   expect(route.pathname).toBe("/admin/estimates");
   expect(route.searchParams.get("address")).toBe("100 Test Palm Way, Parrish, FL 34219");
 });
 
-it("Create Estimate keeps the estimate's address when the lead has none", () => {
-  const route = createEstimateRoute({
-    ...opportunity,
-    address: "200 Test Palm Way, Parrish, FL 34219",
-    rawLead: { id: "synthetic-lead", address: null, city: "Parrish", zip: "34219" },
-  });
+it("Create Estimate keeps an address that carries no lead city or ZIP", () => {
+  const route = createEstimateRoute({ ...opportunity, address: "200 Test Palm Way, Parrish, FL 34219", addressCity: null, addressZip: null });
   expect(route.searchParams.get("address")).toBe("200 Test Palm Way, Parrish, FL 34219");
 });

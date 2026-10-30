@@ -22,7 +22,11 @@ function createEstimateUrl(opportunity) {
   params.set("tab", "new");
   appendParam(params, "leadId", opportunity.leadId);
   appendParam(params, "customerId", opportunity.customerId);
-  appendParam(params, "address", leadServiceAddress(opportunity.rawLead) || opportunity.address);
+  appendParam(params, "address", leadServiceAddress({
+    address: opportunity.address,
+    city: opportunity.addressCity,
+    zip: opportunity.addressZip,
+  }));
   appendParam(params, "customerName", opportunity.name === "Unknown Customer" ? "" : opportunity.name);
   appendParam(params, "customerPhone", opportunity.phone);
   appendParam(params, "customerEmail", opportunity.email);

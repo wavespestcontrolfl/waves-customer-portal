@@ -318,6 +318,10 @@ function buildOpportunity({ lead = null, estimate = null, now = new Date() }) {
   const phone = firstPresent(lead?.phone, lead?.phoneNumber, estimate?.phone, estimate?.customerPhone, estimate?.customer_phone);
   const email = firstPresent(lead?.email, estimate?.email, estimate?.customerEmail, estimate?.customer_email);
   const address = firstPresent(lead?.address, estimate?.address, estimate?.serviceAddress, estimate?.service_address);
+  // The lead's own city and ZIP columns, only when `address` is the lead's
+  // street line: Create Estimate completes it for the property lookup (the
+  // response strips rawLead, so the client cannot read them there).
+  const addressIsLead = firstPresent(lead?.address) !== null;
   const serviceInterest = firstPresent(
     estimate?.serviceName,
     estimate?.service_name,
@@ -376,6 +380,8 @@ function buildOpportunity({ lead = null, estimate = null, now = new Date() }) {
     phone: phone || null,
     email: email || null,
     address: address || null,
+    addressCity: addressIsLead ? firstPresent(lead?.city) : null,
+    addressZip: addressIsLead ? firstPresent(lead?.zip) : null,
     serviceInterest: serviceInterest || null,
     source,
     campaign: campaign || null,
