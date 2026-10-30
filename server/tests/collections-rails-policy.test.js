@@ -33,9 +33,6 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async () => 'https://portal.wavespestcontrol.com/l/pay123'),
   invoiceShortCodePrefix: jest.fn(() => 'INV'),
 }));
-jest.mock('../services/workflows/balance-reminder', () => ({
-  sendLatePaymentEmail: jest.fn(async () => ({ ok: true })),
-}));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async () => 'invoice follow-up sms'),
 }));
@@ -78,7 +75,6 @@ jest.mock('../services/collections/contact-ledger', () => ({
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const BalanceReminder = require('../services/workflows/balance-reminder');
 const EmailTemplates = require('../services/email-template-library');
 const smsTemplates = require('../routes/admin-sms-templates');
 const ContactPolicy = require('../services/collections/contact-policy');
@@ -151,7 +147,6 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   // clearAllMocks keeps per-test mockResolvedValue overrides — re-pin defaults.
   sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
-  BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: true });
   EmailTemplates.sendTemplate.mockResolvedValue({
     sent: true,
     message: { provider_message_id: 'sg-1', sent_at: '2026-05-26T14:00:00.000Z' },

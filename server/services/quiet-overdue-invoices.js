@@ -35,11 +35,6 @@
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
 //
-// Only while the legacy sender is retired (balance-reminder.js's account late
-// check, by its own full rule): it can still contact an invoice with no
-// sequence, a finished one or a stopped one, so "no overdue reminder is scheduled" would not hold. Otherwise the run
-// is skipped and the standing row is left as it is.
-//
 // GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
 // weekday cron returns before any read.
 
@@ -54,8 +49,8 @@ const CATEGORY = 'billing';
 const QUIET_AFTER_DAYS = 14;
 const AUTOPAY_HOLD_DAYS = 7;
 const ET = 'America/New_York';
-// The delivered statuses orphan adoption (invoice-followups.js) and the
-// legacy checker select from: an invoice the customer has.
+// The delivered statuses orphan adoption (invoice-followups.js) selects
+// from: an invoice the customer has.
 const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 // The bell's "Show full text" lists at most this many invoices (oldest first).
 const DETAIL_MAX_LINES = 25;
@@ -269,23 +264,15 @@ async function closeList(database, dedupeKey) {
   });
 }
 
-// The legacy sender retired: the balance reminder's account late check (its
-// full retirement test: gate, ladder, orphan adoption, no legacy `unpaid`
-// invoice, an unreadable count reads as running).
-async function legacySendersRetired() {
-  return require('./workflows/balance-reminder').latePaymentCheckRetired({ log: false });
-}
-
 /**
- * Weekday cron entry point. Returns { skipped } when the gate is off or a
- * legacy sender still runs, otherwise { count, outcome }: raised | refreshed |
+ * Weekday cron entry point. Returns { skipped } when the gate is off,
+ * otherwise { count, outcome }: raised | refreshed |
  * unchanged | suppressed | closed | clear. A read failure throws
  * (runExclusive records it in job_health) and never closes the row.
  * `loadRows` is the row source and `dedupeKey` the row's key (tests set both).
  */
 async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
   if (!(gateEnabled ?? quietOverdueListLive())) return { skipped: 'disabled' };
-  if (!(await legacySendersRetired())) return { skipped: 'legacy_sender_live' };
   const items = listItems(await loadRows(now, database), now);
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;

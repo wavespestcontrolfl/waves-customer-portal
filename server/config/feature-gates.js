@@ -5462,36 +5462,6 @@ const gates = {
   // Prospect email on the customer Activity timeline. logGateStatus only;
   // the timeline reads leadEmailLinksLive() at call time.
   leadEmailLinks: process.env.GATE_LEAD_EMAIL_LINKS === 'true',
-  // Retire the dormant legacy balance-reminder cron (dunning unification,
-  // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
-  // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
-  // 60/90 late check) sent 0 messages in the last 30 days — the invoice
-  // follow-up ladder and the pre-visit balance reminder own these now. Ships DARK: off unless exactly 'true'. This
-  // entry is for logGateStatus only:
-  // server/services/workflows/balance-reminder.js's dailyCheck()/
-  // latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at call time,
-  // each with its OWN coupling to its own replacement:
-  //   - dailyCheck() retires ONLY once the pre-visit balance reminder is
-  //     actually live (PREVISIT_BALANCE_REMINDER=true AND its seeded SMS
-  //     template active — GATE_PREVISIT_BALANCE_5DAY only widens that
-  //     reminder's lead window and says nothing about whether it runs at
-  //     all). The one duty the pre-visit reminder has no equivalent for —
-  //     the internal owner alert for a balance ≥30 days overdue with
-  //     service today/tomorrow — keeps running on its own
-  //     (imminentOverdueOwnerAlertSweep) even while dailyCheck retires.
-  //   - latePaymentCheck() retires ONLY together with GATE_DUNNING_LADDER_90
-  //     also live (its Day 60/90 steps are what actually replace it);
-  //     legacy-off with the ladder gate unset logs a warn and runs
-  //     latePaymentCheck's legacy body unchanged.
-  // Neither retirement needs GATE_DUNNING_ADOPT_ORPHANS: that gate is
-  // independent of whether this file's two methods still run. The at-risk
-  // pipeline_stage stamp both methods carried for 60/90-day debt is shared
-  // (invoice-followups.js's markAtRiskForLongOverdue, warn-and-continue on
-  // failure rather than a bare await) with the ladder's own Day 60/90 steps
-  // (fireTouch, on GATE_DUNNING_LADDER_90 AND this gate). Also guarded
-  // against overwriting a churned/archived customer's stage. Unset =
-  // byte-identical.
-  balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 
   // Customer-level overdue reminders (dunning consolidation, PR 1: inert
   // foundations — nothing reads these yet). A customer with 2+ actively-
@@ -8012,7 +7982,7 @@ function knownGateCatalog() {
     let reader = 'strict';
     if (looseEvidence.has(name)) reader = strictEvidence.has(name) ? 'mixed' : 'loose';
     // Inverted (negative-polarity) gates: 'true' DISABLES the named thing
-    // (GATE_BALANCE_REMINDER_LEGACY_OFF=true turns the legacy reminder off), so the bar
+    // (GATE_IB_WRITES_DISABLED=true turns writes off), so the bar
     // never presents 'true' as "on" for these.
     const inverted = INVERTED_GATE_RE.test(name);
     catalog.set(name, { name, kind, boolean: kind === 'boolean', inverted, reader, description: doc ? doc.description : null });

@@ -138,7 +138,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/messaging/billing-text-verdict.js', // NOT A SENDER: the #5440 visit-summary fold's yes/no verdict (policy lookup keys). The text that carries the pay link is visit-completion-summary.js, gated below
       'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
       'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
-      'services/workflows/balance-reminder.js', // GATED: balance_reminder_workflow / balance_reminder_late_payment_check
     ]);
   });
 
@@ -190,7 +189,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/messaging/billing-email-replay-eligibility.js', // replay eligibility: waits with holdDefer
       'services/messaging/deferred-replay-registry.js', // queued replays: disputeHoldRecheck waits (retryAt), sends after release
       'services/previsit-balance-reminder.js', // GATED
-      'services/workflows/balance-reminder.js', // GATED
     ]);
   });
 
@@ -201,7 +199,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/customer-dunning/send.js', // verdict helper only (isTerminalEmailRefusal)
       'services/invoice-followups.js', // verdict helpers only
       'services/previsit-balance-reminder.js', // sendReminderChannels: a suppressed leg is released, episode stays open
-      'services/workflows/balance-reminder.js', // sendReminderChannels: same
     ]);
   });
 
@@ -210,9 +207,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     const dunning = Hold.HOLD_GATED_DUNNING_EMAIL_TEMPLATES;
     expect(dunning).toBe(require('../services/billing-email-no-replay').SENDER_RENDERED_TEMPLATES);
     for (const templateKey of Object.values(InvoiceFollowUps.FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID)) expect(dunning.has(templateKey)).toBe(true);
-    const balanceKeys = [...read('services/workflows/balance-reminder.js').matchAll(/templateKey:\s*"(billing_late_payment_\d+_day)"/g)].map((m) => m[1]);
-    expect(balanceKeys).toHaveLength(5);
-    for (const templateKey of balanceKeys) expect(dunning.has(templateKey)).toBe(true);
     expect(read('services/microdeposit-verification-email.js')).toMatch(/TEMPLATE_KEY = 'payment\.microdeposit_verification'/);
     expect(dunning.has('payment.microdeposit_verification')).toBe(true);
     expect(read('services/previsit-balance-reminder.js')).toMatch(/EMAIL_TEMPLATE_KEY = 'billing\.previsit_balance'/);
@@ -251,7 +245,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/invoice-email.js', // the invoice email itself: its own provider-boundary hold check
       'services/invoice-followups.js', // GATED by template
       'services/microdeposit-verification-email.js', // GATED by template
-      'services/workflows/balance-reminder.js', // GATED by template
     ]);
   });
 
@@ -261,7 +254,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/billing-reminder-delivery.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(entry\)/,
       'services/invoice-followups.js': /heldByDisputeHold\(sendResult\)[\s\S]{0,400}releaseHeldReservation\(smsLedger\)/,
       'services/previsit-balance-reminder.js': /isHoldSuppression\(result\)\) await ContactLedger\.releaseHeldReservation\(smsLedger\)/,
-      'services/workflows/balance-reminder.js': /isHoldSuppression\(sendResult\)\) \{[\s\S]{0,400}releaseHeldReservation\(ledgerEntry\)/,
     };
     for (const [file, pattern] of Object.entries(RELEASES)) expect([file, pattern.test(read(file))]).toEqual([file, true]);
     expect(read('services/invoice-followups.js')).toMatch(/if \(heldByDisputeHold\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\);\s*return true;/);

@@ -514,10 +514,8 @@ function followupSteps() {
   return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
 }
 
-// The at-risk pipeline_stage stamp for 60/90-day debt once the legacy
-// balance-reminder late check retires (GATE_BALANCE_REMINDER_LEGACY_OFF):
-// called from this ladder's Day 60/90 steps (the legacy method keeps its own
-// inline stamp while it runs). The
+// The at-risk pipeline_stage stamp for 60/90-day debt: called from this
+// ladder's Day 60/90 steps. The
 // caller has already confirmed the tier and a delivery. Only an active
 // customer in a live customer stage (or NULL, a legacy row) moves:
 // fireTouch excludes only deleted customers, so a churned/past/dormant
@@ -2649,31 +2647,26 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
-  // Day 60/90 (Day 90 ladder, GATE_DUNNING_LADDER_90) inherits the legacy
-  // balance-reminder's at-risk stamp for these same debt-age tiers (Codex
-  // P2, dunning unification): retiring the legacy cron under
-  // GATE_BALANCE_REMINDER_LEGACY_OFF must not drop it. Stamped here — ABOVE
+  // Day 60/90 (Day 90 ladder, GATE_DUNNING_LADDER_90) owns the at-risk stamp
+  // for these debt-age tiers (it took it over from the retired balance
+  // reminder, Codex P2, dunning unification). Stamped here — ABOVE
   // the freshDelivery early return below — because reaching this point
   // already means a channel confirmed delivery, fresh OR deduped (the
   // no-channel-delivered branch above returns before here). A dun replay
   // that only re-confirms an already-delivered leg (freshDelivery === false)
-  // still owes this stamp (Codex P2, round 2): the legacy implicit-channel
-  // branch stamped unconditionally at template selection, so a deduped
-  // Day 60/90 replay must not lose the transition the legacy code never did.
+  // still owes this stamp (Codex P2, round 2): a deduped Day 60/90 replay
+  // must not lose the transition.
   // Guarded (Codex P1): the sequence has already advanced above and the
   // customer already has the message — a transient failure on this
   // best-effort lifecycle stamp must never throw out of fireTouch and cost
   // the step advance / interaction logging below, or strand the sequence on
   // this step for as long as the stamp keeps failing. Same reasoning
   // the retired late-payment checker's callers used.
-  // Only once the legacy latePaymentCheck is actually retired (its gate on
-  // AND the ladder live, the same pair it honours): until then that cron
-  // still owns this stamp, and an ungated stamp here would change live
-  // lifecycle stages the moment this merges.
+  // Only while the Day 90 ladder is live.
   // Never for a bank-verification nudge (mdPending): that customer is
-  // completing a payment, and the legacy path treated a pending
-  // microdeposit as a dunning stop (Codex #5294 r2 P1).
-  if (ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true' && !mdPending
+  // completing a payment, and a pending microdeposit is a dunning stop
+  // (Codex #5294 r2 P1).
+  if (ladderThrough90Live() && !mdPending
     && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
     try {
       await markAtRiskForLongOverdue(row.customer_id);

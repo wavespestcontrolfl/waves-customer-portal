@@ -9078,19 +9078,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 11AM — Balance reminders (upcoming services with outstanding balance)
+  // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
+  // overdue. The customer-facing reminders (pre-visit tiers, account late
+  // check) are retired: the 10:05 pre-visit balance reminder and the invoice
+  // follow-up ladder own them.
   // =========================================================================
   cron.schedule('0 11 * * *', async () => {
     logger.info('Running: balance reminders');
     try {
       await runExclusive('balance-reminders', async () => {
-        const balanceReminder = require('./workflows/balance-reminder');
-        if (balanceReminder.dailyCheck) {
-          await balanceReminder.dailyCheck();
-        }
-        if (balanceReminder.latePaymentCheck) {
-          await balanceReminder.latePaymentCheck();
-        }
+        await require('./workflows/balance-reminder').imminentOverdueOwnerAlertSweep();
       });
     } catch (err) {
       logger.error(`Balance reminders failed: ${err.message}`);
