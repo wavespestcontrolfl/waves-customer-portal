@@ -10,10 +10,13 @@ const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { postCreditMovement, round2 } = require('./customer-credit');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { promoterPhoneInUseError } = require('./referral-errors');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+const PHONE_DIGITS_SQL = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
+
 function normalizePhone(phone) {
   const normalized = toE164(phone);
   return isLikelyE164(normalized) ? normalized : null;
@@ -260,6 +263,24 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
       return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
     }
 
+    // customer_phone is unique as raw text, but stored phones mix E.164 and
+    // domestic spellings, so '(941) 555-0100' and '+19415550100' would both
+    // insert and split one household into two promoters (referrals audit
+    // 10-29, F7). Store the canonical form, and treat the same number in any
+    // other spelling as the unique collision: resolvePromoter's household
+    // fallback (same account) or its 409 path (another account) then runs
+    // exactly as for an exact-text 23505. The advisory lock closes the gap
+    // between this check and the insert for two profiles enrolling at once.
+    const customerPhone = normalizePhone(customer.phone) || customer.phone || '';
+    const phoneVariants = phoneMatchDigits(customerPhone);
+    if (phoneVariants.length) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`referral-promoter-phone:${phoneVariants[phoneVariants.length - 1]}`]);
+      const sameNumber = await trx('referral_promoters')
+        .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants)
+        .first('id');
+      if (sameNumber) throw promoterPhoneInUseError();
+    }
+
     const code = customer.referral_code || (await generateUniqueCode(trx));
     const link = referralLinkForCode(code, settings.base_url);
 
@@ -271,7 +292,7 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
     }
 
     const [promoter] = await trx('referral_promoters').insert({
-      customer_phone: customer.phone || '',
+      customer_phone: customerPhone,
       customer_email: customer.email || '',
       first_name: customer.first_name || '',
       last_name: customer.last_name || '',
@@ -346,10 +367,20 @@ async function findHouseholdPromoter(customerId, dbx = db) {
     .where({ id: customerId })
     .first('id', 'phone', 'account_id');
   if (!profile?.phone || !profile?.account_id) return null;
+  // By digits, not exact text: an older promoter snapshot can keep a
+  // domestic spelling after the profile's phone became E.164 (F7). The
+  // account scope is what makes the match safe; it stays.
+  const phoneVariants = phoneMatchDigits(profile.phone);
   const promoter = await dbx('referral_promoters as rp')
     .join('customers as c', 'rp.customer_id', 'c.id')
-    .where('rp.customer_phone', profile.phone)
     .where('c.account_id', profile.account_id)
+    .where(function () {
+      this.where('rp.customer_phone', profile.phone);
+      if (phoneVariants.length) {
+        this.orWhereRaw(`${PHONE_DIGITS_SQL('rp.customer_phone')} IN (${phoneVariants.map(() => '?').join(', ')})`, phoneVariants);
+      }
+    })
+    .orderBy('rp.id')
     .first('rp.*');
   return promoter || null;
 }
