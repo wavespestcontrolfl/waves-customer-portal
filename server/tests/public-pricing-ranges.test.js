@@ -296,3 +296,36 @@ describe('public pricing ranges', () => {
     expect(errors).toEqual([]);
   });
 });
+
+describe('rodent package discount note lists all three live packages (owner 2026-10-30)', () => {
+  const { RODENT } = require('../services/pricing-engine/constants');
+  const rows = () => computePublicPricingRanges({ refresh: true }).services;
+
+  test.each(['rodent_trapping', 'rodent_sanitation', 'rodent_exclusion'])('%s note carries one sentence per package', (key) => {
+    const note = rows().find((svc) => svc.key === key).notes;
+    expect(note).toContain('Package discounts (live terms): trapping+exclusion 7% (floor $895).');
+    expect(note).toContain('Trapping+sanitation 5% (floor $895).');
+    expect(note).toContain('Trapping+exclusion+sanitation 10% (floor $1,195-$1,995 by sanitation tier).');
+    expect(note).not.toMatch(/other combinations/);
+  });
+
+  test('the website splits notes on sentence ends: only the sanitation packages mention sanitation', () => {
+    const note = rows().find((svc) => svc.key === 'rodent_exclusion').notes;
+    const sentences = note.split(/(?<=\.)\s+/);
+    const exclusionSentence = sentences.find((s) => s.startsWith('Package discounts'));
+    expect(exclusionSentence).not.toMatch(/sanitation/i);
+    expect(sentences.filter((s) => /sanitation/i.test(s))).toHaveLength(2);
+  });
+
+  test('the note tracks constants', () => {
+    const original = RODENT.bundles.trapExclusion.discount;
+    try {
+      RODENT.bundles.trapExclusion.discount = 0.08;
+      const note = rows().find((svc) => svc.key === 'rodent_trapping').notes;
+      expect(note).toContain('trapping+exclusion 8% (floor $895).');
+    } finally {
+      RODENT.bundles.trapExclusion.discount = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+});

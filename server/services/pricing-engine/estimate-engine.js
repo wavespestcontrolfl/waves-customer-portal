@@ -379,6 +379,67 @@ function serviceCreditLinePrice(item = {}) {
   return Number.isFinite(amount) ? roundMoney(amount) : 0;
 }
 
+// ── Rodent package (bundle) helpers ─────────────────────────────
+// The V2 exclusion pricer emits one 'rodent_exclusion' row per section
+// (mesh points, linear mesh, bird boxes, job-minimum / urgency / inspect
+// deltas); the legacy pricer emits one 'exclusion' row. Every priced row
+// counts toward the package. A quote-required or non-finite row neither
+// qualifies the package nor adds dollars.
+function isPricedRodentExclusionRow(item) {
+  return (item.service === 'rodent_exclusion' || item.service === 'exclusion')
+    && !item.quoteRequired && Number.isFinite(item.price);
+}
+
+function rodentBundleComponents(lineItems) {
+  return {
+    trap: lineItems.find((i) => i.service === 'rodent_trapping'),
+    exclusion: lineItems.filter(isPricedRodentExclusionRow),
+    sanitation: lineItems.find((i) => i.service === 'rodent_sanitation'),
+  };
+}
+
+function buildRodentBundleLine(bundle, componentTotal, discounted, savings) {
+  return {
+    service: 'rodent_bundle_discount',
+    name: `Rodent ${bundle.kind} bundle`,
+    price: -savings,
+    bundleKind: bundle.kind,
+    discount: bundle.discount,
+    floor: bundle.floor,
+    bundledTotal: discounted,
+    componentTotal,
+    detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
+  };
+}
+
+// The package is priced ONCE, after the percentage pass, any staff price
+// override and any staff service credit, from each component's final net.
+// A component at $0 net no longer counts, so a credit that zeroes a component
+// drops to the right smaller package (or none). Savings are taken to the cent
+// from the bundled total because applyRodentBundle rounds them to dollars.
+function applyRodentPackage(lineItems, { commercial = false } = {}) {
+  if (commercial) return;
+  const { trap, exclusion, sanitation } = rodentBundleComponents(lineItems);
+  const net = (item) => Math.max(0, serviceCreditLinePrice({ price: item?.priceAfterDiscount ?? item?.price }));
+  const exclusionNet = exclusion.reduce((sum, i) => sum + net(i), 0);
+  const bundle = selectRodentBundle({
+    hasTrapping: net(trap) > 0,
+    hasExclusion: exclusionNet > 0,
+    hasSanitation: net(sanitation) > 0,
+    sanitationTier: sanitation?.tier,
+  });
+  if (!bundle) return;
+  const componentTotal = roundMoney(net(trap) + exclusionNet + net(sanitation));
+  const { discounted } = applyRodentBundle(componentTotal, bundle);
+  const savings = Math.max(0, roundMoney(componentTotal - discounted));
+  if (!(savings > 0)) return;
+  lineItems.push({
+    ...buildRodentBundleLine(bundle, componentTotal, discounted, savings),
+    priceBeforeDiscount: -savings,
+    priceAfterDiscount: -savings,
+  });
+}
+
 function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = []) {
   const credits = Array.isArray(serviceSpecificDiscounts)
     ? serviceSpecificDiscounts.filter(Boolean)
@@ -2155,40 +2216,6 @@ function generateEstimate(input) {
     }
   }
 
-  // ── Rodent bundle discount ──────────────────────────────────
-  // Apply bundle discount when 2+ rodent service categories are present.
-  // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
-  // Adjusts the trap/exclusion/sanitation line item prices in-place to reflect
-  // the bundled total, with savings tracked in the bundle line item.
-  if (!propertyIsCommercial) {
-    const trapItem = lineItems.find(i => i.service === 'rodent_trapping');
-    const exclItem = lineItems.find(i => i.service === 'exclusion');
-    const sanItem = lineItems.find(i => i.service === 'rodent_sanitation');
-    const bundle = selectRodentBundle({
-      hasTrapping: !!trapItem,
-      hasExclusion: !!exclItem,
-      hasSanitation: !!sanItem,
-      sanitationTier: sanItem?.tier,
-    });
-    if (bundle) {
-      const componentTotal = (trapItem?.price || 0) + (exclItem?.price || 0) + (sanItem?.price || 0);
-      const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
-      if (savings > 0) {
-        lineItems.push({
-          service: 'rodent_bundle_discount',
-          name: `Rodent ${bundle.kind} bundle`,
-          price: -savings,
-          bundleKind: bundle.kind,
-          discount: bundle.discount,
-          floor: bundle.floor,
-          bundledTotal: discounted,
-          componentTotal,
-          detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
-        });
-      }
-    }
-  }
-
   // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
   // we no longer auto-fire on any trap + exclusion presence. Caller signals
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
@@ -2577,13 +2604,20 @@ function generateEstimate(input) {
   }
 
   // ── 6. Calculate totals ────────────────────────────────────
-  const recurringItems = lineItems.filter(i => i.annual);
-  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
-  const specialtyItems = lineItems.filter(i => i.total && !i.annual);
   const serviceSpecificDiscounts = applyServiceSpecificCredits(
     lineItems,
     input.serviceSpecificDiscounts || input.serviceSpecificCredits || [],
   );
+  // ── Rodent package discount ─────────────────────────────────
+  // Apply a package discount when 2+ rodent service categories are present.
+  // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
+  // The package line carries the savings; the component lines keep their own
+  // net prices. It runs here, after the percentage pass, staff overrides and
+  // staff credits, so it is priced on what each component actually costs.
+  applyRodentPackage(lineItems, { commercial: propertyIsCommercial });
+  const recurringItems = lineItems.filter(i => i.annual);
+  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
+  const specialtyItems = lineItems.filter(i => i.total && !i.annual);
 
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
   const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
@@ -2606,8 +2640,17 @@ function generateEstimate(input) {
     .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const manualOneTimeEligibleItems = oneTimeItems.filter(isManualOneTimeDiscountEligible);
   const manualSpecialtyEligibleItems = specialtyItems.filter(isManualOneTimeDiscountEligible);
-  const manualDiscountableOneTime = manualOneTimeEligibleItems
+  const manualOneTimeEligibleGross = manualOneTimeEligibleItems
     .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  // The negative rodent package line is not itself discountable, but it
+  // lowers what the customer owes, so a manual discount applies to the
+  // package net of its savings (not to the full component total).
+  const rodentPackageSavingsOneTime = oneTimeItems
+    .filter((i) => i.service === 'rodent_bundle_discount')
+    .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  const manualDiscountableOneTime = manualOneTimeEligibleGross > 0
+    ? Math.max(0, roundMoney(manualOneTimeEligibleGross + rodentPackageSavingsOneTime))
+    : 0;
   const manualDiscountableSpecialty = manualSpecialtyEligibleItems
     .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
   const manualDiscountableTotal = roundMoney(
@@ -2889,7 +2932,8 @@ function generateEstimate(input) {
       }
     }
   };
-  stampOneTimeManualFinal(manualOneTimeEligibleItems, manualDiscountableOneTime, manualDiscountOneTimeAmount);
+  // Stamp against the gross eligible lines: the package line carries its own savings.
+  stampOneTimeManualFinal(manualOneTimeEligibleItems, manualOneTimeEligibleGross, manualDiscountOneTimeAmount);
   stampOneTimeManualFinal(manualSpecialtyEligibleItems, manualDiscountableSpecialty, manualDiscountSpecialtyAmount);
 
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;

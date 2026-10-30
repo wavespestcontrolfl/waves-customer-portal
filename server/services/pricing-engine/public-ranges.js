@@ -118,12 +118,18 @@ function buildRows() {
     ? lawnCadenceParts.join(' or ')
     : lawnCadenceParts.join(', ').replace(/, ([^,]*)$/, ', or $1');
   const b = constants.RODENT.bundles || {};
-  // NOTE: only trapping+sanitation is advertised — the live bundle selector
-  // matches service === 'exclusion', which the active V2 exclusion pricer
-  // ('rodent_exclusion') never emits, so exclusion-inclusive bundle
-  // discounts do not currently apply on exact quotes (engine defect flagged
-  // to the owner; widen this note only after the selector is fixed).
-  const rodentBundleTerms = `Package discount (live terms): trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}); other combinations are quoted at booking.`;
+  // One sentence per package: the website drops every sentence containing
+  // "sanitation" on rodent pages that do not sell sanitation, so the
+  // trapping+exclusion sentence must not contain that word.
+  const bundlePct = (cfg) => Math.round(((cfg || {}).discount || 0) * 100);
+  const bundleFloor = (n) => `$${Math.round(n || 0).toLocaleString('en-US')}`;
+  const fullFloors = Object.values(((b.fullRemediation || {}).floors) || {});
+  const fullFloorText = fullFloors.length
+    ? `${bundleFloor(Math.min(...fullFloors))}-${bundleFloor(Math.max(...fullFloors))}`
+    : bundleFloor(0);
+  const rodentBundleTerms = `Package discounts (live terms): trapping+exclusion ${bundlePct(b.trapExclusion)}% (floor ${bundleFloor((b.trapExclusion || {}).floor)}). `
+    + `Trapping+sanitation ${bundlePct(b.trapSanitation)}% (floor ${bundleFloor((b.trapSanitation || {}).floor)}). `
+    + `Trapping+exclusion+sanitation ${bundlePct(b.fullRemediation)}% (floor ${fullFloorText} by sanitation tier).`;
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
 
