@@ -80,6 +80,9 @@ final class AppState: ObservableObject {
             return
         }
         pendingResult = PendingResult(requestId: requestId, invoiceId: nil)
+        // Hold the flow before the async check starts, so a second request in
+        // the same moment finds a payment open and is answered "failed".
+        flow = .validating
         Task { await validate(token: token) }
     }
 
