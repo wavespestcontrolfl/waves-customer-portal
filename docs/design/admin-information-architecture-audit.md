@@ -14,7 +14,7 @@ Static code evidence cannot prove that a production page has no users. No mounte
 
 ## Keep as primary destinations
 
-The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. With the `admin-navigation` flag off, desktop and mobile expose the same inventory through these groups (`NAV_SECTION_DEFINITIONS`; with the flag on, `WORKSPACE_GROUPS` applies instead: Dashboard, Schedule, Customers, Sales, Communications, Billing, Operations, Marketing, Team, Accounting, Agents and Settings):
+The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. The grouped workspace menu is the only admin menu for every login (`WORKSPACE_GROUPS`: Dashboard, Schedule, Customers, Sales, Communications, Billing, Operations, Marketing, Team, Accounting, Agents and Settings). The older flat sections below (`NAV_SECTION_DEFINITIONS`) no longer render as a menu; they only define which destinations the Settings tab owns for its active state:
 
 - Overview
 - Operations

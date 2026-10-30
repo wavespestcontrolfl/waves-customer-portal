@@ -1,10 +1,8 @@
 # Admin navigation
 
-The `admin-navigation` per-user flag enables the grouped sidebar and mobile
-directory. It defaults off and uses the existing `/admin/feature-flags`
-mechanism. Assign it through Early feature access, then reload the session.
-Disable it and reload to restore the existing navigation. No flags are
-enabled by this change.
+The grouped sidebar and mobile directory are the admin menu for every login,
+filtered by role and the existing feature flags. The older flat sidebar and
+the per-user `admin-navigation` flag are gone; saved flag rows are ignored.
 
 The six daily destinations are Dashboard, Schedule, Customers, Sales,
 Communications and Billing. Operations, Marketing, Team and Accounting
