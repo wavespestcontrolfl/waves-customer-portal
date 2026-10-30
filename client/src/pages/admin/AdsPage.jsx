@@ -257,16 +257,16 @@ function OverviewTab() {
         {" "}
         <KpiCard label="7-Day Ad Spend" value={fmt(total7.spend)} />{" "}
         <KpiCard
-          label="Google-reported value (7d)"
+          label="Reported value (7d)"
           value={fmt(total7.value)}
           color={"#15803D"}
           sub={{
-            text: "Google's conversion value, not booked revenue",
+            text: "Google/Meta conversion value, not booked revenue",
             color: "#71717A",
           }}
         />{" "}
         <KpiCard
-          label="Google ROAS (7d)"
+          label="Reported ROAS (7d)"
           value={
             total7.spend > 0
               ? (total7.value / total7.spend).toFixed(1) + "x"
@@ -301,8 +301,8 @@ function OverviewTab() {
                 <TH className="text-right u-nums">Mode</TH>
                 <TH className="text-right u-nums">Budget</TH>
                 <TH className="text-right u-nums">7d Spend</TH>
-                <TH className="text-right u-nums">7d Google value</TH>
-                <TH className="text-right u-nums">Google ROAS</TH>
+                <TH className="text-right u-nums">7d reported value</TH>
+                <TH className="text-right u-nums">Reported ROAS</TH>
                 <TH className="text-right u-nums">CPA</TH>
                 <TH className="text-right u-nums">Conv</TH>
               </TR>

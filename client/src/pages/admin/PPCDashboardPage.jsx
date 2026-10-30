@@ -577,14 +577,14 @@ export default function WavesPPCDashboard() {
             />{" "}
             <KPI
               value={fmtMoney(totals.revenue)}
-              label="Google-reported value (7d)"
-              sub="conversion value, not booked revenue"
+              label="Reported value (7d)"
+              sub="ad-platform conversion value, not booked revenue"
               color={"#18181B"}
               metric="revenue"
             />{" "}
             <KPI
               value={`${overallROAS}x`}
-              label="Google ROAS"
+              label="Reported ROAS"
               sub="return on ad spend"
               color={parseFloat(overallROAS) >= 2 ? "#18181B" : "#991B1B"}
               metric="roas"
@@ -597,7 +597,7 @@ export default function WavesPPCDashboard() {
             />{" "}
             <KPI
               value={`$${overallCPL}`}
-              label="Cost per Google conversion"
+              label="Cost per reported conversion"
               sub="all campaigns"
               color={"#18181B"}
             />{" "}
@@ -840,8 +840,8 @@ export default function WavesPPCDashboard() {
                       "Status",
                       "Budget/Day",
                       "7d Spend",
-                      "7d Google value",
-                      "Google ROAS",
+                      "7d reported value",
+                      "Reported ROAS",
                       "CPA",
                       "Conv",
                       "Clicks",

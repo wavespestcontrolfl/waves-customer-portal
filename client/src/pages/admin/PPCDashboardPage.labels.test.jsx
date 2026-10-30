@@ -27,12 +27,12 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("calls Google's numbers Google-reported and measures the budget against base, not the $0.05 Stop budget", async () => {
+it("labels ad-platform numbers as reported (Google and Meta) and measures the budget against base, not the $0.05 Stop budget", async () => {
   mount([campaign()]);
-  expect(await screen.findByText("Google-reported value (7d)")).toBeInTheDocument();
-  expect(screen.getByText("conversion value, not booked revenue")).toBeInTheDocument();
-  expect(screen.getByText("Google ROAS")).toBeInTheDocument();
-  expect(screen.getByText("Cost per Google conversion")).toBeInTheDocument();
+  expect(await screen.findByText("Reported value (7d)")).toBeInTheDocument();
+  expect(screen.getByText("ad-platform conversion value, not booked revenue")).toBeInTheDocument();
+  expect(screen.getByText("Reported ROAS")).toBeInTheDocument();
+  expect(screen.getByText("Cost per reported conversion")).toBeInTheDocument();
   expect(screen.queryByText("7-Day Revenue")).not.toBeInTheDocument();
   expect(screen.queryByText("Cost Per Lead")).not.toBeInTheDocument();
   expect(screen.getByText("Google Ads and Meta Ads — synced daily")).toBeInTheDocument();
@@ -56,4 +56,20 @@ it("shows the Local Service Ads card only when an LSA campaign exists", async ()
   first.unmount();
   mount([campaign(), campaign({ id: 3, platform: "google_lsa", campaign_type: "google_lsa", campaign_name: "LSA" })]);
   expect(await screen.findByText("Local Service Ads")).toBeInTheDocument();
+});
+
+it("keeps the combined totals platform-neutral when a Meta campaign is active", async () => {
+  mount([
+    campaign(),
+    campaign({
+      id: 4, platform: "facebook", campaign_type: "OUTCOME_LEADS", campaign_name: "Meta Leads",
+      budget_mode: "base", daily_budget_current: 10, daily_budget_base: 10,
+      last7d: { spend: 20, conversionValue: 40, conversions: 2, clicks: 9, impressions: 300 },
+    }),
+  ]);
+  // Combined KPIs name no platform: Google $0.30 + Meta $20.00 spend, $12 + $40 value.
+  expect(await screen.findByText("Reported value (7d)")).toBeInTheDocument();
+  expect(screen.getByText("Reported ROAS")).toBeInTheDocument();
+  expect(screen.queryByText(/Google-reported/)).not.toBeInTheDocument();
+  expect(screen.getByText(/\$20\.30 of \$105\.00 base\s+budget/)).toBeInTheDocument();
 });

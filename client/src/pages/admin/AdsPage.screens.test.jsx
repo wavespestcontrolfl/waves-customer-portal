@@ -48,13 +48,13 @@ const open = async (tab) => {
   render(<MemoryRouter initialEntries={[`/admin/ppc?tab=${tab}`]}><AdsPage /></MemoryRouter>);
 };
 
-it("Overview labels Google's value as Google-reported, drops Trend, and hides the numeric campaign type", async () => {
+it("Overview labels ad-platform value as reported, not revenue, drops Trend, and hides the numeric campaign type", async () => {
   await open("overview");
-  expect(await screen.findByText("Google-reported value (7d)")).toBeInTheDocument();
-  expect(screen.getByText("Google's conversion value, not booked revenue")).toBeInTheDocument();
-  expect(screen.getByText("Google ROAS (7d)")).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "7d Google value" })).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "Google ROAS" })).toBeInTheDocument();
+  expect(await screen.findByText("Reported value (7d)")).toBeInTheDocument();
+  expect(screen.getByText("Google/Meta conversion value, not booked revenue")).toBeInTheDocument();
+  expect(screen.getByText("Reported ROAS (7d)")).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "7d reported value" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "Reported ROAS" })).toBeInTheDocument();
   expect(screen.queryByRole("columnheader", { name: "Trend" })).not.toBeInTheDocument();
   expect(screen.queryByText("7-Day Revenue")).not.toBeInTheDocument();
   expect(screen.queryByText("Blended ROAS")).not.toBeInTheDocument();
