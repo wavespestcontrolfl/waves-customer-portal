@@ -2880,6 +2880,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
+                                            // Opens on the current assignee; "-- Select --" ('')
+                                            // sends an explicit unassign, never a missing key.
+                                            technician_id: lead.assigned_to || "",
                                           });
                                           setShowModal("assign");
                                         }}

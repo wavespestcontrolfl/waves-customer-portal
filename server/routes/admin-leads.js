@@ -1171,6 +1171,19 @@ router.put('/:id', async (req, res, next) => {
         updates.email = normalizedEmail;
       }
     }
+    // This PUT can also link a customer or set the assignee, so the convert and assign
+    // routes' rules hold here: a new customer link only to a live customer, and a new
+    // assignee only one the picker offers. A stored value echoed back is not a new write.
+    if (updates.customer_id && String(updates.customer_id) !== String(existingLead.customer_id || '')) {
+      if (Joi.string().uuid().validate(updates.customer_id).error) return res.status(400).json({ error: 'Invalid customer id' });
+      const linkedCustomer = await db('customers').where('id', updates.customer_id).whereNull('deleted_at').first('id');
+      if (!linkedCustomer) return res.status(404).json({ error: 'Customer not found' });
+    }
+    if (updates.assigned_to !== undefined && String(updates.assigned_to || '') !== String(existingLead.assigned_to || '')) {
+      if (updates.assigned_to && Joi.string().uuid().validate(updates.assigned_to).error) return res.status(400).json({ error: 'Invalid technician id' });
+      const assignee = await assertAssignableTechnician(updates.assigned_to || null);
+      updates.assigned_to = assignee ? assignee.id : null;
+    }
     updates.updated_at = new Date();
 
     const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
@@ -1789,7 +1802,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
     // A real YYYY-MM-DD, today or later (ET), before any database work: an impossible or
     // malformed string never reaches the occupancy reads or the DATE column, and a lead's
-    // appointment is never booked into a day that has already passed.
+    // appointment is never booked into a day that has already passed. These are the three
+    // checks of datetime-et's validScheduleDate, except that a time tail is refused rather
+    // than dropped, because `date` is written to scheduled_date exactly as sent.
     if (!isRealCalendarDate(date)) return res.status(400).json({ error: 'Date must be a real calendar date (YYYY-MM-DD)' });
     if (date < etDateString()) return res.status(400).json({ error: 'That date has passed. Pick today or a later date.' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
