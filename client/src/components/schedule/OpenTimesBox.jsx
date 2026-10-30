@@ -16,7 +16,7 @@
 // never saves. No onPick = display only (the drag-and-drop confirm).
 
 import { useEffect, useRef, useState } from 'react';
-import { fmtDay, fmtHour } from './AvailabilityStrip';
+import { fmtDay, fmtHour, EstimateLegend } from './AvailabilityStrip';
 
 const LIST_SIZE = 15;
 // A day nobody could check: a far day whose lookup failed ('unchecked'), or
@@ -215,7 +215,7 @@ export default function OpenTimesBox({
           </div>
         )}
       </div>
-      {rows.some(isEstimate) ? <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div> : null}
+      {rows.some(isEstimate) ? <EstimateLegend roadLimit={availability.roadLimit} /> : null}
     </div>
   );
 }
