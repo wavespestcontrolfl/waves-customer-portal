@@ -223,23 +223,30 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
   });
 
   test.each([
-    ['gate off: the sender-retry rail, no recovery', undefined, { retry: 1, recovery: 0 }],
-    ['gate on: the bounce recovery lane, no retry alert', 'true', { retry: 0, recovery: 1 }],
+    ['gate off: the sender-retry rail, nothing else', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
+    ['gate on: people only (alert, rescue suggestion, recording re-check), never an automatic recovery or resend', 'true', { retry: 0, alert: 1, rescue: 1, recheck: 1 }],
   ])('%s', async (_label, gate, want) => {
     if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
     const recovery = require('../services/email-bounce-recovery');
+    const rescue = require('../services/email-bounce-rescue');
+    const reverify = require('../services/email-bounce-reverify');
     const providerRetry = require('../services/transactional-email-provider-retry');
     const attempt = jest.spyOn(recovery, 'attemptRecovery').mockResolvedValue({ resent: false });
+    const alert = jest.spyOn(recovery, 'alertBouncedContactAddress').mockResolvedValue(null);
+    const rescueCall = jest.spyOn(rescue, 'rescueBouncedAddress').mockResolvedValue(null);
+    const recheck = jest.spyOn(reverify, 'reverifyBouncedEmailFromCall').mockResolvedValue(null);
     const retryAlert = jest.spyOn(providerRetry, 'alertIfProviderRetriesExhausted').mockResolvedValue(null);
     try {
       mockState.message = { ...MESSAGE, template_key: 'appointment.confirmation' };
       expect((await post([deadDomainBounce()])).status).toBe(200);
       await new Promise((r) => setTimeout(r, 20));
       expect(retryAlert).toHaveBeenCalledTimes(want.retry);
-      expect(attempt).toHaveBeenCalledTimes(want.recovery);
+      expect(attempt).not.toHaveBeenCalled();
+      expect(alert).toHaveBeenCalledTimes(want.alert);
+      expect(rescueCall).toHaveBeenCalledTimes(want.rescue);
+      expect(recheck).toHaveBeenCalledTimes(want.recheck);
     } finally {
-      attempt.mockRestore();
-      retryAlert.mockRestore();
+      [attempt, alert, rescueCall, recheck, retryAlert].forEach((spy) => spy.mockRestore());
     }
   });
 });

@@ -419,11 +419,19 @@ async function handleEvent(ev) {
     if (processedNew && attemptMatched) {
       // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
       // server is a bad address, not a sender block — no retry rail for it.
-      const noMailServer = bounceRecovery.isNoMailServerEvent(ev);
       if (isProviderBlock(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
-      } else if ((noMailServer || bounceRecovery.isHardBounceEvent(ev)) && !isRateReview) {
+      } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
+        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people,
+        // never to an automatic correction or resend (AGENTS.md call-pipeline
+        // rule; attemptRecovery could repair a domain typo and resend): the
+        // bounced-contact alert, the transcript rescue (suggest-only for a
+        // call-captured address) and the recording re-check card.
+        alertUntrackedHardBounce();
+        require('../services/email-bounce-reverify').reverifyBouncedEmailFromCall({ bouncedEmail: email })
+          .catch((err) => logger.error(`[sendgrid-webhook] bounce re-check failed for ${messageId}: ${err.message}`));
+      } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
         // A rate review letter is reconciled on its notice above, with its own alert that a
         // delivered re-send closes: the generic recovery (and its "needs a correct address"
         // alert, which nothing would close) is not run for it.
