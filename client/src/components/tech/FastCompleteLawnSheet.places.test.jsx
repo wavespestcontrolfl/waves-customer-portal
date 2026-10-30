@@ -794,9 +794,14 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
     await openWithArenaRow({
       ...mixed, blockedIds: [P_ARENA], limitedIds: [P_ARENA],
       byPlace: { front: { ...mixed.byPlace.front, limitedIds: [P_ARENA] }, back: { item: ARENA_ITEM, note: null, unreadableIds: [], limitedIds: [] } },
-    }, [P_ARENA]);
+    }, [P_ARENA], { limitWarned: { [P_ARENA]: 'Arena 50 WDG: 2/2 other applications in 2026 — LIMIT REACHED.' } });
     expect(screen.getByRole('group', { name: 'Arena 50 WDG' })).toBeTruthy();
     expect(footerNote() + completeButton().textContent).not.toMatch(/Remove Arena 50 WDG/);
+    // On an open place the row takes that place's verdict: the guide's lawn-wide limit words are not shown there.
+    const row = screen.getByRole('group', { name: 'Arena 50 WDG' });
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Arena 50 WDG' }), 'Back'));
+    expect(within(row).queryByText(/LIMIT REACHED/)).toBeNull();
+    expect(limitWarnings()).toEqual([]);
   });
 
   test('the weed mix: a member unreadable at a place the top level does not follow is searchable and kept', async () => {

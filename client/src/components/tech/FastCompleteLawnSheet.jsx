@@ -1941,8 +1941,9 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
               row.sodSwap?.reason,
               sodRowNote(newSod, row.productId),
               /\bcelsius\b/i.test(String(row.name || '')) ? ctx.carpetgrassCelsiusWarning : '',
-              // A limit at the row's place is on the footer already (limitWarningsOf): said once.
-              row.placeWarning ? '' : limitRowNote(gov, row.productId),
+              // A row on a place takes that place's verdict (a limit there is on the footer, limitWarningsOf); the guide's
+              // lawn-wide words follow one place and are only for a row with no place yet.
+              row.placeRule && row.place ? '' : limitRowNote(gov, row.productId),
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
