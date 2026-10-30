@@ -563,6 +563,14 @@ function customerBillingPin(customer = {}) {
   return CUSTOMER_BILLING_PIN_FIELDS.map((k) => (customer[k] == null ? '' : String(customer[k]))).join('|');
 }
 
+// The booked visits a caller anchored the prepay term and coverage on (the call-prepay-choice card), as one
+// string: the fields the term start and coverage were derived from. Pure: the caller pins the rows it checked,
+// and the accept re-reads them in its own transaction (pin 'bookedVisits' below).
+const BOOKED_VISIT_PIN_FIELDS = ['id', 'customer_id', 'scheduled_date', 'window_start', 'status', 'service_type', 'source_estimate_id'];
+function bookedVisitsPinOf(rows = []) {
+  return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');
+}
+
 // Each pin the card may send, checked by one loop (checkCardPins). A phase
 // reads its locked row once: 'estimate' right after the customer-comms lock
 // (before the already-accepted return), 'customer' after the call-linkage
@@ -624,6 +632,20 @@ const CARD_PIN_CHECKS = [
   },
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
+  // The booked visits the term start and coverage came from (call-prepay-choice): a reschedule, cancel,
+  // re-owner or link since the card's check refuses before the invoice and term exist. Read with NO row
+  // lock: invoice settlement takes the visit FOR UPDATE NOWAIT, so a held lock would fail a payment
+  // (visit_busy). A change after this commit is an ordinary later reschedule, as on the New appointment form.
+  {
+    phase: 'customer',
+    key: 'bookedVisits',
+    holds: async ({ trx, expected }) => {
+      const ids = Array.isArray(expected.bookedVisits.ids) ? [...new Set(expected.bookedVisits.ids.map(String))] : [];
+      if (!ids.length) return false;
+      const rows = await trx('scheduled_services').whereIn('id', ids).select(BOOKED_VISIT_PIN_FIELDS);
+      return rows.length === ids.length && bookedVisitsPinOf(rows) === expected.bookedVisits.pin;
+    },
+  },
 ];
 
 // The lawn profile values the accept's lawn writes read (customer_turf_profiles
@@ -1391,7 +1413,8 @@ async function markEstimateManuallyAccepted({
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
   // customerId, customerVersion, customerBilling, ledgerPin, planRows,
-  // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }); null for every other
+  // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }), or the call-prepay-choice
+  // card's ({ estimateVersion, estimateStatus, customerId, bookedVisits: { ids, pin } }); null for every other
   // caller. effectsKey is the fingerprint of the approved effect list: the
   // accept builds its own list under the locks and refuses (preview_changed)
   // when it differs. membershipEmail ('send' | 'skip') is the approved email
@@ -1448,5 +1471,6 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,
   estimateRowPin,
+  bookedVisitsPinOf,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

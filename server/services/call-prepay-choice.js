@@ -91,6 +91,7 @@ const REFUSALS = {
   service_mismatch: 'The booked visit is not the service the estimate quoted. Accept it from the estimate.',
   term_overlap: 'This customer already has an annual prepay term covering this date. Nothing was accepted.',
   already_accepted: 'Someone already accepted this estimate. Nothing was accepted.',
+  changed_since_check: 'The estimate or the booked visit changed while this was being accepted. Nothing was accepted. Try again.',
   accept_failed: 'The accept did not go through. Nothing was accepted.',
 };
 const refusal = (reason, extra = {}) => ({ ok: false, reason, message: REFUSALS[reason] || REFUSALS.not_eligible, ...extra });
@@ -229,14 +230,28 @@ async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, co
   if (await termOverlap(conn, customerId, derived.termStart)) return refusal('term_overlap', { estimate });
   return {
     ok: true, estimate, rows, amount: eligibility.invoiceTotal, coverage: derived.coverage, termStart: derived.termStart, bookedIds: derived.bookedIds,
+    consumerNotice: await consumerNoticeWouldSend(conn, estimate, customerId),
   };
+}
+
+// Whether the tap also sends the state termite notice: the accept runs the Mark accepted consumer_notice step
+// (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND) for an estimate with a termite line and no signed notice on file.
+// The same read the Intelligence Bar card uses (consumerNoticeCardFacts); an unreadable state reads as "sends",
+// so the card discloses rather than hides a text.
+async function consumerNoticeWouldSend(conn, estimate, customerId) {
+  if (!require('../config/feature-gates').manualAcceptConsumerNoticeSendLive()) return false;
+  const { consumerNoticeCardFacts } = require('./estimate-consumer-notice');
+  return (await consumerNoticeCardFacts(conn, estimate, customerId)).sends === true;
 }
 
 const money = (n) => (Number.isFinite(Number(n)) ? `$${Number(n).toFixed(2).replace(/\.00$/, '')}` : null);
 
-function cardSummary(amount) {
+function cardSummary(amount, consumerNotice = false) {
   const price = money(amount);
-  return `Caller chose annual prepay on the call.${price ? ` Accept as annual prepay (${price}) to bill the open estimate that way.` : ''} Nothing is sent to the customer.`;
+  const sends = consumerNotice
+    ? ' The invoice is a draft and is not sent. The customer also gets the state termite notice to sign, as with Mark accepted.'
+    : ' The invoice is a draft. Nothing is sent to the customer.';
+  return `Caller chose annual prepay on the call.${price ? ` Accept as annual prepay (${price}) to bill the open estimate that way.` : ''}${sends}`;
 }
 
 // The one card for a call. Idempotent: ANY row for (call, reason), open or closed, means it was filed.
@@ -266,7 +281,7 @@ async function fileCard({ call, extraction, evaluation }) {
     const inserted = await trx('triage_items')
       .insert({
         ...item,
-        summary: cardSummary(evaluation.amount),
+        summary: cardSummary(evaluation.amount, evaluation.consumerNotice),
         related_customer_id: call.customer_id,
         related_estimate_id: evaluation.estimate.id,
         related_scheduled_service_id: evaluation.rows[0].id,
@@ -370,7 +385,8 @@ async function runCallPrepayChoiceSweep({ now = new Date() } = {}) {
 
 /**
  * The tap on an open card. The caller (the route) has checked the gate, the admin, the card and its version.
- * Re-reads the call, the visits and the estimate, then runs the same accept the form runs. Sends no invoice and no text.
+ * Re-reads the call, the visits and the estimate, then runs the same accept the form runs. Sends no invoice; the
+ * accept's Mark accepted step sends the state termite notice when it applies (consumerNoticeWouldSend).
  * @returns {{ok:true, invoiceId, amount, warnings}|{ok:false, reason, message}}
  */
 async function acceptCallPrepayChoice({ item, adminUserId = null, now = new Date() }) {
@@ -381,11 +397,18 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, now = new Date
   const evaluation = await evaluateCallPrepay({ callLogId: call.id, customerId: call.customer_id, estimateId: payload.estimate_id || null, now });
   if (!evaluation.ok) return evaluation;
 
-  const { markEstimateManuallyAccepted } = require('./estimate-manual-acceptance');
+  const { markEstimateManuallyAccepted, estimateRowPin, bookedVisitsPinOf } = require('./estimate-manual-acceptance');
   let result;
   try {
     result = await markEstimateManuallyAccepted({
       estimateId: evaluation.estimate.id,
+      // Pins checked inside the accept's own transaction: the estimate row and the booked visits this
+      // evaluation derived the term start and coverage from. An edit, reschedule or cancel since refuses
+      // (preview_changed) before any invoice or term exists.
+      expected: {
+        ...estimateRowPin(evaluation.estimate),
+        bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(evaluation.rows.filter((r) => evaluation.bookedIds.map(String).includes(String(r.id)))) },
+      },
       bookedAppointmentIds: evaluation.bookedIds,
       adminUserId,
       source: 'verbal_annual_prepay_booking',
@@ -399,6 +422,7 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, now = new Date
     // The accept and its invoice and term are one transaction: nothing is half-applied.
     logger.warn(`[call-prepay-choice] accept failed for estimate ${evaluation.estimate.id}: ${err.code || err.name || 'error'}`);
     if (err.annualPrepayOverlap) return refusal('term_overlap');
+    if (err.code === 'preview_changed') return refusal('changed_since_check');
     const message = err.statusCode && err.statusCode < 500 && err.message ? `${err.message} Nothing was accepted.` : REFUSALS.accept_failed;
     return { ok: false, reason: 'accept_failed', message };
   }
@@ -431,4 +455,5 @@ module.exports = {
   runCallPrepayChoiceSweep,
   acceptCallPrepayChoice,
   closeMootCards,
+  cardSummary,
 };

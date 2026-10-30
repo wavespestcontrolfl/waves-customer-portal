@@ -13,7 +13,7 @@ const gates = require('../config/feature-gates');
 const { buildTriageItem } = require('../services/call-routing-gates');
 const { computeHeldVisits } = require('../services/call-held-visits');
 const {
-  billingChoiceOf, quotePlanOf, derivePrepayCoverage, runCallPrepayChoiceSweep, REFUSALS,
+  billingChoiceOf, quotePlanOf, derivePrepayCoverage, runCallPrepayChoiceSweep, REFUSALS, cardSummary,
 } = require('../services/call-prepay-choice');
 
 const GATE = 'GATE_CALL_PREPAY_CHOICE';
@@ -47,6 +47,19 @@ describe('the gate', () => {
     for (const word of ['sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice', 'notifyAdmin', 'sendNewRecurringWelcome']) {
       expect(service).not.toContain(word);
     }
+  });
+});
+
+describe('the card says what the tap sends', () => {
+  test('a termite estimate that sends the state notice says so; otherwise nothing is sent; the invoice is always a draft', () => {
+    const plain = cardSummary(472, false);
+    expect(plain).toContain('Accept as annual prepay ($472)');
+    expect(plain).toContain('The invoice is a draft. Nothing is sent to the customer.');
+    expect(plain).not.toMatch(/termite notice/);
+    const notice = cardSummary(472, true);
+    expect(notice).toContain('The invoice is a draft and is not sent.');
+    expect(notice).toContain('the state termite notice to sign, as with Mark accepted');
+    expect(notice).not.toContain('Nothing is sent');
   });
 });
 

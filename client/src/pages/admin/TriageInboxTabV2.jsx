@@ -417,7 +417,8 @@ export function FamilyEvidence({ payload, openCustomerIds = null, canAttach = fa
 
 // call_prepay_choice (GATE_CALL_PREPAY_CHOICE, admin only): the caller chose annual prepay on a call the pipeline booked. The server reads
 // what the tap can do right now (callPrepay: can_accept, amount, message), so this screen holds no second copy of the eligibility rule.
-// The tap runs the same accept the New appointment form runs; the invoice it creates is a DRAFT that is not sent.
+// The tap runs the same accept the New appointment form runs; the invoice it creates is a DRAFT that is not sent. When the
+// server says the accept will also send the state termite notice (callPrepay.consumer_notice), the card says so before the tap.
 const prepayMoney = (n) => (Number.isFinite(Number(n)) ? `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.replace(/\.00$/, "") : null);
 
 export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = false, isAdmin = false, busy = false, onAcceptPrepay }) {
@@ -429,6 +430,7 @@ export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = fa
     ["Plan", [p.service_type, p.cadence && String(p.cadence).replace(/_/g, " "), p.covered_visits && `${p.covered_visits} visits a year`].filter(Boolean).join(" · ")],
     ["First visit", p.first_visit_date],
     ["Invoice", amount && `${amount} (a draft; it is not sent)`],
+    ["Customer gets", callPrepay?.consumer_notice ? "The state termite notice to sign (as with Mark accepted)" : null],
   ].filter(([, value]) => value);
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
@@ -444,7 +446,9 @@ export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = fa
       )}
       {isOpenView && isAdmin && callPrepay?.can_accept && (
         <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPrepay}
-          title="Accepts the customer's estimate as annual prepay. Creates a draft invoice that is not sent. The customer gets no text or email.">
+          title={callPrepay.consumer_notice
+            ? "Accepts the customer's estimate as annual prepay. Creates a draft invoice that is not sent. The customer gets the state termite notice to sign, as with Mark accepted."
+            : "Accepts the customer's estimate as annual prepay. Creates a draft invoice that is not sent. The customer gets no text or email."}>
           {busy ? "Accepting…" : `Accept as annual prepay${amount ? ` (${amount})` : ""}`}
         </Button>
       )}

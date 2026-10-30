@@ -1261,6 +1261,20 @@ describe('call_prepay_choice card', () => {
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
   });
 
+  it('says before the tap when the accept also sends the state termite notice; says nothing is sent otherwise', async () => {
+    load({ ...prepayCard, call_prepay: { can_accept: true, amount: 472, consumer_notice: true, message: null } });
+    const first = render(<TriageInboxTabV2 isAdmin />);
+    let el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText(/The state termite notice to sign \(as with Mark accepted\)/)).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }).getAttribute('title')).toMatch(/state termite notice to sign/);
+    first.unmount();
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).queryByText(/state termite notice/)).toBeNull();
+    expect(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }).getAttribute('title')).toMatch(/The customer gets no text or email\./);
+  });
+
   it('shows the server\'s plain reason and no accept button when the tap would be refused', async () => {
     load({ ...prepayCard, call_prepay: { can_accept: false, amount: 472, message: 'That estimate is no longer open (it was accepted, declined or expired). Nothing was accepted.' } });
     render(<TriageInboxTabV2 isAdmin />);

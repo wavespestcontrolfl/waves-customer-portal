@@ -278,6 +278,11 @@ describeDb('call prepay choice (PostgreSQL)', () => {
         annualPrepayTermStart: inDays(9),
         annualPrepayCoverage: { coverageServiceType: 'Quarterly Pest Control Service', coverageVisitCount: 4, coverageCadence: 'quarterly' },
       });
+      // Pre-push audit P0: the estimate row and the booked visits are pinned, and re-checked inside the accept.
+      expect(acceptSpy.mock.calls[0][0].expected).toMatchObject({
+        estimateStatus: 'sent', customerId: est.customer_id, bookedVisits: { ids: [visitId], pin: expect.any(String) },
+      });
+      expect(acceptSpy.mock.calls[0][0].expected.bookedVisits.pin).toContain(String(visitId));
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
       expect(await cardsFor(callLogId).first()).toMatchObject({ status: 'resolved', resolution_source: 'human' });
     });
@@ -333,6 +338,15 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       const refusedB = await post(`${b.card.id}/accept-call-prepay`, { expected_updated_at: b.card.updated_at });
       expect(refusedB.body).toMatchObject({ code: 'no_booked_visit' });
       expect(acceptSpy).not.toHaveBeenCalled();
+    });
+
+    test('a record that changed inside the accept (preview_changed) is a plain refusal; the card stays open', async () => {
+      const { card } = await filed();
+      acceptSpy.mockRejectedValueOnce(Object.assign(new Error('changed'), { statusCode: 409, code: 'preview_changed' }));
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      expect(out.status).toBe(409);
+      expect(out.body).toMatchObject({ code: 'changed_since_check' });
+      expect((await trx('triage_items').where({ id: card.id }).first()).status).toBe('open');
     });
 
     test('another session won the accept: the answer says so, the visit is not linked, the card stays for the sweep to close', async () => {
