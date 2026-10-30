@@ -368,6 +368,28 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
       expect(onChange).not.toHaveBeenCalled();
     });
 
+    // Codex #7054: the dialog stays mounted between drags and keeps its busy state until
+    // onConfirm resolves, so onConfirm must not wait for the refresh.
+    it('the confirmation resolves once the write commits, while a slow refresh is still pending', async () => {
+      const readGate = deferred();
+      let reads = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') return response({ success: true });
+        reads += 1;
+        return reads === 1 ? response(payload([[service], []])) : readGate.promise;
+      });
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag();
+      let settled = false;
+      await act(async () => { modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }).then(() => { settled = true; }); });
+      await waitFor(() => expect(settled).toBe(true));
+      expect(modal.props.open).toBe(false);
+      expect(screen.getByRole('status')).toHaveTextContent('Refreshing…');
+      await act(async () => { readGate.resolve(response(payload([[], [movedService]]))); });
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
     it('a late POST response does not promote the old week into the new one', async () => {
       const postGate = deferred();
       const view = await start({ postGate });

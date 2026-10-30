@@ -1028,7 +1028,10 @@ export default function TimeGridDays({
     if (gen !== genRef.current) return;
     setData(optimistic || data);
     setOptimistic(null);
-    await reloadWeek();
+    // Not awaited: the confirmation resolves once the write commits, so a slow
+    // refresh never holds its busy state over the next drag (reloadWeek catches
+    // its own failure and is generation-guarded).
+    void reloadWeek();
   }, [pending, optimistic, data, reloadWeek]);
 
   const cancelReschedule = useCallback(() => {
