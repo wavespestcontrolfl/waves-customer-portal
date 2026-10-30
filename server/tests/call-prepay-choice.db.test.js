@@ -110,7 +110,7 @@ describeDb('call prepay choice (PostgreSQL)', () => {
     const id = randomUUID();
     await trx('scheduled_services').insert({
       id, customer_id: customerId, source_call_log_id: callLogId, scheduled_date: inDays(9), window_start: '09:00',
-      service_type: 'Quarterly Pest Control Service', status: 'pending',
+      service_type: 'Quarterly Pest Control Service', status: 'pending', source_action: 'ai_call_pipeline',
       service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_state: 'FL', service_address_zip: '34200', ...over,
     });
     return id;
@@ -177,16 +177,17 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect(await runCallPrepayChoiceSweep()).toMatchObject({ filed: 0 });
     });
 
-    test('a visit that predates the call and was only attached to it is not a new booking: the existing plan blocks the card (Codex #7050 r2)', async () => {
+    test('only a visit the call itself created counts as booked; a visit the call was attached to stays in the plan check (Codex #7050 r2, r4)', async () => {
       const longAgo = new Date(Date.now() - 30 * 86400000);
-      // The call attached to the customer's existing visit only: nothing was booked from it.
+      // The call was attached to a booking a person made DURING the call (findAttachableCallAppointment):
+      // it carries the call's id but not a call-created source_action, so nothing was booked from the call.
       const a = await booked();
-      await trx('scheduled_services').where({ id: a.visitId }).update({ created_at: longAgo });
+      await trx('scheduled_services').where({ id: a.visitId }).update({ source_action: null });
       expect(await evaluateCallPrepay({ callLogId: a.callLogId, customerId: a.customerId })).toMatchObject({ ok: false, reason: 'no_booked_visit' });
       // The call booked a new visit AND was attached to the customer's existing recurring visit: the existing one
       // stays in the plan check, so the account is not switched to annual prepay.
       const b = await booked();
-      await visit(b.customerId, b.callLogId, { created_at: longAgo, scheduled_date: inDays(30), is_recurring: true, recurring_pattern: 'quarterly' });
+      await visit(b.customerId, b.callLogId, { source_action: null, created_at: longAgo, scheduled_date: inDays(30), is_recurring: true, recurring_pattern: 'quarterly' });
       const out = await evaluateCallPrepay({ callLogId: b.callLogId, customerId: b.customerId });
       expect(out.ok).toBe(false);
       expect(['existing_customer', 'live_plan_unknown']).toContain(out.reason);

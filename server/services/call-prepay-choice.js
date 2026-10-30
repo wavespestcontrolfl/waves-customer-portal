@@ -174,14 +174,24 @@ function derivePrepayCoverage({ estimate, rows, hasAddons = false }) {
   };
 }
 
-// The visits BOOKED from this call: created at or after the call began. A visit that existed before the call
-// and was only attached to it (a reschedule's make-up move, a reconfirmed booking) is not one: it stays in the
-// existing-plan check, so a live plan is never mistaken for a new booking (Codex #7050 r2; the same rule
-// no-show-detector.js applies to an attached source_call_log_id).
-async function liveVisitsOfCall(conn, callLogId, customerId, callStartedAt) {
+// The source_action a CALL itself writes on a visit it creates: the auto-booking ('ai_call_pipeline', a literal in
+// call-recording-processor.js, as ops-scoreboard.js keeps it), its follow-up visit, the package follow-up, and the
+// voice agent's and an outbound callback's pending bookings. Read at call time (the package module is heavy).
+function callCreatedSourceActions() {
+  const { CALL_FOLLOWUP_SOURCE_ACTION, VOICE_AGENT_BOOKING_SOURCE_ACTION, CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+  return ['ai_call_pipeline', CALL_FOLLOWUP_SOURCE_ACTION, require('./package-followup-booking').PACKAGE_FOLLOWUP_SOURCE_ACTION,
+    VOICE_AGENT_BOOKING_SOURCE_ACTION, CALL_OUTBOUND_REVIEW_SOURCE_ACTION];
+}
+
+// The visits this call BOOKED: the call's id AND a source_action only a call writes. The attach paths
+// (findAttachableCallAppointment, a reschedule's make-up move) stamp source_call_log_id only where it is NULL,
+// so a call-created visit always names the call that created it. A visit that existed before, or that a person
+// or the customer booked during the call, keeps its own source_action when attached: it stays in the
+// existing-plan check, so a live plan is never mistaken for a new booking (Codex #7050 r2, r4).
+async function liveVisitsOfCall(conn, callLogId, customerId) {
   return conn('scheduled_services')
     .where({ source_call_log_id: callLogId, customer_id: customerId })
-    .where('created_at', '>=', callStartedAt)
+    .whereIn('source_action', callCreatedSourceActions())
     .whereIn('status', LIVE_VISIT_STATUSES)
     .orderBy([{ column: 'scheduled_date' }, { column: 'window_start' }, { column: 'id' }])
     .select('*');
@@ -224,7 +234,7 @@ async function termOverlap(conn, customerId, termStart) {
 // valid extraction of a real two-party call with billing_choice annual_prepay. A reprocess that re-read the plan
 // (per application, none) or failed the extraction makes the card obsolete ('choice_changed', moot); a pass
 // still running is only a wait ('call_reprocessing'), so the card stays.
-const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'created_at', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 // What is wrong with the call for this card, or null: it moved to another customer, it is being re-read, or
 // it no longer shows the annual prepay choice. The evaluation and the accept's last step ask the same.
 function callRefusal(call, customerId) {
@@ -268,7 +278,7 @@ async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, co
   const call = await conn('call_log').where({ id: callLogId }).first(CALL_CHOICE_COLUMNS);
   const callProblem = callRefusal(call, customerId);
   if (callProblem) return refusal(callProblem);
-  const rows = await liveVisitsOfCall(conn, callLogId, customerId, call.created_at);
+  const rows = await liveVisitsOfCall(conn, callLogId, customerId);
   if (!rows.length) return refusal('no_booked_visit');
   const estimate = await openEstimateFor(conn, customerId, now, estimateId);
   if (!estimate) return refusal(estimateId ? 'estimate_not_open' : 'no_open_estimate');
