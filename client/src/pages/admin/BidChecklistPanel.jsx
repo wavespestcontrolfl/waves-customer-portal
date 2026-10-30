@@ -239,10 +239,12 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
   const saving = useRef(false);
   const again = useRef(false);
   // A save's refresh brings back the note as saved. If the operator has gone on typing in this field since, that
-  // reply is older than the draft and must not replace it; the draft is saved on its next blur.
+  // reply is older than the draft and must not replace it; the draft is saved on its next blur. The same holds while
+  // this row's note save is in flight or a newer draft is queued behind it, even after the field lost focus: another
+  // reload (a tick) can bring back the older text, and the queued draft must still be the one sent.
   useEffect(() => {
     lastSent.current = item.notes || "";
-    if (noteInput.current && noteInput.current === document.activeElement) return;
+    if (saving.current || again.current || (noteInput.current && noteInput.current === document.activeElement)) return;
     setNotes(item.notes || "");
   }, [item.notes]);
   // A note saves when its field loses focus. The save does not lock the panel (a tap that starts the blur would land

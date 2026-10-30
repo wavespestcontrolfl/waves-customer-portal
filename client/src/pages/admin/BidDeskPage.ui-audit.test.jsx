@@ -256,3 +256,37 @@ it("keeps the row's controls usable while a note save is in flight, and sends on
   await act(async () => { releases[0](); });
   await waitFor(() => expect(notePatches).toEqual(["One", "One and two"]));
 });
+
+it("sends a queued note draft even when a tick's reload brings back the older saved text after the field lost focus", async () => {
+  let stored = "";
+  const notePatches = [];
+  const releases = [];
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1") return reply(detail([line({ notes: stored })]));
+    if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) {
+      notePatches.push(options.body.notes);
+      stored = options.body.notes; // committed on the server at once; only the reply is late
+      return new Promise((resolve) => releases.push(() => resolve({ ok: true, status: 200, json: async () => ({ ok: true }) })));
+    }
+    if (path === "/admin/bid-desk/b1/checklist/i1") return reply({ ok: true });
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const input = await screen.findByLabelText(NOTE);
+  input.focus();
+  fireEvent.change(input, { target: { value: "One" } });
+  input.blur();
+  await waitFor(() => expect(notePatches).toEqual(["One"]));
+
+  input.focus();
+  fireEvent.change(input, { target: { value: "One and two" } });
+  input.blur(); // queued behind the save in flight; the field no longer has focus
+  const reloads = adminFetch.mock.calls.filter(([p]) => p === "/admin/bid-desk/b1").length;
+  fireEvent.click(screen.getByLabelText("Example required document")); // its reload returns the committed "One"
+  await waitFor(() => expect(adminFetch.mock.calls.filter(([p]) => p === "/admin/bid-desk/b1").length).toBeGreaterThan(reloads));
+  expect(input).toHaveValue("One and two");
+
+  await act(async () => { releases[0](); });
+  await waitFor(() => expect(notePatches).toEqual(["One", "One and two"]));
+});
