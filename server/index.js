@@ -1117,7 +1117,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
       htmlClass: 'admin-app',
     },
     {
@@ -1138,7 +1138,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
     },
   ];
   function pickSection(reqPath) {
