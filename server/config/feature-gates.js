@@ -1253,6 +1253,13 @@ const gates = {
   // Kill switch: unset — the endpoint 404s (dark).
   mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
 
+  // Owner MCP admin reads: the /api/mcp-admin endpoint (routes/mcp-admin.js)
+  // that serves an allow-list of Intelligence Bar read tools to Claude Code
+  // under the owner's mcp_read key (services/mcp-admin-key.js). Read-only;
+  // opt-in in EVERY environment. Kill switch: unset — the endpoint 403s and
+  // every key stops.
+  mcpAdminRead: process.env.GATE_MCP_ADMIN_READ === 'true',
+
   // Public A2A endpoint: /api/public/a2a — the informational Agent2Agent
   // server behind the hub's agent-card.json. Static single-reply, LLM-free,
   // read-only. No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
