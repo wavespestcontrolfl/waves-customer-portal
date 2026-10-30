@@ -6837,6 +6837,121 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
 }
 
 /**
+ * Office alert for a monthly-autopay charge canceled while it was still
+ * processing (billing audit 2026-10-30, finding 2).
+ *
+ * Monthly dues have no invoice by design. The canceled flip in the handler
+ * below takes the row out of every reader that could recover the month: the
+ * retry sweep and the failed-payment balances read 'failed' only, and the
+ * month's already-collected check reads 'paid'/'processing'. Later months
+ * carry their own billed_month, so nothing ever collects this one. None of
+ * our code cancels a PaymentIntent whose money is in flight
+ * (prepaid-pi-guard PI_MONEY_IN_FLIGHT_STATUSES), so the cancel came from a
+ * person in Stripe or from Stripe itself: charging again could undo a
+ * deliberate cancel, so this does NOT arm a retry. It rings the office once
+ * per PaymentIntent to charge or waive the month. No message goes to the
+ * customer, and nothing is charged.
+ *
+ * Guards: monthly_autopay PIs only; never invoice-linked PIs (they reopen
+ * through the invoice lane; the lookup fails closed like the bounce
+ * arming); only a row still 'processing' (read before the flip) that no
+ * other row superseded; no ring when another row already collected the
+ * month. Runs BEFORE the flip: a throw 500s the webhook, and the redelivery
+ * still finds the row 'processing'; the dedupe key keeps a redelivery from
+ * ringing twice.
+ */
+async function alertCanceledMonthlyAutopay(paymentIntent, processingRow) {
+  const piId = paymentIntent.id;
+  if (paymentIntent.metadata?.type !== 'monthly_autopay') return;
+  if (!processingRow || processingRow.superseded_by_payment_id) return;
+  const linkedInvoice = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .first();
+  if (linkedInvoice) return;
+
+  let rowMeta = {};
+  try {
+    rowMeta = processingRow.metadata
+      ? (typeof processingRow.metadata === 'string' ? JSON.parse(processingRow.metadata) : processingRow.metadata)
+      : {};
+  } catch (e) { /* unparseable legacy metadata — fall through to payment_date */ }
+  const pd = processingRow.payment_date;
+  const pdIso = pd instanceof Date
+    ? (Number.isNaN(pd.getTime()) ? '' : pd.toISOString())
+    : String(pd || '');
+  const obligationMonth = rowMeta.billed_month
+    || paymentIntent.metadata?.billed_month
+    || (/^\d{4}-\d{2}/.test(pdIso) ? pdIso.slice(0, 7) : null);
+
+  const customerId = processingRow.customer_id;
+  if (obligationMonth) {
+    const [obYear, obMonth] = obligationMonth.split('-').map(Number);
+    const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
+    const { findCollectedMonthlyPayment } = require('../services/retry-collectibility');
+    const collected = await findCollectedMonthlyPayment(customerId, {
+      monthKey: obligationMonth,
+      monthStart: `${obligationMonth}-01`,
+      monthEnd: `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`,
+    }, { excludePaymentId: processingRow.id });
+    if (collected) {
+      logger.info(`[stripe-webhook] Monthly autopay PI ${piId} canceled, but ${obligationMonth} is already collected (${collected.id ? `payment ${collected.id}` : `dues invoice ${collected.dues_invoice_id}`}) — no office alert`);
+      return;
+    }
+  }
+
+  const amount = parseFloat(processingRow.amount);
+  const dollars = Number.isFinite(amount)
+    ? `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : '';
+  const monthLabel = obligationMonth
+    ? new Date(`${obligationMonth}-15T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+    : '';
+  const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
+  const { fullName, fitAction } = require('../services/admin-alert-names');
+  const name = fullName(customer) || 'this customer';
+  const payment = [monthLabel, dollars].filter(Boolean).join(' ');
+  const alert = await raiseAdminAlert('billing', {
+    area: 'Billing',
+    action: fitAction('Billing', name, [
+      (who) => `charge or waive ${who}'s canceled dues`,
+      (who) => `review ${who}'s canceled dues`,
+    ]),
+    why: `The ${payment ? `${payment} ` : ''}dues payment was canceled at Stripe before it cleared; the month is unpaid.`,
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: { type: 'customer', id: customerId },
+    // Nothing closes this alert automatically: a person marks it done after collecting or waiving.
+    doneWhen: 'collected_and_marked_done',
+    who: 'person',
+  }, {
+    // A needs-you money item must ring: with GATE_ADMIN_BELL_POLICY on, billing is not
+    // allowlisted, and bell: true is the sanctioned site-level opt-in (as autopay-sca-parked.js).
+    bell: true,
+    detail: `${name}'s ${payment ? `${payment} ` : ''}monthly dues payment was canceled at Stripe while the bank payment was still processing, so it was never collected. Nothing else has paid ${monthLabel || 'that month'}, and nothing will retry it on its own. Charge it again from the customer's page, or waive it, then mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${processingRow.id}.`,
+    dedupeKey: `autopay-canceled:${customerId}:${piId}`,
+    metadata: {
+      customer_id: customerId,
+      stripe_payment_intent_id: piId,
+      payment_id: processingRow.id,
+      billed_month: obligationMonth,
+      source: 'payment_intent.canceled',
+    },
+  });
+  const { logAutopay } = require('../services/autopay-log');
+  await logAutopay(customerId, 'charge_canceled', {
+    amountCents: Number.isFinite(amount) ? Math.round(amount * 100) : null,
+    paymentId: processingRow.id,
+    details: { source: 'autopay_canceled', stripe_payment_intent_id: piId, billed_month: obligationMonth },
+  }).catch(() => {});
+  if (!alert) {
+    logger.error(`[stripe-webhook] Monthly autopay PI ${piId} canceled while processing — ${obligationMonth || 'unknown month'} unpaid, and the office alert was NOT filed (customer ${customerId}, payment ${processingRow.id})`);
+    return;
+  }
+  logger.warn(`[stripe-webhook] Monthly autopay PI ${piId} canceled while processing — ${obligationMonth || 'unknown month'} unpaid; office alerted, no retry armed`);
+}
+
+/**
  * payment_intent.canceled — Stale or admin-cancelled PI. Mark payment cancelled.
  */
 async function handlePaymentIntentCanceled(paymentIntent) {
@@ -6855,6 +6970,13 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     await handleDepositIntentCanceled(paymentIntent);
     return;
   }
+
+  // Read BEFORE the flip (as the payment_failed path does): after it, a dues
+  // charge canceled mid-processing looks like any other canceled row.
+  const processingRowBeforeCancel = await db('payments')
+    .where({ stripe_payment_intent_id: piId, status: 'processing' })
+    .first();
+  await alertCanceledMonthlyAutopay(paymentIntent, processingRowBeforeCancel);
 
   // No .catch — a failed write must propagate so the event is retried.
   await db('payments')

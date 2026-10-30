@@ -159,11 +159,15 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
 // (billed_month stamp), payment_date window + description marker as the legacy
 // fallback; exactly the dedupe charge-now and the retry classifier apply.
 // `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
-// the completion-minted dues invoice fallback (it names no payment row).
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true } = {}) {
-  const payment = await conn('payments')
+// the completion-minted dues invoice fallback (it names no payment row);
+// `excludePaymentId` leaves out one row (a caller asking whether ANOTHER row
+// collected the month).
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null } = {}) {
+  let query = conn('payments')
     .where({ customer_id: customerId })
-    .whereIn('status', statuses)
+    .whereIn('status', statuses);
+  if (excludePaymentId) query = query.whereNot({ id: excludePaymentId });
+  const payment = await query
     .where(function () {
       this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
         .orWhere(function () {
