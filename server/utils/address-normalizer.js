@@ -781,21 +781,46 @@ function normalizeLeadAddress(input = {}) {
   };
 }
 
+// A comma segment that is only a unit: "Apt 4", "#4", "Fl 2". A bare "FL" is the
+// state and "FL 34236" the state + ZIP, never a floor.
+function unitOnlySegment(segment) {
+  const [first, value = ''] = segment.toLowerCase().replace(/\./g, '').split(' ');
+  if (first.startsWith('#')) return first.length > 1 || Boolean(value);
+  return UNIT_DESIGNATORS.has(first) && Boolean(value) && !isStateZipPair(first, value);
+}
+
+// Whether a one-line address ends in a locality: after the street and any unit
+// segments that follow it (parseRawAddress keeps those on the street line), one
+// or two segments ("City, ST ZIP") and no unit. "123 Main St, Apt 12345" has no
+// locality: a five-digit unit is not a ZIP, and no unit is ever dropped.
+function endsInLocality(raw) {
+  const segments = raw.split(',').map(cleanString).filter(Boolean).slice(1);
+  if (/^(usa|united states)$/i.test(segments[segments.length - 1] || '')) segments.pop();
+  let start = 0;
+  while (start < segments.length && unitOnlySegment(segments[start])) start += 1;
+  const locality = segments.slice(start);
+  return locality.length > 0 && locality.length <= 2 && !locality.some(unitOnlySegment);
+}
+
 // A lead's service address as customer fields. leads.address holds one free-text line, and the
 // website form saves its whole fullAddress there with no ZIP column ("12 Sample Ct East, Parrish,
 // FL 34219"). Copied as-is into a street field, that line keys as a different house than the same
 // address saved in parts, so the customer it creates never matches the form's own customer and a
-// later merge keeps both copies (owner 2026-10-30). A comma line that starts with a house number
-// and ends in a locality (a state, a ZIP, or the lead's own city) is split the way the form split
-// it; the lead's own city and zip columns still win. Anything else (a bare street, a call's
-// partial "12912", a unit tail like "123 Main St, Apt 4") is returned as before.
+// later merge keeps both copies (owner 2026-10-30). A line that starts with a house number and
+// ends in a locality (a state, a ZIP, or the lead's own city) is split the way the form split it.
+// The line's city must agree with the lead's city column when both are set (a segment that
+// disagrees may be a unit word, not a city); the lead's zip column wins over the line's ZIP.
+// Anything else (a bare street, a call's partial "12912", a unit tail) is returned as before.
 function leadAddressFields(lead = {}) {
   const raw = cleanString(lead.address);
-  const asIs = { line1: raw, line2: null, city: cleanString(lead.city) || null, state: 'FL', zip: cleanString(lead.zip) || null };
-  if (!raw.includes(',')) return asIs;
+  const leadCity = cleanString(lead.city);
+  const asIs = { line1: raw, line2: null, city: leadCity || null, state: 'FL', zip: cleanString(lead.zip) || null };
+  if (!endsInLocality(raw)) return asIs;
   const tail = parseRawAddress(raw);
-  const leadCity = cleanString(lead.city).toLowerCase();
-  if (!(tail.state || tail.zip || (leadCity && cleanString(tail.city).toLowerCase() === leadCity))) return asIs;
+  const tailCity = cleanString(tail.city).toLowerCase();
+  const sameCity = Boolean(tailCity) && tailCity === leadCity.toLowerCase();
+  if (/\d/.test(tailCity) || (tailCity && leadCity && !sameCity)) return asIs;
+  if (!(tail.state || tail.zip || sameCity)) return asIs;
   const split = normalizeLeadAddress({ raw, city: lead.city, zip: lead.zip });
   if (!/^\d/.test(split.line1) || split.unitConflict) return asIs;
   return { line1: split.line1, line2: split.line2 || null, city: split.city || null, state: split.state || 'FL', zip: split.zip || null };
