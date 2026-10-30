@@ -166,6 +166,50 @@ describe('gate on: arrival_window names the stop', () => {
 
   // Codex pre-push P1: the stop under way is not in the simulated order, but it keeps its number, so every
   // later stop is one higher. Today's route, picker road check on (fromActiveStop), the stop continued from.
+  // Codex pre-push P1: capacity mode collapses a shared stop's rows into one simulated entry, but the save
+  // writes a route number to EACH member, so every stop after a group is numbered past all its members.
+  describe('numbering behind a shared stop (capacity mode)', () => {
+    const group = (id, order) => stop(id, '08:00', 60, { visit_id: 'V1', route_order: order });
+    const lateCase = (extraRows = [], ctx = {}) => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const rows = [group('A1', 1), group('A2', 2), stop('B', '08:00', 60, { route_order: 3 }), ...extraRows];
+      return run(rows, candidate('15:00', 60), { detail: true }, ctx);
+    };
+
+    test('A1/A2 grouped as 1/2: the late stop B is "Stop 3"', () => {
+      const fit = lateCase();
+      expect(fit.reason).toBe('day_overcommitted');
+      expect(fit.warning).toMatch(/^Route on 2027-03-01: Stop 3 \(8–10 AM window\) would already arrive /);
+    });
+
+    test('grouped plus a completed stop ahead: numbered behind all of them', () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const done = stop('D', '07:00', 30, { status: 'completed', route_order: 1, actual_end_time: `${DATE}T07:40:00-05:00` });
+      const rows = [done, group('A1', 2), group('A2', 3), stop('B', '08:00', 60, { route_order: 4 })];
+      const fit = run(rows, candidate('15:00', 60), { detail: true }, { now: new Date(`${DATE}T06:00:00-05:00`) });
+      expect(fit.warning).toMatch(/Stop 4 \(8–10 AM window\) would already arrive /);
+    });
+
+    test('grouped behind a stop under way: numbered behind it and every member', () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const rows = [stop('U', '08:00', 30, { status: 'on_site', route_order: 1 }), group('A1', 2), group('A2', 3), stop('B', '08:00', 60, { route_order: 4 })];
+      const fit = run(rows, candidate('15:00', 60), { detail: true },
+        { now: new Date(`${DATE}T10:00:00-05:00`), activeStop: { id: 'U', arrived_at: `${DATE}T09:00:00-05:00` } });
+      expect(fit.reason).toBe('day_overcommitted');
+      // U is 1, the group is 2 and 3 (named by its first member), B is 4.
+      expect(fit.warning).toContain('Stop 4 (8–10 AM window) would already arrive 12:40 PM, 160 min late');
+      expect(fit.warning).toContain('Stop 2 (8–10 AM window) would already arrive 10:20 AM, 20 min late');
+    });
+
+    test('ungrouped stops are numbered as before', () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const rows = [stop('A1', '08:00', 60, { route_order: 1 }), stop('A2', '08:00', 60, { route_order: 2 }), stop('B', '08:00', 60, { route_order: 3 })];
+      const fit = run(rows, candidate('15:00', 60), { detail: true });
+      expect(fit.reason).toBe('day_overcommitted');
+      expect(fit.warning).toContain('Stop 3 (8–10 AM window) would already arrive 11 AM, 60 min late');
+    });
+  });
+
   describe('numbering with a stop under way', () => {
     const NOW = new Date(`${DATE}T10:00:00-05:00`);
     const live = (status, stamps) => ({ prospective: false, now: NOW, activeStop: { id: 'U', ...stamps } });

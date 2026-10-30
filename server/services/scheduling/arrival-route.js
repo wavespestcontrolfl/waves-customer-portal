@@ -685,11 +685,13 @@ function stopLabeler(own, target) {
 
 /** The technician's day as it reads: completed stops, then the stop under way (en route or on site) if
  *  any, then the simulated pending order. The simulation drops the first two from the order it runs
- *  (resolvePlacementOrigin), so a stop's number is its place in the order plus how many such stops come
- *  before it. One helper for every sentence that prints a number from a simulated order. */
+ *  (resolvePlacementOrigin), and capacity mode collapses a shared stop's service rows into one entry
+ *  (groupRouteStops) that buildFeasibleResult flattens by `memberIds` when it writes route numbers. So
+ *  a stop's number is the rows ahead of it (those two kinds, plus every member of each earlier entry)
+ *  plus one: the number the save writes. One helper for every sentence taken from a simulated order. */
 function numberInOrder(own, target) {
   const ahead = own.filter(row => ['completed', 'en_route', 'on_site'].includes(row.status) && String(row.id) !== String(target.id)).length;
-  return index => ahead + index + 1;
+  return (order, index) => ahead + order.slice(0, index).reduce((sum, entry) => sum + (entry.memberIds?.length || 1), 0) + 1;
 }
 
 /** The cause of a `route_unverified` answer, in words. `cause` is { code, rows?, startPoint? }. */
@@ -748,7 +750,7 @@ function describeLateness({ date, candidates, baselines, simulate, target, own, 
     const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
     if (!simulation) return null;
     return simulation.arrivals.map((arrival, index) => ({ row: order[index], arrivalMin: arrival.arrivalMin,
-      lateMinutes: arrival.lateMinutes || 0, number: numberOf(index) })).filter(stop => stop.lateMinutes > 0);
+      lateMinutes: arrival.lateMinutes || 0, number: numberOf(order, index) })).filter(stop => stop.lateMinutes > 0);
   };
   // The day WITHOUT the visit: each stop's own arrival and lateness there. A "without this visit"
   // sentence must quote these, never the candidate route's times (which carry the visit's delay). Where
@@ -810,7 +812,7 @@ function describeTightness({ date, candidates, simulate, target, own, rangeForSt
       const range = index > at ? rangeForStop(order[index]) : null;
       if (range == null) return;
       const left = range.endMin - arrival.arrivalMin;
-      if (left < margin && (!tight || left < tight.left)) tight = { row: order[index], arrivalMin: arrival.arrivalMin, left, number: numberOf(index) };
+      if (left < margin && (!tight || left < tight.left)) tight = { row: order[index], arrivalMin: arrival.arrivalMin, left, number: numberOf(order, index) };
     });
     if (tight && (!best || tight.left > best.left)) best = tight;
   }
