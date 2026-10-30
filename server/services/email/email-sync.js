@@ -7,6 +7,52 @@ const { isInternalEmailRecipient } = require('../../utils/internal-email-recipie
 // Prevent concurrent syncs from racing on email_sync_state counters.
 let SYNC_IN_FLIGHT = null;
 
+// Consecutive failed incremental runs (2 minutes apart) per Gmail message id.
+// This process only: a restart starts the count again, which only adds
+// retries. Cleared on success, on 404, and when the message is passed.
+const MESSAGE_RETRY_RUNS = 15;
+const messageFailures = new Map();
+
+// A failed message (not a 404, not a Zelle notice): true while it holds the
+// cursor for a retry next run. After MESSAGE_RETRY_RUNS runs it is passed,
+// once the office has an alert to read it in Gmail.
+async function holdForRetry(gmailId) {
+  const runs = (messageFailures.get(gmailId) || 0) + 1;
+  if (runs >= MESSAGE_RETRY_RUNS && await alertSkippedMessage(gmailId)) {
+    messageFailures.delete(gmailId);
+    return false;
+  }
+  messageFailures.set(gmailId, runs);
+  return true;
+}
+
+// The record of a message the incremental sync passes after
+// MESSAGE_RETRY_RUNS failed runs: one needs-you alert per message, so the
+// office reads it in Gmail. True when the alert stands (written now, already
+// open, or muted by the bell policy); otherwise the cursor stays held and the
+// next run asks again.
+async function alertSkippedMessage(gmailId) {
+  try {
+    const { raiseAdminAlert } = require('../admin-alert-compose');
+    const alert = await raiseAdminAlert('alert', {
+      area: 'Comms',
+      action: 'read a skipped email in Gmail',
+      why: 'An incoming email kept failing to save, so the portal inbox skipped it.',
+      severity: 'needs-you',
+      link: '/admin/communications#tab=email',
+      subject: { type: 'check', id: String(gmailId) },
+      doneWhen: 'office_checked',
+      who: 'person',
+    }, {
+      bell: true, dedupeKey: `email-sync-skip:${gmailId}`, metadata: { gmailId }, detail: `Gmail message id: ${gmailId}`,
+    });
+    return Boolean(alert);
+  } catch (err) {
+    logger.error(`[email-sync] skipped-message alert failed for ${gmailId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function syncEmails() {
   if (SYNC_IN_FLIGHT) return SYNC_IN_FLIGHT;
   SYNC_IN_FLIGHT = (async () => {
@@ -176,36 +222,44 @@ async function incrementalSync(state) {
 
     if (history.historyId) latestHistoryId = history.historyId;
 
-    // A Zelle notice whose retry record could not be written (err.zelleRetryLost)
-    // has NO durable trace — neither a claim nor a mark — so advancing the
-    // cursor past it would skip the payment for good. Keep the previous
-    // cursor for that run (upserts are idempotent; the next run re-lists it).
-    let cursorWithheld = false;
+    // A message that failed (fetch or store, anything but 404) keeps the
+    // previous cursor, so the next run re-lists it; Gmail never offers it
+    // again once the cursor passes it (upserts are idempotent). A Zelle
+    // notice whose retry record could not be written (err.zelleRetryLost)
+    // has no durable trace at all, so it holds the cursor for as long as it
+    // fails. Any other message is held for MESSAGE_RETRY_RUNS runs, then
+    // passed once the office has an alert to read it in Gmail: one message
+    // that always fails must not hold the cursor until the backlog forces a
+    // whole-mailbox full sync.
+    let held = 0;
     for (const msgId of messageIds) {
       try {
+        // The cursor advances only to the listing's own historyId. A message
+        // changed after the listing carries a later historyId; moving the
+        // cursor there would pass changes made in between, such as an email
+        // that arrived during this loop.
         const parsed = await gmailClient.getMessage(msgId);
         const inserted = await upsertEmail(parsed);
+        messageFailures.delete(msgId);
         if (inserted) newEmails++;
-        if (parsed.historyId && parsed.historyId > latestHistoryId) {
-          latestHistoryId = parsed.historyId;
-        }
       } catch (err) {
         if (err.code === 404 || err.response?.status === 404) {
+          messageFailures.delete(msgId);
           await db('emails').where('gmail_id', msgId).update({
             is_archived: true,
             updated_at: new Date(),
           });
         } else {
-          if (err.zelleRetryLost) cursorWithheld = true;
           logger.warn(`[email-sync] Failed to fetch message ${msgId}: ${err.message}`);
+          if (err.zelleRetryLost || await holdForRetry(msgId)) held += 1;
         }
       }
     }
 
     await db('email_sync_state').where('id', state.id).update({
-      last_history_id: cursorWithheld ? state.last_history_id : latestHistoryId,
+      last_history_id: held ? state.last_history_id : latestHistoryId,
       last_sync_at: new Date(),
-      errors: cursorWithheld ? 'incremental sync incomplete: a Zelle notice retry could not be recorded — cursor withheld, retrying next run' : null,
+      errors: held ? `incremental sync incomplete: ${held} message(s) failed — cursor withheld, retrying next run` : null,
     });
     if (newEmails > 0) {
       await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
@@ -276,6 +330,45 @@ async function offerZelleNotice(email, { backfill }) {
     }
     return true; // marked = owned until the reconciler decides
   }
+}
+
+const attachmentRow = (emailId, att) => ({
+  email_id: emailId,
+  gmail_attachment_id: att.gmail_attachment_id,
+  filename: att.filename,
+  mime_type: att.mime_type,
+  size_bytes: att.size_bytes,
+});
+
+// Rows stored without attachment rows by design (see the outbound and
+// blocked-sender branches of upsertEmail).
+const SKIPPED_STORE_ACTIONS = new Set(['outbound_skipped', 'blocked_sender_trashed']);
+
+// A row whose attachment rows were cut short before they committed with it
+// gets the missing ones back when Gmail lists the message again. Insert
+// only: the invoice processor keeps its results on the stored rows. Gmail
+// attachment ids change between fetches, so a file is matched on name, type
+// and size, counted (two identical files stay two rows). The email row lock
+// keeps two syncs from adding the same file twice.
+async function addMissingAttachmentRows(emailId, attachments) {
+  if (!attachments?.length) return;
+  // Every re-list of a complete row stops here, without a lock.
+  const [{ count }] = await db('email_attachments').where('email_id', emailId).count('* as count');
+  if (Number(count) >= attachments.length) return;
+  const fileKey = (a) => JSON.stringify([a.filename || '', a.mime_type || '', Number(a.size_bytes) || 0]);
+  await db.transaction(async (trx) => {
+    await trx('emails').where('id', emailId).forUpdate().first('id');
+    const stored = new Map();
+    for (const row of await trx('email_attachments').where('email_id', emailId).select('filename', 'mime_type', 'size_bytes')) {
+      stored.set(fileKey(row), (stored.get(fileKey(row)) || 0) + 1);
+    }
+    const missing = attachments.filter((att) => {
+      const left = stored.get(fileKey(att)) || 0;
+      stored.set(fileKey(att), left - 1);
+      return left <= 0;
+    });
+    if (missing.length) await trx('email_attachments').insert(missing.map((att) => attachmentRow(emailId, att)));
+  });
 }
 
 async function upsertEmail(parsed, { backfill = false } = {}) {
@@ -391,6 +484,8 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),
     });
+    // Outbound copies and blocked senders never get attachment rows.
+    if (!SKIPPED_STORE_ACTIONS.has(existing.auto_action)) await addMissingAttachmentRows(existing.id, parsed.attachments);
     return false; // not new
   }
 
@@ -447,7 +542,17 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // trusted notice — flow as ordinary mail) clears it below.
   const preMarked = !backfill && isZelleReconcileEnabled() && isZelleNoticeCandidate(emailData);
   if (preMarked) emailData.auto_action = ZELLE_RETRY_MARK;
-  const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
+  // The row and its attachment rows commit together: a failed attachment
+  // insert rolls the email back as well, so the message fails and the sync
+  // retries it whole. A row committed alone would take the existing-row path
+  // on the retry, which never stored the rest.
+  const inserted = await db.transaction(async (trx) => {
+    const rows = await trx('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
+    if (rows.length && parsed.attachments?.length > 0) {
+      await trx('email_attachments').insert(parsed.attachments.map((att) => attachmentRow(rows[0].id, att)));
+    }
+    return rows;
+  });
   if (!inserted.length) {
     // Lost the insert race with a concurrent sync — already stored. The
     // winner may have died after its insert and before the Zelle hook: its
@@ -507,19 +612,6 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       }),
     });
     email.list_unsubscribe = parsed.list_unsubscribe;
-  }
-
-  // Store attachment metadata
-  if (parsed.attachments?.length > 0) {
-    for (const att of parsed.attachments) {
-      await db('email_attachments').insert({
-        email_id: email.id,
-        gmail_attachment_id: att.gmail_attachment_id,
-        filename: att.filename,
-        mime_type: att.mime_type,
-        size_bytes: att.size_bytes,
-      });
-    }
   }
 
   // Newsletter proof-approval replies are deterministic control messages —

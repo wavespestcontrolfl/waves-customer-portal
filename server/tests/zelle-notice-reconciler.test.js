@@ -575,7 +575,8 @@ describe('sync wiring', () => {
     // the insert (never for backfill history, never with the gate off), the
     // race loser offers only a marked winner row, and the existing-email
     // branch re-offers ONLY marked rows (never a gate-flip replay of history).
-    expect(src).toMatch(/const preMarked = !backfill && isZelleReconcileEnabled\(\) && isZelleNoticeCandidate\(emailData\);\s*if \(preMarked\) emailData\.auto_action = ZELLE_RETRY_MARK;\s*const inserted = await db\('emails'\)\.insert\(emailData\)/);
+    // (The insert runs in the transaction that also stores the attachment rows.)
+    expect(src).toMatch(/const preMarked = !backfill && isZelleReconcileEnabled\(\) && isZelleNoticeCandidate\(emailData\);\s*if \(preMarked\) emailData\.auto_action = ZELLE_RETRY_MARK;\s*(?:\/\/[^\n]*\n\s*)*const inserted = await db\.transaction\(async \(trx\) => \{\s*const rows = await trx\('emails'\)\.insert\(emailData\)/);
     // A false verdict releases the insert-time mark (only while it is still the mark) BEFORE classification runs.
     expect(src.indexOf('if (preMarked && !zelleHandled) {')).toBeLessThan(src.indexOf("require('./email-classifier')"));
     expect(src).toMatch(/if \(preMarked && !zelleHandled\) \{\s*await db\('emails'\)\.where\(\{ id: email\.id, auto_action: ZELLE_RETRY_MARK \}\)\.update\(\{ auto_action: null/);
@@ -586,9 +587,10 @@ describe('sync wiring', () => {
     expect(src).toMatch(/if \(!marked\) \{[\s\S]{0,200}throw err;\s*\}\s*return true;/);
     // A 0-row mark (auto_action already set by something other than the reconciler) is NOT a durable record.
     expect(src).toMatch(/startsWith\('zelle_notice'\)/);
-    // A lost retry record withholds the INCREMENTAL cursor too (fullSync already withholds on any failed message).
-    expect(src).toMatch(/if \(err\.zelleRetryLost\) cursorWithheld = true;/);
-    expect(src).toMatch(/last_history_id: cursorWithheld \? state\.last_history_id : latestHistoryId/);
+    // A lost retry record withholds the INCREMENTAL cursor too, with no retry cap (any other failed message holds
+    // it for a capped number of runs; fullSync already withholds on any failed message).
+    expect(src).toMatch(/if \(err\.zelleRetryLost \|\| await holdForRetry\(msgId\)\) held \+= 1;/);
+    expect(src).toMatch(/last_history_id: held \? state\.last_history_id : latestHistoryId/);
     // The insert-race loser reloads the winner's row and offers it only while it carries the insert-time mark.
     expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.auto_action === ZELLE_RETRY_MARK[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
     expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
