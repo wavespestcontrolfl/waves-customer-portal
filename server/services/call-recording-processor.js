@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { heardAboutFromCallReferral } = require('./heard-about');
 const { applyAssignable, isAssignable, assertAssignableTechnician } = require('./technician-eligibility');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
@@ -5699,7 +5700,7 @@ function deriveStampLinkAuthority({ phone, existingLeadVia, priorStampedLeadVia,
 // later attempt rejects the call. One list so the stamp and the restore can
 // never drift.
 const STAMPED_LEAD_RESTORE_FIELDS = [
-  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip',
+  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip', 'heard_about',
   'service_interest', 'urgency', 'transcript_summary', 'extracted_data',
   'is_qualified', 'status', 'next_follow_up_at', 'customer_id',
 ];
@@ -5757,7 +5758,7 @@ function snapshotStampedLeadStates(leadRow, leadUpdates) {
 // fill-only behavior (codex P2 r17). Re-decided against the LOCKED row
 // inside the transaction; keep this list in step with the fill-if-empty
 // assignments in Step 4b.
-const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'];
+const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip', 'heard_about'];
 
 function dropFilledLeadColumns(leadUpdates, lockedLead) {
   if (!lockedLead || !leadUpdates) return leadUpdates;
@@ -17260,6 +17261,17 @@ const CallRecordingProcessor = {
           // kill-switch mode.
           const leadAddressShape = analyzeLeadAddress(extracted.address_line1, extracted.address_line2);
           const composedLeadAddress = leadAddressShape.address;
+          // "How did you hear about us?" from the call itself: the V2
+          // reader's customer_history.referral_source, mapped onto the
+          // quote-form allowlist (null when the caller named no clear
+          // channel). Read from V2 directly in every mode, like the quote
+          // signals: it is a standalone attribute with no V1 counterpart,
+          // so there is no V1 field it could be glued onto.
+          const callHeardAbout = heardAboutFromCallReferral(
+            v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
+              ? v2Result.extraction?.customer_history?.referral_source
+              : null,
+          );
           if (leadAddressShape.unitConflict && !bridgeNeedsConfirmation.includes('address_unit_conflict')) {
             bridgeNeedsConfirmation.push('address_unit_conflict');
           }
@@ -17294,6 +17306,7 @@ const CallRecordingProcessor = {
             if (composedLeadAddress && isEmpty(current?.address)) leadUpdates.address = composedLeadAddress;
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
+            if (callHeardAbout && isEmpty(current?.heard_about)) leadUpdates.heard_about = callHeardAbout;
             // Multi-service calls: matched_service is single-slot, so append the
             // requested families it doesn't cover ("pest and lawn" must not
             // price as pest-only). Fill-if-empty semantics unchanged.
@@ -17811,6 +17824,7 @@ const CallRecordingProcessor = {
                     resupply('address', composedLeadAddress);
                     resupply('city', extracted.city);
                     resupply('zip', extracted.zip);
+                    resupply('heard_about', callHeardAbout);
                     if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
                       leadUpdates.service_interest = serviceInterestLabel;
                       persistedServiceInterestLabel = serviceInterestLabel;
@@ -17881,6 +17895,7 @@ const CallRecordingProcessor = {
                   address: composedLeadAddress,
                   city: extracted.city,
                   zip: extracted.zip,
+                  heard_about: callHeardAbout,
                 };
                 for (const [f, v] of Object.entries(reaffirmedFilledLeadFields(suppliedIdentity, lockedLead))) {
                   const sv = serializeStampedLeadValue(f, v);

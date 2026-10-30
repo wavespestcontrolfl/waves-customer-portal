@@ -66,6 +66,37 @@ function heardAboutFillIfEmpty(db, { heardAbout, heardAboutPrompt } = {}) {
   };
 }
 
+// Calls: the call reader's customer_history.referral_source is free text the
+// model fills only when a caller says how they found Waves (29 of 343 calls,
+// 2026-09-28..10-29 — "google", "ai", "chatgpt", "online reviews", "son is a
+// waves customer", sometimes a referrer's name). Mapped onto the SAME
+// allowlist; text that names no channel clearly (a bare name, "website",
+// "online", "online reviews", "chat") stays null — unknown stays unknown.
+// Order matters: AI first; "next-door neighbor" is a person, not the
+// Nextdoor app; Google Maps before Google search. "claude" is left out on
+// purpose: it is also a first name.
+const CALL_REFERRAL_RULES = [
+  ['chatgpt', /\bchat\s*gpt\b|\bopen\s*ai\b/],
+  ['other_ai', /\bai\b|\ba\.i\.?|\bartificial intelligence\b|\b(gemini|perplexity|copilot|chatbot)\b/],
+  ['friend_neighbor', /\bnext[\s-]?door neighbou?rs?\b/],
+  ['nextdoor', /\bnext[\s-]?door\b/],
+  ['google_maps', /\bgoogle maps?\b/],
+  ['google_search', /\bgoogl(e|ed|ing)\b|\b(online|internet|web) search\b|\bsearch(ed|ing)? (online|the internet|the web)\b/],
+  ['facebook_instagram', /\bfacebook\b|\binstagram\b|\bfb\b/],
+  ['yelp', /\byelp\b/],
+  ['truck_yard_sign', /\b(trucks?|vans?|yard signs?)\b/],
+  ['friend_neighbor', /\b(friends?|neighbou?rs?|family|word of mouth|referr(ed|al)|recommend(ed|ation)?|son|daughter|mother|mom|father|dad|wife|husband|brother|sister|cousin|aunt|uncle|relatives?|co-?workers?)\b/],
+];
+
+function heardAboutFromCallReferral(text) {
+  if (typeof text !== 'string') return null;
+  const s = text.slice(0, 300).toLowerCase();
+  for (const [value, re] of CALL_REFERRAL_RULES) {
+    if (re.test(s)) return sanitizeHeardAbout(value);
+  }
+  return null;
+}
+
 module.exports = {
   HEARD_ABOUT_OPTIONS,
   HEARD_ABOUT_PROMPT_MAX,
@@ -74,4 +105,5 @@ module.exports = {
   sanitizeHeardAboutPrompt,
   heardAboutFromBody,
   heardAboutFillIfEmpty,
+  heardAboutFromCallReferral,
 };
