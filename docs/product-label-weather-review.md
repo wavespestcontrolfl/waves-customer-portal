@@ -60,11 +60,13 @@ answer (`inactive`, "EPA registration cancelled or label removed"), not an outag
 An unavailable EPA source (no answer) uses the last check that got an answer for
 the same filename and checksum, up to 7 days old (owner 2026-10-30,
 `epa-label-check-keep.js`): each answer is kept in `system_settings`
-(`epa_label_check:*`, at most one write an hour while it is unchanged), so a deploy
-does not lose it, and a kept `superseded` or `inactive` is never replaced by an
-older `current`. With no such answer the review is inactive and the verdict
-UNKNOWN. Approval never uses the kept answer. Source requests happen outside
-catalog transactions and make no model calls.
+(`epa_label_check:*`), so a deploy does not lose it. Answers are ordered by the
+time EPA gave them (`checkEpaSource`; a cached answer keeps its time): a newer
+`superseded` or `inactive` is written at once, a newer `current` at most once an
+hour, and a write never replaces a newer stored answer. With no kept answer the
+review is inactive and the verdict UNKNOWN. Approval always checks fresh and never
+uses a kept answer; its own answer is kept for the reads that follow. Source
+requests happen outside catalog transactions and make no model calls.
 
 Conditional restrictions remain UNKNOWN unless another reviewed limit already
 establishes HOLD. If no numeric limit is established, the card stays UNKNOWN.

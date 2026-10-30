@@ -59,7 +59,7 @@ postgres('kept EPA label check against migrated PostgreSQL', () => {
     await keptEpaSourceStatus(source, { dbh: trx });
     // Process A got 'current' at 12:00 but could not save it; it retries during an outage at 12:10.
     _test.seen.clear();
-    _test.seen.set(_test.keyOf(source), { status: 'current', at: Date.parse('2040-01-01T12:00:00Z'), savedAt: null });
+    _test.seen.set(_test.keyOf(source), { status: 'current', at: Date.parse('2040-01-01T12:00:00Z'), savedFor: null, savedAt: null });
     now = Date.parse('2040-01-01T12:10:00Z');
     expect(await keptEpaSourceStatus(source, { dbh: trx })).toBe('inactive');
     expect(await stored()).toMatchObject({ status: 'inactive', checkedAt: '2040-01-01T12:05:00.000Z' });

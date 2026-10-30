@@ -66,7 +66,7 @@ function selectEpaSource(payload, registration) {
   const matches = (payload?.items || []).filter((item) => item.eparegno === registration);
   if (matches.length !== 1 || matches[0].product_status !== 'Active' || matches[0].cancel_flag !== 'No') {
     // inactive: EPA's own record for this number says it is cancelled or not active. An empty or doubled answer is
-    // not proof of that (currentEpaSourceStatus reads it as an outage).
+    // not proof of that (checkEpaSource reads it as an outage).
     throw Object.assign(labelError('No single active EPA registration matched. Check the catalog registration.'), { inactive: matches.length === 1 });
   }
   const item = matches[0];
@@ -245,6 +245,7 @@ async function sourceStatusNow(source) {
 
 // EPA's answer for a reviewed source and the time it came (ms): { status, checkedAt }; status is current, superseded,
 // inactive or unavailable. Cached 60 seconds: a cached answer keeps the time EPA gave it, so it never reads as newer.
+// Read it through epa-label-check-keep.js, which keeps every answer.
 async function checkEpaSource(source, { refresh = false } = {}) {
   const key = `${source?.registration}:${source?.filename}:${source?.sha256}`;
   const cached = sourceChecks.get(key);
@@ -255,8 +256,5 @@ async function checkEpaSource(source, { refresh = false } = {}) {
   return promise;
 }
 
-async function currentEpaSourceStatus(source, options) {
-  return (await checkEpaSource(source, options)).status;
-}
 
-module.exports = { findEpaRegistrationByName, findEpaLabel, downloadEpaLabel, selectEpaSource, checkEpaSource, currentEpaSourceStatus, labelError };
+module.exports = { findEpaRegistrationByName, findEpaLabel, downloadEpaLabel, selectEpaSource, checkEpaSource, labelError };

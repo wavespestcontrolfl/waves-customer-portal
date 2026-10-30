@@ -24,7 +24,7 @@ jest.mock('../services/epa-product-label', () => ({ checkEpaSource: jest.fn() })
 
 const db = require('../models/db');
 const { checkEpaSource } = require('../services/epa-product-label');
-const { keptEpaSourceStatus, _test } = require('../services/epa-label-check-keep');
+const { keptEpaSourceStatus, freshEpaSourceStatus, _test } = require('../services/epa-label-check-keep');
 
 const source = { registration: '91234-401', filename: '091234-00401-20251216.pdf', sha256: 'a'.repeat(64) };
 const DAY = 24 * 3600000;
@@ -92,6 +92,20 @@ test('a cached answer read again keeps the time EPA gave it, so another process\
   expect(await keptEpaSourceStatus(source)).toBe('inactive');
 });
 
+test('approval checks fresh and never takes the kept answer, but its answer is kept for later reads (pre-push audit P1)', async () => {
+  answers('current', 'inactive');
+  expect(await keptEpaSourceStatus(source)).toBe('current');
+  now += 60000;
+  expect(await freshEpaSourceStatus(source)).toBe('inactive');
+  expect(checkEpaSource).toHaveBeenLastCalledWith(source, { refresh: true });
+  // The 60-second cache has expired and EPA does not answer: the read says cancelled, not the older current.
+  now += 120000;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+  expect(JSON.parse(db.rows.values().next().value.value).status).toBe('inactive');
+  // An outage at approval is an outage, whatever is kept.
+  expect(await freshEpaSourceStatus(source)).toBe('unavailable');
+});
+
 test('the same answer is written at most once an hour', async () => {
   checkEpaSource.mockImplementation(async () => ({ status: 'current', checkedAt: Date.now() }));
   await keptEpaSourceStatus(source);
@@ -117,6 +131,19 @@ test('a newer answer that failed to save still beats the stored older one, and i
   expect(JSON.parse(db.rows.values().next().value.value).status).toBe('inactive');
   _test.seen.clear();
   expect(await keptEpaSourceStatus(source)).toBe('inactive');
+});
+
+test('a newer "changed" or "cancelled" answer is written at once; a cached one read again is not written twice', async () => {
+  checkEpaSource.mockImplementation(async () => ({ status: 'inactive', checkedAt: Date.now() }));
+  await keptEpaSourceStatus(source);
+  now += 60000;
+  await keptEpaSourceStatus(source);
+  expect(db).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(db.rows.values().next().value.value).checkedAt).toBe('2026-10-30T12:01:00.000Z');
+  // The same cached answer (same EPA time) read again writes nothing.
+  checkEpaSource.mockResolvedValue({ status: 'inactive', checkedAt: now });
+  await keptEpaSourceStatus(source);
+  expect(db).toHaveBeenCalledTimes(2);
 });
 
 test('a database error never fails the check; a source with no checksum is never kept', async () => {
