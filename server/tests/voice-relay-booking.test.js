@@ -28,11 +28,15 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../services/scheduling/line-technician', () => {
   const actual = jest.requireActual('../services/scheduling/line-technician');
-  return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
+  return {
+    ...actual,
+    recordLinePickShadow: jest.fn(actual.recordLinePickShadow),
+    serviceLineFor: jest.fn(actual.serviceLineFor),
+  };
 });
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
-  serviceLineMapMode: () => (process.env.GATE_SERVICE_LINE_MAP === 'shadow' ? 'shadow' : 'off'),
+  serviceLineMapMode: () => (['shadow', 'live'].includes(process.env.GATE_SERVICE_LINE_MAP) ? process.env.GATE_SERVICE_LINE_MAP : 'off'),
 }));
 // ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
 // once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
@@ -901,6 +905,43 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     await executeTool('request_booking', GOOD_INPUT, slotCtx());
     const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
     expect(call[0]).not.toHaveProperty('serviceIdentity');
+  });
+
+  // Build 4 (GATE_SERVICE_LINE_MAP=live): the booked service's line rides to the re-check as
+  // `serviceLines` (NOT an identity: the line rule changes no geometry), so the saved technician is
+  // the line's. Not live: nothing is read and nothing is passed.
+  describe('service-line map', () => {
+    const lineTech = require('../services/scheduling/line-technician');
+    afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; lineTech.serviceLineFor.mockClear(); });
+
+    test('live: the re-check passes [line] of the resolved catalog row, and still no serviceIdentity', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lineTech.serviceLineFor.mockResolvedValueOnce({ line: 'lawn', lineFrom: 'catalog' });
+      await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+      expect(call[0].serviceLines).toEqual(['lawn']);
+      expect(call[0]).not.toHaveProperty('serviceIdentity');
+      expect(lineTech.serviceLineFor).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ serviceType: PEST_ROW.name }));
+    });
+
+    test('live but the service has no line: nothing passed', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lineTech.serviceLineFor.mockResolvedValueOnce({ line: null, lineFrom: null });
+      await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+      expect(call[0].serviceLines).toBeUndefined();
+    });
+
+    test('shadow or off: no line read and nothing passed', async () => {
+      for (const mode of [undefined, 'shadow']) {
+        if (mode) process.env.GATE_SERVICE_LINE_MAP = mode; else delete process.env.GATE_SERVICE_LINE_MAP;
+        booking.buildBookingAvailability.mockClear();
+        await executeTool('request_booking', GOOD_INPUT, slotCtx());
+        const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+        expect(call[0].serviceLines).toBeUndefined();
+      }
+      expect(lineTech.serviceLineFor).not.toHaveBeenCalled();
+    });
   });
 
   test('the probe never covers LESS than the written duration, even if the offered end is short', async () => {

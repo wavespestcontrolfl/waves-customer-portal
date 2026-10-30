@@ -16,13 +16,15 @@
  *      active; it never names anyone outside the list from step 1. Otherwise
  *      the office chooses: the visit stays unassigned.
  *   4. Nobody → unassigned.
+ * With GATE_SERVICE_LINE_MAP=live, a line that has a home or gap technician set
+ * decides first, among the step 1 list (line_home | line_gap | line_none).
  * Reads only. Never throws: a failed read is "unassigned, lookup_failed" so the
  * save is never blocked. The caller says so in the response and the modal warns.
  */
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
-const { serviceLineFor } = require('./line-technician');
+const { serviceLineFor, lineMapLive, pickLineTechnician } = require('./line-technician');
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 
@@ -48,7 +50,7 @@ async function assignableTechnicians(conn, { day, serviceId, serviceKey, service
 /**
  * @returns {Promise<{technicianId: string|null, result: 'assigned'|'unassigned', reason: string}>}
  *   reason: only_assignable | scheduling_pick | none_assignable | several_assignable |
- *           none_free | lookup_failed
+ *           none_free | lookup_failed | line_home | line_gap | line_none
  */
 async function resolveOfficeAutoTechnician({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = 60,
@@ -59,6 +61,17 @@ async function resolveOfficeAutoTechnician({
     if (!day) return unassigned('lookup_failed');
     const techs = await assignableTechnicians(conn, { day, serviceId, serviceKey, serviceType });
     if (!techs.length) return unassigned('none_assignable');
+
+    // Service-line map LIVE: the line's home technician, else its gap technician, among
+    // the technicians above. A line with nobody set (or the gate not live) falls through.
+    if (lineMapLive()) {
+      const line = await pickLineTechnician(conn, {
+        serviceId, serviceKey, serviceType, date: day, windowStart, windowEnd, durationMinutes,
+        excludeCustomerId: customerId, candidateIds: techs.map((t) => t.id),
+        checkFree: require('./pick-technician').pickTechnicianActive(),
+      });
+      if (line.mapped) return line.technicianId ? assigned(line.technicianId, line.reason === 'home' ? 'line_home' : 'line_gap') : unassigned('line_none');
+    }
     if (techs.length === 1) return assigned(techs[0].id, 'only_assignable');
 
     const picker = require('./pick-technician');
