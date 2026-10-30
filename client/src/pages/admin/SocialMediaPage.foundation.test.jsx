@@ -307,6 +307,21 @@ describe("Social media stale copy, failed reads and dismissal", () => {
     expect(saveBody().city).toBe("Bradenton");
   });
 
+  it("does not restore the saved preview when the form changed while the save was pending", async () => {
+    let release;
+    routeFetch([["/admin/social-media/campaign-builder/save", () => new Promise((resolve) => { release = resolve; })]]);
+    renderPage();
+    await screen.findByText("Local Campaign");
+    fireEvent.click(screen.getByRole("button", { name: "Generate Drafts" }));
+    await screen.findByDisplayValue("Synthetic Facebook draft");
+    fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    fireEvent.change(screen.getByDisplayValue("Sarasota"), { target: { value: "Venice" } });
+    const savedPreview = fixtureFor("/admin/social-media/campaign-builder/preview", { method: "POST" });
+    await act(async () => { release(response({ success: true, preview: savedPreview })); });
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled();
+  });
+
   it("ignores a campaign preview that returns after the form changed", async () => {
     let release;
     routeFetch([["/admin/social-media/campaign-builder/preview", () => new Promise((resolve) => { release = resolve; })]]);

@@ -1408,6 +1408,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
   };
   const saveDraft = async () => {
     if (!preview) return;
+    const gen = previewGen.current;
     setSaving(true);
     try {
       const result = await adminFetch("/admin/social-media/campaign-builder/save", {
@@ -1418,7 +1419,9 @@ function CampaignBuilderTab({ showToast, onSaved }) {
           preview: { ...preview, drafts },
         }),
       });
-      if (result.preview) setPreview(result.preview);
+      // A source edit while the save was in flight already dropped this
+      // preview; the saved copy must not come back as the current one.
+      if (result.preview && gen === previewGen.current) setPreview(result.preview);
       showToast("Campaign saved as social draft");
       onSaved();
     } catch (e) {
