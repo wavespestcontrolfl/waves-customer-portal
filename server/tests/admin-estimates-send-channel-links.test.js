@@ -95,6 +95,7 @@ const EmailTemplateLibrary = require('../services/email-template-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const smsTemplates = require('../routes/admin-sms-templates');
+const AutomationRunner = require('../services/automation-runner');
 
 function estimateRow(overrides = {}) {
   return {
@@ -162,6 +163,11 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     const patches = deliveryPatches();
     expect(patches.length).toBeGreaterThan(0);
     expect(patches[0].deliveryState.firstDeliveredAt).toBeTruthy();
+    // The follow-up enrollment carries this estimate's id: the runner drops
+    // the follow-up once it is accepted (owner 2026-10-29).
+    expect(AutomationRunner.enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'estimate_sent', context: { estimateId: 'est-1' },
+    }));
   });
 
   test('a resend carries the ORIGINAL firstDeliveredAt forward — sent_at inflation never reaches the witness', async () => {
