@@ -112,8 +112,15 @@ function pickTechResponseFields(tech, fields) {
   return out;
 }
 
-function sanitizeTechForNonAdmin(tech) {
-  return pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+// A technician reads the roster for names and status only: a coworker's phone
+// and email are office-only (owner 2026-10-30); the caller's own row keeps them.
+function sanitizeTechForNonAdmin(tech, viewerId) {
+  const out = pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+  if (out && out.id !== viewerId) {
+    delete out.phone;
+    delete out.email;
+  }
+  return out;
 }
 
 function sanitizeTechForAdmin(tech) {
@@ -787,7 +794,7 @@ async function listTechnicians(req, res, next) {
         capability_summary: summaries.get(t.id),
         ...(hiredPacket ? hireLinkState(t, now) : {}),
       };
-      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row, req.technicianId);
     }));
     res.json({
       technicians: enriched,
@@ -1864,7 +1871,7 @@ router.post(
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated);
+      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated, req.technicianId);
       res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);

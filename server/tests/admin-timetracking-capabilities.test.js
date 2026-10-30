@@ -347,6 +347,29 @@ describe('roster summary + new-hire seed', () => {
     expect(asTech.body.technicians[0]).not.toHaveProperty('pay_rate');
   });
 
+  test('GET /technicians: a technician reads its own phone and email but never a coworker\'s; an admin reads both', async () => {
+    const techs = [
+      { ...TECH, phone: '+19415550100' },
+      { ...TECH, id: 'tech-2', name: 'Tech #2', email: 'tech2@example.com', phone: '+19415550101' },
+    ];
+    installDb(jest.fn((table) => {
+      if (table === 'technicians') return makeChain({ rows: techs });
+      if (table === 'technician_capabilities') return makeChain({ rows: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    }));
+    const asSelf = await invoke(listTechnicians, { technician: { id: 'tech-2', role: 'technician' }, technicianId: 'tech-2' });
+    const [coworker, self] = asSelf.body.technicians;
+    expect(coworker).toMatchObject({ id: 'tech-1', name: 'Jordan Reyes' });
+    expect(coworker).not.toHaveProperty('phone');
+    expect(coworker).not.toHaveProperty('email');
+    expect(self).toMatchObject({ id: 'tech-2', phone: '+19415550101', email: 'tech2@example.com' });
+    const asAdmin = await invoke(listTechnicians, { technician: { id: 'adam', role: 'admin' }, technicianId: 'adam' });
+    expect(asAdmin.body.technicians.map((t) => [t.phone, t.email])).toEqual([
+      ['+19415550100', 'jordan@wavespestcontrol.com'],
+      ['+19415550101', 'tech2@example.com'],
+    ]);
+  });
+
   test('GATE_TECH_WORK_DAYS: the roster carries work_days and workDaysEnabled only while the gate is on; non-admin readers never see work_days', async () => {
     const techs = [{ ...TECH, work_days: [1, 2, 3, 4] }];
     const conn = jest.fn((table) => {

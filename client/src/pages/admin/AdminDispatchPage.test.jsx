@@ -126,6 +126,17 @@ describe("AdminDispatchPage", () => {
     expect(screen.queryByText("Dispatch board workspace")).not.toBeInTheDocument();
   });
 
+  it("offers Add Appointment to an admin only (creating a visit is office-only on the server)", () => {
+    renderSchedule("/admin/dispatch?tab=schedule");
+    expect(screen.getByRole("button", { name: "Add Appointment" })).toBeInTheDocument();
+    cleanup();
+
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    renderSchedule("/admin/dispatch?tab=schedule");
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Appointment" })).not.toBeInTheDocument();
+  });
+
   it("exposes every Schedule section in the mobile tab strip", () => {
     renderSchedule("/admin/dispatch?tab=schedule");
 
