@@ -11,7 +11,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // Every lane open: the fence under test is the only thing that can hold a row.
-jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => true, sameQuestionCheckLive: () => true }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => true, sameQuestionCheckLive: () => mockSameQuestionLive }));
+let mockSameQuestionLive = true;
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const queue = require('../services/content/opportunity-queue');
@@ -281,6 +282,20 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     const blocked = await refresh.enqueueOwnerRefresh({ ...args, tokens: ['fungus'], question: 'fungus on st augustine' }, { protectedPages });
     expect(blocked).toMatchObject({ queued: false, reason: 'page_edit_in_flight' });
     expect((await mockPg('opportunity_queue').where({ bucket: 'same_question_refresh' }).count('* as n').first()).n).toBe('0');
+  });
+
+  test('rollback: with GATE_SAME_QUESTION_CHECK off a pending same_question_refresh row stops reserving its page (claimed / review rows still do)', async () => {
+    const refreshAudit = require('../services/seo/refresh-audit');
+    const find = () => refreshAudit.findInflightPageEdit(mockPg, { path: SLUG.replace(/\/$/, ''), targetDomain: 'wavespestcontrol.com' });
+    try {
+      await mockPg('opportunity_queue').insert(sameQuestionRefresh());
+      mockSameQuestionLive = true;
+      expect(await find()).toBeTruthy();
+      mockSameQuestionLive = false;
+      expect(await find()).toBeUndefined();
+      await mockPg('opportunity_queue').update({ status: 'claimed', claimed_at: new Date() });
+      expect(await find()).toBeTruthy();
+    } finally { mockSameQuestionLive = true; }
   });
 
   test('unrelated routes and rows without a question are unaffected', async () => {

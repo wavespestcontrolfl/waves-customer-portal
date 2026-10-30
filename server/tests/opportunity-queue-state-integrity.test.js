@@ -874,4 +874,14 @@ describe('same_question_refresh lane fence (kill-switch + cooldown contract, GAT
     await queue.peek({});
     expect(q._filters).not.toEqual(expect.arrayContaining([['not', 'bucket', 'same_question_refresh']]));
   });
+
+  test('releaseDisabledSameQuestionReservations only narrows the query while the gate is off', () => {
+    const q = { whereRaw: jest.fn(() => q) };
+    process.env.GATE_SAME_QUESTION_CHECK = 'true';
+    queue._internals.releaseDisabledSameQuestionReservations(q);
+    expect(q.whereRaw).not.toHaveBeenCalled();
+    delete process.env.GATE_SAME_QUESTION_CHECK;
+    queue._internals.releaseDisabledSameQuestionReservations(q);
+    expect(q.whereRaw).toHaveBeenCalledWith(`NOT (bucket = 'same_question_refresh' AND status = 'pending')`);
+  });
 });

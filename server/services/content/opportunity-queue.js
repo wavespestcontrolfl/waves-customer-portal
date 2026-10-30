@@ -164,6 +164,17 @@ function sameQuestionLaneOpen() {
   }
 }
 
+// Rollback hygiene for the same_question_refresh lane: with the gate off a
+// PENDING row cannot be claimed, so it must not keep reserving its page against
+// ordinary page-edit producers (refresh-audit, intercept and citability
+// seeders, the miner's fences) until it expires. Claimed and review rows are
+// real in-flight work and keep their reservation. Applied to a knex query that
+// reads in-flight page edits; a no-op while the gate is on.
+function releaseDisabledSameQuestionReservations(query) {
+  if (sameQuestionLaneOpen()) return query;
+  return query.whereRaw(`NOT (bucket = '${SAME_QUESTION_BUCKET}' AND status = 'pending')`);
+}
+
 // Same kill-switch contract for "Suggest a post" rows (signal_metadata.source
 // 'tech_blog_search', report-blog-suggestion.js SOURCE): the route's
 // GATE_BLOG_SEARCH_SUGGEST check fences WRITES; this fences CONSUMPTION, so
@@ -813,6 +824,7 @@ module.exports._internals = {
   listicleFamilyLaneOpen,
   citabilityBackfillLaneOpen,
   sameQuestionLaneOpen,
+  releaseDisabledSameQuestionReservations,
   SAME_QUESTION_BUCKET,
   blogSearchSuggestLaneOpen,
   NOT_A_SUGGESTION_SQL,
