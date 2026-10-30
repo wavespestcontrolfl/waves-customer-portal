@@ -107,15 +107,11 @@ describe("the accept's last step: lock the call then the visits, re-check, link"
 });
 
 describe('the card says what the tap sends', () => {
-  test('a termite estimate that sends the state notice says so; otherwise nothing is sent; the invoice is always a draft', () => {
-    const plain = cardSummary(472, false);
-    expect(plain).toContain('Accept as annual prepay ($472)');
-    expect(plain).toContain('The invoice is a draft. Nothing is sent to the customer.');
-    expect(plain).not.toMatch(/termite notice/);
-    const notice = cardSummary(472, true);
-    expect(notice).toContain('The invoice is a draft and is not sent.');
-    expect(notice).toContain('the state termite notice to sign, as with Mark accepted');
-    expect(notice).not.toContain('Nothing is sent');
+  test('the invoice is a draft and nothing is sent (termite estimates, whose accept can message, get no card)', () => {
+    const summary = cardSummary(472);
+    expect(summary).toContain('Accept as annual prepay ($472)');
+    expect(summary).toContain('The invoice is a draft. Nothing is sent to the customer.');
+    expect(REFUSALS.termite_estimate).toMatch(/Accept it from the estimate/);
   });
 });
 

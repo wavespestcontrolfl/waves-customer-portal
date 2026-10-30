@@ -1268,17 +1268,11 @@ describe('call_prepay_choice card', () => {
     expect(within(el).getByText(/2026-11-12/)).toBeInTheDocument();
   });
 
-  it('says before the tap when the accept also sends the state termite notice; says nothing is sent otherwise', async () => {
-    load({ ...prepayCard, call_prepay: { can_accept: true, amount: 472, consumer_notice: true, message: null } });
-    const first = render(<TriageInboxTabV2 isAdmin />);
-    let el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
-    expect(within(el).getByText(/The state termite notice to sign \(as with Mark accepted\)/)).toBeInTheDocument();
-    expect(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }).getAttribute('title')).toMatch(/state termite notice to sign/);
-    first.unmount();
+  it('the button promises no text or email: the server files no card for a termite estimate', async () => {
     load();
     render(<TriageInboxTabV2 isAdmin />);
-    el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
-    expect(within(el).queryByText(/state termite notice/)).toBeNull();
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).queryByText(/termite notice/)).toBeNull();
     expect(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }).getAttribute('title')).toMatch(/The customer gets no text or email\./);
   });
 

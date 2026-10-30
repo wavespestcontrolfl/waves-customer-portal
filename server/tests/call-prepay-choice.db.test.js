@@ -175,6 +175,17 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect(await runCallPrepayChoiceSweep()).toMatchObject({ filed: 0 });
     });
 
+    test('a termite estimate files no card: its accept can send the termite notice and agreement (Codex #7050 r1)', async () => {
+      const { customerId, est, callLogId } = await booked();
+      await trx('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify(quotedData({
+        recurring: { services: [{ service: 'termite_bait', name: 'Termite Bait Stations', frequency: 'quarterly', visitsPerYear: 4, price: 118, perApp: 118, annual: 472 }] },
+      })) });
+      expect(await evaluateCallPrepay({ callLogId, customerId })).toMatchObject({ ok: false, reason: 'termite_estimate' });
+      const out = await runCallPrepayChoiceSweep();
+      expect(out.filed).toBe(0);
+      expect(await cardsFor(callLogId).first()).toBeUndefined();
+    });
+
     test('no live visit from the call (cancelled, or booked by hand with no call link): no card', async () => {
       const customerId = await customer();
       await estimate(customerId);

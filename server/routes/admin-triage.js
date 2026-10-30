@@ -1923,7 +1923,7 @@ async function stampCallPrepayActions(items, isAdmin = false) {
       const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: item.customer_id, estimateId: payload.estimate_id || null });
       item.call_prepay = ev.ok
         ? {
-          can_accept: true, amount: ev.amount, consumer_notice: ev.consumerNotice === true, preview_token: previewTokenOf(ev), message: null,
+          can_accept: true, amount: ev.amount, preview_token: previewTokenOf(ev), message: null,
           // The plan the token covers, from the same read: the card shows these, not the facts it was filed with.
           plan: {
             service_type: ev.coverage.coverageServiceType, cadence: ev.coverage.coverageCadence,
@@ -2066,8 +2066,8 @@ router.post('/:id/new-customer', familyCardRoute('start the new customer', async
 // Accept as annual prepay (GATE_CALL_PREPAY_CHOICE, call_prepay_choice cards): the caller chose annual prepay on a call the pipeline booked.
 // Runs the SAME accept the New appointment form runs for "Billing on acceptance: Annual prepay" (markEstimateManuallyAccepted, billingTerm
 // prepay_annual, the term anchored to the booked visit, coverage from the booked series), links the booked visits to the estimate, then
-// resolves the card. It creates a DRAFT annual prepay invoice and a payment-pending term: the invoice is NOT sent. The one customer message
-// is Mark accepted's: the state termite notice, for a termite estimate with none signed (the card says so first). Every refusal is a plain
+// resolves the card. It creates a DRAFT annual prepay invoice and a payment-pending term: the invoice is NOT sent and the customer gets
+// no message (termite estimates, whose accept can send the termite notice and agreement, get no card). Every refusal is a plain
 // message and changes nothing (estimate already accepted, no longer eligible, visit gone, customer
 // changed). Admin only; the version the screen showed must still be the card's (409 otherwise).
 router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
