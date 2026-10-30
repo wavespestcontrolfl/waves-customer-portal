@@ -82,6 +82,7 @@ import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
+import MistingRecordsPanel from "./MistingRecordsPanel";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
@@ -6108,6 +6109,7 @@ function CustomerProfileOverview({
                   technician session would only 403 on expand */}
       {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
       {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
+      {!embedded && isAdmin && <MistingRecordsPanel customerId={customerId} />}
       {accountProperties.length > 0 && (
         <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
           {" "}
@@ -8060,6 +8062,7 @@ function CustomerProfileProperty({
           <summary>Property service tools & historical maps</summary>
           <PropertyZonesPanel customerId={customerId} />
           <TermiteStationsGate customerId={customerId} />
+          <MistingRecordsPanel customerId={customerId} />
         </details>
       )}
       {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin

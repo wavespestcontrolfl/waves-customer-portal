@@ -790,6 +790,7 @@ app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/service-outlines', adminServiceOutlineRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
 app.use('/api/admin/estimates', require('./routes/admin-estimate-misting-layout'));
+app.use('/api/admin/misting-records', require('./routes/admin-misting-records'));
 app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
