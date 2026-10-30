@@ -255,7 +255,9 @@ function AiChart({ chartType, spec, rows, fields }) {
 
 // `active` is false while the mobile dashboard shows another section: the
 // panel stays mounted (hidden) so a prompt, a preview or a request in flight
-// survives the switch, and a live dictation ends instead of listening unseen.
+// survives the switch. The mic unmounts meanwhile — the dictation hook's
+// unmount cleanup stops a running recording or live session and drops its
+// clip, as the old panel unmount did — so nothing records unseen.
 export default function AiChartsPanel({ active = true }) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
@@ -369,13 +371,14 @@ export default function AiChartsPanel({ active = true }) {
             placeholder="e.g. new customers per month by city, last 6 months — or attach an image"
           />
         </Field>
-        <DictationButton
-          onAppend={(t) => setPrompt((p) => (p ? `${p} ${t}` : t))}
-          palette={{ accent: "#18181B", muted: "#A1A1AA", red: "#C8312F", card: "#FFFFFF" }}
-          title="Dictate"
-          size={44}
-          disabled={!active}
-        />
+        {active && (
+          <DictationButton
+            onAppend={(t) => setPrompt((p) => (p ? `${p} ${t}` : t))}
+            palette={{ accent: "#18181B", muted: "#A1A1AA", red: "#C8312F", card: "#FFFFFF" }}
+            title="Dictate"
+            size={44}
+          />
+        )}
         <input
           ref={fileInputRef}
           type="file"

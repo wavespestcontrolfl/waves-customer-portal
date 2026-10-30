@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AiChartsPanel from "./AiChartsPanel";
 
-vi.mock("../tech/DictationButton", () => ({ default: () => null }));
+vi.mock("../tech/DictationButton", () => ({ default: () => <button type="button">Dictate</button> }));
 vi.mock("../../hooks/dictationPending", () => ({ default: () => false }));
 
 const WIDGET = {
@@ -38,6 +38,18 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("AiChartsPanel while hidden", () => {
+  it("unmounts the mic while inactive, so a recording cannot run unseen", async () => {
+    answer("GET /api/admin/dashboard/widgets", 200, { widgets: [] });
+    const { rerender } = render(<AiChartsPanel active={false} />);
+    await screen.findByText("No pinned charts yet — describe one above.");
+    expect(screen.queryByRole("button", { name: "Dictate" })).not.toBeInTheDocument();
+
+    rerender(<AiChartsPanel active />);
+    expect(screen.getByRole("button", { name: "Dictate" })).toBeInTheDocument();
+  });
 });
 
 describe("AiChartsPanel pinned-chart failures", () => {

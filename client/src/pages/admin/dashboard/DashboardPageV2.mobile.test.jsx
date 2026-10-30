@@ -172,7 +172,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
     fireEvent.change(screen.getByLabelText("Describe a metric"), { target: { value: "new customers by city" } });
 
-    // Hidden, not unmounted — and told it is inactive, so a live dictation ends.
+    // Hidden, not unmounted — and told it is inactive, so its mic unmounts.
     fireEvent.click(navButton("Growth"));
     expect(screen.getByLabelText("Describe a metric")).not.toBeVisible();
     expect(screen.getByLabelText("Describe a metric")).toHaveAttribute("data-active", "false");
