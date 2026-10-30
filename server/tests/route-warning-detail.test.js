@@ -260,6 +260,20 @@ describe('gate on: arrival_window names the stop', () => {
     });
   });
 
+  // Codex round 1 P2: a stop is "already late without this visit" only when EVERY baseline leaves it late.
+  // Stored order A (10 AM) then B (8 AM) is stale; the clock-order baseline keeps both promises, so B is not
+  // late without the visit and must not be quoted from the broken stored order.
+  test('a stale stored order does not make a stop "already late" when the clock order keeps it on time', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const rows = [stop('A', '10:00', 60, { route_order: 1 }), stop('B', '08:00', 60, { route_order: 2 })];
+    const fit = run(rows, candidate('08:00', 140), { detail: true, durationMinutes: 140 });
+    expect(fit.reason).toBe('arrival_window');
+    expect(fit.warning).not.toMatch(/without this visit/);
+    expect(fit.warning).not.toMatch(/already/);
+    // A (10 AM) is on time in the clock-order baseline; the visit's placement is what makes it late.
+    expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (10 AM–12 PM window) would arrive 12:20 PM, 20 min late.`);
+  });
+
   test('a day already late in several places: at most two stops are named', () => {
     const rows = [stop('A', '08:00', 240), stop('B', '08:20', 30), stop('C', '08:40', 30), stop('D', '09:00', 30), stop('E', '09:20', 30)];
     const fit = run(rows, candidate('15:00', 60), { detail: true });

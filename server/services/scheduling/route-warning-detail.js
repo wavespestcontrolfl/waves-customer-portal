@@ -20,6 +20,11 @@ function routeWarningDetailLive() {
   return typeof gateEnvValue === 'function' && gateEnvValue('GATE_ROUTE_WARNING_DETAIL') === true;
 }
 
+/** True when a staff check asked for detail AND the gate is on. */
+function detailWanted(detail) {
+  return detail === true && routeWarningDetailLive();
+}
+
 /** `{ detail: true }` on a staff check's `arrivalWindow` while the gate is on, else `{}`, so the
  *  object a caller builds is exactly today's with the gate off. */
 function detailOption() {
@@ -82,6 +87,6 @@ function dayEndSentence(dayEndMin) {
 }
 
 module.exports = {
-  routeWarningDetailLive, detailOption, pinServesRouteCheckOnly, clockText, windowText, stopLabel, plural,
+  routeWarningDetailLive, detailWanted, detailOption, pinServesRouteCheckOnly, clockText, windowText, stopLabel, plural,
   lateSentence, tightSentence, dayEndSentence,
 };

@@ -375,9 +375,12 @@ function groupRouteStops(rows) {
 // `detail`: { warning, diagnostics } from describeUnverified (GATE_ROUTE_WARNING_DETAIL, a staff
 // save's own check only). Unset: today's result, byte for byte.
 function unverified(target, date, detail) {
+  const generic = `Could not verify the route's arrival windows on ${date}. Review the route before driving it.`;
   return {
     feasible: false, target, reason: 'route_unverified',
-    warning: detail?.warning || `Could not verify the route's arrival windows on ${date}. Review the route before driving it.`,
+    warning: detail?.warning || generic,
+    // The unchanged sentence rides with a worded one: a snapshot compared across a gate flip uses it.
+    ...(detail?.warning ? { baseWarning: generic } : {}),
     ...(detail ? { diagnostics: detail.diagnostics } : {}),
   };
 }
@@ -470,7 +473,13 @@ function pickerTravelSource(legs) {
 }
 
 // `fail` (optional, GATE_ROUTE_WARNING_DETAIL): receives the cause of a null return. Never read otherwise.
-function resolvePlacementOrigin(context, capacity, departureMin, target, own, fail = {}) {
+// The stops (and the technician's start point) that have no map pin, for the detail wording.
+function noPinCause(origin, pending) {
+  return { code: 'no_pin', rows: [origin, ...pending].filter(row => row.id && !hasCoords(row)), startPoint: !origin.id && !hasCoords(origin) };
+}
+
+function resolvePlacementOrigin(context, capacity, departureMin, target, own, fail) {
+  const refuse = (cause) => { fail.cause = cause; return null; };
   // The night tool's van departure (context.vanDepartureMin): the van may
   // leave before the shift opens, so a farther first stop still makes an
   // 08:00 promise. No stop starts before its window opens either way.
@@ -485,30 +494,26 @@ function resolvePlacementOrigin(context, capacity, departureMin, target, own, fa
     // A staff picker's one active stop (loadActiveStop) is where the day
     // continues from; anything else under way stays unverified.
     const continuesFrom = active.length === 1 && String(context.activeStop?.id) === String(active[0].id) ? active[0] : null;
-    if (context.activeTarget) { fail.cause = { code: 'target_under_way' }; return null; }
-    if (active.length && !continuesFrom) { fail.cause = { code: 'under_way', rows: active }; return null; }
+    if (context.activeTarget) return refuse({ code: 'target_under_way' });
+    if (active.length && !continuesFrom) return refuse({ code: 'under_way', rows: active });
     const parts = etParts(context.now);
     startMin = Math.max(startMin, parts.hour * 60 + parts.minute);
     const completed = own.filter(row => row.status === 'completed').map(row => ({
       ...row, completionTime: row.actual_end_time || row.check_out_time || row.completed_at,
     }));
     const unfinished = completed.find(row => !row.completionTime);
-    if (unfinished) { fail.cause = { code: 'completed_no_time', rows: [unfinished] }; return null; }
+    if (unfinished) return refuse({ code: 'completed_no_time', rows: [unfinished] });
     completed.sort((a, b) => new Date(b.completionTime) - new Date(a.completionTime));
     if (completed.length) origin = completed[0];
     if (continuesFrom) {
-      if (!hasCoords(continuesFrom)) { fail.cause = { code: 'no_pin', rows: [continuesFrom] }; return null; }
+      if (!hasCoords(continuesFrom)) return refuse(noPinCause(continuesFrom, []));
       startMin = Math.max(startMin, activeStopFreeAt(continuesFrom, context.activeStop, origin, context.date, parts.hour * 60 + parts.minute));
       origin = continuesFrom;
       activeOrigin = continuesFrom;
     }
   }
   const pending = own.filter(row => row.status !== 'completed' && row !== activeOrigin);
-  if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) {
-    fail.cause = { code: 'no_pin', rows: [...(origin !== context.home && origin !== RouteOptimizer.HQ && !hasCoords(origin) ? [origin] : []),
-      ...pending.filter(row => !hasCoords(row))], startPoint: !hasCoords(origin) && (origin === context.home || origin === RouteOptimizer.HQ) };
-    return null;
-  }
+  if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) return refuse(noPinCause(origin, pending));
   return { origin, startMin, pending };
 }
 
@@ -740,62 +745,54 @@ function describeUnverified({ date, target, own, cause }) {
 }
 
 /** Late stops, in words, for the orders the check tried. `candidates` are the orders tried for the
- *  visit, `baselines` the day without it. Picks the order that breaks the fewest promises (the
- *  visit's own counts) and names them. null: nothing late to name (a blocker or margin). */
-function describeLateness({ date, candidates, baselines, simulate, target, own, rangeForStop, dayEndMin }) {
+ *  visit, `baselines` the day without it. Every late stop is one of three kinds: the visit itself
+ *  (`mine`), a stop that is late in EVERY baseline, so late with or without the visit (`old`), or any
+ *  other (`fresh`: on time in at least one baseline, so the visit's placement makes it late). Picks the
+ *  order that breaks the fewest promises (the visit's own counts) and names them. null: nothing late to
+ *  name (a blocker or margin). */
+function describeLateness({ date, candidates, baselines, simulate, target, own, dayEndMin }) {
   const label = stopLabeler(own, target);
   const numberOf = numberInOrder(own, target);
+  const isNew = String(target.id) === '__candidate__';
+  const idOf = stop => String(stop.row.id);
   const lateStops = (order) => {
-    if (order.length > EXPLAIN_MAX_STOPS + 1) return null;
-    const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
-    if (!simulation) return null;
-    return simulation.arrivals.map((arrival, index) => ({ row: order[index], arrivalMin: arrival.arrivalMin,
-      lateMinutes: arrival.lateMinutes || 0, number: numberOf(order, index) })).filter(stop => stop.lateMinutes > 0);
+    const simulation = order.length <= EXPLAIN_MAX_STOPS + 1 && simulate(order, [], { reportLate: true, dayEndMin: Infinity });
+    return simulation ? simulation.arrivals.map((arrival, index) => ({ row: order[index], arrivalMin: arrival.arrivalMin,
+      lateMinutes: arrival.lateMinutes || 0, number: numberOf(order, index) })).filter(stop => stop.lateMinutes > 0) : null;
   };
-  // The day WITHOUT the visit: each stop's own arrival and lateness there. A "without this visit"
-  // sentence must quote these, never the candidate route's times (which carry the visit's delay). Where
-  // two baselines disagree the least late one is quoted, the only claim both support.
-  const baselineStops = new Map();
-  for (const stop of baselines.flatMap(order => lateStops(order) || [])) {
-    const seen = baselineStops.get(String(stop.row.id));
-    if (!seen || stop.lateMinutes < seen.lateMinutes) baselineStops.set(String(stop.row.id), stop);
+  // The day WITHOUT the visit. A stop is already late only when no baseline keeps it on time; a stale
+  // stored order can break a promise the clock order keeps. "Without this visit" sentences quote the
+  // baseline's own arrival and minutes (the least late one), never the candidate route's.
+  const runs = baselines.map(lateStops).filter(Boolean);
+  const already = new Map();
+  for (const stop of runs.flat()) {
+    const seen = already.get(idOf(stop));
+    if (runs.every(run => run.some(other => idOf(other) === idOf(stop))) && (!seen || stop.lateMinutes < seen.lateMinutes)) already.set(idOf(stop), stop);
   }
-  const baselineLate = new Set(baselineStops.keys());
+  const kindOf = stop => (idOf(stop) === String(target.id) ? 'mine' : (already.has(idOf(stop)) ? 'old' : 'fresh'));
+  const byKind = late => late.reduce((kinds, stop) => { kinds[kindOf(stop)].push(stop); return kinds; }, { mine: [], old: [], fresh: [] });
+  const cost = kinds => [...kinds.fresh, ...kinds.mine].reduce((sum, stop) => sum + stop.lateMinutes, 0);
   let best = null;
   for (const order of candidates) {
     const late = lateStops(order);
-    if (!late) continue;
-    const mine = late.find(stop => String(stop.row.id) === String(target.id)) || null;
-    const others = late.filter(stop => String(stop.row.id) !== String(target.id) && !baselineLate.has(String(stop.row.id)));
-    const old = late.filter(stop => String(stop.row.id) !== String(target.id) && baselineLate.has(String(stop.row.id)));
-    const score = others.length + (mine ? 1 : 0);
-    const minutes = others.reduce((sum, stop) => sum + stop.lateMinutes, 0) + (mine?.lateMinutes || 0);
-    if (!best || score < best.score || (score === best.score && minutes < best.minutes)) best = { order, mine, others, old, score, minutes };
+    const kinds = late && byKind(late);
+    const score = kinds && kinds.fresh.length + kinds.mine.length;
+    if (kinds && (!best || score < best.score || (score === best.score && cost(kinds) < cost(best.kinds)))) best = { order, kinds, score };
   }
   if (!best) return null;
-  const byLate = (a, b) => b.lateMinutes - a.lateMinutes;
-  const sentences = [];
-  const others = [...best.others].sort(byLate);
-  for (const stop of others.slice(0, 3)) sentences.push(warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes));
-  if (others.length > 3) sentences.push(`${warningDetail.plural(others.length - 3, 'more stop')} would also be late.`);
-  if (best.mine) {
-    const who = label(best.mine.row, best.mine.number);
-    sentences.push(`${String(target.id) === '__candidate__' ? who : `${who} is this visit and`} would arrive ${warningDetail.clockText(best.mine.arrivalMin)}, ${best.mine.lateMinutes} min late, so it cannot keep its own window.`);
-  }
-  if (!others.length && !best.mine) {
-    const withoutVisit = best.old.map((stop) => {
-      const base = baselineStops.get(String(stop.row.id));
-      return { ...stop, arrivalMin: base.arrivalMin, lateMinutes: base.lateMinutes };
-    });
-    for (const stop of withoutVisit.sort(byLate).slice(0, 2)) {
-      sentences.push(warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes, { already: true }));
-    }
-  }
-  const dayEnd = Number.isFinite(dayEndMin) && !simulate(best.order, [], { reportLate: true });
-  if (dayEnd) sentences.push(warningDetail.dayEndSentence(dayEndMin));
-  if (!sentences.length) return null;
-  const ids = [...best.others, ...(best.mine ? [best.mine] : []), ...best.old].map(stop => String(stop.row.id) === '__candidate__' ? 'new' : String(stop.row.id));
-  return { warning: `Route on ${date}: ${sentences.join(' ')}`, lateStopIds: ids };
+  const { kinds } = best;
+  const worst = stops => [...stops].sort((a, b) => b.lateMinutes - a.lateMinutes);
+  const named = (stops, extra) => worst(stops).slice(0, extra.limit).map(stop => warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes, extra));
+  const sentences = [
+    ...named(kinds.fresh, { limit: 3 }),
+    ...(kinds.fresh.length > 3 ? [`${warningDetail.plural(kinds.fresh.length - 3, 'more stop')} would also be late.`] : []),
+    ...kinds.mine.map(stop => `${isNew ? label(stop.row, stop.number) : `${label(stop.row, stop.number)} is this visit and`} would arrive ${warningDetail.clockText(stop.arrivalMin)}, ${stop.lateMinutes} min late, so it cannot keep its own window.`),
+    // Nothing the visit breaks: the day's own lateness, from the day without the visit.
+    ...(kinds.fresh.length + kinds.mine.length ? [] : named(kinds.old.map(stop => ({ ...stop, ...already.get(idOf(stop)), row: stop.row, number: stop.number })), { limit: 2, already: true })),
+    ...(Number.isFinite(dayEndMin) && !simulate(best.order, [], { reportLate: true }) ? [warningDetail.dayEndSentence(dayEndMin)] : []),
+  ];
+  const ids = [...kinds.fresh, ...kinds.mine, ...kinds.old].map(stop => (idOf(stop) === '__candidate__' ? 'new' : idOf(stop)));
+  return sentences.length ? { warning: `Route on ${date}: ${sentences.join(' ')}`, lateStopIds: ids } : null;
 }
 
 /** The tightest later stop, for an `arrival_margin` answer: the order that leaves the most room. */
@@ -867,7 +864,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // A staff save's own check: a failure carries `diagnostics` for the save's log line, and with
   // GATE_ROUTE_WARNING_DETAIL on it is worded with the stop, its window, the predicted arrival and
   // the minutes. Never changes whether the placement fits.
-  detail = false }) {
+  detail }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -881,7 +878,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const rows = context.preserveCapacity ? context.rows.map(row => ({ ...row, preserveCapacity: true })) : context.rows;
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = buildPlacementTarget(context, windowStart, windowEnd, durationMinutes);
-  const detailOn = detail === true && warningDetail.routeWarningDetailLive();
+  const detailOn = warningDetail.detailWanted(detail);
   const dayOf = () => (target.technician_id ? rows.filter(row => row.technician_id === target.technician_id
     && (capacity || row.reservation_expires_at == null)) : []);
   // route_unverified, worded with its cause when a staff save asked for detail.
@@ -984,6 +981,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       diagnostics: { placement: placement || 'none', travelSource: context.travel ? 'picker_cache' : 'conservative_model',
         lateStopIds: words?.lateStopIds || [] } };
   };
+  const words = describe => (detailOn ? describe() : null);
   const candidateOrders = () => orders.map(entry => entry.order);
   const baselineOrders = () => sequencers.map(sequence => sequence(groupedPending));
   if (!winner && returnTooLate) {
@@ -993,19 +991,19 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (!winner && tooTight) {
     return detailed({ ...fail, reason: 'arrival_margin',
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
-    detailOn ? describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES }) : null);
+    words(() => describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES })));
   }
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
   if (!winner && capacity && dayIsOvercommitted(sequencers, groupedPending, simulate)) {
     return detailed({ ...fail, reason: 'day_overcommitted',
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` },
-    detailOn ? describeLateness({ date, candidates: baselineOrders(), baselines: baselineOrders(), simulate, target, own, rangeForStop, dayEndMin }) : null);
+    words(() => describeLateness({ date, candidates: baselineOrders(), baselines: baselineOrders(), simulate, target, own, dayEndMin })));
   }
   if (!winner) {
     const result = explain ? { ...fail, lateness: explainLateness({ sequencers, groupedPending, simulate, target }) } : fail;
     return detailed(result,
-      detailOn ? describeLateness({ date, candidates: candidateOrders(), baselines: baselineOrders(), simulate, target, own, rangeForStop, dayEndMin }) : null);
+      words(() => describeLateness({ date, candidates: candidateOrders(), baselines: baselineOrders(), simulate, target, own, dayEndMin })));
   }
   return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ,
     roadTravel: !!context.travel });

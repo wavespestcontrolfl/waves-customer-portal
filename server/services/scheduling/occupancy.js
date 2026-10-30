@@ -462,9 +462,19 @@ const CONFLICT_COLUMNS = [
 // (arrivalWindow roads 'cache', or `detail`), so a live case can be told apart from the
 // numbers it left: why, what the placement did, which stops were late and where the drive times came
 // from. Ids only, no names. Never throws.
+// A staff save's route check: it reads cached road times (roads 'cache'), or a caller asked for `detail`.
+function isStaffSaveCheck(arrivalWindow) {
+  return arrivalWindow?.roads === 'cache' || arrivalWindow?.detail === true;
+}
+
+// The unchanged sentence beside a worded warning (GATE_ROUTE_WARNING_DETAIL), for snapshots.
+function baseWarningField(fit) {
+  return fit.baseWarning ? { base_warning: fit.baseWarning } : {};
+}
+
 function logRouteWarning(fit, arrivalWindow, date) {
   try {
-    if (!fit || fit.feasible || !(arrivalWindow?.roads === 'cache' || arrivalWindow?.detail === true)) return;
+    if (!fit || fit.feasible || !isStaffSaveCheck(arrivalWindow)) return;
     const d = fit.diagnostics || {};
     logger.info(`[route-warning] service=${arrivalWindow.serviceId || '-'} date=${String(date).split('T')[0]}`
       + ` reason=${fit.reason} placement=${d.placement || '-'} late=${(d.lateStopIds || []).join(',') || '-'}`
@@ -546,7 +556,7 @@ async function findConflictingVisits({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
         // Staff saves read cached road times (roads: 'cache'): their failure carries the diagnostics
         // the log line below records, and its words with GATE_ROUTE_WARNING_DETAIL on.
-        detail: arrivalWindow.roads === 'cache' || arrivalWindow.detail === true,
+        detail: isStaffSaveCheck(arrivalWindow),
         // A caller may give the arrival check its own exclusion list (the
         // series carry keeps a carried stop's members visible so the stop is
         // judged as ONE grouped stop); otherwise the occupancy list applies.
@@ -561,7 +571,7 @@ async function findConflictingVisits({
         conflict_reason: fit.reason, warning: fit.warning,
         // GATE_ROUTE_WARNING_DETAIL: the sentence a staff save shows is worded with the stop and
         // minutes; `base_warning` keeps the unchanged one for any snapshot that compares warnings.
-        ...(fit.baseWarning ? { base_warning: fit.baseWarning } : {}),
+        ...baseWarningField(fit),
       }], { db, date, windowStart, windowEnd, includeInterviews });
     }
   }
