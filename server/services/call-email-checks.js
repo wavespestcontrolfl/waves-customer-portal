@@ -81,7 +81,8 @@ const OWN_DOMAINS = new Set(['wavespestcontrol.com']);
 //    belong to the address ("jane D-O-E") has local: null.
 //  - said: words before "at" with a dotted domain ("sclay18 at yahoo.com",
 //    "jane two at gmail dot com"). Only one word right after a clean start can
-//    stand for the whole local part; anything else has local: null.
+//    stand for the whole local part; anything else has local: null. An address
+//    written inline ("jane2@gmail.com") is a said mention too.
 // A spelled name that runs into a word ("S-M-I-T-H. My email is ...") is not a
 // mention by itself. Returns { mentions, labeled }.
 function emailMentions(text) {
@@ -113,6 +114,15 @@ function emailMentions(text) {
       continue;
     }
     const bare = raw.replace(/[,;!?]+$/, '');
+    // An address written inline ("jane2@gmail.com", "J-A-N-E@gmail.com"): a said
+    // mention, so a correction typed out this way still conflicts.
+    const inline = bare.replace(/[.:]+$/, '').match(/^([^@\s]+)@([^@\s]+)$/);
+    if (inline) {
+      const inlineLocal = /^(?:[a-z0-9]-)+[a-z0-9]$/i.test(inline[1]) ? inline[1].replace(/-/g, '') : inline[1];
+      mentions.push({ kind: 'said', local: inlineLocal.toLowerCase(), domain: inline[2].toLowerCase(), speaker });
+      endRun(i);
+      continue;
+    }
     if (/^(?:at|@)$/i.test(bare.replace(/[.:]+$/, ''))) {
       const domain = spokenDomainFrom(tokens, i + 1);
       if (domain && letters >= MIN_SPELLED_LETTERS) {

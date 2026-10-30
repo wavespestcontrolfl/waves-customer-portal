@@ -46,6 +46,8 @@ describe('emailMentions', () => {
     ['the pronoun I is not a spelled run', 'I think it is S-M-I-T-H at gmail.com', [spelled('smith', 'gmail.com')]],
     ['one word after a clean start is a said address', 'Agent: So sclay18 at yahoo.com, got it.', [{ kind: 'said', local: 'sclay18', domain: 'yahoo.com', speaker: 'agent' }]],
     ['times and places are not addresses', 'We are at 107 Rodeo Drive at 4 o\'clock.', []],
+    ['an inline address', 'No, jane2@gmail.com.', [{ kind: 'said', local: 'jane2', domain: 'gmail.com', speaker: null }]],
+    ['an inline address with hyphen-joined letters', 'J-A-N-E@gmail.com', [{ kind: 'said', local: 'jane', domain: 'gmail.com', speaker: null }]],
     ['fewer than three letters is not a spelling', 'J-O at gmail', []],
   ])('%s', (_label, text, mentions) => {
     expect(emailMentions(text).mentions).toEqual(mentions);
@@ -76,6 +78,11 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['the caller spelled it and the agent read it back', ['Caller: D-R-A-Y 22 at yahoo.com. Agent: So dray22 at yahoo.com, got it.'], 'dray22@yahoo.com', true],
     ['our own address said on the call is not a conflict', ['Caller: D-R-A-Y 22 at yahoo.com. Agent: You can also email us at wavespestcontrol.com.'], 'dray22@yahoo.com', true],
     ['a second address on the call keeps the card', ['Caller: D-R-A-Y 22 at yahoo.com, and my husband is bob at gmail.com.'], 'dray22@yahoo.com', false],
+    ['an inline correction keeps the card', ['Caller: J-A-N-E at gmail.com. Caller: No, jane2@gmail.com.'], 'jane@gmail.com', false],
+    ['an inline correction in an unlabeled pass keeps the card', ['J-A-N-E at gmail.com. No, jane2@gmail.com.'], 'jane@gmail.com', false],
+    ['an inline correction in the other transcript keeps the card', ['Caller: J-A-N-E at gmail.com.', 'No, jane2@gmail.com.'], 'jane@gmail.com', false],
+    ['an inline read-back of the same address is fine', ['Caller: J-A-N-E at gmail.com. Agent: jane@gmail.com, got it.'], 'jane@gmail.com', true],
+    ['our own inline address is ignored', ['Caller: J-A-N-E at gmail.com. Agent: Our email is contact@wavespestcontrol.com.'], 'jane@gmail.com', true],
     ['an interrupted spelling never vouches for the joined address either', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
     ['a mixed spoken and spelled address keeps the card', ['my email is jane D-O-E at gmail.com'], 'doe@gmail.com', false],
     ['the spelling names a different provider', ['B-R-I-G-H-T at yahoo dot com'], 'bright@gmail.com', false],
