@@ -3787,7 +3787,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // Fire-and-forget: enroll the customer in the estimate_sent follow-up
   // automation (lands ~2h later with a neighborly "any questions?" note).
   // Enrollment is deduped by customer id when present, otherwise by lead
-  // email, so re-sends of the same lead estimate won't spam.
+  // email, so re-sends of the same lead estimate won't spam. The estimate id
+  // rides along: the runner drops the follow-up once it is accepted.
   if (estimate.customer_email) {
     try {
       const AutomationRunner = require('../services/automation-runner');
@@ -3804,6 +3805,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           first_name: greetingToken || (parts.length ? 'there' : ''),
           last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',
         },
+        context: { estimateId: estimate.id },
       });
     } catch (e) {
       logger.warn(`[admin-estimates] estimate_sent enroll failed: ${e.message}`);
