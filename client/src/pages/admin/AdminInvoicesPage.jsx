@@ -4463,60 +4463,45 @@ function SendInvoiceModal({
 // email tagged deliveryOutcome "uncertain") may still have reached the
 // customer. A requested leg is "sent", "uncertain" (never offer a resend) or
 // "failed" (with its reason).
+const RECEIPT_CHANNEL_LABELS = { email: "Email", sms: "SMS" };
 export function receiptDeliveryOutcome(res, requested) {
-  // No per-leg results at all: fall back to the overall flag.
-  if (!res?.email && !res?.sms) {
-    return {
-      sent: [],
-      uncertain: [],
-      failed: [],
-      settled: [],
-      complete: !!res?.ok,
-      message: res?.ok ? "" : "Receipt send failed: Send failed",
-    };
-  }
-  const legs = [
-    ["email", "Email", res?.email],
-    ["sms", "SMS", res?.sms],
-  ].filter(([key]) => requested?.[key]);
-  const sent = [];
-  const uncertain = [];
-  const failed = [];
+  const body = res || {};
+  const byKind = { sent: [], uncertain: [], failed: [] };
   const notes = [];
-  for (const [key, label, leg] of legs) {
-    const reason = leg?.error || (leg?.skipped ? "not attempted" : "not sent");
-    if (leg?.ok) {
-      sent.push(key);
-      notes.push(`${label} sent.`);
-    } else if (
-      leg?.deliveryOutcome === "uncertain" ||
-      res?.delivery?.[key] === "unknown"
-    ) {
-      uncertain.push(key);
-      notes.push(
-        `${label} may have been delivered (${leg?.error || "outcome unknown"}). Check before sending it again.`,
-      );
-    } else {
-      failed.push(key);
-      notes.push(`${label} failed: ${reason}.`);
-    }
+  const keys = ["email", "sms"].filter((key) => requested && requested[key]);
+  for (const key of keys) {
+    // A response with no per-leg results falls back to its overall flag.
+    const leg = body[key] || { ok: !!body.ok };
+    const label = RECEIPT_CHANNEL_LABELS[key];
+    const unknown =
+      leg.deliveryOutcome === "uncertain" ||
+      (body.delivery || {})[key] === "unknown";
+    const kind = leg.ok ? "sent" : unknown ? "uncertain" : "failed";
+    byKind[kind].push(key);
+    notes.push(
+      {
+        sent: `${label} sent.`,
+        uncertain: `${label} may have been delivered (${leg.error || "outcome unknown"}). Check before sending it again.`,
+        failed: `${label} failed: ${leg.error || (leg.skipped ? "not attempted" : "not sent")}.`,
+      }[kind],
+    );
   }
-  const settled = [...sent, ...uncertain];
-  const complete = legs.length > 0 && sent.length === legs.length;
+  const settled = [...byKind.sent, ...byKind.uncertain];
+  const complete = keys.length > 0 && byKind.sent.length === keys.length;
+  const retry = byKind.failed.length
+    ? ` Only ${byKind.failed.map((key) => RECEIPT_CHANNEL_LABELS[key]).join(" and ")} is selected to retry.`
+    : "";
+  const errors = [body.email, body.sms]
+    .map((leg) => leg && leg.error)
+    .filter(Boolean)
+    .join(" · ");
   let message = "";
-  if (!complete) {
-    message = settled.length
-      ? `Receipt not fully sent. ${notes.join(" ")}${
-          failed.length
-            ? ` Only ${failed.map((key) => (key === "sms" ? "SMS" : "Email")).join(" and ")} is selected to retry.`
-            : ""
-        }`
-      : `Receipt send failed: ${
-          [res?.email?.error, res?.sms?.error].filter(Boolean).join(" · ") ||
-          "Send failed"
-        }`;
+  if (!complete && settled.length) {
+    message = `Receipt not fully sent. ${notes.join(" ")}${retry}`;
+  } else if (!complete) {
+    message = `Receipt send failed: ${errors || "Send failed"}`;
   }
-  return { sent, uncertain, failed, settled, complete, message };
+  return { ...byKind, settled, complete, message };
 }
 // ── Send Receipt Modal ──
 // Per-invoice action for paid invoices. Memo is ephemeral (stored on the
