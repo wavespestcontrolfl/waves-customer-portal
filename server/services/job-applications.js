@@ -4,7 +4,8 @@
  * Pure service so the abuse/validation contract is unit-testable without
  * Express (same split as estimate-measurement-review). The route owns the
  * limiter/honeypot/Turnstile chain; this module owns what a valid
- * application IS and the single insert.
+ * application IS and the single insert (a resubmission of the same
+ * application is not inserted twice).
  *
  * Applicants are never customers or leads — no reads or writes to either
  * table, mirroring the call pipeline's job_applicant rule.
@@ -89,8 +90,31 @@ function normalizeSource(raw) {
   return Object.keys(out).length ? out : null;
 }
 
+// The careers form re-sends the same content (with a fresh Turnstile token)
+// when the answer to a POST that already committed is lost. The same
+// application from the same phone inside this window is that one
+// submission, not a second application; anything later, or anything
+// changed, is a new one.
+const RESUBMIT_WINDOW_MS = 15 * 60 * 1000;
+const RETURNED_COLUMNS = ['id', 'role', 'status', 'language', 'created_at', 'contact_snapshot', 'sms_consent'];
+
+// The application this request repeats, if one was filed inside the window:
+// same contact, answers, role, language and SMS consent. Source and
+// attribution are not compared (they are not the applicant's content).
+function findResubmittedApplication(trx, fields) {
+  return trx('job_applications')
+    .where({ role: fields.role, language: fields.language, sms_consent: fields.smsConsent })
+    .where('created_at', '>=', new Date(Date.now() - RESUBMIT_WINDOW_MS))
+    .whereRaw('contact_snapshot = ?::jsonb', [fields.contactSnapshot])
+    .whereRaw('answers = ?::jsonb', [fields.answers])
+    .orderBy('created_at', 'desc')
+    .first(RETURNED_COLUMNS);
+}
+
 /**
- * Validates and inserts one application. Returns the inserted row.
+ * Validates and files one application. Returns { created, row }: created
+ * false with the filed row when the request repeats an application filed
+ * inside RESUBMIT_WINDOW_MS (the caller starts nothing again).
  * Throws { status: 400 } on invalid input — the route maps it to a 400.
  */
 async function createJobApplication({ body = {}, database }) {
@@ -123,23 +147,35 @@ async function createJobApplication({ body = {}, database }) {
   const language = LANGUAGES.includes(body.language) ? body.language : 'en';
   const answers = normalizeAnswers(body.answers);
   const smsConsent = [true, 'true', 'on', 'yes'].includes(body.sms_consent);
+  const fields = {
+    role,
+    language,
+    smsConsent,
+    contactSnapshot: JSON.stringify({ name, phone, email, city }),
+    answers: JSON.stringify(answers),
+  };
+  const source = normalizeSource(body.source);
 
-  const [row] = await database('job_applications')
-    .insert({
-      role,
-      status: 'new',
-      language,
-      contact_snapshot: JSON.stringify({ name, phone, email, city }),
-      answers: JSON.stringify(answers),
-      sms_consent: smsConsent,
-      source: (() => {
-        const source = normalizeSource(body.source);
-        return source ? JSON.stringify(source) : null;
-      })(),
-    })
-    .returning(['id', 'role', 'status', 'language', 'created_at', 'contact_snapshot', 'sms_consent']);
+  return database.transaction(async (trx) => {
+    // The per-phone lock the call path takes: two copies of one submission in
+    // flight at once cannot both pass the check below.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`job_application_phone:${lastTenDigits(phone)}`]);
+    const filed = await findResubmittedApplication(trx, fields);
+    if (filed) return { created: false, row: filed };
 
-  return row;
+    const [row] = await trx('job_applications')
+      .insert({
+        role,
+        status: 'new',
+        language,
+        contact_snapshot: fields.contactSnapshot,
+        answers: fields.answers,
+        sms_consent: smsConsent,
+        source: source ? JSON.stringify(source) : null,
+      })
+      .returning(RETURNED_COLUMNS);
+    return { created: true, row };
+  });
 }
 
 // Statuses that count as an OPEN application (the same set the recruiting

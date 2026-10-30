@@ -83,6 +83,25 @@ const AEO_BUCKETS = ['aeo_gap', 'aeo_question_gap'];
 const AEO_REPROBE_DAYS = 21;        // wait this many days post-deploy before judging
 const AEO_MIN_OBSERVATIONS = 5;     // distinct post-deploy probe-days needed for a verdict
 
+// ── before-and-after AI citation check (every bucket) ───────────────
+// checkAeoVisibility only watches two buckets and only asks "cited yet?".
+// This leg grades EVERY change on how often AI answers cited the page in the
+// 14 days before deploy vs the 14 days after, adjusted for site-wide Waves
+// citations over the same two windows. It reads the seo_llm_mentions rows the
+// daily prober already stored: no probes, no cost.
+const AI_CHANGE_PRE_DAYS = 14;        // pre window = [deploy - 14d, deploy)
+const AI_CHANGE_POST_START_DAY = 2;   // post window starts deploy + 2d (recrawl lag)
+const AI_CHANGE_POST_END_DAY = 16;    // ... and ends deploy + 16d, inclusive
+// The spec says "deployed 16 days ago"; we wait one more day so the last post
+// day (deploy + 16d) has been probed in full before the row is judged.
+const AI_CHANGE_SETTLE_DAYS = 17;
+const AI_CHANGE_MIN_CITES_TOTAL = 3;  // pre + post cites below this = no_data
+const AI_CHANGE_LOST_MIN_PRE_CITES = 3;
+const AI_CHANGE_LOST_RATIO = 0.5;     // control-adjusted ratio at or below = lost
+const AI_CHANGE_GAINED_MIN_POST_CITES = 3;
+const AI_CHANGE_GAINED_RATIO = 2;     // control-adjusted ratio at or above = gained
+const AI_CHANGE_BATCH = 50;           // rows judged per daily tick
+
 // ── pure verdict core ───────────────────────────────────────────────
 
 // Pure: did Waves start getting cited after the page went live?
@@ -90,6 +109,82 @@ function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSE
   if (observedDays < minObservations) return { verdict: 'insufficient_data', nowCited: null };
   const nowCited = wavesHitDays > 0;
   return { verdict: nowCited ? 'now_cited' : 'still_absent', nowCited };
+}
+
+/**
+ * Pure: did AI answers cite this page more, less, or about the same after the
+ * change, once site-wide Waves citations are held constant?
+ *
+ * Each window is { answers, cites, siteCites }: measured answers, answers that
+ * cite THIS page, answers that cite ANY Waves page.
+ *   page rate r = cites / answers          site rate s = siteCites / answers
+ *   R = (r_post / r_pre) / (s_post / s_pre)
+ *
+ * R is null when the control cannot be formed (a site rate of 0 on either
+ * side, i.e. no Waves citation anywhere in that window). A page cite is also a
+ * site cite, so that only happens when the page itself had none; a site-wide
+ * blackout is a prober problem, not a verdict on one page, so it reads flat.
+ */
+function aiChangeVerdict({ pre, post } = {}) {
+  const w = (x) => ({
+    answers: Number(x?.answers) || 0,
+    cites: Number(x?.cites) || 0,
+    siteCites: Number(x?.siteCites) || 0,
+  });
+  const a = w(pre);
+  const b = w(post);
+  if (a.answers === 0 || b.answers === 0 || a.cites + b.cites < AI_CHANGE_MIN_CITES_TOTAL) {
+    return { verdict: 'no_data', ratio: null };
+  }
+  const rPre = a.cites / a.answers;
+  const rPost = b.cites / b.answers;
+  const sPre = a.siteCites / a.answers;
+  const sPost = b.siteCites / b.answers;
+  const ratio = rPre > 0 && sPre > 0 && sPost > 0 ? (rPost / rPre) / (sPost / sPre) : null;
+
+  if (a.cites >= AI_CHANGE_LOST_MIN_PRE_CITES && ratio != null && ratio <= AI_CHANGE_LOST_RATIO) {
+    return { verdict: 'lost', ratio };
+  }
+  if (b.cites >= AI_CHANGE_GAINED_MIN_POST_CITES && (a.cites === 0 || (ratio != null && ratio >= AI_CHANGE_GAINED_RATIO))) {
+    return { verdict: 'gained', ratio };
+  }
+  return { verdict: 'flat', ratio };
+}
+
+/**
+ * Pure: the two ET-date windows for a deploy. Dates are inclusive 'YYYY-MM-DD'
+ * strings; check_date is a DATE column so no clock enters the query.
+ */
+function aiChangeWindows(deployedAt) {
+  const deploy = etDateString(deployedAt);
+  const anchor = etDayAnchor(deploy);
+  const day = (n) => etDateString(addETDays(anchor, n));
+  return {
+    deploy,
+    pre: { from: day(-AI_CHANGE_PRE_DAYS), to: day(-1) },
+    post: { from: day(AI_CHANGE_POST_START_DAY), to: day(AI_CHANGE_POST_END_DAY) },
+  };
+}
+
+/**
+ * Pure: one pass over the stored answers, counted into the two windows.
+ * Same measured-answer and citation rules as checkAeoVisibility.
+ */
+function tallyAiChangeWindows(observations, page, windows) {
+  const empty = (win) => ({ from: win.from, to: win.to, answers: 0, cites: 0, siteCites: 0 });
+  const pre = empty(windows.pre);
+  const post = empty(windows.post);
+  for (const o of observations || []) {
+    if (!isMeasuredAnswer(o)) continue;
+    const d = observationDate(o.check_date);
+    const target = d >= pre.from && d <= pre.to ? pre : (d >= post.from && d <= post.to ? post : null);
+    if (!target) continue;
+    target.answers += 1;
+    const owned = ownedCitations(o);
+    if (owned.length) target.siteCites += 1;
+    if (owned.some((url) => citationMatchesPage(url, page))) target.cites += 1;
+  }
+  return { pre, post };
 }
 
 /**
@@ -801,10 +896,96 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
   return { checked };
 }
 
+// Reads the answers for one row's two windows in a single query and grades it.
+// Throws on a read failure so the caller leaves the row unchecked and retries.
+async function evaluateAiChange(database, row) {
+  const windows = aiChangeWindows(row.deployed_at);
+  const observations = await database('seo_llm_mentions')
+    .whereBetween('check_date', [windows.pre.from, windows.post.to])
+    .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls');
+  const { pre, post } = tallyAiChangeWindows(observations, row.page_url, windows);
+  const { verdict, ratio } = aiChangeVerdict({ pre, post });
+  return { deploy: windows.deploy, pre, post, verdict, ratio };
+}
+
+/**
+ * Before-and-after AI citation check for EVERY content_optimization_impact
+ * row (all buckets). Grades gained / lost / flat / no_data from the answers
+ * the daily prober already stored. No-op while GATE_AI_CHANGE_CHECK is off.
+ * Per-row failures leave the row unchecked so the next tick retries it.
+ */
+async function checkAiChange({ db: database = db, now = new Date(), limit = AI_CHANGE_BATCH } = {}) {
+  if (!require('../../config/feature-gates').aiChangeCheckLive()) return { skipped: 'gated', checked: 0 };
+  let pending = [];
+  try {
+    pending = await database('content_optimization_impact')
+      .whereNotNull('page_url')
+      .whereNotNull('deployed_at')
+      .whereNull('ai_change_checked_at')
+      .where('deployed_at', '<=', addETDays(now, -AI_CHANGE_SETTLE_DAYS))
+      .orderBy('deployed_at', 'asc')
+      .limit(limit)
+      .select('id', 'bucket', 'page_url', 'deployed_at');
+  } catch (err) {
+    logger.warn(`[impact-tracker] checkAiChange query failed: ${err.message}`);
+    return { checked: 0, error: err.message };
+  }
+
+  const counts = { gained: 0, lost: 0, flat: 0, no_data: 0 };
+  let checked = 0;
+  for (const row of pending) {
+    try {
+      const r = await evaluateAiChange(database, row);
+      await database('content_optimization_impact')
+        .where('id', row.id)
+        .update({
+          ai_change_pre: JSON.stringify(r.pre),
+          ai_change_post: JSON.stringify(r.post),
+          ai_change_verdict: r.verdict,
+          ai_change_checked_at: now,
+          updated_at: now,
+        });
+      counts[r.verdict] += 1;
+      checked++;
+    } catch (err) {
+      logger.warn(`[impact-tracker] checkAiChange row ${row.id} failed: ${err.message}`);
+    }
+  }
+  if (checked) logger.info(`[impact-tracker] AI change check: ${checked} row(s) ${JSON.stringify(counts)}`);
+  return { checked, scanned: pending.length, ...counts };
+}
+
+/**
+ * Read-only preview of the same grading, with no gate and no writes. Lists
+ * every row old enough to judge (checked or not) from the last `days` days.
+ */
+async function previewAiChange({ db: database = db, now = new Date(), days = 90, limit = 200 } = {}) {
+  const rows = await database('content_optimization_impact')
+    .whereNotNull('page_url')
+    .whereNotNull('deployed_at')
+    .where('deployed_at', '<=', addETDays(now, -AI_CHANGE_SETTLE_DAYS))
+    .where('deployed_at', '>=', addETDays(now, -days))
+    .orderBy('deployed_at', 'desc')
+    .limit(limit)
+    .select('id', 'bucket', 'page_url', 'deployed_at');
+  const out = [];
+  for (const row of rows) {
+    try {
+      out.push({ ...row, ...(await evaluateAiChange(database, row)) });
+    } catch (err) {
+      out.push({ ...row, error: err.message });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   computeVerdict,
   snapshotBaseline,
   checkAeoVisibility,
+  checkAiChange,
+  previewAiChange,
+  aiChangeVerdict,
   sweepNewlyLive,
   checkPending,
   pausedBuckets,
@@ -813,11 +994,13 @@ module.exports = {
   selectControlPages,
   launchVerdict,
   isEmptyBaseline,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl, aeoQueryIdsForRun, questionGapMissingPlatforms },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, aiChangeWindows, tallyAiChangeWindows, evaluateAiChange, normalizeQueryCohort, queryLift, domainFromUrl, aeoQueryIdsForRun, questionGapMissingPlatforms },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,
     LIFT_POSITION_REGRESSED, LIFT_CLICKS_REGRESSED_PCT, REGRESSION_PAUSE_THRESHOLD,
     LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION,
+    AI_CHANGE_SETTLE_DAYS, AI_CHANGE_MIN_CITES_TOTAL, AI_CHANGE_LOST_MIN_PRE_CITES, AI_CHANGE_LOST_RATIO,
+    AI_CHANGE_GAINED_MIN_POST_CITES, AI_CHANGE_GAINED_RATIO, AI_CHANGE_BATCH,
   },
 };

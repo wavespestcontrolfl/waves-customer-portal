@@ -28,6 +28,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/email-bounce-recovery', () => ({
   isHardBounceEvent: jest.fn((ev) => ev?.event === 'bounce' && (!ev.type || ev.type === 'hard')),
+  isNoMailServerEvent: jest.fn(() => false),
   attemptRecovery: jest.fn(),
   alertBouncedContactAddress: jest.fn(),
   commitRecoveryOnDelivery: jest.fn(),

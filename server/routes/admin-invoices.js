@@ -2783,8 +2783,10 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
   try {
     const { memo, via = 'both' } = req.body || {};
     // The one writer, shared with the Intelligence Bar resend_receipt tool.
-    const { status, body } = await sendInvoiceReceipt(req.params.id, { memo, via, actorTechnicianId: req.technicianId || null });
-    res.status(status).json(body);
+    const { status, body, delivery } = await sendInvoiceReceipt(req.params.id, { memo, via, actorTechnicianId: req.technicianId || null });
+    // Per-leg certainty ('sent' | 'not_sent' | 'unknown' | 'not_requested') rides along so the dialog
+    // never offers to resend a text or email that may already have reached the customer.
+    res.status(status).json(body && delivery ? { ...body, delivery } : body);
   } catch (err) { next(err); }
 });
 

@@ -2,18 +2,23 @@
 import React, { createRef } from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, useNavigate } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest';
 import GlobalCommandPalette from './GlobalCommandPalette';
 import useIsMobile from '../../hooks/useIsMobile';
 import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { markUsageSource } from '../../lib/adminUsage';
+import { encodeJpegDataUrl } from '../../utils/imageCompression';
 
 vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));
 
 vi.mock('../../hooks/useIsMobile', () => ({ default: vi.fn(() => false) }));
 vi.mock('../tech/DictationButton', () => ({ default: () => null }));
+// jsdom has no canvas: a file named broken* does not decode, any other does.
+vi.mock('../../utils/imageCompression', () => ({
+  encodeJpegDataUrl: vi.fn(async (file) => (file.name.startsWith('broken') ? null : 'data:image/jpeg;base64,QUJD')),
+}));
 const ok = body => ({ ok: true, json: async () => body });
 let navigate, queryResolvers, fetchMock;
 function RouteHarness({ paletteRef }) { navigate = useNavigate(); return <GlobalCommandPalette ref={paletteRef} />; }
@@ -386,10 +391,17 @@ describe('local page search', () => {
     expect(opener).toHaveFocus();
   });
 
-  test('the default-off flag preserves the assistant keyboard shortcut', async () => {
+  test('Cmd/Ctrl K opens the page finder, never the assistant, for a technician login', async () => {
+    fixture({ role: 'technician' });
+    await act(async () => fireEvent.keyDown(window, { key: 'k', metaKey: true }));
+    expect(screen.getByRole('searchbox', { name: 'Search pages' })).toBeVisible();
+    expect(screen.queryByPlaceholderText(/Ask anything/)).not.toBeInTheDocument();
+  });
+
+  test('before the session is verified Cmd/Ctrl K opens nothing', async () => {
     fixture({ enabled: false });
     await act(async () => fireEvent.keyDown(window, { key: 'k', metaKey: true }));
-    expect(screen.getByPlaceholderText(/Ask anything/)).toBeVisible();
+    expect(screen.queryByPlaceholderText(/Ask anything/)).not.toBeInTheDocument();
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
   });
 });
@@ -1068,5 +1080,212 @@ describe('the server decides every rollover; the palette obeys', () => {
     await waitFor(() => expect(queryBodies()).toHaveLength(2));
     expect(queryBodies()[1].thread_id).toBe(THREAD);
     expect(queryBodies()[1].thread_reopened).toBeUndefined();
+  });
+});
+
+describe('IB UI audit 2026-10-29 fixes', () => {
+  const STAFF_A = { id: 'staff-a', role: 'admin', name: 'Fixture A' };
+  const STAFF_B = { id: 'staff-b', role: 'admin', name: 'Fixture B' };
+  const THREAD_ROW = { id: 'thread-1', title: 'Fixture saved conversation', context: 'dashboard' };
+  const unavailable = status => ({ ok: false, status, json: async () => ({ error: 'Unavailable' }) });
+  function Where() { const { pathname, search } = useLocation(); return <div data-testid="where">{pathname + search}</div>; }
+  async function mountAs(user, path = '/admin/dashboard') {
+    const ref = createRef();
+    const view = render(<MemoryRouter initialEntries={[path]}><Where /><GlobalCommandPalette ref={ref} user={user} /></MemoryRouter>);
+    act(() => ref.current.open());
+    await screen.findByPlaceholderText(/Ask anything/);
+    return { ref, view };
+  }
+  async function openHistory(mobile) {
+    if (mobile) fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+  }
+  function closeHistory(mobile) {
+    fireEvent.click(screen.getByRole('button', { name: mobile ? 'Back to request' : 'Back', exact: true }));
+  }
+
+  it('keeps recent prompts per staff account; another login never sees them', async () => {
+    useIsMobile.mockReturnValue(true);
+    fetchMock.mockImplementation(async url => (url.endsWith('/query')
+      ? ok({ response: 'Answered.', conversationHistory: [] })
+      : ok({ actions: [], tasks: [], threads: [], thread: null })));
+    const first = await mountAs(STAFF_A);
+    submit('Fixture private prompt for account A');
+    await screen.findByText('Answered.');
+    expect(JSON.parse(localStorage.getItem('admin_ib_recents:staff-a'))).toEqual(['Fixture private prompt for account A']);
+    first.view.unmount();
+    // The key every login shared before this fix is never read again.
+    localStorage.setItem('admin_ib_recents', JSON.stringify(['Fixture prompt from the shared key']));
+    const second = await mountAs(STAFF_B);
+    expect(screen.queryByText('Recent')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fixture private prompt for account A')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fixture prompt from the shared key')).not.toBeInTheDocument();
+    second.view.unmount();
+    await mountAs(STAFF_A);
+    expect(await screen.findByText('Fixture private prompt for account A')).toBeInTheDocument();
+  });
+
+  it.each([false, true])('a History outage says so, keeps the last list and retries (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    let outage = false;
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes('/threads?')) return outage ? unavailable(503) : ok({ threads: [THREAD_ROW] });
+      if (url.includes('/tasks?')) return outage ? unavailable(503) : ok({ tasks: [] });
+      return ok({ actions: [] });
+    });
+    await mountAs(STAFF_A);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/tasks?'))).toBe(true));
+    outage = true;
+    await openHistory(mobile);
+    expect(await screen.findByText('History is temporarily unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('No previous conversations yet.')).not.toBeInTheDocument();
+    outage = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry', exact: true }));
+    expect(await screen.findByRole('button', { name: /Fixture saved conversation/ })).toBeInTheDocument();
+    expect(screen.queryByText(/History is temporarily unavailable/)).not.toBeInTheDocument();
+    closeHistory(mobile);
+    outage = true;
+    await openHistory(mobile);
+    expect(await screen.findByText('History is temporarily unavailable. This list may be out of date.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Fixture saved conversation/ })).toBeInTheDocument();
+  });
+
+  it('a list that is off for this login (404) is still an empty history, not an outage', async () => {
+    useIsMobile.mockReturnValue(false);
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes('/threads?')) return unavailable(404);
+      return ok({ actions: [], tasks: [] });
+    });
+    await mountAs(STAFF_A);
+    await openHistory(false);
+    expect(await screen.findByText('No previous conversations yet.')).toBeInTheDocument();
+    expect(screen.queryByText(/temporarily unavailable/)).not.toBeInTheDocument();
+  });
+
+  it('names the one History list that failed', async () => {
+    useIsMobile.mockReturnValue(false);
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes('/threads?')) return ok({ threads: [] });
+      if (url.includes('/tasks?')) return unavailable(503);
+      return ok({ actions: [] });
+    });
+    await mountAs(STAFF_A);
+    await openHistory(false);
+    expect(await screen.findByText('Saved requests are temporarily unavailable.')).toBeInTheDocument();
+    expect(screen.getByText('No previous conversations yet.')).toBeInTheDocument();
+  });
+
+  it.each([
+    [503, 'That conversation did not open. Try again.', 1],
+    [404, 'That conversation is no longer available.', 2],
+  ])('a conversation that does not open says why (HTTP %s)', async (status, message, listReads) => {
+    useIsMobile.mockReturnValue(false);
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes('/threads/thread-1')) return unavailable(status);
+      if (url.includes('/threads?')) return ok({ threads: [THREAD_ROW] });
+      return ok({ actions: [], tasks: [] });
+    });
+    await mountAs(STAFF_A);
+    await openHistory(false);
+    fireEvent.click(await screen.findByRole('button', { name: /Fixture saved conversation/ }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    // Still on the list; a conversation that is gone makes the list reload.
+    expect(screen.getByRole('button', { name: 'Back', exact: true })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.includes('/threads?'))).toHaveLength(listReads));
+  });
+
+  it.each([false, true])('answer links open records in the app and https pages in a new tab; other targets stay text (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    const record = '/admin/customers?customerId=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    fetchMock.mockImplementation(async url => (url.endsWith('/query') ? ok({ conversationHistory: [], response: [
+      `Open [the fixture customer](${record}).`,
+      'Read **[the guide](https://example.invalid/guide)**.',
+      '[run](javascript:alert(1)) [plain](http://example.invalid/x) [relative](//evil.invalid/x) [https://waves.invalid/pay](https://evil.invalid/pay)',
+      '[Pay at waves.invalid](https://evil.invalid/pay) [the help page at example.invalid](https://example.invalid/help)',
+    ].join('\n') }) : ok({ actions: [], tasks: [], threads: [], thread: null })));
+    await mountAs(STAFF_A);
+    submit('Show the record and guide');
+    const recordLink = await screen.findByRole('link', { name: 'the fixture customer' });
+    expect(recordLink).toHaveAttribute('href', record);
+    const guide = screen.getByRole('link', { name: 'the guide' });
+    expect(guide).toHaveAttribute('href', 'https://example.invalid/guide');
+    expect(guide).toHaveAttribute('target', '_blank');
+    expect(guide).toHaveAttribute('rel', 'noopener noreferrer');
+    for (const name of ['run', 'plain', 'relative', 'https://waves.invalid/pay', 'Pay at waves.invalid']) {
+      expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+    }
+    // A label may name the site the link really opens.
+    expect(screen.getByRole('link', { name: 'the help page at example.invalid' })).toHaveAttribute('href', 'https://example.invalid/help');
+    expect(screen.getByText(/\[plain\]\(http:\/\/example\.invalid\/x\)/)).toBeInTheDocument();
+    fireEvent.click(recordLink);
+    expect(screen.getByTestId('where')).toHaveTextContent(record);
+    expect(screen.queryByPlaceholderText(/Ask anything/)).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])('controls and History text are at least 14px (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return ok({ response: 'Answered.', conversationHistory: [] });
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes('/threads?')) return ok({ threads: [{ ...THREAD_ROW, last_active_at: '2026-10-29T14:00:00Z' }] });
+      if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'task-1', state: 'completed', target: { target: { label: 'Fixture saved request' } } }] });
+      return ok({ actions: [{ id: 'qa', label: 'Fixture quick action', prompt: 'Fixture quick prompt' }] });
+    });
+    await mountAs(STAFF_A);
+    const px = el => parseFloat(el.style.fontSize);
+    const quick = await screen.findByText('Fixture quick action');
+    expect(px(quick.closest('button')) || px(quick)).toBeGreaterThanOrEqual(14);
+    if (mobile) {
+      expect(px(screen.getByText('Quick actions'))).toBeGreaterThanOrEqual(14);
+      expect(px(screen.getByText('Dashboard'))).toBeGreaterThanOrEqual(14);
+    }
+    submit('Fixture question');
+    await screen.findByText('Answered.');
+    if (!mobile) {
+      for (const name of ['Send', 'Clear', 'History']) {
+        expect(px(screen.getByRole('button', { name, exact: true }))).toBeGreaterThanOrEqual(14);
+      }
+      expect(px(screen.getByPlaceholderText('Follow up...'))).toBeGreaterThanOrEqual(14);
+    }
+    await openHistory(mobile);
+    const row = await screen.findByRole('button', { name: /Fixture saved conversation/ });
+    for (const span of row.querySelectorAll('span')) expect(px(span)).toBeGreaterThanOrEqual(14);
+    expect(px(screen.getByRole('button', { name: /Fixture saved request/ }))).toBeGreaterThanOrEqual(14);
+    expect(px(screen.getByText('Previous conversations'))).toBeGreaterThanOrEqual(14);
+  });
+
+  it('desktop: "Attaching…" shows under the composer while Go waits for the photo', async () => {
+    useIsMobile.mockReturnValue(false);
+    let finish;
+    encodeJpegDataUrl.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await mountAs(STAFF_A);
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: 'What is in this photo?' } });
+    fireEvent.change(document.querySelector('input[type=file]'), { target: { files: [new File(['x'], 'fixture-slow.png', { type: 'image/png' })] } });
+    expect(await screen.findByText('Attaching…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go', exact: true })).toBeDisabled();
+    await act(async () => finish('data:image/jpeg;base64,QUJD'));
+    expect(screen.queryByText('Attaching…')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go', exact: true })).toBeEnabled();
+  });
+
+  it.each([false, true])('says which picked photos did not attach and why (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    await mountAs(STAFF_A);
+    const input = document.querySelector('input[type=file]');
+    const png = name => new File(['x'], name, { type: 'image/png' });
+    fireEvent.change(input, { target: { files: [png('broken-image.png'), png('fixture-good.png')] } });
+    expect(await screen.findByText(/^broken-image\.png could not be attached because it is not a readable image\./)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove fixture-good.png' })).toBeInTheDocument();
+    fireEvent.change(input, { target: { files: [1, 2, 3, 4].map(n => png(`fixture-${n}.png`)) } });
+    expect(await screen.findByText('A question can carry 4 photos; 1 was not added.')).toBeInTheDocument();
+    expect(screen.queryByText(/broken-image\.png could not/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^Remove fixture-/ })).toHaveLength(4);
+    for (const name of ['Remove fixture-1.png', 'Remove fixture-2.png']) fireEvent.click(screen.getByRole('button', { name }));
+    fireEvent.change(input, { target: { files: [png('broken-a.png'), png('broken-b.png')] } });
+    expect(await screen.findByText(/^2 files could not be attached because they are not readable images\./)).toBeInTheDocument();
   });
 });

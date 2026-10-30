@@ -124,7 +124,7 @@ describe('placeStaffSavedVisit', () => {
     gateOn();
     const trx = jest.fn();
     expect(await routeCheck.placeStaffSavedVisit(trx, { serviceId: 'svc-1', source: 'bulk_reschedule' })).toEqual([1]);
-    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, source: 'bulk_reschedule' });
+    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, lateDays: true, source: 'bulk_reschedule' });
   });
 });
 
@@ -182,5 +182,78 @@ describe('GATE_ROUTE_CHECK_AUTO_SAVES: placeAutoSavedVisit', () => {
     await routeCheck.placeAutoSavedVisit(trx, { serviceId: 'svc-1' });
     expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
     expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true });
+  });
+});
+
+// GATE_ROUTE_CHECK_ACCEPT_SAVES + GATE_ROUTE_CHECK_ASSIGN_SAVES (owner
+// 2026-10-29, Route Check Everywhere follow-up item 1): the same placement
+// function, asked through a caller-chosen gate.
+describe('placeAcceptedVisit / placeAssignedVisit (caller-chosen gates)', () => {
+  const trx = { isTransaction: true };
+  const on = (gate) => {
+    process.env[gate] = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES;
+    delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
+    delete process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES;
+  });
+
+  test('the readers are read at call time, need the arrival-window route check, and are independent of each other', () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    expect([arrivalRoute.routeCheckAcceptSavesLive(), arrivalRoute.routeCheckAssignSavesLive()]).toEqual([false, false]);
+    process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
+    expect([arrivalRoute.routeCheckAcceptSavesLive(), arrivalRoute.routeCheckAssignSavesLive()]).toEqual([true, false]);
+    delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
+    process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES = 'true';
+    expect([arrivalRoute.routeCheckAcceptSavesLive(), arrivalRoute.routeCheckAssignSavesLive()]).toEqual([false, true]);
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    expect([arrivalRoute.routeCheckAcceptSavesLive(), arrivalRoute.routeCheckAssignSavesLive()]).toEqual([false, false]);
+  });
+
+  test('gate off: both touch nothing, even with the auto-saves gate on', async () => {
+    on('GATE_ROUTE_CHECK_AUTO_SAVES');
+    expect(await routeCheck.placeAcceptedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAssignedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
+  });
+
+  test('accept gate on: one placement on the caller transaction with source estimate_accept (row or id)', async () => {
+    on('GATE_ROUTE_CHECK_ACCEPT_SAVES');
+    expect(await routeCheck.placeAcceptedVisit(trx, { visit: { id: 'svc-9' } })).toEqual([1]);
+    expect(await routeCheck.placeAcceptedVisit(trx, { serviceId: 'svc-8' })).toEqual([1]);
+    expect(placeSpy).toHaveBeenCalledTimes(2);
+    expect(placeSpy).toHaveBeenNthCalledWith(1, trx, { serviceId: 'svc-9', staffSave: true, source: 'estimate_accept' });
+    expect(placeSpy).toHaveBeenNthCalledWith(2, trx, { serviceId: 'svc-8', staffSave: true, source: 'estimate_accept' });
+    expect(await routeCheck.placeAssignedVisit(trx, { serviceId: 'svc-8' })).toBeNull();
+    expect(placeSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test('assign gate on: one placement with source dispatch_assign; the accept helper stays off', async () => {
+    on('GATE_ROUTE_CHECK_ASSIGN_SAVES');
+    expect(await routeCheck.placeAssignedVisit(trx, { serviceId: 'svc-1' })).toEqual([1]);
+    expect(placeSpy).toHaveBeenCalledTimes(1);
+    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, source: 'dispatch_assign' });
+    expect(await routeCheck.placeAcceptedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(placeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a throwing placement is one warning line and a null, never a throw (both gates)', async () => {
+    on('GATE_ROUTE_CHECK_ACCEPT_SAVES');
+    process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES = 'true';
+    placeSpy.mockRejectedValueOnce(new Error('accept boom')).mockRejectedValueOnce(new Error('assign boom'));
+    expect(await routeCheck.placeAcceptedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAssignedVisit(trx, { serviceId: 'svc-1' })).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenNthCalledWith(1, expect.stringContaining('(estimate_accept): accept boom'));
+    expect(logger.warn).toHaveBeenNthCalledWith(2, expect.stringContaining('(dispatch_assign): assign boom'));
+  });
+
+  test('no connection or no visit id is a quiet no-op', async () => {
+    on('GATE_ROUTE_CHECK_ACCEPT_SAVES');
+    expect(await routeCheck.placeAcceptedVisit(null, { serviceId: 'svc-1' })).toBeNull();
+    expect(await routeCheck.placeAcceptedVisit(trx)).toBeNull();
+    expect(placeSpy).not.toHaveBeenCalled();
   });
 });

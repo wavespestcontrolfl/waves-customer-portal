@@ -838,13 +838,33 @@ const BillingCron = {
         const retryAt = new Date();
         retryAt.setDate(retryAt.getDate() + RETRY_DELAYS_DAYS[0]);
 
-        // Find the failed payment record (created by the charge method)
-        const failedPayment = await db('payments')
-          .where({ customer_id: customer.id, status: 'failed' })
-          .where('payment_date', '>=', monthStart)
-          .where('description', 'like', '%WaveGuard Monthly%')
-          .orderBy('created_at', 'desc')
-          .first();
+        // Arm the failed row charge() recorded for THIS attempt (err.paymentRecord).
+        // This runs after the billing lock is released, so "the newest failed
+        // monthly row" can be an older month's retry rung that failed in the gap;
+        // arming it would leave this month's failure with no retry. charge() sets
+        // err.paymentRecord on every throw (null when recording the failed row
+        // itself failed); only then does the lookup run, held to this month's
+        // obligation stamp (chargeMonthly sets billed_month) and to rows no rung
+        // superseded. An error from anywhere else (the customer read, the lock,
+        // or the bookkeeping AFTER a charge that succeeded) left no failed
+        // attempt: arming a row then would email a "payment failed" retry notice
+        // to a customer whose charge may have gone through.
+        const fromCharge = Object.prototype.hasOwnProperty.call(err, 'paymentRecord');
+        let failedPayment = null;
+        if (err.paymentRecord?.id && err.paymentRecord.status === 'failed') {
+          failedPayment = err.paymentRecord;
+        } else if (fromCharge && !err.paymentRecord) {
+          failedPayment = await db('payments')
+            .where({ customer_id: customer.id, status: 'failed' })
+            .where('payment_date', '>=', monthStart)
+            .where('description', 'like', '%WaveGuard Monthly%')
+            .whereRaw("metadata->>'billed_month' = ?", [`${year}-${String(month).padStart(2, '0')}`])
+            .whereNull('superseded_by_payment_id')
+            .orderBy('created_at', 'desc')
+            .first();
+        } else if (!fromCharge) {
+          logger.warn(`[billing-cron] Monthly charge for customer id=${customer.id} failed outside the charge itself (${err.message}) — no failed attempt to arm for retry`);
+        }
 
         const emailChoice = failedPayment ? await paymentIssueEmailChoice(customer.id) : false;
         const emailDescriptor = failedPayment && emailChoice !== false && emailChoice !== null

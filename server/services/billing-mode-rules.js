@@ -10,7 +10,8 @@
  * same checks, same order, same database reads, same messages.
  *
  * No database handle is required at load: the caller passes its own (the
- * route its `db`, the bar its transaction), and the prerequisite check takes
+ * route its `db` before any lock and its transaction again on the locked
+ * customer row; the bar its transaction), and the prerequisite check takes
  * its reads as loaders so it runs only the read the requested lane needs.
  */
 

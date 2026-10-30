@@ -99,6 +99,7 @@ const CODES = Object.freeze({
   CANNIBALIZES_EXISTING: 'TOPIC_CANNIBALIZES_EXISTING',
   SLUG_COLLIDES_LIVE: 'TOPIC_SLUG_COLLIDES_LIVE',
   RETIRED_TOPIC: 'TOPIC_RETIRED',
+  SAME_QUESTION_LIVE: 'TOPIC_SAME_QUESTION_LIVE',
 });
 
 // Regional phrasings that anchor a topic to the footprint without naming a
@@ -927,7 +928,12 @@ function indexCorpus(corpus = []) {
     for (const tok of tokenize(targetingText(fields))) counts.set(tok, (counts.get(tok) || 0) + 1);
     const url = normalizeSlug(item.url || fields.slug);
     const category = String(fields.category || categoryFromSlug(url) || '').toLowerCase() || null;
-    posts.push({ url, title: fields.title, path: item.path || item.file || null, category, counts });
+    // The STRICT fields (title / slug leaf / primary keyword) only — the
+    // same-question rule judges these, never the meta description,
+    // secondary keywords or headings that ownership counts also read.
+    const strict = new Map();
+    for (const tok of sameQuestionTokens([fields.title, slugWords(url), slugWords(fields.slug), fields.primary_keyword].filter(Boolean).join(' '))) strict.set(tok, (strict.get(tok) || 0) + 1);
+    posts.push({ url, title: fields.title, path: item.path || item.file || null, category, counts, strict });
     accumulateProperNounStats(proseOf(item.body), nounStats, counts);
   }
   return { posts, df: documentFrequency(posts), dfByCategory: new Map(), properNouns: properNounsFrom(nounStats) };
@@ -1099,6 +1105,122 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     });
   }
   return { ...base, ok: findings.length === 0, findings, geo, entity_owners, category, corpus_size: idx.posts.length };
+}
+
+// ── same question already answered by a live post ─────────────────────
+// Owner 2026-10-30 ("all"): the engine published two millipede posts 8 days
+// apart (/pest-control/millipede-vs-centipede-southwest-florida/, then
+// /pest-control/florida-millipedes-southwest-florida/). The entity rule above
+// only catches a RARE PROPER NOUN (Taexx); a species or an ordinary noun was
+// out of its scope, and the uniqueness gate only sees near-copy TEXT after
+// the draft. This rule asks, before any writer spend: does a live post
+// already hold every topic word of this brief's keyword in its title, slug or
+// primary keyword? If so that post answers the question, and the sanctioned
+// move is a refresh of it (the runner queues one), not a sibling.
+//
+// Deterministic, no LLM. Candidate core tokens = the primary keyword's words
+// (fallback: working title, then slug) minus geo words, minus the generic
+// framing words below, folded singular. Applies to NEW supporting blogs only
+// (isApplicable); refreshes are exempt. Shipped behind
+// GATE_SAME_QUESTION_CHECK: evaluateSameQuestion only DECIDES; the runner
+// shadows or enforces it.
+// "Florida" / "fla" and the county / coast words are geo, never the topic.
+const SQ_GEO_EXTRA = new Set(['fla', 'sarasota', 'manatee', 'charlotte', 'swfl', 'southwest', 'county', 'gulf', 'coast', 'suncoast']);
+// Framing words: they shape HOW a question is asked, not WHAT it asks about.
+// Singular, post-fold. GENERIC_TOKENS and RETIRED_FILLER (above) are dropped
+// as well; this list adds the question-shape words they lack. Calibrate by
+// the replay script (server/scripts/same-question-replay.js).
+const SQ_FRAMING_WORDS = new Set([
+  'type', 'kind', 'variety', 'species', 'sign', 'symptom', 'cause', 'reason', 'fix', 'solution', 'tip', 'trick',
+  'guide', 'top', 'ultimate', 'complete', 'common', 'basic', 'fact', 'everything', 'explained', 'overview',
+  'how', 'what', 'why', 'when', 'which', 'does', 'vs', 'versus', 'difference', 'between', 'identify',
+  'identification', 'safe', 'safely', 'worth', 'answer', 'question', 'mean', 'know', 'need',
+  'home', 'house', 'property', 'yard', 'year', 'near', 'around',
+]);
+// Broad pest-family and service nouns. A one-word topic made only of one of
+// these ("termite", "lawn", "cockroach") never identifies a single question:
+// the site rightly holds many posts about each. A narrower name (millipede)
+// is not here, and a one-word topic of it can block. Singular, post-fold
+// ("cockroach" folds to "roach").
+const SQ_BROAD_TOKENS = new Set([
+  'pest', 'bug', 'insect', 'termite', 'ant', 'roach', 'spider', 'mosquito', 'rodent', 'rat', 'mouse', 'flea', 'tick',
+  'wasp', 'bee', 'hornet', 'fly', 'beetle', 'moth', 'lawn', 'grass', 'turf', 'sod', 'weed', 'tree', 'shrub', 'plant',
+  'palm', 'mold', 'fungus', 'disease', 'irrigation', 'fertilizer', 'fertilization', 'herbicide', 'insecticide',
+]);
+// A topic held by more live posts than this is a cluster the site already
+// covers from several angles; no single post answers it, so nothing blocks.
+// Same number as the entity rule's rare threshold.
+const SQ_MAX_OWNERS = RARE_ENTITY_DF_MAX;
+
+// Fold a phrase to comparable topic words: pest aliases (cockroach → roach,
+// mice → mouse), regional / statewide geo removed, singular. No filtering of
+// framing words here — the corpus side keeps every word.
+function sameQuestionTokens(text) {
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  return tokenize(geoFree).map(stem);
+}
+
+// The candidate's topic words: geo, served-city, generic and framing words
+// dropped. Raw words are screened before AND after folding (the lists mix
+// plural and singular entries).
+function sameQuestionCore(text) {
+  const cities = cityTokens();
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  const dropRaw = (w) => GEO_TOKENS.has(w) || SQ_GEO_EXTRA.has(w) || cities.has(w) || GENERIC_TOKENS.has(w) || RETIRED_FILLER.has(w) || SQ_FRAMING_WORDS.has(w);
+  const out = tokenize(geoFree).filter((w) => !dropRaw(w)).map(stem).filter((w) => w.length >= 3 && !dropRaw(w));
+  return [...new Set(out)];
+}
+
+/**
+ * evaluateSameQuestion(candidate, { index })
+ *   candidate: { actionType, pageType, query, title, slug }
+ *   index: indexCorpus() result (the live blog corpus)
+ * → { applicable, would_block, reason, tokens, source, source_text, owner, owners, findings }
+ * Pure and read-only. `would_block` is the rule's verdict; the CALLER decides
+ * whether to enforce it (GATE_SAME_QUESTION_CHECK). `findings` holds the one
+ * P0 finding only when would_block. A missing index is `reason: 'no_corpus'`,
+ * never a block.
+ */
+function evaluateSameQuestion(candidate = {}, { index = null } = {}) {
+  const base = { applicable: false, would_block: false, reason: null, tokens: [], source: null, source_text: null, owner: null, owners: [], findings: [] };
+  if (!isApplicable(candidate)) return { ...base, reason: 'not_a_new_blog' };
+  const sources = [['query', candidate.query], ['title', candidate.title], ['slug', slugWords(candidate.slug || '')]];
+  let tokens = [];
+  let source = null;
+  let sourceText = null;
+  for (const [name, text] of sources) {
+    const core = sameQuestionCore(text);
+    if (core.length) { tokens = core; source = name; sourceText = String(text || '').trim(); break; }
+  }
+  // source_text is the phrase the match was made on (keyword, else working
+  // title, else slug words): the question a refresh of the owner should answer.
+  const applicable = { ...base, applicable: true, tokens, source, source_text: sourceText };
+  if (!tokens.length) return { ...applicable, reason: 'no_topic_words' };
+  if (!index || !Array.isArray(index.posts) || !index.posts.length) return { ...applicable, reason: 'no_corpus' };
+  const selfUrl = normalizeSlug(candidate.slug || '');
+  const matched = index.posts
+    .filter((post) => post.strict && post.url !== selfUrl && tokens.every((tok) => post.strict.has(tok)))
+    .map((post) => ({ url: post.url, title: post.title, hits: tokens.reduce((n, tok) => n + (post.strict.get(tok) || 0), 0) }))
+    .sort((a, b) => (b.hits - a.hits) || String(a.url).localeCompare(String(b.url)));
+  if (!matched.length) return { ...applicable, reason: 'no_owner' };
+  if (tokens.length === 1 && SQ_BROAD_TOKENS.has(tokens[0])) return { ...applicable, reason: 'broad_single_word', owners: matched.slice(0, SQ_MAX_OWNERS) };
+  if (matched.length > SQ_MAX_OWNERS) return { ...applicable, reason: 'common_topic', owners: matched.slice(0, SQ_MAX_OWNERS) };
+  const owner = matched[0];
+  return {
+    ...applicable,
+    would_block: true,
+    reason: 'owner_found',
+    owner,
+    owners: matched,
+    findings: [{
+      severity: 'P0',
+      code: CODES.SAME_QUESTION_LIVE,
+      tokens,
+      owner_url: owner.url,
+      owner_title: owner.title || null,
+      message: `The live post ${owner.url} already holds every topic word ("${tokens.join('", "')}") of this brief in its title, slug or primary keyword. One question → one post: add this question to that post as an answer section (a refresh), not a sibling post.`,
+    }],
+  };
 }
 
 // ── retired topics ─────────────────────────────────────────────────────
@@ -1287,6 +1409,7 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
 
 module.exports = {
   evaluate,
+  evaluateSameQuestion,
   withTopicMergeLock,
   TOPIC_MERGE_LOCK_KEY,
   evaluateDraftFraming,
@@ -1303,4 +1426,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, extraTargetingOf, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { sameQuestionCore, sameQuestionTokens, SQ_FRAMING_WORDS, SQ_BROAD_TOKENS, SQ_MAX_OWNERS, topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, extraTargetingOf, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

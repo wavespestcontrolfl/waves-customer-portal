@@ -8,6 +8,7 @@
  *   node server/scripts/impact-tracker.js verdicts   # show recorded verdicts
  *   node server/scripts/impact-tracker.js paused      # buckets at regression threshold
  *   node server/scripts/impact-tracker.js digest      # PREVIEW the ops emails (never sends)
+ *   node server/scripts/impact-tracker.js ai-change [days]  # PREVIEW before/after AI citation verdicts (read-only, no gate, no writes)
  *
  * For prod data:
  *   railway run -s Postgres -- bash -c '
@@ -18,6 +19,23 @@
 
 const db = require('../models/db');
 const tracker = require('../services/seo/impact-tracker');
+
+// Read-only: grades each settled change on the AI answers already stored
+// (14 days before deploy vs days 2-16 after, adjusted for site-wide Waves
+// citations). Works with GATE_AI_CHANGE_CHECK off; writes nothing.
+async function previewAiChange(daysArg) {
+  const days = daysArg > 0 ? daysArg : 90;
+  const rows = await tracker.previewAiChange({ db, days });
+  console.log(`\n${rows.length} settled change(s) in the last ${days} days (read-only preview):`);
+  const fmt = (w) => (w ? `${w.cites}/${w.answers} answers (site ${w.siteCites})` : '—');
+  for (const r of rows) {
+    if (r.error) { console.log(`  [error] ${r.page_url}: ${r.error}`); continue; }
+    const ratio = r.ratio == null ? '—' : r.ratio.toFixed(2);
+    console.log(`  [${r.verdict}] ${r.page_url}  bucket=${r.bucket || '—'}  deployed=${r.deploy}  before ${fmt(r.pre)}  after ${fmt(r.post)}  ratio=${ratio}`);
+  }
+  const tally = rows.reduce((acc, r) => { if (r.verdict) acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
+  console.log('\ntally:', JSON.stringify(tally));
+}
 
 async function main() {
   const cmd = process.argv[2] || 'sweep';
@@ -75,8 +93,11 @@ async function main() {
       }
       break;
     }
+    case 'ai-change':
+      await previewAiChange(Number(process.argv[3]));
+      break;
     default:
-      console.log('commands: sweep | verdicts | paused | digest');
+      console.log('commands: sweep | verdicts | paused | digest | ai-change [days]');
   }
 }
 

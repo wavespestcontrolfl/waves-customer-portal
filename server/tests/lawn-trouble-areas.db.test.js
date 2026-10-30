@@ -43,11 +43,14 @@ describeDb('places and trouble areas through PostgreSQL', () => {
   };
   // One ledger row: a spot application of a product on the fixture lawn, at a place (or none).
   let seq = 0;
-  async function applied(name, { place = null, daysAgo = 5, rate = 0.1, unit = 'oz', property = world.property.id, retracted = false } = {}) {
+  // `places` (a list): ONE application on several places, written the way the completion writes it (the first in treated_place too).
+  // `legacy`: only treated_place, as a server that predates treated_places writes it.
+  async function applied(name, { place = null, places = null, legacy = false, daysAgo = 5, rate = 0.1, unit = 'oz', property = world.property.id, retracted = false } = {}) {
     seq += 1;
+    const list = places || (place ? [place] : null);
     const [row] = await knex('property_application_history').insert({
       customer_id: world.customerId, property_id: property, product_id: catalog[name].id, application_date: dayAgo(daysAgo),
-      application_rate: rate, rate_unit: unit, area_treated_sqft: 200, treated_place: place, notes: `row ${seq}`,
+      application_rate: rate, rate_unit: unit, area_treated_sqft: 200, treated_place: list ? list[0] : null, ...(list && !legacy ? { treated_places: list } : {}), notes: `row ${seq}`,
       retracted_at: retracted ? new Date() : null,
     }).returning('*');
     return row;
@@ -63,10 +66,12 @@ describeDb('places and trouble areas through PostgreSQL', () => {
     }
     // The clones come from a database that may already carry this migration: start without it, then run the real one.
     for (const table of ['service_products', 'property_application_history']) {
+      if (await knex.schema.hasColumn(table, 'treated_places')) await knex.schema.alterTable(table, (t) => t.dropColumn('treated_places'));
       if (await knex.schema.hasColumn(table, 'treated_place')) await knex.schema.alterTable(table, (t) => t.dropColumn('treated_place'));
     }
     await knex.raw('DROP TABLE IF EXISTS lawn_trouble_areas');
     await migration.up(knex);
+    await require('../models/migrations/20261030120000_lawn_treated_places').up(knex);
     await product(ARENA, { category: 'insecticide', default_rate_per_1000: 0.147 });
     await product(CELSIUS, { default_rate_per_1000: 0.085 });
     await product('Plain Spot Fungicide', { category: 'fungicide' });
@@ -118,6 +123,98 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       await migration.up(knex);
       expect(await knex.schema.hasTable('lawn_trouble_areas')).toBe(true);
       expect(await knex.schema.hasColumn('property_application_history', 'treated_place')).toBe(true);
+    });
+  });
+
+  describe('the treated_places migration (20261030120000)', () => {
+    const treatedPlaces = require('../models/migrations/20261030120000_lawn_treated_places');
+    const columnOf = async (table) => knex.schema.hasColumn(table, 'treated_places');
+
+    test('up adds the list to both tables and backfills ARRAY[treated_place] for a placed row; an unplaced row stays NULL; a second up changes nothing', async () => {
+      await treatedPlaces.down(knex);
+      await applied(CELSIUS, { place: 'front', legacy: true });
+      await applied(CELSIUS, { place: null, daysAgo: 9 });
+      const [{ id: productRecord }] = await knex('service_products').insert({ service_record_id: randomUUID(), product_name: 'fixture', treated_place: 'back' }).returning('id');
+      await treatedPlaces.up(knex);
+      expect(await columnOf('service_products')).toBe(true);
+      expect(await columnOf('property_application_history')).toBe(true);
+      const rows = await knex('property_application_history').orderBy('application_date').select('treated_place', 'treated_places');
+      expect(rows).toEqual([{ treated_place: null, treated_places: null }, { treated_place: 'front', treated_places: ['front'] }]);
+      expect((await knex('service_products').where({ id: productRecord }).first()).treated_places).toEqual(['back']);
+      // A list the code already wrote is never overwritten, and a second run is a no-op.
+      await knex('property_application_history').where({ treated_place: 'front' }).update({ treated_places: ['front', 'back'] });
+      await expect(treatedPlaces.up(knex)).resolves.toBeUndefined();
+      expect((await knex('property_application_history').where({ treated_place: 'front' }).first()).treated_places).toEqual(['front', 'back']);
+    });
+
+    test('down drops the list from both tables and keeps treated_place; down again is a no-op; up restores it (round trip)', async () => {
+      await treatedPlaces.down(knex);
+      expect(await columnOf('service_products')).toBe(false);
+      expect(await columnOf('property_application_history')).toBe(false);
+      expect(await knex.schema.hasColumn('property_application_history', 'treated_place')).toBe(true);
+      await expect(treatedPlaces.down(knex)).resolves.toBeUndefined();
+      await treatedPlaces.up(knex);
+      expect(await columnOf('property_application_history')).toBe(true);
+    });
+  });
+
+  describe('one application on several places', () => {
+    const svcOf = async () => {
+      const visit = await world.visit(0);
+      return { id: visit.id, customer_id: world.customerId, property_id: world.property.id, scheduled_date: visit.scheduled_date, service_type: 'Lawn fixture' };
+    };
+    const auditAt = (svc, productId, place) => limits.auditHardCountLimits(svc.customer_id, productId, svc.scheduled_date, knex, { propertyId: svc.property_id, place, excludeScheduledServiceId: svc.id });
+    test('counts once at each place it names, and once for the lawn: two sprays on the front and back close the front and back, not the sides', async () => {
+      await applied(CELSIUS, { places: ['front', 'back'] });
+      await applied(CELSIUS, { places: ['back', 'front'], daysAgo: 20 });
+      for (const place of ['front', 'back']) expect(typesOf(await check(CELSIUS, { place }))).toContain('annual_max_apps');
+      for (const place of ['left_side', 'right_side']) expect(typesOf(await check(CELSIUS, { place }))).not.toContain('annual_max_apps');
+    });
+
+    test('one spray on two places is ONE application, not two: it leaves the next spray at either place open', async () => {
+      await applied(CELSIUS, { places: ['front', 'back'] });
+      for (const place of ['front', 'back', 'left_side']) expect(typesOf(await check(CELSIUS, { place }))).not.toContain('annual_max_apps');
+      expect(typesOf(await check(CELSIUS))).not.toContain('annual_max_apps');
+    });
+
+    test('a row an older server wrote (treated_place only) is read at its one place; a list row and an unplaced row add to it', async () => {
+      await applied(CELSIUS, { place: 'front', legacy: true });
+      await applied(CELSIUS, { places: ['front', 'left_side'], daysAgo: 20 });
+      expect(typesOf(await check(CELSIUS, { place: 'front' }))).toContain('annual_max_apps');
+      expect(typesOf(await check(CELSIUS, { place: 'back' }))).not.toContain('annual_max_apps');
+      expect(typesOf(await check(CELSIUS, { place: 'left_side' }))).not.toContain('annual_max_apps');
+      await applied(CELSIUS, { place: null, daysAgo: 30 });
+      // The unplaced row counts at every place: the side now has the list row and it (2), the back only it (1).
+      expect(typesOf(await check(CELSIUS, { place: 'left_side' }))).toContain('annual_max_apps');
+      expect(typesOf(await check(CELSIUS, { place: 'back' }))).not.toContain('annual_max_apps');
+    });
+
+    test('the closeout audit reads the list: a spray on the front and back is audited at each, and the side is not touched', async () => {
+      await applied(CELSIUS, { places: ['front', 'back'] });
+      await applied(CELSIUS, { places: ['front'], daysAgo: 20 });
+      const svc = await svcOf();
+      expect((await auditAt(svc, catalog[CELSIUS].id, 'front')).map((v) => v.type)).toContain('annual_max_apps');
+      expect(await auditAt(svc, catalog[CELSIUS].id, 'back')).toEqual([]);
+      expect(await auditAt(svc, catalog[CELSIUS].id, 'left_side')).toEqual([]);
+    });
+
+    test('preflightPlaces accepts areaPlaces, and still the single areaPlace; a bad id or an empty list is refused', async () => {
+      const svc = await svcOf();
+      const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, applicationMethod: 'spot_treatment', ...extra });
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlaces: ['front', 'back'] })] })).toBeNull();
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlaces: ['front', 'roof'] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlaces: [] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+    });
+
+    test('recordFromCompletion keeps one area per picked place, once, however many times the rows repeat', async () => {
+      const visit = await world.visit(-1);
+      const record = await world.record(visit);
+      const svc = { id: visit.id, customer_id: world.customerId, property_id: world.property.id, scheduled_date: visit.scheduled_date };
+      const inserted = [{ product_id: catalog[CELSIUS].id, treated_place: 'front', treated_places: ['front', 'back'], application_method: 'spot_treatment' }];
+      const rows = areas.areaRowsOf({ requestRows: [{ productId: catalog[CELSIUS].id, troubleSource: 'tech_tap' }], inserted, catalog: new Map([[String(catalog[CELSIUS].id), { category: 'herbicide' }]]) });
+      expect(await areas.recordFromCompletion(knex, { svc, record, rows: [...rows, ...rows] })).toBe(2);
+      expect((await knex('lawn_trouble_areas').orderBy('place').select('place', 'type')).map((r) => `${r.place}:${r.type}`)).toEqual(['back:weeds', 'front:weeds']);
     });
   });
 
@@ -195,11 +292,22 @@ describeDb('places and trouble areas through PostgreSQL', () => {
     });
   });
 
-  describe('the plan reader, the completion preflight and the closeout audit agree', () => {
+  describe('the plan reader, the place-limit reader and the closeout audit agree', () => {
     const svcOf = async () => {
       const visit = await world.visit(0);
       return { id: visit.id, customer_id: world.customerId, property_id: world.property.id, scheduled_date: visit.scheduled_date, service_type: 'Lawn fixture' };
     };
+    // The yearly limit reader the completion preflight used to refuse with (owner 2026-10-30: a limit warns, /complete never refuses it
+    // now): the product's own count, interval and v13 amount at the row's place, as a proposal. The sheet's warning follows it and the
+    // closeout audit raises the office alert, so these tests keep the three agreeing. null = no limit at that place.
+    const proposalBlock = async (svc, row) => {
+      const { etCalendarDayOf } = require('../utils/datetime-et');
+      const result = await limits.checkLimits(svc.customer_id, row.productId, new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`), knex, {
+        propertyId: svc.property_id, place: row.areaPlace, proposal: true, proposedRow: areas.proposedRow(row), excludeScheduledServiceId: svc.id,
+      });
+      return (result.blocks || []).find(areas.refusesAtPlace) || null;
+    };
+    const auditAt = (svc, productId, place) => limits.auditHardCountLimits(svc.customer_id, productId, svc.scheduled_date, knex, { propertyId: svc.property_id, place, excludeScheduledServiceId: svc.id });
 
     test('cappedByPlace (the sheet) shows the front closed and the back open, the same as checkLimits', async () => {
       await applied(CELSIUS, { place: 'front' });
@@ -220,23 +328,26 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       spy.mockRestore();
     });
 
-    test('preflightPlaces refuses a spot row at the closed place, allows the open one, and asks for a place', async () => {
+    test('preflightPlaces never refuses a spot row for a yearly limit (the closeout audit flags the closed place instead), and still asks for a place', async () => {
       await applied(CELSIUS, { place: 'front' });
       await applied(CELSIUS, { place: 'front', daysAgo: 20 });
       const svc = await svcOf();
       const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, applicationMethod: 'spot_treatment', ...extra });
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
-      const closed = await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] });
-      expect(closed).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front', limitType: 'annual_max_apps' } });
-      expect(closed.payload.error).toMatch(/LIMIT REACHED/);
+      expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toBeNull();
+      // The limit is still there: the reader says it at the front, and the audit that raises the office alert flags it there only.
+      expect(await proposalBlock(svc, row({ areaPlace: 'front' }))).toMatchObject({ type: 'annual_max_apps' });
+      expect(await proposalBlock(svc, row({ areaPlace: 'back' }))).toBeNull();
+      expect((await auditAt(svc, catalog[CELSIUS].id, 'front')).map((v) => v.type)).toContain('annual_max_apps');
+      expect(await auditAt(svc, catalog[CELSIUS].id, 'back')).toEqual([]);
       expect(await areas.preflightPlaces({ knex, svc, products: [row({})] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
       // A whole-lawn row is not judged by place.
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ applicationMethod: 'broadcast_spray' })] })).toBeNull();
     });
 
-    // One row per way a spot treatment reaches the sheet: the product is at its yearly count at the FRONT, so /complete refuses
-    // the front and accepts the back (the sheet tests prove the tech can reach the back in the counted taps).
+    // One row per way a spot treatment reaches the sheet: the product is at its yearly limit at the FRONT, so the limit reader closes the
+    // front and not the back (the sheet warns at the front), and /complete accepts both.
     test.each([
       ['Weed spots lead (Celsius WG)', CELSIUS, 2],
       ['Weed spots member (Certainty)', 'Certainty Turf Herbicide', 2],
@@ -246,11 +357,13 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       ['caterpillar card (a stored cap)', 'Stored Cap Caterpillar Insecticide', 1],
       ['dry-spot card (a stored cap)', 'Stored Cap Wetting Agent', 1],
       ['a search-added spot row (a stored cap)', 'Stored Cap Fungicide', 1],
-    ])('%s: /complete refuses the front and accepts the back', async (_label, name, rows) => {
+    ])('%s: the limit reader closes the front and not the back, and /complete accepts both', async (_label, name, rows) => {
       for (let i = 0; i < rows; i += 1) await applied(name, { place: 'front', daysAgo: 100 - i * 60, rate: 0.147 });
       const svc = await svcOf();
       const row = (areaPlace) => ({ productId: catalog[name].id, name, applicationMethod: 'spot_treatment', areaPlace });
-      expect(await areas.preflightPlaces({ knex, svc, products: [row('front')] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+      expect(await proposalBlock(svc, row('front'))).not.toBeNull();
+      expect(await proposalBlock(svc, row('back'))).toBeNull();
+      expect(await areas.preflightPlaces({ knex, svc, products: [row('front')] })).toBeNull();
       expect(await areas.preflightPlaces({ knex, svc, products: [row('back')] })).toBeNull();
     });
 
@@ -279,24 +392,26 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         ['0.0294 oz on 100 sq ft is exactly the cap: allowed', 0.0294, false],
       ])('%s', async (_label, totalAmount, refused) => {
         const row = typed({ totalAmount });
-        const result = await areas.preflightPlaces({ knex, svc: await visit(), products: [row] });
-        if (refused) expect(result).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        const result = await proposalBlock(await visit(), row);
+        if (refused) expect(result).toMatchObject({ type: 'annual_max_rate' });
         else expect(result).toBeNull();
+        // Never a refusal at /complete.
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [row] })).toBeNull();
         // The audit, given the row as the ledger would hold it, reaches the same verdict.
         expect(await audited(row)).toBe(refused);
       });
 
       test('the same quantity on a larger spot is under the cap (the row\'s OWN area decides)', async () => {
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [typed({ totalAmount: 0.05, areaValue: 1000 })] })).toBeNull();
+        expect(await proposalBlock(await visit(), typed({ totalAmount: 0.05, areaValue: 1000 }))).toBeNull();
       });
 
       test('a stated rate wins over the quantity, as it does for a recorded row; a quantity on a row with no area falls back to the program\'s dose', async () => {
         const rateRow = typed({ totalAmount: 5, rate: 0.147, rateUnit: 'oz' });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [rateRow] })).toBeNull();
+        expect(await proposalBlock(await visit(), rateRow)).toBeNull();
         expect(await audited(rateRow)).toBe(false);
         // A quantity with no spot area cannot be sized: the preflight counts the cap row's fixed fallback rate, the recorded row's own reading.
         const noArea = typed({ totalAmount: 5, areaValue: undefined, areaUnit: undefined });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [noArea] })).toBeNull();
+        expect(await proposalBlock(await visit(), noArea)).toBeNull();
         expect(await audited(noArea)).toBe(false);
       });
 
@@ -311,11 +426,11 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[ARENA].id, product_name: ARENA, role: 'insecticide_spot', application_mode: 'spot', default_in_plan: false, rate_per_1000: 0.147, rate_unit: 'oz', gates: '{}' });
         expect((await limits.programDose(knex, catalog[ARENA].id)).ratePer1000).toBe(0.147);
         const quantityOnly = typed({ totalAmount: 0.147, areaValue: undefined, areaUnit: undefined });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [quantityOnly] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        expect(await proposalBlock(await visit(), quantityOnly)).toMatchObject({ type: 'annual_max_rate' });
         expect(await audited(quantityOnly)).toBe(true);
         // A row the ledger CAN size (a stated rate of 0.147 oz per 1,000, exactly the remaining half): both agree it fits, at 100%.
         const sized = typed({ totalAmount: 1, rate: 0.147, rateUnit: 'oz' });
-        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [sized] })).toBeNull();
+        expect(await proposalBlock(await visit(), sized)).toBeNull();
         expect(await audited(sized)).toBe(false);
         await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id }).del();
         await knex('lawn_protocol_windows').where({ id: window.id }).del();
@@ -402,11 +517,11 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         expect(await go([{ productId: catalog['Plain Spot Fungicide'].id, name: 'Plain Spot Fungicide' }])).toBeNull();
       });
 
-      test('the limit is read for an inferred spot row at its place', async () => {
+      test('an inferred spot row is a spot row (it needs a place) and a limit at its place does not refuse it', async () => {
         await applied(CELSIUS, { place: 'front' });
         await applied(CELSIUS, { place: 'front', daysAgo: 20 });
         const svc = await svcRow();
-        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toBeNull();
         expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
       });
     });

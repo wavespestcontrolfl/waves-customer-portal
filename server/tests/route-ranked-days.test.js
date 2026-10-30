@@ -284,4 +284,30 @@ describe('gate on', () => {
       expect(Object.keys(o).sort()).toEqual(['currentLoad', 'date', 'dayOfWeek', 'displayDate', 'driveMinutes', 'routeChecked', 'sameAreaServices', 'score', 'suggestedWindow']);
     }
   });
+
+  // GATE_ROUTE_CHECK_LATE_DAYS (fix A): a day whose existing stops already arrive late is listed, flagged.
+  test('an already-late day is a checked day: kept, flagged dayAlreadyLate, and ranked after every day that is not', async () => {
+    findAvailableSlots.mockImplementation(async (call) => {
+      const d = datesOf(call);
+      return {
+        // The late day has the engine's best score; the three clean days follow.
+        slots: [{ ...slot(d[0], '15:00', 1), day_already_late: true }, slot(d[1], '10:00', 5), slot(d[2], '10:00', 6), slot(d[3], '10:00', 7)],
+        rejections_by_date: {},
+      };
+    });
+    const options = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(options.map((o) => o.date)).toEqual([dayOffset(2), dayOffset(3), dayOffset(4)]);
+    expect(options.some((o) => 'dayAlreadyLate' in o)).toBe(false);
+  });
+
+  test('with fewer than three clean days the already-late day still appears, flagged, at its checked start', async () => {
+    findAvailableSlots.mockImplementation(async (call) => {
+      const d = datesOf(call);
+      return { slots: [{ ...slot(d[0], '15:00', 1), day_already_late: true }, slot(d[1], '10:00', 5)], rejections_by_date: {} };
+    });
+    const options = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
+    expect(options.slice(0, 2).map((o) => o.date)).toEqual([dayOffset(2), dayOffset(1)]);
+    expect(options[1]).toMatchObject({ routeChecked: true, dayAlreadyLate: true });
+    expect(options[1].suggestedWindow.start).toBe('15:00');
+  });
 });

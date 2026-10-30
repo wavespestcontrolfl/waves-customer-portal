@@ -21,6 +21,7 @@ const {
   buildFindingsFromVision,
   runFindingsLadder,
   applyWriterSummary,
+  postedScore,
   deriveOverallScore,
 } = require('../services/lawn-diagnostic-analyze');
 const { etParts } = require('../utils/datetime-et');
@@ -446,7 +447,7 @@ router.post('/', async (req, res, next) => {
     const address = normalizeAddress(body.address);
     const compliance = body.compliance && typeof body.compliance === 'object' ? body.compliance : {};
     const aiAnalysis = body.aiAnalysis && typeof body.aiAnalysis === 'object' ? body.aiAnalysis : {};
-    const overallScore = Number.isFinite(Number(body.overallScore)) ? Math.round(Number(body.overallScore)) : null;
+    const overallScore = postedScore(body.overallScore);
     const aiConfidence = Number.isFinite(Number(body.aiConfidence)) ? Number(body.aiConfidence) : null;
     const inputPhotos = asArray(body.photos).map((photo, index) => ({
       photo_id: photo.photo_id || photo.photoId || `photo-${index + 1}`,

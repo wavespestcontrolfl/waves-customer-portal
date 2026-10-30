@@ -143,7 +143,9 @@ async function classifyDay(candidate, { byDate, rejections, clashesAt, durationM
 const bySoonest = (a, b) => b.score - a.score || (a.dateStr < b.dateStr ? -1 : 1);
 
 // Least added drive first (the engine's own score), then its detour, then the old score.
-const byEngineRank = (a, b) => finite(a.slot.score) - finite(b.slot.score)
+// A day whose existing stops already arrive late (GATE_ROUTE_CHECK_LATE_DAYS) ranks after every day that is not.
+const byEngineRank = (a, b) => (a.slot.day_already_late === true) - (b.slot.day_already_late === true)
+  || finite(a.slot.score) - finite(b.slot.score)
   || finite(a.slot.detour_minutes) - finite(b.slot.detour_minutes) || bySoonest(a.candidate, b.candidate);
 
 /**
@@ -175,7 +177,9 @@ async function rankRouteCheckedDays({ serviceId, service, candidates, durationMi
     if (!days.checked.length && !days.refused.length) return null;
 
     const ranked = days.checked.sort(byEngineRank)
-      .map(({ candidate, slot }) => ({ candidate, slot, window: windowFor(slot.start_time, durationMinutes), routeChecked: true }));
+      .map(({ candidate, slot }) => ({ candidate, slot, window: windowFor(slot.start_time, durationMinutes), routeChecked: true,
+        // GATE_ROUTE_CHECK_LATE_DAYS: the engine's best start is on a day whose existing stops already arrive late.
+        ...(slot.day_already_late === true ? { alreadyLate: true } : {}) }));
     // Unverified days keep today's behavior (the visit's own window, the
     // overlap probe) after every checked day.
     const unverified = days.unverified.map((day) => day.candidate).sort(bySoonest);

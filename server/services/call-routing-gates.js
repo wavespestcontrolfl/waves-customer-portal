@@ -779,6 +779,14 @@ function secondaryContactPayload(extraction) {
   };
 }
 
+// GATE_CALL_PREPAY_CHOICE: the plan the caller chose on the call (service_request.billing_choice), so the office
+// card says "Caller chose annual prepay". Nothing is added with the gate off or when the call named no plan.
+function billingChoiceSnapshot(extraction) {
+  if (!require('../config/feature-gates').callPrepayChoiceLive()) return {};
+  const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
+  return choice ? { billing_choice: choice } : {};
+}
+
 // Scheduling-shaped cards carry the model's captured window fields so the
 // office can book "Tuesday, first slot" from the card instead of re-listening
 // to the recording — plus the filing-time service snapshot, so the
@@ -800,6 +808,7 @@ function schedulingWindowSnapshot(extraction) {
     callback_window_end: s.callback_window_end ?? null,
     scheduling_notes_raw: s.scheduling_notes_raw ?? null,
     ...askSnapshot(extraction),
+    ...billingChoiceSnapshot(extraction),
   };
 }
 const SCHEDULING_PAYLOAD_FLAGS = new Set([
@@ -1083,6 +1092,9 @@ function buildTriageItem({
     // prospect) and the insert did not land — same lane as its lead twin,
     // and this card is the only surface the failure gets.
     customer_creation_failed: 'customer_field_conflict',
+    // The caller chose annual prepay on a call the pipeline booked (call-prepay-choice.js, GATE_CALL_PREPAY_CHOICE):
+    // one admin-only card with a one-tap accept of the open estimate as annual prepay.
+    call_prepay_choice: 'billing_review',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;

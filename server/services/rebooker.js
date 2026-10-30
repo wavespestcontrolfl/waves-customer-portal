@@ -479,6 +479,25 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
 // that technician too (the anchor row's after-snapshot) and the anchor must
 // still be assigned to them — a move that landed with another tech is not
 // this request's result.
+// Technician-initiated series move (expectAnchor.technician_id, set only by the
+// tech-portal Quick Move): the shift writes every swept future occurrence and
+// every carried visit partner, so EVERY one of those locked rows must belong
+// to the requesting technician — a technician moves their OWN visits, never
+// another technician's follower in a mixed-assignee series. Judged on the
+// locked rows, before any write. No pin (every admin/customer caller) = inert.
+// Refusal is the same 409 SLOT_TAKEN the anchor pin throws, so the caller's
+// single-visit fallback moves the technician's own anchor alone.
+function assertSeriesWriteSetOwnedBy(expectAnchor, writeRows) {
+  if (!expectAnchor || !Object.prototype.hasOwnProperty.call(expectAnchor, 'technician_id')) return;
+  const owner = String(expectAnchor.technician_id || '');
+  if (writeRows.every((row) => String(row.technician_id || '') === owner)) return;
+  throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+    statusCode: 409,
+    isOperational: true,
+    code: 'SLOT_TAKEN',
+  });
+}
+
 function priorStillCurrent(prior, service, technician = null) {
   const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
     || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
@@ -1645,7 +1664,8 @@ class SmartRebooker {
       if (ranked) {
         return ranked.slice(0, 3).map((entry) => buildOption(entry.candidate, entry.window, entry.routeChecked
           ? { routeChecked: true, ...(Number.isFinite(Number(entry.slot?.detour_minutes))
-            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}) }
+            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}),
+          ...(entry.alreadyLate === true ? { dayAlreadyLate: true } : {}) }
           : { routeChecked: false }));
       }
       // No day could be route-checked: today's list, from the same candidates.
@@ -2050,6 +2070,17 @@ class SmartRebooker {
     const offDayWarnings = new Set();
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
+    // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
+    // runs): an ADMIN caller (`options.roadSpender` = the staff user, set by
+    // the admin routes only) buys the legs the move's check and route number
+    // read, BEFORE the transaction, so no Google call runs under a lock.
+    if ((useArrivalWindows || options.placeInRoute === true) && updates.window_start && options.roadSpender && keptTechId) {
+      await require('./scheduling/save-road-buy').buyRoadsBeforeSave({
+        spender: options.roadSpender, serviceId, changes: updates, date: newDateStr, technicianId: keptTechId,
+        windowStart: updates.window_start, windowEnd: occupancyGateEnd, check: useArrivalWindows,
+        excludeServiceIds: (options.excludeServiceIds || []).map(String),
+      });
+    }
     // The technician on the COMMITTED row (RETURNING off the CAS write).
     let committedTechId = null;
 
@@ -2474,7 +2505,7 @@ class SmartRebooker {
         // placement itself (the check never placed it either).
         // overlapAdvisory = a staff move (the tech-out mover is none): its day is
         // numbered on the road times its picker bought (GATE_SAVE_ROAD_TIMES).
-        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory });
+        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
       }
 
       if (service.status !== landedStatus) {
@@ -2943,6 +2974,18 @@ class SmartRebooker {
         .whereNotIn('status', TERMINAL).select('id');
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
+    // Road times for the ANCHOR's landing hour (GATE_SAVE_ROAD_BUY; unset =
+    // nothing runs; `options.roadSpender` is set by the admin routes only),
+    // bought BEFORE the transaction. The later occurrences keep the cache.
+    if (options.roadSpender && options.clearAnchorWindow !== true
+      && (useArrivalWindows || options.placeInRoute === true)) {
+      await require('./scheduling/save-road-buy').buyRoadsForVisitSave({
+        spender: options.roadSpender, serviceId, check: useArrivalWindows,
+        changes: { scheduled_date: seriesDateStr, ...(win.start ? { window_start: win.start } : {}),
+          ...(win.end ? { window_end: win.end } : {}) },
+        excludeServiceIds: (options.excludeServiceIds || []).map(String),
+      });
+    }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the
       // caller's guard takes customer/property/call locks, so it runs after
@@ -3079,7 +3122,13 @@ class SmartRebooker {
         // Presence-based for the window: a pinned NULL start (windowless
         // anchor at planning time) must fail the fence if a window was
         // added meanwhile, exactly like a pinned start that changed.
+        // Presence-based assignment pin: a technician-initiated move pins the
+        // anchor to the technician whose request it is, judged on the LOCKED
+        // read — a reassignment that landed after the caller's ownership
+        // check refuses the series move like any other concurrent change.
+        const expTech = has('technician_id') ? String(options.expectAnchor.technician_id || '') : undefined;
         if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
+          || (expTech !== undefined && String(anchorRow.technician_id || '') !== expTech)
           || (has('window_start') && hm(anchorRow.window_start) !== expStart)
           || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
           || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
@@ -3465,6 +3514,10 @@ class SmartRebooker {
           if (carry.partnerIds.length) probeExcludeIds = [...sweptIds, ...carry.partnerIds];
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
+          assertSeriesWriteSetOwnedBy(options.expectAnchor, [
+            ...siblings.filter((x) => sweptIds.some((id) => String(id) === String(x.id))),
+            ...[...carry.byVisit.values()].flatMap((entry) => entry.partners || []),
+          ]);
           // The acknowledged set: a surface confirmed exactly the previewed
           // occurrences — the locked sweep must be that same set (ids, not a
           // count: a cancel plus an auto-extend keeps the count while moving
@@ -4319,7 +4372,7 @@ class SmartRebooker {
           && (useArrivalWindows || options.placeInRoute === true)
           && (sibDateChanges || anchorTechChanges
             || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {
-          await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory });
+          await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
         }
         if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in
@@ -4979,6 +5032,7 @@ module.exports.makeSeriesProjector = makeSeriesProjector;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.assertSeriesWriteSetOwnedBy = assertSeriesWriteSetOwnedBy;
 module.exports.replaySeriesMoveCleanup = replaySeriesMoveCleanup;
 module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;

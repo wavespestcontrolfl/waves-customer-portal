@@ -6,7 +6,9 @@ const timeTracking = require('../services/time-tracking');
 const featureGates = require('../config/feature-gates');
 const { autoLunchLive, techWorkDaysLive } = featureGates;
 // Looked up at call time: a missing reader (a partial feature-gates mock) reads as off.
-const serviceLineShadow = () => typeof featureGates.serviceLineMapMode === 'function' && featureGates.serviceLineMapMode() === 'shadow';
+const serviceLineMode = () => (typeof featureGates.serviceLineMapMode === 'function' ? featureGates.serviceLineMapMode() : 'off');
+// The Team tab card and its endpoints work in 'shadow' and 'live' alike.
+const serviceLineMapOn = () => ['shadow', 'live'].includes(serviceLineMode());
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -112,8 +114,15 @@ function pickTechResponseFields(tech, fields) {
   return out;
 }
 
-function sanitizeTechForNonAdmin(tech) {
-  return pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+// A technician reads the roster for names and status only: a coworker's phone
+// and email are office-only (owner 2026-10-30); the caller's own row keeps them.
+function sanitizeTechForNonAdmin(tech, viewerId) {
+  const out = pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+  if (out && out.id !== viewerId) {
+    delete out.phone;
+    delete out.email;
+  }
+  return out;
 }
 
 function sanitizeTechForAdmin(tech) {
@@ -787,12 +796,12 @@ async function listTechnicians(req, res, next) {
         capability_summary: summaries.get(t.id),
         ...(hiredPacket ? hireLinkState(t, now) : {}),
       };
-      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row, req.technicianId);
     }));
     res.json({
       technicians: enriched,
       ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
-      ...(serviceLineShadow() ? { serviceLinesEnabled: true } : {}),
+      ...(serviceLineMapOn() ? { serviceLinesEnabled: true } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -1532,17 +1541,19 @@ async function putTechnicianCapabilities(req, res, next) {
 router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
 router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
 
-// ── Service-line map (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25) ─────────
-// One home and one gap technician per service line. SHADOW ONLY: nothing reads this
-// to place a visit; the six booking choice points only log what it would pick
-// (services/scheduling/line-technician.js). Admin only; 404 while the gate is off.
+// ── Service-line map (GATE_SERVICE_LINE_MAP=shadow|live, owner 2026-10-25 / 2026-10-30) ─
+// One home and one gap technician per service line. In shadow, nothing reads this
+// to place a visit; the six booking choice points only log what it would pick. In
+// live, new /book, phone and after-call bookings and the office Auto choice go to the
+// line's home technician, else its gap technician (services/scheduling/line-technician.js).
+// Admin only; 404 while the gate is off.
 const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
 const SERVICE_LINE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHADOW_SUMMARY_DEFAULT_DAYS = 14;
 const SHADOW_SUMMARY_MAX_DAYS = 90;
 
 function serviceLinesOff(res) {
-  if (serviceLineShadow()) return false;
+  if (serviceLineMapOn()) return false;
   res.status(404).json({ error: 'Not found' });
   return true;
 }
@@ -1590,7 +1601,7 @@ function normalizeServiceLineEntries(input) {
 router.get('/service-lines', requireAdmin, async (req, res, next) => {
   try {
     if (serviceLinesOff(res)) return undefined;
-    return res.json({ mode: 'shadow', lines: await readServiceLines(db) });
+    return res.json({ mode: serviceLineMode(), lines: await readServiceLines(db) });
   } catch (err) {
     return next(err);
   }
@@ -1632,7 +1643,7 @@ router.put('/service-lines', requireAdmin, async (req, res, next) => {
     if (outcome.error) return res.status(400).json({ error: outcome.error });
     // Event ids only: no names, no phone numbers.
     logger.info(`[team] Updated service-line map by staff id=${req.technicianId} (${entries.map((e) => `${e.service_category}: home=${e.home_technician_id || 'none'} gap=${e.gap_technician_id || 'none'}`).join('; ')})`);
-    return res.json({ success: true, mode: 'shadow', lines: outcome.lines });
+    return res.json({ success: true, mode: serviceLineMode(), lines: outcome.lines });
   } catch (err) {
     return next(err);
   }
@@ -1864,7 +1875,7 @@ router.post(
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated);
+      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated, req.technicianId);
       res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);

@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  customerAlertsRingLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
@@ -47,7 +48,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, customerAlertsRingLive } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -80,6 +81,7 @@ const gateOff = () => isEnabled.mockReturnValue(false);
 beforeEach(() => {
   jest.clearAllMocks();
   gateOff();
+  customerAlertsRingLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
 
@@ -128,6 +130,24 @@ describe('NotificationService.create under the bell policy', () => {
       'billing', 'Card number heard on a recorded call', 'PCI event body',
     );
     expect(silenced.suppressed).toBe(true);
+  });
+
+  test('GATE_CUSTOMER_ALERTS_RING: a quote we owe a caller (category lead, metadata promise) rings; off it stays silent', async () => {
+    // The estimator's and the call processor's 'Quote promised on call — send it' bells: muted today.
+    gateOn();
+    const notifications = chainMock([{ id: 'n-quote' }]);
+    mockTables({ notifications, notification_preferences: chainMock([]) });
+    const owed = () => NotificationService.notifyAdmin('lead', 'Quote promised on call — send it', 'body',
+      { link: '/admin/leads?lead=1', metadata: { quote_promised: true, promise: true } });
+
+    expect((await owed()).suppressed).toBe(true);
+    expect(notifications.insert).not.toHaveBeenCalled();
+
+    customerAlertsRingLive.mockReturnValue(true);
+    expect(await owed()).toEqual({ id: 'n-quote' });
+    expect(notifications.insert).toHaveBeenCalledTimes(1);
+    // The same bell without the declaration keeps today's answer.
+    expect((await NotificationService.notifyAdmin('lead', 'Quote promised on call — send it', 'body')).suppressed).toBe(true);
   });
 
   test('gate on: job applications are silent by default (own overridable category, not new_lead)', async () => {
@@ -523,6 +543,34 @@ describe('bellAllowed decision order', () => {
     await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_failed' })).resolves.toBe(true);
     await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_succeeded' })).resolves.toBe(false);
     await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: null })).resolves.toBe(false);
+  });
+
+  test('GATE_CUSTOMER_ALERTS_RING: a declared customer contact or promise rings over a silenced category and the owner override', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:estimate', bell_enabled: false }]) });
+    const bundle = { category: 'estimate', triggerKey: 'bundle_quote_requested', declared: { contact: true } };
+    const owedQuote = { category: 'lead', triggerKey: null, declared: { promise: true } };
+    // Off: today's answers (a bundle quote request and an owed quote are muted).
+    await expect(bellPolicy.bellAllowed(bundle)).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed(owedQuote)).resolves.toBe(false);
+    customerAlertsRingLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(bundle)).resolves.toBe(true);
+    await expect(bellPolicy.bellAllowed(owedQuote)).resolves.toBe(true);
+    // A site's explicit bell:false still wins; an undeclared or falsely-declared alert keeps today's answer.
+    await expect(bellPolicy.bellAllowed({ ...owedQuote, options: { bell: false } })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'lead', triggerKey: null })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'lead', declared: { contact: false, promise: false } })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'lead', declared: { contact: 'yes' } })).resolves.toBe(false);
+  });
+
+  test("GATE_CUSTOMER_ALERTS_RING: a customer's failed invoice payment rings beside payment_failed, even with payment silenced", async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:payment', bell_enabled: false }]) });
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'bill_payment_error' })).resolves.toBe(false);
+    customerAlertsRingLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'bill_payment_error' })).resolves.toBe(true);
+    // Only that one joins: the other payment bells keep today's answers.
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_succeeded' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: null })).resolves.toBe(false);
+    expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
   test('repeat_caller is retired from the bell even though its missed_call category is allowlisted (owner ruling 2026-09-11)', async () => {

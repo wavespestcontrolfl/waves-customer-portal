@@ -24,6 +24,8 @@ const STATUS_TABS = [
   { key: "all", label: "All" },
 ];
 
+const PAGE_SIZE = 100;
+
 function api(path, options = {}) {
   return rawAdminFetch(path, options).then(async (res) => {
     const body = await res.json().catch(() => ({}));
@@ -113,6 +115,29 @@ function SignedPdfButton({ request, disabled, onError }) {
   );
 }
 
+// The displayed range and Previous/Next for the server's 1-based pages.
+function RequestsPager({ meta, shown, loading, onPage }) {
+  if (meta.total <= 0) return null;
+  const first = (meta.page - 1) * PAGE_SIZE + 1;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t-hairline border-zinc-200 px-4 py-3">
+      <div className="u-nums text-ui-body text-ink-secondary">
+        Showing {first}–{first + shown - 1} of {meta.total}
+      </div>
+      {meta.totalPages > 1 && (
+        <div className="flex gap-2">
+          <Button size="sm" variant="secondary" disabled={loading || meta.page <= 1} onClick={() => onPage(meta.page - 1)}>
+            Previous
+          </Button>
+          <Button size="sm" variant="secondary" disabled={loading || meta.page >= meta.totalPages} onClick={() => onPage(meta.page + 1)}>
+            Next
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CountersignButton({ request, disabled, onClick }) {
   if (!canCountersign(request)) return null;
   return (
@@ -159,6 +184,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   // ?tab=requests&status=signed); anything unrecognised falls back to Open.
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedStatus = searchParams.get("status");
+  const [page, setPage] = useState(1);
   const [status, setStatus] = useState(() => (
     STATUS_TABS.some((tab) => tab.key === requestedStatus) ? requestedStatus : "open"
   ));
@@ -169,6 +195,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   // Back from a bell link (?status=signed → none) returns to Open.
   useEffect(() => {
     setStatus(STATUS_TABS.some((tab) => tab.key === requestedStatus) ? requestedStatus : "open");
+    setPage(1);
   }, [requestedStatus]);
   // A tab click mirrors itself into ?status= (other params kept, history
   // replaced), so the URL never holds a stale status. Otherwise a later bell
@@ -176,6 +203,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   // wouldn't fire (codex #4842 r2 P2).
   const selectStatus = useCallback((key) => {
     setStatus(key);
+    setPage(1);
     setSearchParams((prev) => {
       if (prev.get("status") === key) return prev;
       const next = new URLSearchParams(prev);
@@ -185,6 +213,8 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   }, [setSearchParams]);
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
+  // Server pages are 1-based; `meta` describes the page currently on screen.
+  const [meta, setMeta] = useState({ page: 1, total: 0, totalPages: 1 });
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -196,10 +226,10 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   const listPendingRef = useRef(null);
 
   const query = useMemo(() => {
-    const params = new URLSearchParams({ status, limit: "100" });
+    const params = new URLSearchParams({ status, limit: String(PAGE_SIZE), page: String(page) });
     if (search.trim()) params.set("search", search.trim());
     return params.toString();
-  }, [status, search]);
+  }, [status, search, page]);
 
   const loadRequests = useCallback(async ({ background = false } = {}) => {
     if (background && listPendingRef.current === listRequestRef.current) return;
@@ -216,7 +246,14 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         api("/admin/contracts/requests/stats").catch(() => ({ stats: null })),
       ]);
       if (request !== listRequestRef.current) return;
+      const totalPages = Math.max(1, Number(data.totalPages) || 1);
+      if (page > totalPages) {
+        // The last page emptied (e.g. its only row was cancelled): reload the new last page.
+        setPage(totalPages);
+        return;
+      }
       setRequests(data.requests || []);
+      setMeta({ page, total: Number(data.total) || 0, totalPages });
       if (statsData.stats) setStats(statsData.stats);
       setLoadError("");
     } catch (err) {
@@ -229,7 +266,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         setLoading(false);
       }
     }
-  }, [query]);
+  }, [query, page]);
 
   useEffect(() => {
     loadRequests();
@@ -239,6 +276,12 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   }, [loadRequests]);
 
   useVisiblePageRefresh(() => loadRequests({ background: true }));
+
+  // A row action reloads after its POST resolves. By then staff may have
+  // changed page, tab or search, so the reload goes through the latest
+  // loadRequests (the current query), never the one captured at the click.
+  const loadRequestsRef = useRef(loadRequests);
+  loadRequestsRef.current = loadRequests;
 
   const runDeliveryAction = async (request, channel, action = "send") => {
     if (!request?.id) return;
@@ -257,7 +300,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       });
       setLatestLink(result.signingUrl || result.contract?.signingUrl || "");
       setToast(action === "reminder" ? `${channel.toUpperCase()} reminder sent` : `${channel.toUpperCase()} sent`);
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Document delivery failed");
     } finally {
@@ -275,7 +318,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       const result = await api(`/admin/contracts/${request.id}/share-link`, { method: "POST" });
       setLatestLink(result.signingUrl || result.contract?.signingUrl || "");
       setToast("Fresh signing link created");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not create signing link");
     } finally {
@@ -295,7 +338,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         body: { reason: "Cancelled from document requests queue" },
       });
       setToast("Document request cancelled");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not cancel document request");
     } finally {
@@ -312,7 +355,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
     try {
       await api(`/admin/contracts/${request.id}/countersign`, { method: "POST", body: { name: name.trim() } });
       setToast("Countersigned");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not countersign this agreement");
     } finally {
@@ -322,8 +365,15 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
 
   const copyLatestLink = async () => {
     if (!latestLink) return;
-    await navigator.clipboard?.writeText(latestLink).catch(() => {});
-    setToast("Signing link copied");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(latestLink);
+      setError("");
+      setToast("Signing link copied");
+    } catch {
+      setToast("");
+      setError("Could not copy the link. Select the link above and copy it.");
+    }
   };
 
   const hubNavRef = useRef({});
@@ -357,9 +407,9 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
 
       <div className="mb-5 flex flex-wrap items-end gap-3">
         <Field label="Search requests" className="min-w-0 flex-1">
-          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customer, document, phone, or email" />
+          <Input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search customer, document, phone, or email" />
         </Field>
-        <Button variant="secondary" onClick={() => setSearch("")} disabled={!search}>
+        <Button variant="secondary" onClick={() => { setSearch(""); setPage(1); }} disabled={!search}>
           Clear
         </Button>
       </div>
@@ -509,6 +559,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
               Loading document requests...
             </div>
           )}
+          <RequestsPager meta={meta} shown={requests.length} loading={loading} onPage={setPage} />
         </CardBody>
       </Card>
       <Dialog open={Boolean(cancelTarget)} onClose={() => setCancelTarget(null)} size="sm">

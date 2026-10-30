@@ -66,3 +66,22 @@ test('technicians cannot infer private health or retention from result membershi
   expect(compile(helpers.techSafeListFilters(requested)).sql).not.toMatch(/customer_health_scores|retention_outreach/);
   expect(helpers.techSafeListRow(helpers.mapCustomerListRow({ health_score: 0, health_grade: 'F' }))).not.toHaveProperty('healthGrade');
 });
+
+test('hasBalance qualifies on net due (payments and credits subtracted), the same rule as balance_owed', () => {
+  const result = compile({ hasBalance: 'true' });
+  expect(result.sql).toContain('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)');
+  expect(result.sql).not.toContain('SUM(total)');
+  expect(result.bindings).toEqual(['sent', 'viewed', 'overdue']);
+  expect(compile({}).sql).not.toContain('credit_applied');
+});
+
+test('list rows carry stored coordinates as numbers and null when not located', () => {
+  expect(helpers.mapCustomerListRow({ id: 'c1', latitude: '27.4989280', longitude: '-82.5748190' }))
+    .toMatchObject({ lat: 27.498928, lng: -82.574819 });
+  expect(helpers.mapCustomerListRow({ id: 'c2', latitude: null, longitude: null })).toMatchObject({ lat: null, lng: null });
+  expect(helpers.mapCustomerListRow({ id: 'c3' })).toMatchObject({ lat: null, lng: null });
+  expect(helpers.mapCustomerListRow({ id: 'c4', latitude: 'abc', longitude: '' })).toMatchObject({ lat: null, lng: null });
+  const tech = helpers.techSafeListRow(helpers.mapCustomerListRow({ id: 'c1', latitude: '27.5', longitude: '-82.5' }));
+  expect(tech).not.toHaveProperty('lat');
+  expect(tech).not.toHaveProperty('lng');
+});
