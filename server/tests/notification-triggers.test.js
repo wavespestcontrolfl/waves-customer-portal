@@ -148,6 +148,11 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/communications?thread=customer-123');
   });
 
+  test('SEO sync failure links to the Advisor view the SEO page reads', () => {
+    const built = TRIGGER_REGISTRY.seo_sync_failed.build({ source: 'GSC', reason: 'quota' });
+    expect(built.link).toBe('/admin/seo?workspace=command&view=advisor');
+  });
+
   test('KB audit trigger summarizes flagged entries for the admin bell', () => {
     const notDispatched = TRIGGER_REGISTRY.newsletter_send_not_dispatched.build({ sendId: 'send-42', subject: 'Pest Insider' });
     expect(notDispatched.link).toBe('/admin/newsletter?tab=compose&draftId=send-42'); // codex round 14 P2: THE affected draft

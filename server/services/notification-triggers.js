@@ -913,7 +913,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `${p.source || 'SEO'} sync failed`,
       body: `${p.locationName ? p.locationName + ': ' : ''}${p.reason || 'unknown error'}. Check the Sync Health card on the SEO Advisor tab.`,
-      link: '/admin/seo?tab=advisor',
+      link: '/admin/seo?workspace=command&view=advisor',
     }),
   },
   // Fired by server/services/dashboard-alerts-cron.js when an
