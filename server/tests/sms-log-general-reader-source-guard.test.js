@@ -595,26 +595,6 @@ const ALLOWLIST = [
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    snippet: 'const smsHistory = await db("sms_log")',
-    reason: 'message_type restricted to \'balance_reminder\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
-    file: 'services/workflows/balance-reminder.js',
-    snippet: '|| await db(\'sms_log\').where({ customer_id: customer.id, message_type: \'late_payment\' })',
-    reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
-    file: 'services/workflows/balance-reminder.js',
-    snippet: 'const prevCount = await db("sms_log")',
-    reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
-    file: 'services/workflows/balance-reminder.js',
-    snippet: 'const sentRecently = await db("sms_log")',
-    reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
-    file: 'services/workflows/balance-reminder.js',
     snippet: 'const recentReminder = await db("sms_log")',
     reason: 'message_type restricted to this cooldown check\'s own message_type constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },

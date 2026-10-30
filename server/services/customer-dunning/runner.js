@@ -142,7 +142,7 @@ async function nextStageArrived(run, event) {
 }
 
 const markAtRisk = async (run) => {
-  if (!(Followups.ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true')) return;
+  if (!Followups.ladderThrough90Live()) return;
   if (!FINAL_STEP_IDS.includes(run.step.id)) return;
   try {
     await Followups.markAtRiskForLongOverdue(run.schedule.customer_id);
