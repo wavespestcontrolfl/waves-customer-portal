@@ -90,6 +90,21 @@ describe('Home misting system card', () => {
     expect(screen.queryByText('Your misting system')).not.toBeInTheDocument();
   });
 
+  it('re-reads the card just after the next mist passes, so an open Home never keeps a past time', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const soon = { ...system, nextMistAt: new Date(Date.now() + 2000).toISOString() };
+      api.getMistingSystem.mockResolvedValue({ propertyScope: { enabled: true, propertyId: 'pa', closed: false }, system: soon });
+      renderHome();
+      expect(await screen.findByText('Your misting system')).toBeInTheDocument();
+      expect(api.getMistingSystem).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(3500);
+      await waitFor(() => expect(api.getMistingSystem).toHaveBeenCalledTimes(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows under a secondary house when the echo matches it', async () => {
     api.getMistingSystem.mockResolvedValue({ propertyScope: { enabled: true, propertyId: 'pb', closed: false }, system });
     renderHome({ activePropertyId: 'cust-1:pb' });

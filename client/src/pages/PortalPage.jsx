@@ -2794,6 +2794,16 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const mistingScopeStale = scopeEchoMismatch(mistingRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (mistingScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [mistingScopeStale, onSavedScopeUnavailable]);
   const mistingSystem = mistingScopeStale ? null : (mistingRead.data?.system || null);
+  // The server works out the next mist when it is read. Re-read just after that time passes, so a
+  // Home left open never keeps showing a mist that already ran (the card shows "—" meanwhile).
+  const mistingNextAt = mistingSystem?.nextMistAt || null;
+  const refreshMisting = mistingRead.refresh;
+  useEffect(() => {
+    const at = mistingNextAt ? new Date(mistingNextAt).getTime() : NaN;
+    if (!Number.isFinite(at)) return undefined;
+    const timer = setTimeout(() => { void refreshMisting(); }, Math.min(Math.max(at - Date.now(), 0) + 1000, 2147483647));
+    return () => clearTimeout(timer);
+  }, [mistingNextAt, refreshMisting]);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [reviewCard, setReviewCard] = useState(null);
   const [reviewCardStatus, setReviewCardStatus] = useState('loading');

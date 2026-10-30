@@ -32,7 +32,8 @@ function dailyLine(mistTimes) {
 function nextMistLabel(nextMistAt, now) {
   if (!nextMistAt) return '—';
   const at = new Date(nextMistAt);
-  if (Number.isNaN(at.getTime())) return '—';
+  // A time that already passed is never shown as the next mist (Home re-reads it right after).
+  if (Number.isNaN(at.getTime()) || at.getTime() <= now.getTime()) return '—';
   const day = etDateString(at);
   if (day === etDateString(now)) return `Today at ${clock(at)}`;
   if (day === etDateString(addETDays(now, 1))) return `Tomorrow at ${clock(at)}`;

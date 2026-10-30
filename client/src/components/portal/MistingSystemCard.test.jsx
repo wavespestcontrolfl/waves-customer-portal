@@ -37,6 +37,12 @@ describe('MistingSystemCard', () => {
     expect(rowValue('Next mist')).toBe('Tomorrow at 6:30 AM');
   });
 
+  it('never shows a mist time that already passed as the next mist', () => {
+    render(<MistingSystemCard system={{ ...base, nextMistAt: '2026-10-30T19:30:00.000Z' }} now={NOW} />);
+    expect(rowValue('Next mist')).toBe('—');
+    expect(screen.getByText('Daily at 6:30 AM, 7:30 PM and 10:30 PM')).toBeInTheDocument();
+  });
+
   it('compares ET calendar dates, not 24-hour windows or the UTC date', () => {
     // 10:00 PM EDT Oct 30 is already Oct 31 in UTC; 6:30 AM EDT Oct 31 is "tomorrow", not "today".
     render(<MistingSystemCard system={{ ...base, nextMistAt: '2026-10-31T10:30:00.000Z' }} now={new Date('2026-10-31T02:00:00Z')} />);
