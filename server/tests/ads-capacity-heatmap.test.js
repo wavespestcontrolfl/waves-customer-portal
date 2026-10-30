@@ -10,6 +10,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 let mockBookedByDate = {};
 let mockCampaigns = [];
 let mockChanges = [];
+let mockLatest = [];
+let mockLatestIds = null;
 jest.mock('../models/db', () => jest.fn((table) => {
   if (table === 'technicians') {
     const q = { where: () => q, then: (res, rej) => Promise.resolve([{ id: 1 }]).then(res, rej) };
@@ -29,6 +31,15 @@ jest.mock('../models/db', () => jest.fn((table) => {
     const q = { where: () => q, orderBy: () => q, select: () => Promise.resolve(mockCampaigns) };
     return q;
   }
+  if (table === 'ad_budget_log') {
+    const q = {
+      whereIn: (_col, ids) => { mockLatestIds = ids; return q; },
+      distinctOn: () => q,
+      orderBy: () => q,
+      select: () => Promise.resolve(mockLatest),
+    };
+    return q;
+  }
   if (table === 'ad_budget_log as l') {
     const q = { join: () => q, where: () => q, orderBy: () => q, limit: () => q, select: () => Promise.resolve(mockChanges) };
     return q;
@@ -42,6 +53,8 @@ beforeEach(() => {
   mockBookedByDate = {};
   mockCampaigns = [];
   mockChanges = [];
+  mockLatest = [];
+  mockLatestIds = null;
   delete process.env.GATE_ADS_CAPACITY_WORK_DAYS;
   // 8:06 PM ET on Thu Oct 29 2026 (EDT): UTC is already Friday Oct 30.
   jest.useFakeTimers({ now: new Date('2026-10-30T00:06:00Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
@@ -77,7 +90,23 @@ test('returns one all row, no per-day budget mode, and the campaigns and recent 
   expect(result.heatmap.all.techs).toBe(1);
   expect(result.heatmap.all.weeklySlots).toBe(result.heatmap.all.days.reduce((s, d) => s + d.slots, 0));
   for (const day of result.heatmap.all.days) expect(day).not.toHaveProperty('budgetMode');
-  expect(result.campaigns).toEqual(mockCampaigns);
+  expect(result.campaigns).toEqual([{ ...mockCampaigns[0], lastChange: null }]);
   expect(result.recentChanges).toEqual(mockChanges);
   expect(result.thresholds).toEqual({ green: 70, yellow: 85, orange: 95 });
 });
+
+test("each campaign's latest change comes from its own id, not the global last-10 list or its name", async () => {
+  mockCampaigns = [
+    { id: 'c1', campaign_name: 'Same Name', budget_mode: 'stop', daily_budget_current: '0.05', daily_budget_base: '5.00' },
+    { id: 'c2', campaign_name: 'Same Name', budget_mode: 'base', daily_budget_current: '9.00', daily_budget_base: '9.00' },
+  ];
+  // The global list holds only c2's rows (a busy campaign); c1's last change is older.
+  mockChanges = [{ campaign_id: 'c2', campaign_name: 'Same Name', new_mode: 'base' }];
+  mockLatest = [{ campaign_id: 'c1', created_at: new Date('2026-10-20T18:00:00Z'), previous_mode: 'spent', new_mode: 'stop' }];
+  const { campaigns } = await BudgetManager.getWeeklyHeatmap();
+
+  expect(mockLatestIds).toEqual(['c1', 'c2']);
+  expect(campaigns[0].lastChange).toMatchObject({ campaign_id: 'c1', new_mode: 'stop' });
+  expect(campaigns[1].lastChange).toBeNull();
+});
+

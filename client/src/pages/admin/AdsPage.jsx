@@ -1662,7 +1662,7 @@ function CapacityTab() {
         Capacity and ad budget — next 14 days
       </div>
       {campaigns.map((c) => {
-        const last = changes.find((ch) => ch.campaign_name === c.campaign_name);
+        const last = c.lastChange;
         return (
           <UiCard key={c.id} className="p-6">
             <div className="flex flex-wrap items-center [gap:10px]">

@@ -24,7 +24,14 @@ const days = Array.from({ length: 14 }, (_, i) => ({
 const HEATMAP = {
   heatmap: { all: { days, weeklyBooked: 91, weeklySlots: 112, weeklyUtilization: 81, techs: 1 } },
   thresholds: { green: 70, yellow: 85, orange: 95 },
-  campaigns: [CAMPAIGN],
+  campaigns: [{
+    ...CAMPAIGN,
+    lastChange: {
+      campaign_id: CAMPAIGN.id, created_at: "2026-10-27T18:00:00.000Z", previous_mode: "spent", new_mode: "stop",
+      previous_budget: "5.00", new_budget: "0.05", reason: "Capacity 100% for general on 2026-10-28",
+      trigger: "auto", google_ads_updated: true,
+    },
+  }],
   recentChanges: [{
     created_at: "2026-10-27T18:00:00.000Z", campaign_name: "Waves Pest Control - GBP Search",
     previous_mode: "spent", new_mode: "stop", previous_budget: "5.00", new_budget: "0.05",

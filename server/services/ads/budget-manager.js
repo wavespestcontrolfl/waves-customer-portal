@@ -388,10 +388,26 @@ class BudgetManager {
       ? Math.round((all.weeklyBooked / all.weeklySlots) * 100)
       : 0;
 
-    const campaigns = await db('ad_campaigns')
+    const liveCampaigns = await db('ad_campaigns')
       .where({ status: 'active', platform: 'google_ads' })
       .orderBy('campaign_name')
       .select('id', 'campaign_name', 'budget_mode', 'daily_budget_current', 'daily_budget_base');
+
+    // Each campaign's own latest change, by id: the global last-10 list below can
+    // miss a quiet campaign, and campaign names are neither unique nor stable.
+    const ids = liveCampaigns.map((c) => c.id);
+    const latest = ids.length
+      ? await db('ad_budget_log')
+        .whereIn('campaign_id', ids)
+        .distinctOn('campaign_id')
+        .orderBy([{ column: 'campaign_id' }, { column: 'created_at', order: 'desc' }])
+        .select(
+          'campaign_id', 'created_at', 'previous_mode', 'new_mode', 'previous_budget', 'new_budget',
+          'reason', 'trigger', 'google_ads_updated',
+        )
+      : [];
+    const latestById = new Map(latest.map((row) => [String(row.campaign_id), row]));
+    const campaigns = liveCampaigns.map((c) => ({ ...c, lastChange: latestById.get(String(c.id)) || null }));
 
     const recentChanges = await db('ad_budget_log as l')
       .join('ad_campaigns as c', 'c.id', 'l.campaign_id')
@@ -399,7 +415,7 @@ class BudgetManager {
       .orderBy('l.created_at', 'desc')
       .limit(10)
       .select(
-        'l.created_at', 'l.campaign_name', 'l.previous_mode', 'l.new_mode',
+        'l.campaign_id', 'l.created_at', 'l.campaign_name', 'l.previous_mode', 'l.new_mode',
         'l.previous_budget', 'l.new_budget', 'l.reason', 'l.trigger', 'l.google_ads_updated',
       );
 
