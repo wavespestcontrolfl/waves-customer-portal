@@ -796,15 +796,17 @@ export function nextFormForOfferTiers(form, estimate) {
   return form;
 }
 // The linked member's current services this quote moves up a tier
-// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). Each fresh result
+// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). Each fresh list
 // replaces the pick: every offered service starts ticked, except one staff
-// unticked on an earlier result for the SAME customer. No list = no pick, and
-// the save then sends none (the server keeps its automatic plan). The pick
-// lives in the form so a reopened draft saves the same choice.
+// unticked on an earlier result for the SAME customer. A result without the
+// list (nothing to offer, or the lookup failed) keeps that customer's choices:
+// dropping them would let the save fall back to the server's automatic plan
+// and reprice a service staff unticked. Another customer's pick never carries.
+// The pick lives in the form so a reopened draft saves the same choice.
 export function nextFormForTierExtension(form, estimate, customerId) {
   const offered = (estimate?.currentServiceTierOffer?.services || []).map((svc) => svc.key);
-  if (!offered.length || !customerId) return form.tierExtensionPick ? { ...form, tierExtensionPick: null } : form;
-  const prior = form.tierExtensionPick?.customerId === customerId ? form.tierExtensionPick : null;
+  const prior = customerId && form.tierExtensionPick?.customerId === customerId ? form.tierExtensionPick : null;
+  if (!offered.length) return (form.tierExtensionPick || null) === prior ? form : { ...form, tierExtensionPick: prior };
   const unticked = (key) => !!prior && prior.offered.includes(key) && !prior.ticked.includes(key);
   return { ...form, tierExtensionPick: { customerId, offered, ticked: offered.filter((key) => !unticked(key)) } };
 }

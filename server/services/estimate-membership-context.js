@@ -1807,9 +1807,10 @@ async function computeMembershipContext(database, {
       // Current services staff saw on the list and unticked (option B): the
       // accept keeps their contracted price without asking the office to
       // review them. A service the list never showed (parked, re-quoted) is
-      // never kept — it stays on the review path. Staff-side only (never in
-      // publicMembershipView).
-      ...(pickedKeys
+      // never kept — it stays on the review path — and a quote that raises
+      // no tier keeps nothing (there is no tier to review). Staff-side only
+      // (never in publicMembershipView).
+      ...(pickedKeys && upgraded
         ? { extensionKeptKeys: existingKeys.filter((key) => extensionPick.unticked.includes(key) && !pickedKeys.has(key)) }
         : {}),
       newServices,

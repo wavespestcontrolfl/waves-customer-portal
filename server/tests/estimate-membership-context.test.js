@@ -2991,6 +2991,20 @@ describe('staff-picked tier extension (option B)', () => {
     expect(ctx.extensionKeptKeys).toEqual([]);
   });
 
+  test('a pick on a quote that raises no tier freezes and keeps nothing', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // The quote re-prices pest only: no new family, no tier change.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true,
+      estData: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }] } } },
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
+    });
+    expect(ctx.upgrade).toBeNull();
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx).not.toHaveProperty('extensionKeptKeys');
+  });
+
   test('pick gate off: a sent pick changes nothing', async () => {
     mockExtendExistingGate = true;
     const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {

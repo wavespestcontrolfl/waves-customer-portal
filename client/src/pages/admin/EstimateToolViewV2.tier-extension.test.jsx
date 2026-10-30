@@ -85,10 +85,16 @@ describe("nextFormForTierExtension", () => {
     const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: [] } };
     expect(nextFormForTierExtension(form, estimate, "c2").tierExtensionPick.ticked).toEqual(["lawn_care", "pest_control"]);
   });
-  it("drops the pick when the result has no list or no customer", () => {
+  it("keeps the same customer's unticks through a result without the list, so a failed lookup cannot reprice them", () => {
+    const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: [] }, notes: "x" };
+    expect(nextFormForTierExtension(form, {}, "c1")).toBe(form);
+    // The list comes back: the untick still holds.
+    expect(nextFormForTierExtension(form, estimate, "c1").tierExtensionPick.ticked).toEqual(["pest_control"]);
+  });
+  it("drops a pick that belongs to no customer or another customer", () => {
     const form = { tierExtensionPick: { customerId: "c1", offered: ["lawn_care"], ticked: ["lawn_care"] }, notes: "x" };
-    expect(nextFormForTierExtension(form, {}, "c1")).toEqual({ tierExtensionPick: null, notes: "x" });
-    expect(nextFormForTierExtension(form, estimate, null).tierExtensionPick).toBeNull();
+    expect(nextFormForTierExtension(form, {}, "c2")).toEqual({ tierExtensionPick: null, notes: "x" });
+    expect(nextFormForTierExtension(form, {}, null)).toEqual({ tierExtensionPick: null, notes: "x" });
     const plain = { notes: "x" };
     expect(nextFormForTierExtension(plain, {}, "c1")).toBe(plain);
   });
