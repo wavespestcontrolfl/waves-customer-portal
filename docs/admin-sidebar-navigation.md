@@ -1,10 +1,8 @@
 # Admin navigation
 
-The `admin-navigation` per-user flag enables the grouped sidebar and mobile
-directory. It defaults off and uses the existing `/admin/feature-flags`
-mechanism. Assign it through Early feature access, then reload the session.
-Disable it and reload to restore the existing navigation. No flags are
-enabled by this change.
+The grouped sidebar and mobile directory are the admin menu for every login,
+filtered by role and the existing feature flags. The older flat sidebar and
+the per-user `admin-navigation` flag are gone; saved flag rows are ignored.
 
 The six daily destinations are Dashboard, Schedule, Customers, Sales,
 Communications and Billing. Operations, Marketing, Team and Accounting
@@ -14,10 +12,15 @@ feature flag. Contracts stays owner-only under Customers; System health
 stays owner-only under Settings. Mobile keeps its five existing tabs and
 all the Settings preferences, with the same workspace destinations.
 
-Parent links open their default page; adjacent chevrons expand the group.
-The active page expands its group when navigation changes. Manual expansion
-is saved on this browser per verified account. Only known group IDs and
-booleans are stored; corrupt or unavailable storage falls back to defaults.
+Parent links open their default page, and a group lists only its other
+pages, so no page appears twice (Sales opens Pipeline, Billing opens
+Invoices). Adjacent chevrons expand the group. The active page expands its
+group when navigation changes; that opening is never saved, and it ends when
+navigation leaves the group. Expansion changed by hand is saved on this
+browser per verified account. Only known group IDs and booleans are stored,
+with a version: groups saved before version 2 (which saved every visited
+group as open) are dropped once and pins carry over. Corrupt or unavailable
+storage falls back to defaults.
 Rendered tab reports keep Pipeline and Estimates selection accurate when
 a page consumes or changes its query. Usage tracking retains its existing
 source names and authoritative rendered-tab beacons.

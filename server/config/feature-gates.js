@@ -90,6 +90,7 @@
  *   GATE_BID_DESK_AUTO_DATES=true (Bid Desk, needs GATE_BID_DESK: a due date read from a provider's fixed email template, or a SAM.gov response deadline, counts as confirmed when the bid is first filed, so the 7-day and 2-day reminders start by themselves; and an open bid still marked new, with no submission, closes itself as no bid once its due date is more than a day past (a date still waiting on an addendum check waits 30 days), with a note saying so. A date from a later email, an addendum or a SAM.gov deadline move still waits for the operator. Admin portal only: it sends nothing to a buyer, contractor, agency or customer and rings no new bell. Read at call time via bidDeskAutoDatesLive(), strict 'true', dark by default; off = the Bid Desk works as before.)
  *   GATE_BID_DESK_CHARLOTTE_DATES=true (Bid Desk, needs GATE_BID_DESK: an open Charlotte County Purchasing bid with a bid number and no due date gets its date from the county's own public bid list (purchasingbids.charlottecountyfl.gov, one read, at most hourly, and only while such a bid is waiting); the date counts as confirmed only while GATE_BID_DESK_AUTO_DATES is also on. An existing date, a decided bid and every other source are never touched. Admin portal only: it sends nothing to a buyer, contractor, agency or customer and rings no new bell. Read at call time via bidDeskCharlotteDatesLive(), strict 'true', dark by default; off = no call to the county and the Bid Desk works as before.)
  *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
+ *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
@@ -2506,6 +2507,8 @@ const gates = {
   // Reads call_log, scheduled_services, triage_items; writes nothing.
   // Off -> the route returns an empty list and the strip never renders.
   callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
+  // GATE_CALL_PREPAY_CHOICE (annual prepay chosen on a call: carried to Dispatch + one office card per booked call, dark). Boot-log entry only; the call-time reader is callPrepayChoiceLive().
+  callPrepayChoice: process.env.GATE_CALL_PREPAY_CHOICE === 'true',
   // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
   // sweep reads recent two-party calls and quiet text threads where only a DAY
   // was agreed for a visit (or a move of one), asks the model what the office
@@ -2600,6 +2603,15 @@ const gates = {
   // out. Layered on triageAutoResolve + triageAutoResolveEvidence. Sends
   // customer email — owner-flip only. Ships DARK.
   firstTouchAutoRelease: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE === 'true',
+  // First-touch auto-release for a clearly spelled email: the card carries
+  // NO decoder candidates (one spelling heard), so the one-candidate rule
+  // above never fires. On (and only while GATE_FIRST_TOUCH_AUTO_RELEASE is
+  // on too), a no-candidate email_unverified card with confidence >= 0.9, a
+  // valid release target and no email disagreement qualifies; every other
+  // check (V1/V2/target agreement, digit doubt, MX, exact-address hold, max
+  // age) still applies. Sends customer email — owner-flip only. Ships DARK.
+  // Read at call time in triage-auto-resolve; registered here for the boot log.
+  firstTouchAutoReleaseSpelled: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -9093,6 +9105,17 @@ function acceptedPlanRingOnChangeLive() {
 // GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
 module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
 
+// GATE_CUSTOMER_ALERTS_RING read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-29,
+// "small" E1 of the admin bell rebuild). On, an admin alert declared as a customer contact or as a promise we owe a
+// customer (registry rule `contact`/`promise`, or the same flag in the alert's metadata) rings whatever else the bell
+// policy says, and a customer's failed invoice payment (bill_payment_error) rings beside payment_failed. Off = what
+// rings is today's behavior, byte for byte.
+function customerAlertsRingLive() {
+  return process.env.GATE_CUSTOMER_ALERTS_RING === 'true';
+}
+// GATE_CUSTOMER_ALERTS_RING reader, on its own line so gate PRs never conflict.
+module.exports.customerAlertsRingLive = customerAlertsRingLive;
+
 // GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
 // On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is
 // 'person') or one of our own engineering faults (the classes in services/admin-alert-routing.js) is written Activity-only
@@ -9250,6 +9273,11 @@ function callLeadLazyStripeLive() {
 function satellitePalmCountTypedLive() {
   return process.env.GATE_SATELLITE_PALM_COUNT_TYPED === 'true';
 }
+// GATE_CALL_PREPAY_CHOICE read at CALL time, strict `=== 'true'`, dark in every environment. The owner flips it (it leads to a draft
+// annual prepay invoice). Off = byte-identical: no billing_choice on any payload or held row, no card, the accept route answers 404.
+function callPrepayChoiceLive() {
+  return process.env.GATE_CALL_PREPAY_CHOICE === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9386,3 +9414,5 @@ module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
 module.exports.lawn9xRoundsLive = lawn9xRoundsLive;
 // GATE_CALL_APPLICANT_HANDLING reader, on its own line so gate PRs never conflict.
 module.exports.callApplicantHandlingLive = callApplicantHandlingLive;
+// GATE_CALL_PREPAY_CHOICE reader, on its own line so gate PRs never conflict.
+module.exports.callPrepayChoiceLive = callPrepayChoiceLive;

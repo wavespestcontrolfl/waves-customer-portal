@@ -177,7 +177,7 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
-    rule: { area: 'Leads', severity: 'needs-you', who: 'person', doneWhen: 'lead_contacted', closedBy: 'server/services/admin-alert-relevance.js' },
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', doneWhen: 'lead_contacted', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Owner-only end to end: THIS PR makes /admin/leads requireAdmin (sales
     // is not a technician surface), so push and feed visibility follow the
     // surface — neither the bell row nor the push reaches non-admin staff.
@@ -285,7 +285,7 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'urgent',
     group: 'Communication',
-    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     // Schedule-surface alert a field tech must see (their visit may still
     // be armed) — one of the few triggers in the non-admin bell feed.
     techVisible: true,
@@ -310,7 +310,7 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_closed', closedBy: 'server/services/admin-alert-relevance.js' },
+    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_closed', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Composed through docs/admin-notifications.md: `alert` carries the
     // structured parts (area, severity, subject, done-when, who) into the
     // row's metadata. A customer's own words that trip a copy rule never
@@ -375,7 +375,7 @@ const TRIGGER_REGISTRY = {
     // belong in the non-admin bell feed (fail-closed allowlist).
     techVisible: true,
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'text_answered', closedBy: 'server/services/admin-alert-relevance.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'text_answered', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     build: (p) => ({
       // One bell row per conversation: a known sender's later texts rewrite the
       // row while it is still open, so a count leads the title ("3 texts from
@@ -419,7 +419,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
     build: (p) => ({
       title: 'Sandy transfer without context',
@@ -434,7 +434,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/sms-operational-actions.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/sms-operational-actions.js', promise: true },
     build: (p) => ({
       title: 'An SMS request needs follow-up',
       body: 'Open the customer profile to verify completion or take the next step.',
@@ -453,7 +453,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/call-commitments-watchdog.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/call-commitments-watchdog.js', promise: true },
     build: (p) => ({
       title: p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue',
       body: p.summary || 'Open the Owed tab to mark it done or dismiss it.',
@@ -472,7 +472,7 @@ const TRIGGER_REGISTRY = {
     category: 'voicemail_callback',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/admin-alert-relevance.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Owner ruling (Adam, 2026-07-30, same as twilio_failure): the callback
     // bell shows the real number — a masked callback number is undialable.
     // Payload fields are built by call-recording-processor, not free text.
@@ -500,7 +500,7 @@ const TRIGGER_REGISTRY = {
     category: 'inbound_email',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'email_answered', closedBy: 'server/services/admin-alert-relevance.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'email_answered', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     build: (p) => ({
       title: `Email from ${p.fromName || 'a customer'}`,
       body: redactSensitiveText(p.subject || '(no subject)').slice(0, 140),
@@ -515,7 +515,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/missed-call-bell.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/missed-call-bell.js', contact: true },
     // Same owner ruling as the voicemail bell: the number must be dialable.
     allowContactDetails: true,
     build: (p) => ({
@@ -553,7 +553,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/promise-chaser-bell.js' },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/promise-chaser-bell.js', promise: true },
     allowContactDetails: true,
     build: (p) => {
       const who = p.name || p.phone || 'A lead';
@@ -581,7 +581,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     // Same owner ruling as the voicemail bell: a callback number must be
     // dialable. The payload is built by the hand-off module from the
     // PAN-scrubbed call summary, not free model text.
@@ -849,7 +849,7 @@ const TRIGGER_REGISTRY = {
     category: 'estimate',
     priority: 'high',
     group: 'Leads & Sales',
-    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     build: (p) => ({
       title: p.bundled
         ? `Bundle self-applied: ${p.customerName || 'Customer'}`
@@ -1284,10 +1284,17 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // silenced categories) still buzzed the phone — and a push-only admin
     // bypassed it entirely (hook P1). Category overrides re-enable both.
     let policySilenced = false;
+    // GATE_CUSTOMER_ALERTS_RING: a customer alert (the type's rule declares `contact`/`promise`, or it is
+    // bill_payment_error) passes the policy, and its bell write below carries `bell: true` so
+    // NotificationService.create's own policy check, which sees only the category and the trigger key, agrees.
+    let declaredCustomerAlert = false;
     try {
       const bellPolicy = require('./notification-bell-policy');
       if (bellPolicy.isBellPolicyEnabled()) {
-        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey }));
+        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule }));
+        // Guarded: a test that mocks the policy module without the helper keeps today's bell write.
+        declaredCustomerAlert = !policySilenced && typeof bellPolicy.ringsAsCustomerAlert === 'function'
+          && bellPolicy.ringsAsCustomerAlert({ triggerKey, declared: trigger.rule });
       }
     } catch (err) {
       logger.warn(`[notification-triggers] bell policy check failed: ${err.message}; delivering`);
@@ -1321,6 +1328,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.title,
             built.body,
             { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload },
+              ...(declaredCustomerAlert ? { bell: true } : {}),
               ...(dedupeKey ? { dedupeKey } : {}),
               // A standing thread row (sms_reply, one per customer) is rewritten
               // in place by each new message instead of inserting another row.
