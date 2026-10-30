@@ -45,7 +45,6 @@ const {
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
-const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
 const {
   createOrReuseAdminEstimate,
@@ -4818,18 +4817,18 @@ router.put('/:id/proposal', async (req, res, next) => {
           return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 or Net-60 for an invoiced proposal, or turn off Bill by invoice.' });
         }
       } else if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
-        // Structured payment terms exist because billing CONSUMES them (the
-        // acceptance invoice's due date). Only invoice-mode proposals have
-        // that path — on any other proposal the field would render a promise
-        // no invoice ever reads. Payment language for manually-billed
-        // agreements belongs in Additional terms (codex #3297 r4).
+        // Structured Net terms belong to invoice mode: the signed agreement
+        // prints them and the win checks them against the customer's payer,
+        // whose terms bill each visit. On any other proposal the field would
+        // render a promise no billing path reads. Payment language for
+        // manually-billed agreements belongs in Additional terms (codex #3297 r4).
         return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
       }
       // The invoice-mode state the term was checked against, re-asserted at write time below.
       savingPaymentTerm = canonicalPaymentTerms ? { billByInvoice: canonicalPaymentTerms !== AUTOPAY_PAYMENT_TERMS } : false;
       // A linked ACTIVE payer's terms are the standing billing relationship
-      // (they drive statement accrual and the acceptance invoice via
-      // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
+      // (they drive statement accrual for every visit; the win re-checks them
+      // in assertProposalTermsMatchPayer). Authoring a CONTRADICTING term here
       // would render a promise the invoice won't keep — reject it at the
       // only surface that authors terms, so agreement and invoice always
       // match (codex #3297 r2d).
@@ -4902,18 +4901,6 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
       }
     }
-    // The acceptance invoice bills every program's first application PLUS all
-    // corrective work (and tax) on ONE invoice — each estimate column can
-    // pass the per-column bound while the combined first invoice overflows
-    // invoices.subtotal/total, also decimal(10,2), at mark-won (codex 1A-ii
-    // r14). Reuse the canonical builder so the bound matches exactly what a
-    // win would bill. Checked regardless of the current billing mode —
-    // bill_by_invoice can flip after authoring.
-    const firstInvoice = buildProposalFirstInvoice(normalized);
-    if (firstInvoice.subtotal > DB_TOTAL_MAX || firstInvoice.total > DB_TOTAL_MAX) {
-      return res.status(400).json({ error: 'The combined acceptance invoice (first applications plus corrective work and tax) exceeds $99,999,999.99 — reduce the amounts before saving.' });
-    }
-
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
     const hadFixedValidity = hasFixedBidValidity(estimate);

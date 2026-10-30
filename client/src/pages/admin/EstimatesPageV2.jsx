@@ -2173,11 +2173,11 @@ function EstimatePipelineViewV2({
   );
   const markEstimateAccepted = useCallback(
     async (e) => {
-      // A commercial proposal win auto-creates the customer when none is linked
-      // and, in invoice mode, builds the first invoice from the proposal lines.
+      // A commercial proposal win auto-creates the customer when none is linked.
+      // It makes no invoice: each visit bills when it is completed.
       const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
       const confirmMsg = proposalInvoiceMode
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. No invoice is created now: each visit is billed once when it is completed, including any one-time work booked on it. The customer is NOT texted and NOT auto-scheduled.`
         : e.isCommercialProposal
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
@@ -2191,11 +2191,6 @@ function EstimatePipelineViewV2({
         const notes = [];
         if (result?.createdCustomer?.id) {
           notes.push("A new customer record was created from the proposal.");
-        }
-        if (result?.proposalInvoice?.invoiceNumber) {
-          notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
-          );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
@@ -4038,11 +4033,11 @@ function EstimatesMobileListView({
   }, [filter, refreshEstimates, estimatesRefresh]);
   const markEstimateAccepted = useCallback(
     async (e) => {
-      // A commercial proposal win auto-creates the customer when none is linked
-      // and, in invoice mode, builds the first invoice from the proposal lines.
+      // A commercial proposal win auto-creates the customer when none is linked.
+      // It makes no invoice: each visit bills when it is completed.
       const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
       const confirmMsg = proposalInvoiceMode
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. No invoice is created now: each visit is billed once when it is completed, including any one-time work booked on it. The customer is NOT texted and NOT auto-scheduled.`
         : e.isCommercialProposal
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
@@ -4056,11 +4051,6 @@ function EstimatesMobileListView({
         const notes = [];
         if (result?.createdCustomer?.id) {
           notes.push("A new customer record was created from the proposal.");
-        }
-        if (result?.proposalInvoice?.invoiceNumber) {
-          notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
-          );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
