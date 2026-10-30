@@ -44,6 +44,11 @@ describe('gate on', () => {
     expect(route.primary).toMatchObject({ provider: 'gemini', model: 'gemini-2.5-pro' });
     expect(route.fallback.provider).toBe('openai');
     expect(payload).toMatchObject({ jsonMode: true, temperature: 0 });
+    // The chain reads its budget from the payload (llm/call.js runFallbackChain),
+    // split across the two legs: each keeps the old 180 s single-call limit.
+    const single = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0 ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) : 180000;
+    expect(payload.timeoutMs).toBe(2 * single);
+    expect(options.timeoutMs).toBeUndefined();
     expect(options.reserveFallbackBudget).toBe(true);
     expect(options.validate({ json: { emails: [] } })).toBeNull();
     expect(options.validate({ json: { nothing: true } })).toBe('decoder_shape_invalid');

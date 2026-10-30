@@ -3,7 +3,7 @@
 // the phrasings mirror real transcripts (hyphen-joined letters, "G as in good",
 // digits said as a number, a word said between two spelled stretches).
 const {
-  callEmailChecksLive, spelledEmailStatements, spelledEmailMatches, checkEmailDomain, screenCallEmail,
+  callEmailChecksLive, emailMentions, spelledEmailMatches, checkEmailDomain, screenCallEmail,
   deadDomainQuestion, isNoMailServerReason,
 } = require('../services/call-email-checks');
 
@@ -27,25 +27,33 @@ describe('callEmailChecksLive', () => {
   });
 });
 
-describe('spelledEmailStatements', () => {
+describe('emailMentions', () => {
+  const spelled = (local, domain, speaker = null) => ({ kind: 'spelled', local, domain, speaker });
   test.each([
-    ['hyphen-joined letters across a space', 'It is B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com', [{ local: 'brightonkayla', domain: 'gmail.com' }]],
-    ['letters then a number', 'D-R-A-Y 22 at yahoo.com.', [{ local: 'dray22', domain: 'yahoo.com' }]],
-    ['letters and digits all hyphen-joined', 'D-R-A-Y-2-2 at yahoo.com', [{ local: 'dray22', domain: 'yahoo.com' }]],
-    ['phonetic markers', 'T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com', [{ local: 'thebaitshopgm', domain: 'icloud.com' }]],
-    ['digit words and a spoken dot', 'J-A-N-E dot D-O-E one two at gmail dot com', [{ local: 'jane.doe12', domain: 'gmail.com' }]],
-    ['a spoken multi-part domain is kept whole', 'J-A-N-E at yahoo dot co dot uk', [{ local: 'jane', domain: 'yahoo.co.uk' }]],
-    ['a bare provider word stays bare', 'J-A-N-E at yahoo', [{ local: 'jane', domain: 'yahoo' }]],
-    ['a name spelled elsewhere is not a statement', 'Clay, C-L-A-Y. And the email? D-R-A-Y 22 at yahoo.com', [{ local: 'dray22', domain: 'yahoo.com' }]],
-    ['a spelled name followed by words is not a statement', 'Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com', []],
-    ['an interrupted spelling is a statement the letters do not cover', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [{ local: null, domain: 'hotmail.com' }]],
-    ['a spoken word right before the letters may be part of the address', 'my email is jane D-O-E at gmail.com', [{ local: null, domain: 'gmail.com' }]],
-    ['speaker labels and curly apostrophes', 'Caller: Okay. It’s B-R-I-G-H-T at gmail.com. Agent: Thanks.', [{ local: 'bright', domain: 'gmail.com' }]],
-    ['a spelled name three words back is not an interruption', 'It is Rowe, R-O-W-E, and email is T-A-M-I at hotmail.com', [{ local: 'tami', domain: 'hotmail.com' }]],
-    ['the pronoun I is not a spelled run', 'I think it is S-M-I-T-H at gmail.com', [{ local: 'smith', domain: 'gmail.com' }]],
+    ['hyphen-joined letters across a space', 'It is B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com', [spelled('brightonkayla', 'gmail.com')]],
+    ['letters then a number', 'Okay. D-R-A-Y 22 at yahoo.com.', [spelled('dray22', 'yahoo.com')]],
+    ['letters and digits all hyphen-joined', 'D-R-A-Y-2-2 at yahoo.com', [spelled('dray22', 'yahoo.com')]],
+    ['phonetic markers', 'So T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com', [spelled('thebaitshopgm', 'icloud.com')]],
+    ['digit words and a spoken dot', 'J-A-N-E dot D-O-E one two at gmail dot com', [spelled('jane.doe12', 'gmail.com')]],
+    ['a spoken multi-part domain is kept whole', 'J-A-N-E at yahoo dot co dot uk', [spelled('jane', 'yahoo.co.uk')]],
+    ['a bare provider word stays bare', 'J-A-N-E at yahoo', [spelled('jane', 'yahoo')]],
+    ['a name spelled elsewhere is not a mention', 'Clay, C-L-A-Y. And the email? D-R-A-Y 22 at yahoo.com', [spelled('dray22', 'yahoo.com')]],
+    ['a spelled name followed by words is not a spelled mention', 'Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com', [{ kind: 'said', local: 'smith', domain: 'yahoo.com', speaker: null }]],
+    ['an interrupted spelling does not cover the address', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [spelled(null, 'hotmail.com')]],
+    ['a spoken word right before the letters may be part of the address', 'my email is jane D-O-E at gmail.com', [spelled(null, 'gmail.com')]],
+    ['speaker labels and curly apostrophes', 'Caller: Okay. It’s B-R-I-G-H-T at gmail.com. Agent: Thanks.', [spelled('bright', 'gmail.com', 'caller')]],
+    ['a spelled name three words back is not an interruption', 'It is Rowe, R-O-W-E, and email is T-A-M-I at hotmail.com', [spelled('tami', 'hotmail.com')]],
+    ['the pronoun I is not a spelled run', 'I think it is S-M-I-T-H at gmail.com', [spelled('smith', 'gmail.com')]],
+    ['one word after a clean start is a said address', 'Agent: So sclay18 at yahoo.com, got it.', [{ kind: 'said', local: 'sclay18', domain: 'yahoo.com', speaker: 'agent' }]],
+    ['times and places are not addresses', 'We are at 107 Rodeo Drive at 4 o\'clock.', []],
     ['fewer than three letters is not a spelling', 'J-O at gmail', []],
-  ])('%s', (_label, text, statements) => {
-    expect(spelledEmailStatements(text)).toEqual(statements);
+  ])('%s', (_label, text, mentions) => {
+    expect(emailMentions(text).mentions).toEqual(mentions);
+  });
+
+  test('labeled is set when the transcript carries speaker labels', () => {
+    expect(emailMentions('Agent: Hi. Caller: Hello.').labeled).toBe(true);
+    expect(emailMentions('Hi. Hello.').labeled).toBe(false);
   });
 });
 
@@ -62,6 +70,12 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['the spelled letters are a different address', ['S-M-Y-T-H-E at gmail'], 'smithe@gmail.com', false],
     ['a spelled last name never vouches for a said email', ['Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com'], 'smith@me.com', false],
     ['an interrupted spelling never vouches for its last part', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'rowe@hotmail.com', false],
+    ['the caller rejects the agent\'s spelling', ['Agent: Is it J-A-N-E at gmail.com? Caller: No, jane two at gmail dot com.'], 'jane@gmail.com', false],
+    ['the same rejection in an unlabeled dictation pass', ['Is it J-A-N-E at gmail.com? No, jane two at gmail dot com.'], 'jane@gmail.com', false],
+    ['only the agent spelled it', ['Agent: So that is D-R-A-Y 22 at yahoo.com? Caller: Yes.'], 'dray22@yahoo.com', false],
+    ['the caller spelled it and the agent read it back', ['Caller: D-R-A-Y 22 at yahoo.com. Agent: So dray22 at yahoo.com, got it.'], 'dray22@yahoo.com', true],
+    ['our own address said on the call is not a conflict', ['Caller: D-R-A-Y 22 at yahoo.com. Agent: You can also email us at wavespestcontrol.com.'], 'dray22@yahoo.com', true],
+    ['a second address on the call keeps the card', ['Caller: D-R-A-Y 22 at yahoo.com, and my husband is bob at gmail.com.'], 'dray22@yahoo.com', false],
     ['an interrupted spelling never vouches for the joined address either', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
     ['a mixed spoken and spelled address keeps the card', ['my email is jane D-O-E at gmail.com'], 'doe@gmail.com', false],
     ['the spelling names a different provider', ['B-R-I-G-H-T at yahoo dot com'], 'bright@gmail.com', false],

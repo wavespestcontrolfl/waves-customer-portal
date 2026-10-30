@@ -368,8 +368,10 @@ async function fetchDecoderWithFallback(prompt) {
     text: prompt,
     jsonMode: true,
     temperature: 0,
-  }, {
+    // The chain reads its budget from the payload; reserveFallbackBudget
+    // splits it, so each leg keeps the old single-call limit.
     timeoutMs: DECODER_TIMEOUT_MS * 2,
+  }, {
     reserveFallbackBudget: true,
     validate: (result) => (result.json && Array.isArray(result.json.emails) ? null : 'decoder_shape_invalid'),
   });

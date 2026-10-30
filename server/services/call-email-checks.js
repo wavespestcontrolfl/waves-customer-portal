@@ -67,17 +67,28 @@ const SENTENCE_END = /[.?:]$/;
 const MAX_INTERRUPTION_WORDS = 2;
 const stripQuotes = (token) => String(token || '').replace(/^["“(']+|["”)]+$/g, '');
 
-// The spelled email statements in one transcript: a spelled run (three or more
-// spelled letters) that ends directly on "at" / "@", paired with the whole
-// domain spoken right after it. "It's F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
-// [{ local: 'fletchershyla', domain: 'gmail.com' }]; "Okay. S-C-L-A-Y 18 at yahoo.com" ->
-// [{ local: 'sclay18', domain: 'yahoo.com' }]. A spelled name that runs into a
-// word ("S-M-I-T-H. My email is ...") is not a statement. A statement that was
-// interrupted, or does not start cleanly, carries local: null: it is evidence
-// of an address the letters do not fully cover, so it keeps the card.
-function spelledEmailStatements(text) {
+// "Caller:" / "Agent:" speaker labels in the primary transcript. The
+// dictation pass has none; its mentions carry speaker null.
+const SPEAKER_LABELS = [[/^(?:caller|customer):$/i, 'caller'], [/^(?:agent|staff|csr|rep):$/i, 'agent']];
+// Our own addresses, which staff say on calls ("email us at ..."). Never the caller's.
+const OWN_DOMAINS = new Set(['wavespestcontrol.com']);
+
+// Every email address mentioned in one transcript: "<local> at <domain>".
+//  - spelled: a spelled run (three or more spelled letters) ending directly on
+//    "at" / "@". "It's F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
+//    { kind: 'spelled', local: 'fletchershyla', domain: 'gmail.com' }. A run that
+//    was interrupted ("T-A-M-I, Rowe, R-O-W-E") or follows a spoken word that may
+//    belong to the address ("jane D-O-E") has local: null.
+//  - said: words before "at" with a dotted domain ("sclay18 at yahoo.com",
+//    "jane two at gmail dot com"). Only one word right after a clean start can
+//    stand for the whole local part; anything else has local: null.
+// A spelled name that runs into a word ("S-M-I-T-H. My email is ...") is not a
+// mention by itself. Returns { mentions, labeled }.
+function emailMentions(text) {
   const tokens = String(text || '').replace(/[’‘]/g, "'").replace(PHONETIC_MARKER, '$1').split(/\s+/).filter(Boolean);
-  const statements = [];
+  const mentions = [];
+  let labeled = false;
+  let speaker = null;
   let run = '';
   let letters = 0;
   let clean = false;
@@ -87,11 +98,29 @@ function spelledEmailStatements(text) {
     run = '';
     letters = 0;
   };
+  const cleanStartAt = (i) => {
+    const prev = stripQuotes(tokens[i - 1]);
+    return i === 0 || SENTENCE_END.test(prev) || INTRODUCERS.has(prev.toLowerCase().replace(/,+$/, ''))
+      || SPEAKER_LABELS.some(([re]) => re.test(prev));
+  };
   for (let i = 0; i < tokens.length; i += 1) {
-    const bare = stripQuotes(tokens[i]).replace(/[,;!?]+$/, '');
+    const raw = stripQuotes(tokens[i]);
+    const label = SPEAKER_LABELS.find(([re]) => re.test(raw));
+    if (label) {
+      labeled = true;
+      speaker = label[1];
+      endRun(i);
+      continue;
+    }
+    const bare = raw.replace(/[,;!?]+$/, '');
     if (/^(?:at|@)$/i.test(bare.replace(/[.:]+$/, ''))) {
       const domain = spokenDomainFrom(tokens, i + 1);
-      if (letters >= MIN_SPELLED_LETTERS && domain) statements.push({ local: clean ? run : null, domain });
+      if (domain && letters >= MIN_SPELLED_LETTERS) {
+        mentions.push({ kind: 'spelled', local: clean ? run : null, domain, speaker });
+      } else if (domain && domain.includes('.') && i > 0) {
+        const word = stripQuotes(tokens[i - 1]).toLowerCase().replace(/[,;:!?.]+$/, '');
+        mentions.push({ kind: 'said', local: cleanStartAt(i - 1) && word ? word : null, domain, speaker });
+      }
       endRun(i);
       continue;
     }
@@ -100,26 +129,25 @@ function spelledEmailStatements(text) {
     for (const piece of bare.replace(/\.+$/, '').split('-').filter(Boolean)) {
       const unit = spelledUnit(piece);
       if (unit === null) { endRun(i); continue; }
-      if (!run) {
-        const prev = stripQuotes(tokens[i - 1]);
-        const startsClean = i === 0 || SENTENCE_END.test(prev) || INTRODUCERS.has(prev.toLowerCase().replace(/,+$/, ''));
-        clean = startsClean && i - lastRunEnd - 1 > MAX_INTERRUPTION_WORDS;
-      }
+      if (!run) clean = cleanStartAt(i) && i - lastRunEnd - 1 > MAX_INTERRUPTION_WORDS;
       run += unit;
       if (/^[a-z]$/.test(unit)) letters += 1;
     }
   }
-  return statements;
+  return { mentions, labeled };
 }
 
 const KNOWN_DOMAIN_SET = new Set(KNOWN_DOMAINS);
 
-// True when the call has at least one spelled email statement and EVERY spelled
-// email statement in either transcript is this exact address (local part and
-// the whole spoken domain), on a known consumer mail provider. A correction ("S-M-I-T-H at
-// gmail, no, S-M-Y-T-H at gmail") or the two transcripts hearing different
-// letters keeps the read-back card. A custom domain is never trusted this way:
-// it is usually said, not spelled, and a misheard one can belong to someone else.
+// The 2026-10-05 rule without AI. True only when:
+//  - the saved address is on a known consumer mail provider (a custom domain is
+//    usually said, not spelled, and a misheard one can belong to someone else);
+//  - the CALLER spelled exactly this address (local part and the whole spoken
+//    domain) from a clean start. In a labeled transcript an agent's spelling or
+//    read-back alone is not the caller's; an unlabeled dictation pass counts;
+//  - and no other address is mentioned in either transcript: a correction
+//    ("No, jane two at gmail dot com"), an interrupted or mixed spelling, a
+//    bare provider ("at gmail"), or a different address all keep the card.
 function spelledEmailMatches({ transcripts = [], email } = {}) {
   const value = String(email || '').trim().toLowerCase();
   const at = value.lastIndexOf('@');
@@ -128,8 +156,16 @@ function spelledEmailMatches({ transcripts = [], email } = {}) {
   const domain = value.slice(at + 1);
   if (!KNOWN_DOMAIN_SET.has(domain)) return false;
   if ((local.match(/[a-z]/g) || []).length < MIN_SPELLED_LETTERS) return false;
-  const statements = transcripts.filter(Boolean).flatMap((t) => spelledEmailStatements(String(t)));
-  return statements.length > 0 && statements.every((st) => st.local === local && st.domain === domain);
+  let callerSpelled = false;
+  for (const text of transcripts.filter(Boolean)) {
+    const { mentions, labeled } = emailMentions(String(text));
+    for (const m of mentions) {
+      if (OWN_DOMAINS.has(m.domain)) continue;
+      if (m.local !== local || m.domain !== domain) return false;
+      if (m.kind === 'spelled' && (m.speaker === 'caller' || (!labeled && m.speaker === null))) callerSpelled = true;
+    }
+  }
+  return callerSpelled;
 }
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
@@ -182,7 +218,7 @@ function isNoMailServerReason(text) {
 
 module.exports = {
   callEmailChecksLive,
-  spelledEmailStatements,
+  emailMentions,
   spelledEmailMatches,
   checkEmailDomain,
   screenCallEmail,
