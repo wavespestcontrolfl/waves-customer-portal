@@ -440,7 +440,7 @@ export default function PricingLogicPanel() {
   return <div className="space-y-5 text-ui-body text-ink-primary">
     <div className="flex flex-wrap gap-2" aria-label="Pricing configuration category">{TABS.map((tab) => <Button key={tab.key} variant={activeTab === tab.key ? "primary" : "secondary"} aria-pressed={activeTab === tab.key} onClick={() => setActiveTab(tab.key)}>{tab.label}</Button>)}</div>
     {loading ? <ActionFeedback className="min-h-20">Loading pricing configuration...</ActionFeedback> : <>
-      {loadError && <ActionFeedback error onRetry={loadConfigs}>Could not load pricing configuration: {loadError}</ActionFeedback>}
+      {loadError && !specialTab && <ActionFeedback error onRetry={loadConfigs}>Could not load pricing configuration: {loadError}</ActionFeedback>}
       {activeTab === "lawn" && <LawnBracketsTab />}
       {activeTab === "waveguard" && <DiscountRulesTab />}
       {activeTab === "products" && <ProductsTab />}
