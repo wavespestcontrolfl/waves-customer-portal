@@ -60,8 +60,24 @@ const ITEM_FIELDS = ['id', 'kind', 'area', 'severity', 'who', 'headline', 'why',
 // The allow-list. Keys are action-policy read tools; values are the only
 // response paths that leave the server (keepPaths syntax: `*` steps into a list).
 // Left out on purpose: needs_me `detail` (long free text) and `report_link`;
-// get_day_summary customer names (no customer records until the customer
-// reads ship).
+// every note, instruction, comment and other free text typed by staff,
+// customers or callers (customer and visit notes, tags, property labels, lead
+// service_interest and notes, invoice titles and payment references); gate,
+// garage and lockbox codes; pay links, tokens and processor ids.
+const fieldsOf = (prefix, fields) => fields.map((field) => `${prefix}.${field}`);
+
+const CUSTOMER_ROW = [
+  'id', 'name', 'first_name', 'last_name', 'company_name', 'email', 'phone', 'city', 'state', 'zip', 'address', 'tier', 'stage',
+  'monthly_rate', 'lifetime_revenue', 'lead_score', 'health_score', 'active', 'member_since', 'last_service_date', 'next_service_date',
+  'last_contact_date', 'lead_source', 'match.score', 'match.reasons',
+];
+const ADDRESS_PARTS = ['id', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
+const INVOICE_DUE = [
+  'amount_due_after_credit', 'collectible', 'balance_due', 'needs_reconciliation', 'bank_payment_processing', 'payer_billed', 'overdue',
+];
+const PLAN_ROW = ['id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at'];
+const LINE_ITEM = ['description', 'quantity', 'unit_price', 'amount', 'is_discount'];
+
 const TOOL_FIELDS = Object.freeze({
   needs_me: [
     'generated_at', 'total_open', 'returned', 'unsorted_total', 'next_cursor',
@@ -72,9 +88,81 @@ const TOOL_FIELDS = Object.freeze({
   ],
   get_day_summary: [
     'date', 'total_services', 'completed', 'remaining', 'estimated_revenue', 'unassigned_count', 'new_customer_count', 'by_zone',
-    'unassigned.*.id', 'unassigned.*.city', 'unassigned.*.service_type',
+    'unassigned.*.id', 'unassigned.*.customer', 'unassigned.*.city', 'unassigned.*.service_type',
     'by_tech.*.name', 'by_tech.*.total', 'by_tech.*.completed', 'by_tech.*.remaining', 'by_tech.*.zones',
-    ...['id', 'city', 'service_type', 'status', 'tier', 'time_window', 'route_order'].map((field) => `by_tech.*.services.*.${field}`),
+    ...['id', 'customer', 'city', 'service_type', 'status', 'tier', 'time_window', 'route_order'].map((field) => `by_tech.*.services.*.${field}`),
+  ],
+  query_customers: [
+    'total_matching', 'returned_count', 'has_more', 'next_offset', 'total_customers', 'approximate',
+    'exact_hit_match.rank', 'exact_hit_match.score', 'exact_hit_match.reasons',
+    ...fieldsOf('customers.*', CUSTOMER_ROW),
+    ...fieldsOf('alternatives.*', CUSTOMER_ROW),
+  ],
+  get_customer_detail: [
+    ...fieldsOf('profile', [
+      'id', 'name', 'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'state', 'zip', 'tier', 'stage', 'monthly_rate',
+      'billing_mode', 'lifetime_revenue', 'active', 'member_since', 'lead_source', 'property_sqft', 'lot_sqft', 'lawn_type',
+      'monthly_bill.*.service', 'monthly_bill.*.label', 'monthly_bill.*.monthly',
+    ]),
+    ...fieldsOf('properties.*', [...ADDRESS_PARTS, 'is_primary', 'active']),
+    ...fieldsOf('account_properties.*', ADDRESS_PARTS),
+    'coverage.properties', 'coverage.linked_profiles', 'coverage.service_history', 'coverage.upcoming_services', 'coverage.invoices',
+    ...fieldsOf('health_score', ['overall', 'churn_risk', 'engagement', 'payment', 'service']),
+    ...fieldsOf('recent_services.*', ['id', 'date', 'type', 'technician', 'status']),
+    ...fieldsOf('upcoming_services.*', ['id', 'date', 'type', 'status', 'time_window', 'property_id', 'service_address', 'location_provenance']),
+    ...fieldsOf('recent_invoices.*', ['id', 'amount', 'status', 'date']),
+  ],
+  get_schedule_view: [
+    'returned_count', 'has_more', 'next_offset', 'date',
+    ...fieldsOf('appointments.*', [
+      'id', 'date', 'service_type', 'status', 'time_window', 'route_order', 'customer_id', 'customer_name', 'customer_city',
+      'customer_address', 'customer_phone', 'technician',
+    ]),
+  ],
+  query_leads: [
+    'total',
+    ...fieldsOf('leads.*', [
+      'id', 'name', 'phone', 'email', 'status', 'source', 'channel', 'assigned_to', 'city', 'address', 'zip', 'monthly_value',
+      'response_time_min', 'first_contact', 'last_activity',
+    ]),
+  ],
+  get_customer_invoices: [
+    'customer.id', 'customer.name', 'customer.phone_last4',
+    ...fieldsOf('account_summary', [
+      'total_due', 'outstanding_count', 'needs_reconciliation_count', 'overdue_count', 'not_yet_sent_due', 'presented_self_pay_due',
+      'processing.count', 'processing.bank_payment_in_flight', 'processing.needs_reconciliation',
+      'credit_balance', 'credit_ledger_sum', 'credit_matches_ledger', 'dispute_hold.active', 'dispute_hold.since', 'as_of', 'unknown',
+    ]),
+    ...fieldsOf('invoices.*', [
+      'id', 'invoice_number', 'status', 'created_at', 'sent_at', 'service_date', 'due_date', 'paid_at', 'receipt_sent_at', 'total',
+      'credit_applied', ...INVOICE_DUE, 'has_active_payment_plan', 'dispute_hold', 'archived', 'archived_at',
+      ...['id', 'status', 'payment_amount', 'payment_frequency', 'next_payment_date', 'total_balance'].map((field) => `payment_plan.${field}`),
+      'annual_prepay.role', 'annual_prepay.term_id', 'annual_prepay.term_status',
+    ]),
+    'unavailable_invoices.*.id',
+    'returned_count', 'total_matching', 'has_more', 'next_offset', 'filters.status', 'filters.include_archived', 'unknowns',
+  ],
+  get_invoice_detail: [
+    ...fieldsOf('invoice', [
+      'id', 'invoice_number', 'status', 'service_type', 'service_date', 'created_at', 'sent_at', 'viewed_at', 'due_date', 'paid_at',
+      'receipt_sent_at', 'subtotal', 'discount_amount', 'tax_rate', 'tax_amount', 'total', 'credit_applied', ...INVOICE_DUE,
+      'payment_method', 'payment_recorded_at', 'archived',
+    ]),
+    'customer.id', 'customer.name', 'customer.phone_last4',
+    ...fieldsOf('line_items.*', LINE_ITEM),
+    'line_items_truncated',
+    'discounts.document_discount.amount', 'discounts.account_credit_applied', 'discounts.discount_lines_truncated',
+    ...fieldsOf('discounts.discount_lines.*', LINE_ITEM),
+    ...fieldsOf('recorded_payments.*', [
+      'id', 'date', 'recorded_at', 'amount', 'status', 'method', 'refunded_amount', 'refund_status', 'funded_by_payer.id', 'funded_by_payer.name',
+      'statement_level.statement_id', 'statement_level.statement_amount', 'statement_level.refunded_amount', 'statement_level.refund_status',
+    ]),
+    ...fieldsOf('payment_plan.active', PLAN_ROW),
+    ...fieldsOf('payment_plan.history.*', PLAN_ROW),
+    'payment_plan.history_truncated',
+    'dispute_hold.active', 'dispute_hold.since',
+    ...fieldsOf('annual_prepay', ['role', 'term_id', 'term_status', 'term_start', 'term_end', 'prepay_amount']),
+    'unknowns',
   ],
   list_gap_reports: [
     'window_days', 'total_matching', 'returned', 'has_more', 'groups.*.domain',

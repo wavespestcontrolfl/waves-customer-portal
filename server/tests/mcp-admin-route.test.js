@@ -236,17 +236,17 @@ describe('answers', () => {
     expect(mockRecordToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'mcp-admin', toolName: 'needs_me', success: true }));
   });
 
-  test('get_day_summary leaves out customer names', async () => {
+  test('get_day_summary keeps customer names and the visit fields', async () => {
     mockExecute.mockResolvedValue({
       date: '2026-10-30',
-      total_services: 1,
-      unassigned: [{ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest' }],
-      by_tech: [{ name: 'Tech One', total: 1, completed: 0, remaining: 1, zones: { south: 1 }, services: [{ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled' }] }],
+      total_services: 2,
+      unassigned: [{ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest', notes: 'dog in yard, call first' }],
+      by_tech: [{ name: 'Tech One', total: 1, completed: 0, remaining: 1, zones: { south: 1 }, services: [{ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled', notes: 'gate code 4455' }] }],
     });
     const answer = toolResult((await callTool('get_day_summary', { date: '2026-10-30' })).body);
-    expect(JSON.stringify(answer)).not.toMatch(/Example/);
-    expect(answer.data.unassigned[0]).toEqual({ id: 's1', city: 'Venice', service_type: 'pest' });
-    expect(answer.data.by_tech[0].services[0]).toEqual({ id: 's2', city: 'Nokomis', status: 'scheduled' });
+    expect(answer.data.unassigned[0]).toEqual({ id: 's1', customer: 'Pat Example', city: 'Venice', service_type: 'pest' });
+    expect(answer.data.by_tech[0].services[0]).toEqual({ id: 's2', customer: 'Sam Example', city: 'Nokomis', status: 'scheduled' });
+    expect(JSON.stringify(answer)).not.toMatch(/gate code|call first/);
   });
 
   test('list_gap_reports withholds words quoted from someone other than the owner', async () => {
@@ -262,6 +262,143 @@ describe('answers', () => {
     expect(own.wanted).toBe('owner ask');
     expect(quoted.wanted).toBe('[withheld: 17 characters]');
     expect(quoted.tried).toBeNull();
+  });
+
+  describe('customer, schedule, lead and invoice reads', () => {
+    const run = async (name, result, args = {}) => {
+      mockExecute.mockResolvedValue(result);
+      return toolResult((await callTool(name, args)).body);
+    };
+    const absent = (answer, ...needles) => {
+      const text = JSON.stringify(answer);
+      for (const needle of needles) expect(text).not.toContain(needle);
+    };
+
+    const customerRow = (over = {}) => ({
+      id: 'c-1', name: 'Pat Example', first_name: 'Pat', last_name: 'Example', company_name: null, email: 'pat@example.test', phone: '+19415550101',
+      city: 'Venice', state: 'FL', zip: '34285', address: '1 Palm Way', tier: 'Gold', stage: 'active_customer', monthly_rate: 89, lifetime_revenue: 1200,
+      lead_score: 70, health_score: 81, active: true, member_since: new Date('2024-05-01T00:00:00Z'), last_service_date: '2026-10-01', next_service_date: '2026-11-01',
+      last_contact_date: '2026-10-20', lead_source: 'Google Ads', ...over,
+    });
+
+    test('query_customers keeps the list row, approximate rows, alternatives and match info', async () => {
+      const answer = await run('query_customers', {
+        customers: [customerRow({ crm_notes: 'allergic to dogs', gate_code: '4455', match: { score: 0.91, reasons: ['on_screen', 'visit_soon'] } })],
+        alternatives: [customerRow({ id: 'c-2', name: 'Pet Exampel', stripe_customer_id: 'cus_123', match: { score: 0.7, reasons: [] } })],
+        exact_hit_match: { rank: 2, score: 0.8, reasons: ['recent_contact'] },
+        approximate: true,
+        note: 'Show them to the operator with offer_choices',
+        total_matching: 1, returned_count: 1, has_more: false, next_offset: null, total_customers: 900,
+      }, { search: 'Pat' });
+      expect(answer.data.customers[0]).toEqual({ ...customerRow({ member_since: '2024-05-01T00:00:00.000Z' }), match: { score: 0.91, reasons: ['on_screen', 'visit_soon'] } });
+      expect(answer.data.alternatives[0].match).toEqual({ score: 0.7, reasons: [] });
+      expect(answer.data.exact_hit_match).toEqual({ rank: 2, score: 0.8, reasons: ['recent_contact'] });
+      expect(answer.data).toMatchObject({ approximate: true, total_matching: 1, returned_count: 1, has_more: false, next_offset: null, total_customers: 900 });
+      absent(answer, 'allergic', '4455', 'cus_123', 'offer_choices');
+    });
+
+    test('get_customer_detail keeps profile, addresses, visits and invoice summaries, not notes, tags or codes', async () => {
+      const answer = await run('get_customer_detail', {
+        profile: { id: 'c-1', name: 'Pat Example', first_name: 'Pat', last_name: 'Example', email: 'pat@example.test', phone: '+19415550101', address: '1 Palm Way, Venice, FL 34285', city: 'Venice', state: 'FL', zip: '34285', tier: 'Gold', stage: 'active_customer', monthly_rate: 89, monthly_bill: [{ service: 'lawn', label: 'Lawn care', monthly: 59 }], billing_mode: 'card', lifetime_revenue: 1200, active: true, member_since: new Date('2024-05-01T00:00:00Z'), lead_source: 'Referral', property_sqft: 2100, lot_sqft: 9000, lawn_type: 'St. Augustine', notes: 'Pat says the lockbox code is 9911' },
+        properties: [{ id: 'p-1', label: 'Beach house, ask for Dee', is_primary: true, active: true, address_line1: '1 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285', gate_code: '1234', garage_code: '5678', access_notes: 'side door', primary_change_eligible: true, primary_change_unavailable: 'because of reasons' }],
+        account_properties: [{ id: 'c-9', profile_label: 'Rental unit', address_line1: '2 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }],
+        coverage: { properties: 'complete', linked_profiles: 'complete', service_history: 'latest 10', upcoming_services: 'next 10', invoices: 'latest 5' },
+        tags: ['vip', 'dog on site'],
+        health_score: { overall: 81, churn_risk: 'low', engagement: 70, payment: 90, service: 85 },
+        recent_services: [{ id: 'r-1', date: '2026-10-01', type: 'lawn', technician: 'Tech One', notes: 'Customer yelled about the fence', status: 'completed' }],
+        upcoming_services: [{ id: 'u-1', date: '2026-11-01', type: 'lawn', status: 'pending', time_window: '8:00-10:00', property_id: 'p-1', service_address: '1 Palm Way, Venice, FL 34285', location_provenance: 'account_fallback' }],
+        recent_invoices: [{ id: 'i-1', amount: 59, status: 'paid', date: new Date('2026-10-02T14:00:00Z') }],
+      }, { customer_id: 'c-1' });
+      const { data } = answer;
+      expect(data.profile).toMatchObject({ id: 'c-1', email: 'pat@example.test', address: '1 Palm Way, Venice, FL 34285', member_since: '2024-05-01T00:00:00.000Z', lot_sqft: 9000 });
+      expect(data.profile.monthly_bill).toEqual([{ service: 'lawn', label: 'Lawn care', monthly: 59 }]);
+      expect(data.properties).toEqual([{ id: 'p-1', is_primary: true, active: true, address_line1: '1 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }]);
+      expect(data.account_properties).toEqual([{ id: 'c-9', address_line1: '2 Palm Way', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }]);
+      expect(data.coverage.properties).toBe('complete');
+      expect(data.health_score.churn_risk).toBe('low');
+      expect(data.recent_services).toEqual([{ id: 'r-1', date: '2026-10-01', type: 'lawn', technician: 'Tech One', status: 'completed' }]);
+      expect(data.upcoming_services[0].service_address).toBe('1 Palm Way, Venice, FL 34285');
+      expect(data.recent_invoices).toEqual([{ id: 'i-1', amount: 59, status: 'paid', date: '2026-10-02T14:00:00.000Z' }]);
+      absent(answer, 'lockbox', '9911', 'Beach house', '1234', '5678', 'side door', 'Rental unit', 'vip', 'yelled', 'because of reasons');
+    });
+
+    test('get_schedule_view keeps visits and pagination, not notes', async () => {
+      const answer = await run('get_schedule_view', {
+        appointments: [{ id: 'a-1', date: '2026-10-30', service_type: 'lawn', status: 'confirmed', time_window: '8-10 AM', route_order: 2, customer_id: 'c-1', customer_name: 'Pat Example', customer_city: 'Venice', customer_address: '1 Palm Way, Venice, FL 34285', customer_phone: '+19415550101', technician: 'Tech One', notes: 'Use the back gate, code 4455. Beware of dog.' }],
+        returned_count: 1, has_more: true, next_offset: 200, date: '2026-10-30', coverage: 'Requested date range; cancelled appointments excluded',
+      }, { date: '2026-10-30' });
+      expect(answer.data.appointments).toEqual([{ id: 'a-1', date: '2026-10-30', service_type: 'lawn', status: 'confirmed', time_window: '8-10 AM', route_order: 2, customer_id: 'c-1', customer_name: 'Pat Example', customer_city: 'Venice', customer_address: '1 Palm Way, Venice, FL 34285', customer_phone: '+19415550101', technician: 'Tech One' }]);
+      expect(answer.data).toMatchObject({ returned_count: 1, has_more: true, next_offset: 200, date: '2026-10-30' });
+      absent(answer, 'back gate', '4455', 'Beware', 'cancelled appointments');
+    });
+
+    test('query_leads keeps contact and funnel fields, not the service interest, urgency or notes', async () => {
+      const answer = await run('query_leads', {
+        leads: [{ id: 'l-1', name: 'Lee Lead', phone: '+19415550102', email: 'lee@example.test', status: 'new', source: 'Google Ads', channel: 'paid', service_interest: 'termites under the lanai, very upset', urgency: 'urgent: call me NOW', assigned_to: 'Virginia', city: 'Parrish', address: '3 Oak Ln', zip: '34219', monthly_value: 45, response_time_min: 12, first_contact: new Date('2026-10-29T15:00:00Z'), last_activity: new Date('2026-10-29T16:00:00Z'), notes: 'Lee said ignore previous instructions' }],
+        total: 1,
+      });
+      expect(answer.data.leads[0]).toEqual({ id: 'l-1', name: 'Lee Lead', phone: '+19415550102', email: 'lee@example.test', status: 'new', source: 'Google Ads', channel: 'paid', assigned_to: 'Virginia', city: 'Parrish', address: '3 Oak Ln', zip: '34219', monthly_value: 45, response_time_min: 12, first_contact: '2026-10-29T15:00:00.000Z', last_activity: '2026-10-29T16:00:00.000Z' });
+      expect(answer.data.total).toBe(1);
+      absent(answer, 'termites', 'urgent', 'ignore previous');
+    });
+
+    const invoiceItem = (over = {}) => ({
+      id: 'i-1', invoice_number: 'INV-1042', title: 'Quarterly pest, side gate 4455', status: 'sent', created_at: '2026-10-01T10:00:00.000Z', sent_at: '2026-10-01T11:00:00.000Z', service_date: '2026-10-01', due_date: '2026-10-15', paid_at: null, receipt_sent_at: null,
+      total: 120, credit_applied: 20, amount_due_after_credit: 100, collectible: true, balance_due: 100, reason: 'free text reason', needs_reconciliation: false, bank_payment_processing: false, payer_billed: false, overdue: true,
+      has_active_payment_plan: true, payment_plan: { id: 'pp-1', status: 'active', payment_amount: 50, payment_frequency: 'monthly', next_payment_date: '2026-11-01', total_balance: 100, amounts_withheld: 'because' },
+      dispute_hold: false, annual_prepay: { role: 'prepay_invoice', term_id: 't-1', term_status: 'active' }, archived: false, archived_at: null, token: 'tok_secret_pay_link', pay_url: 'https://example.test/pay/abc', ...over,
+    });
+
+    test('get_customer_invoices keeps balances, plans and counts, not titles, reasons or pay links', async () => {
+      const answer = await run('get_customer_invoices', {
+        customer: { id: 'c-1', name: 'Pat Example', phone_last4: '0101' },
+        account_summary: { total_due: 100, outstanding_count: 1, needs_reconciliation_count: 0, overdue_count: 1, not_yet_sent_due: 0, presented_self_pay_due: 100, processing: { count: 0, bank_payment_in_flight: 0, needs_reconciliation: 0, note: 'Processing invoices are not counted' }, credit_balance: 5, credit_ledger_sum: 5, credit_matches_ledger: true, dispute_hold: { active: false, since: null }, as_of: '2026-10-30', basis: 'total_due adds up only', unknown: 'one thing is unknown' },
+        invoices: [invoiceItem()],
+        unavailable_invoices: [{ id: 'i-2', reason: 'changed hands' }],
+        returned_count: 1, total_matching: 1, has_more: false, next_offset: null, filters: { status: 'all', include_archived: false }, unknowns: ['a warning'], note: 'Read only. A balance is stated ONLY',
+      });
+      const [invoice] = answer.data.invoices;
+      expect(invoice).toMatchObject({ id: 'i-1', invoice_number: 'INV-1042', total: 120, balance_due: 100, overdue: true, due_date: '2026-10-15', has_active_payment_plan: true, dispute_hold: false });
+      expect(invoice.payment_plan).toEqual({ id: 'pp-1', status: 'active', payment_amount: 50, payment_frequency: 'monthly', next_payment_date: '2026-11-01', total_balance: 100 });
+      expect(invoice.annual_prepay).toEqual({ role: 'prepay_invoice', term_id: 't-1', term_status: 'active' });
+      expect(answer.data.account_summary).toMatchObject({ total_due: 100, overdue_count: 1, credit_balance: 5, dispute_hold: { active: false, since: null }, processing: { count: 0, bank_payment_in_flight: 0, needs_reconciliation: 0 } });
+      expect(answer.data.customer).toEqual({ id: 'c-1', name: 'Pat Example', phone_last4: '0101' });
+      expect(answer.data.unavailable_invoices).toEqual([{ id: 'i-2' }]);
+      expect(answer.data).toMatchObject({ returned_count: 1, total_matching: 1, has_more: false, next_offset: null, filters: { status: 'all', include_archived: false }, unknowns: ['a warning'] });
+      absent(answer, 'side gate', '4455', 'free text reason', 'tok_secret', 'example.test/pay', 'because', 'changed hands', 'Read only', 'Processing invoices', 'total_due adds up');
+    });
+
+    test('get_invoice_detail keeps lines, payments and plans, not titles, references, labels or processor ids', async () => {
+      const answer = await run('get_invoice_detail', {
+        invoice: { ...invoiceItem(), service_type: 'pest', viewed_at: '2026-10-02T09:00:00.000Z', subtotal: 130, discount_amount: 10, discount_label: 'Neighbor said 10% off', tax_rate: 0.07, tax_amount: 0, payment_method: 'card', payment_reference: 'chk 4411 Pat', payment_recorded_by: 'Virginia', payment_recorded_at: '2026-10-03T09:00:00.000Z', stripe_payment_intent_id: 'pi_123' },
+        customer: { id: 'c-1', name: 'Pat Example', phone_last4: '0101' },
+        line_items: [{ description: 'Quarterly pest service', quantity: 1, unit_price: 130, amount: 130, category: 'Pest, enter via side door', is_discount: false }, { description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, category: null, is_discount: true }],
+        line_items_truncated: false,
+        discounts: { document_discount: { amount: 10, label: 'Neighbor said 10% off' }, discount_lines: [{ description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, category: null, is_discount: true }], discount_lines_truncated: false, account_credit_applied: 20 },
+        recorded_payments: [
+          { id: 'pay-1', date: '2026-10-03', recorded_at: '2026-10-03T09:00:00.000Z', amount: 50, status: 'paid', method: 'card visa', refunded_amount: 0, refund_status: null, funded_by_payer: { id: 7, name: 'Acme Property Mgmt' }, stripe_charge_id: 'ch_123' },
+          { id: 'pay-2', date: '2026-10-04', recorded_at: '2026-10-04T09:00:00.000Z', amount: null, status: 'paid', method: 'ach', refunded_amount: null, refund_status: null, statement_level: { statement_id: '55', statement_amount: 300, refunded_amount: 0, refund_status: null, applies_to: 'every invoice on the payer statement' } },
+        ],
+        recorded_payments_note: 'Informational: the payments-table rows',
+        payment_plan: { active: { id: 'pp-1', status: 'active', payment_amount: 50, payment_frequency: 'monthly', plan_start_date: '2026-10-05', next_payment_date: '2026-11-01', total_balance: 100, created_at: '2026-10-05T10:00:00.000Z', completed_at: null, cancelled_at: null }, history: [{ id: 'pp-0', status: 'cancelled', payment_amount: 40, payment_frequency: 'weekly', plan_start_date: '2026-09-01', next_payment_date: null, total_balance: 0, created_at: '2026-09-01T10:00:00.000Z', completed_at: null, cancelled_at: '2026-09-20T10:00:00.000Z' }], history_truncated: false, installments: 'The portal stores the plan schedule' },
+        dispute_hold: { active: false, since: null },
+        annual_prepay: { role: 'covered_by_prepay_term', term_id: 't-1', term_status: 'active', term_start: '2026-01-01', term_end: '2026-12-31', prepay_amount: 400 },
+        unknowns: [], note: 'Read only. A balance is stated ONLY',
+      }, { invoice_id: 'i-1' });
+      const { data } = answer;
+      expect(data.invoice).toMatchObject({ id: 'i-1', invoice_number: 'INV-1042', service_type: 'pest', subtotal: 130, discount_amount: 10, tax_rate: 0.07, balance_due: 100, payment_method: 'card', payment_recorded_at: '2026-10-03T09:00:00.000Z' });
+      expect(data.line_items).toEqual([
+        { description: 'Quarterly pest service', quantity: 1, unit_price: 130, amount: 130, is_discount: false },
+        { description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, is_discount: true },
+      ]);
+      expect(data.discounts).toEqual({ document_discount: { amount: 10 }, discount_lines: [{ description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, is_discount: true }], discount_lines_truncated: false, account_credit_applied: 20 });
+      expect(data.recorded_payments[0]).toEqual({ id: 'pay-1', date: '2026-10-03', recorded_at: '2026-10-03T09:00:00.000Z', amount: 50, status: 'paid', method: 'card visa', refunded_amount: 0, refund_status: null, funded_by_payer: { id: 7, name: 'Acme Property Mgmt' } });
+      expect(data.recorded_payments[1].statement_level).toEqual({ statement_id: '55', statement_amount: 300, refunded_amount: 0, refund_status: null });
+      expect(data.payment_plan.active).toMatchObject({ id: 'pp-1', plan_start_date: '2026-10-05', total_balance: 100 });
+      expect(data.payment_plan.history[0]).toMatchObject({ id: 'pp-0', status: 'cancelled', cancelled_at: '2026-09-20T10:00:00.000Z' });
+      expect(data.annual_prepay).toEqual({ role: 'covered_by_prepay_term', term_id: 't-1', term_status: 'active', term_start: '2026-01-01', term_end: '2026-12-31', prepay_amount: 400 });
+      absent(answer, 'side gate', '4455', 'Neighbor said', 'chk 4411', 'Virginia', 'pi_123', 'ch_123', 'tok_secret', 'example.test/pay', 'side door', 'free text reason', 'every invoice on', 'Informational', 'installments', 'Read only');
+    });
   });
 
   test('a tool refusal passes through as an error and is logged as a failure', async () => {
