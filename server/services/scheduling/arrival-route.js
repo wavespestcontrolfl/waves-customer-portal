@@ -17,6 +17,7 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
+const warningDetail = require('./route-warning-detail');
 
 /** The customer's primary premise, aliased the way effectivePremise (and
  *  stampedAddressDiverges) expect. Every query that feeds the co-visit merge
@@ -371,10 +372,13 @@ function groupRouteStops(rows) {
   return result;
 }
 
-function unverified(target, date) {
+// `detail`: { warning, diagnostics } from describeUnverified (GATE_ROUTE_WARNING_DETAIL, a staff
+// save's own check only). Unset: today's result, byte for byte.
+function unverified(target, date, detail) {
   return {
     feasible: false, target, reason: 'route_unverified',
-    warning: `Could not verify the route's arrival windows on ${date}. Review the route before driving it.`,
+    warning: detail?.warning || `Could not verify the route's arrival windows on ${date}. Review the route before driving it.`,
+    ...(detail ? { diagnostics: detail.diagnostics } : {}),
   };
 }
 
@@ -465,7 +469,8 @@ function pickerTravelSource(legs) {
   return 'conservative_model';
 }
 
-function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
+// `fail` (optional, GATE_ROUTE_WARNING_DETAIL): receives the cause of a null return. Never read otherwise.
+function resolvePlacementOrigin(context, capacity, departureMin, target, own, fail = {}) {
   // The night tool's van departure (context.vanDepartureMin): the van may
   // leave before the shift opens, so a farther first stop still makes an
   // 08:00 promise. No stop starts before its window opens either way.
@@ -480,24 +485,30 @@ function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
     // A staff picker's one active stop (loadActiveStop) is where the day
     // continues from; anything else under way stays unverified.
     const continuesFrom = active.length === 1 && String(context.activeStop?.id) === String(active[0].id) ? active[0] : null;
-    if (context.activeTarget || (active.length && !continuesFrom)) return null;
+    if (context.activeTarget) { fail.cause = { code: 'target_under_way' }; return null; }
+    if (active.length && !continuesFrom) { fail.cause = { code: 'under_way', rows: active }; return null; }
     const parts = etParts(context.now);
     startMin = Math.max(startMin, parts.hour * 60 + parts.minute);
     const completed = own.filter(row => row.status === 'completed').map(row => ({
       ...row, completionTime: row.actual_end_time || row.check_out_time || row.completed_at,
     }));
-    if (completed.some(row => !row.completionTime)) return null;
+    const unfinished = completed.find(row => !row.completionTime);
+    if (unfinished) { fail.cause = { code: 'completed_no_time', rows: [unfinished] }; return null; }
     completed.sort((a, b) => new Date(b.completionTime) - new Date(a.completionTime));
     if (completed.length) origin = completed[0];
     if (continuesFrom) {
-      if (!hasCoords(continuesFrom)) return null;
+      if (!hasCoords(continuesFrom)) { fail.cause = { code: 'no_pin', rows: [continuesFrom] }; return null; }
       startMin = Math.max(startMin, activeStopFreeAt(continuesFrom, context.activeStop, origin, context.date, parts.hour * 60 + parts.minute));
       origin = continuesFrom;
       activeOrigin = continuesFrom;
     }
   }
   const pending = own.filter(row => row.status !== 'completed' && row !== activeOrigin);
-  if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) return null;
+  if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) {
+    fail.cause = { code: 'no_pin', rows: [...(origin !== context.home && origin !== RouteOptimizer.HQ && !hasCoords(origin) ? [origin] : []),
+      ...pending.filter(row => !hasCoords(row))], startPoint: !hasCoords(origin) && (origin === context.home || origin === RouteOptimizer.HQ) };
+    return null;
+  }
   return { origin, startMin, pending };
 }
 
@@ -648,6 +659,145 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
     baselineLateStopIds: [...baselineLate], dayEndExceeded };
 }
 
+// ---- Staff warning detail (GATE_ROUTE_WARNING_DETAIL, route-warning-detail.js) ----
+// Everything below runs only for a staff save's own check with the gate on, after the result is
+// already decided: it words the failure, it never changes one. A stop is named by its place in
+// the technician's day (completed stops first, then the route in the order simulated), its window
+// and the clock, never by customer.
+
+/** The stop number of any row on the technician's day, ordered the way the board lists the day. */
+function stopNumberer(own, target) {
+  const base = own.some(row => String(row.id) === String(target.id)) ? own : [...own, target];
+  const numbers = new Map(currentOrder(base).map((row, index) => [String(row.id), index + 1]));
+  return row => numbers.get(String(row.id));
+}
+
+function stopLabeler(own, target) {
+  const numberOf = stopNumberer(own, target);
+  const isNew = String(target.id) === '__candidate__';
+  return (row, number = numberOf(row)) => {
+    const range = row.arrivalRange || effectiveWindowRange(row);
+    const mine = String(row.id) === String(target.id);
+    if (mine && isNew) return warningDetail.stopLabel(null, range, { isNew: true });
+    return warningDetail.stopLabel(number, range);
+  };
+}
+
+/** The cause of a `route_unverified` answer, in words. `cause` is { code, rows?, startPoint? }. */
+function describeUnverified({ date, target, own, cause }) {
+  const label = stopLabeler(own, target);
+  const mine = label(target);
+  let text;
+  switch (cause.code) {
+    case 'off_shift':
+      text = `${mine} starts outside the technician's shift hours, so its route cannot be checked.`;
+      break;
+    case 'no_technician':
+      text = `${mine} has no technician, so its route cannot be checked.`;
+      break;
+    case 'no_pin': {
+      const rows = cause.rows || [];
+      const named = rows.slice(0, 3).map(row => `${label(row)} has no map pin.`);
+      if (rows.length > 3) named.push(`${warningDetail.plural(rows.length - 3, 'more stop')} also ${rows.length - 3 === 1 ? 'has' : 'have'} no map pin.`);
+      if (cause.startPoint) named.push("The technician's start point has no map pin.");
+      text = `${named.join(' ')} Fix the address pin to check the route.`;
+      break;
+    }
+    case 'grouped':
+      text = `${mine} is booked with another service at the same stop, so its route cannot be checked.`;
+      break;
+    case 'target_under_way':
+      text = `${mine} is already under way, so the rest of the day cannot be checked.`;
+      break;
+    case 'under_way': {
+      const rows = cause.rows || [];
+      text = rows.length === 1
+        ? `${label(rows[0])} is under way and its live position is not available, so the rest of the day cannot be checked.`
+        : `${rows.slice(0, 3).map(row => label(row)).join(' and ')} are all under way, so the rest of the day cannot be checked.`;
+      break;
+    }
+    case 'completed_no_time':
+      text = `${label(cause.rows[0])} is marked completed with no finish time, so the route cannot be checked.`;
+      break;
+    case 'group_unmodeled':
+      text = 'A shared stop on this day cannot be modeled, so the route cannot be checked.';
+      break;
+    default:
+      return null;
+  }
+  return { warning: `Route on ${date}: ${text}`, diagnostics: { cause: cause.code } };
+}
+
+/** Late stops, in words, for the orders the check tried. `candidates` are the orders tried for the
+ *  visit, `baselines` the day without it. Picks the order that breaks the fewest promises (the
+ *  visit's own counts) and names them. null: nothing late to name (a blocker or margin). */
+function describeLateness({ date, candidates, baselines, simulate, target, own, rangeForStop, dayEndMin }) {
+  const label = stopLabeler(own, target);
+  const completedCount = own.filter(row => row.status === 'completed').length;
+  const lateStops = (order) => {
+    if (order.length > EXPLAIN_MAX_STOPS + 1) return null;
+    const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
+    if (!simulation) return null;
+    return simulation.arrivals.map((arrival, index) => ({ row: order[index], arrivalMin: arrival.arrivalMin,
+      lateMinutes: arrival.lateMinutes || 0, number: completedCount + index + 1 })).filter(stop => stop.lateMinutes > 0);
+  };
+  const baselineLate = new Set(baselines.flatMap(order => lateStops(order) || []).map(stop => String(stop.row.id)));
+  let best = null;
+  for (const order of candidates) {
+    const late = lateStops(order);
+    if (!late) continue;
+    const mine = late.find(stop => String(stop.row.id) === String(target.id)) || null;
+    const others = late.filter(stop => String(stop.row.id) !== String(target.id) && !baselineLate.has(String(stop.row.id)));
+    const old = late.filter(stop => String(stop.row.id) !== String(target.id) && baselineLate.has(String(stop.row.id)));
+    const score = others.length + (mine ? 1 : 0);
+    const minutes = others.reduce((sum, stop) => sum + stop.lateMinutes, 0) + (mine?.lateMinutes || 0);
+    if (!best || score < best.score || (score === best.score && minutes < best.minutes)) best = { order, mine, others, old, score, minutes };
+  }
+  if (!best) return null;
+  const byLate = (a, b) => b.lateMinutes - a.lateMinutes;
+  const sentences = [];
+  const others = [...best.others].sort(byLate);
+  for (const stop of others.slice(0, 3)) sentences.push(warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes));
+  if (others.length > 3) sentences.push(`${warningDetail.plural(others.length - 3, 'more stop')} would also be late.`);
+  if (best.mine) {
+    const who = label(best.mine.row, best.mine.number);
+    sentences.push(`${String(target.id) === '__candidate__' ? who : `${who} is this visit and`} would arrive ${warningDetail.clockText(best.mine.arrivalMin)}, ${best.mine.lateMinutes} min late, so it cannot keep its own window.`);
+  }
+  if (!others.length && !best.mine) {
+    for (const stop of [...best.old].sort(byLate).slice(0, 2)) {
+      sentences.push(warningDetail.lateSentence(label(stop.row, stop.number), stop.arrivalMin, stop.lateMinutes, { already: true }));
+    }
+  }
+  const dayEnd = Number.isFinite(dayEndMin) && !simulate(best.order, [], { reportLate: true });
+  if (dayEnd) sentences.push(warningDetail.dayEndSentence(dayEndMin));
+  if (!sentences.length) return null;
+  const ids = [...best.others, ...(best.mine ? [best.mine] : []), ...best.old].map(stop => String(stop.row.id) === '__candidate__' ? 'new' : String(stop.row.id));
+  return { warning: `Route on ${date}: ${sentences.join(' ')}`, lateStopIds: ids };
+}
+
+/** The tightest later stop, for an `arrival_margin` answer: the order that leaves the most room. */
+function describeTightness({ date, candidates, simulate, target, own, rangeForStop, margin }) {
+  const label = stopLabeler(own, target);
+  const completedCount = own.filter(row => row.status === 'completed').length;
+  let best = null;
+  for (const order of candidates) {
+    const simulation = simulate(order, []);
+    const at = order.findIndex(row => String(row.id) === String(target.id));
+    if (!simulation || at < 0) continue;
+    let tight = null;
+    simulation.arrivals.forEach((arrival, index) => {
+      const range = index > at ? rangeForStop(order[index]) : null;
+      if (range == null) return;
+      const left = range.endMin - arrival.arrivalMin;
+      if (left < margin && (!tight || left < tight.left)) tight = { row: order[index], arrivalMin: arrival.arrivalMin, left, number: completedCount + index + 1 };
+    });
+    if (tight && (!best || tight.left > best.left)) best = tight;
+  }
+  if (!best) return null;
+  return { warning: `Route on ${date}: ${warningDetail.tightSentence(label(best.row, best.number), best.arrivalMin, Math.max(0, best.left))} Choose another window.`,
+    lateStopIds: [String(best.row.id)] };
+}
+
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
 function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ, roadTravel = false }) {
@@ -690,7 +840,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false,
   // Optional diagnostics (customer route check): on an `arrival_window` failure, add `lateness`
   // (see explainLateness). Unset: no extra work and the result is exactly what it was.
-  explain = false }) {
+  explain = false,
+  // A staff save's own check: a failure carries `diagnostics` for the save's log line, and with
+  // GATE_ROUTE_WARNING_DETAIL on it is worded with the stop, its window, the predicted arrival and
+  // the minutes. Never changes whether the placement fits.
+  detail = false }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -704,7 +858,21 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const rows = context.preserveCapacity ? context.rows.map(row => ({ ...row, preserveCapacity: true })) : context.rows;
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = buildPlacementTarget(context, windowStart, windowEnd, durationMinutes);
-  if (targetUnroutable(capacity, target, windowStart, windowEnd, grouped)) return unverified(target, date);
+  const detailOn = detail === true && warningDetail.routeWarningDetailLive();
+  const dayOf = () => (target.technician_id ? rows.filter(row => row.technician_id === target.technician_id
+    && (capacity || row.reservation_expires_at == null)) : []);
+  // route_unverified, worded with its cause when a staff save asked for detail.
+  const unverifiedBecause = (cause) => {
+    if (detail !== true) return unverified(target, date);
+    const words = describeUnverified({ date, target, own: dayOf(), cause: typeof cause === 'function' ? cause() : cause });
+    // Gate off: the sentence stays; the cause still rides along for the save's log line.
+    return unverified(target, date, detailOn ? words : (words ? { diagnostics: words.diagnostics } : undefined));
+  };
+  if (targetUnroutable(capacity, target, windowStart, windowEnd, grouped)) {
+    return unverifiedBecause(() => (capacity && !placementFitsShift(minuteOfDay(windowStart), minuteOfDay(windowEnd)) ? { code: 'off_shift' }
+      : !target.technician_id ? { code: 'no_technician' }
+        : !hasCoords(target) ? { code: 'no_pin', rows: [target] } : { code: 'grouped' }));
+  }
   // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a move
   // tries every place (staffPlacement). A whole shared stop (`unit`) and a
   // route number the office typed keep today's rule: their save keeps that
@@ -713,11 +881,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     ? staffPlacement(context, place, date, target.technician_id, windowStart) : null;
   const staffInsert = placement === 'move';
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
-  const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own);
-  if (!resolvedOrigin) return unverified(target, date);
+  const originFail = {};
+  const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own, originFail);
+  if (!resolvedOrigin) return unverifiedBecause(() => originFail.cause || { code: 'unknown' });
   const { origin, startMin, pending } = resolvedOrigin;
   const groupedPending = capacity ? groupRouteStops(pending) : pending;
-  if (!groupedPending) return unverified(target, date);
+  if (!groupedPending) return unverifiedBecause({ code: 'group_unmodeled' });
   // Clock-order fallback (owner 2026-09-25): a stored order with gaps,
   // duplicates or an afternoon stop ahead of a morning one is leftover
   // numbering, not a plan. Simulate the day in promised-window order too and
@@ -782,22 +951,38 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     feasible: false, target, reason: 'arrival_window',
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,
   };
+  // Staff warning detail: the stop, window, arrival and minutes behind a failure, plus what the save's
+  // log line records (placement kind, late stops, where the drive times came from). The generic
+  // sentence stays when nothing can be named. `base_warning` is the unchanged sentence: a snapshot
+  // compared between a review and its apply must not drift with the clock.
+  const detailed = (result, words) => {
+    if (detail !== true) return result;
+    return { ...result, ...(detailOn && words ? { warning: words.warning, baseWarning: result.warning } : {}),
+      diagnostics: { placement: placement || 'none', travelSource: context.travel ? 'picker_cache' : 'conservative_model',
+        lateStopIds: words?.lateStopIds || [] } };
+  };
+  const candidateOrders = () => orders.map(entry => entry.order);
+  const baselineOrders = () => sequencers.map(sequence => sequence(groupedPending));
   if (!winner && returnTooLate) {
-    return { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` };
+    return detailed({ ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` });
   }
   // Every place it fits crowds a later customer (staff route insertion).
   if (!winner && tooTight) {
-    return { ...fail, reason: 'arrival_margin',
-      warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` };
+    return detailed({ ...fail, reason: 'arrival_margin',
+      warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
+    detailOn ? describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES }) : null);
   }
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
   if (!winner && capacity && dayIsOvercommitted(sequencers, groupedPending, simulate)) {
-    return { ...fail, reason: 'day_overcommitted',
-      warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
+    return detailed({ ...fail, reason: 'day_overcommitted',
+      warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` },
+    detailOn ? describeLateness({ date, candidates: baselineOrders(), baselines: baselineOrders(), simulate, target, own, rangeForStop, dayEndMin }) : null);
   }
   if (!winner) {
-    return explain ? { ...fail, lateness: explainLateness({ sequencers, groupedPending, simulate, target }) } : fail;
+    const result = explain ? { ...fail, lateness: explainLateness({ sequencers, groupedPending, simulate, target }) } : fail;
+    return detailed(result,
+      detailOn ? describeLateness({ date, candidates: candidateOrders(), baselines: baselineOrders(), simulate, target, own, rangeForStop, dayEndMin }) : null);
   }
   return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ,
     roadTravel: !!context.travel });
@@ -1095,7 +1280,7 @@ function staffSaveTravel(date) {
 }
 
 async function checkArrivalPlacement({
-  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, ...options
+  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, ...options
 }) {
   const live = pickerRoadCheckLive();
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
@@ -1112,7 +1297,8 @@ async function checkArrivalPlacement({
       await context.travel.preload(legs);
     }
   }
-  return evaluateArrivalPlacement(context, placement);
+  // A staff save's own check words its failure (GATE_ROUTE_WARNING_DETAIL); every other caller keeps the sentence.
+  return evaluateArrivalPlacement(context, detail === true ? { ...placement, detail: true } : placement);
 }
 
 

@@ -458,6 +458,20 @@ const CONFLICT_COLUMNS = [
   'is_recurring', 'recurring_parent_id', 'customer_confirmed',
 ];
 
+// One log line each time a staff save's route check comes back with a warning
+// (arrivalWindow roads 'cache', or `detail`), so a live case can be told apart from the
+// numbers it left: why, what the placement did, which stops were late and where the drive times came
+// from. Ids only, no names. Never throws.
+function logRouteWarning(fit, arrivalWindow, date) {
+  try {
+    if (!fit || fit.feasible || !(arrivalWindow?.roads === 'cache' || arrivalWindow?.detail === true)) return;
+    const d = fit.diagnostics || {};
+    logger.info(`[route-warning] service=${arrivalWindow.serviceId || '-'} date=${String(date).split('T')[0]}`
+      + ` reason=${fit.reason} placement=${d.placement || '-'} late=${(d.lateStopIds || []).join(',') || '-'}`
+      + ` travel=${d.travelSource || '-'}${d.cause ? ` cause=${d.cause}` : ''}`);
+  } catch { /* a log line never fails a save */ }
+}
+
 /**
  * Overlapping scheduled_services rows for one date + window. Tech-blind.
  *
@@ -530,17 +544,24 @@ async function findConflictingVisits({
     if (arrivalWindowRoutingEnabled()) {
       const fit = await checkArrivalPlacement({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
+        // Staff saves read cached road times (roads: 'cache'): their failure carries the diagnostics
+        // the log line below records, and its words with GATE_ROUTE_WARNING_DETAIL on.
+        detail: arrivalWindow.roads === 'cache' || arrivalWindow.detail === true,
         // A caller may give the arrival check its own exclusion list (the
         // series carry keeps a carried stop's members visible so the stop is
         // judged as ONE grouped stop); otherwise the occupancy list applies.
         windowStart, windowEnd, excludeServiceIds: arrivalWindow.excludeServiceIds || excludeIds,
       });
+      logRouteWarning(fit, arrivalWindow, date);
       // Interviews merge into this branch too (Codex r4 P2): an admin move
       // whose window overlaps a booked interview gets the conflict row.
       return withInterviewConflicts(fit.feasible ? [] : [{
         ...fit.target, id: arrivalWindow.serviceId,
         window_start: windowStart, window_end: windowEnd,
         conflict_reason: fit.reason, warning: fit.warning,
+        // GATE_ROUTE_WARNING_DETAIL: the sentence a staff save shows is worded with the stop and
+        // minutes; `base_warning` keeps the unchanged one for any snapshot that compares warnings.
+        ...(fit.baseWarning ? { base_warning: fit.baseWarning } : {}),
       }], { db, date, windowStart, windowEnd, includeInterviews });
     }
   }

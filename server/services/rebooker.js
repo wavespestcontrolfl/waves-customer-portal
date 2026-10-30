@@ -140,7 +140,9 @@ function conflictSnapshotItem(target, row) {
     conflict_end: hhmm(row.window_end),
     conflict_duration: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
     reason,
-    warning: row.warning || null,
+    // base_warning: the unchanged sentence under GATE_ROUTE_WARNING_DETAIL, whose worded warning carries
+    // clock times that can differ between a review and its apply.
+    warning: row.base_warning || row.warning || null,
     // Target status may change when reviewed moves land pending.
     status: synthetic ? null : (row.status || null),
     service_type: row.service_type || null,
