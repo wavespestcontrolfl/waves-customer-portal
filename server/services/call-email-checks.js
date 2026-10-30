@@ -44,43 +44,67 @@ function spelledUnit(token) {
 // The whole domain spoken after "at": "gmail.com", "yahoo.co.uk", or the
 // spoken form "gmail dot com" / "yahoo dot co dot uk". A bare provider word
 // ("at gmail") stays bare, so it never equals a full domain.
+const wordOf = (token) => String(token || '').toLowerCase().replace(/[^a-z0-9.-]+$/, '');
 function spokenDomainFrom(tokens, start) {
-  let domain = String(tokens[start] || '').toLowerCase().replace(/[^a-z0-9.-]+$/, '').replace(/\.+$/, '');
+  let domain = wordOf(tokens[start]).replace(/\.+$/, '');
   if (!/^[a-z0-9][a-z0-9.-]*$/.test(domain)) return null;
-  for (let j = start + 1; /^(?:dot|period|point)$/i.test(tokens[j] || ''); j += 2) {
-    const label = String(tokens[j + 1] || '').toLowerCase().replace(/[^a-z0-9-]+$/, '');
+  for (let j = start + 1; /^(?:dot|period|point)$/.test(wordOf(tokens[j]).replace(/\.+$/, '')); j += 2) {
+    const label = wordOf(tokens[j + 1]).replace(/\.+$/, '');
     if (!/^[a-z0-9-]+$/.test(label)) break;
     domain += `.${label}`;
   }
   return domain;
 }
 
+// What may stand right before a spelled address: the start of the text, a
+// sentence or speaker-label end ("Okay." "Caller:"), or a word that introduces
+// it ("It's", "is", "so"). Anything else (a first name, "jane D-O-E") may be
+// part of the address said aloud, so the spelling is not the whole address.
+const INTRODUCERS = new Set(["it's", 'its', 'it', 'is', 'email', 'e-mail', 'address', 'so', 'okay', 'ok', 'yeah', 'yes', 'sure', 'be', 'um', 'uh', 'well', "that's", 'thats']);
+const SENTENCE_END = /[.?:]$/;
+// "T-A-M-I, Rowe, R-O-W-E": a spelled stretch that restarts within two words
+// of an earlier one is one address interrupted, never a whole one.
+const MAX_INTERRUPTION_WORDS = 2;
+const stripQuotes = (token) => String(token || '').replace(/^["“(']+|["”)]+$/g, '');
+
 // The spelled email statements in one transcript: a spelled run (three or more
 // spelled letters) that ends directly on "at" / "@", paired with the whole
-// domain spoken right after it. "F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
-// [{ local: 'fletchershyla', domain: 'gmail.com' }]; "S-C-L-A-Y 18 at yahoo.com" ->
+// domain spoken right after it. "It's F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
+// [{ local: 'fletchershyla', domain: 'gmail.com' }]; "Okay. S-C-L-A-Y 18 at yahoo.com" ->
 // [{ local: 'sclay18', domain: 'yahoo.com' }]. A spelled name that runs into a
-// word ("S-M-I-T-H. My email is ...") is not a statement: the evidence must be
-// the email itself, not a name spelled elsewhere on the call.
+// word ("S-M-I-T-H. My email is ...") is not a statement. A statement that was
+// interrupted, or does not start cleanly, carries local: null: it is evidence
+// of an address the letters do not fully cover, so it keeps the card.
 function spelledEmailStatements(text) {
-  const reduced = String(text || '').replace(PHONETIC_MARKER, '$1');
-  const tokens = reduced.split(/[\s,;:!?"“”()]+/).filter(Boolean);
+  const tokens = String(text || '').replace(/[’‘]/g, "'").replace(PHONETIC_MARKER, '$1').split(/\s+/).filter(Boolean);
   const statements = [];
   let run = '';
   let letters = 0;
-  const reset = () => { run = ''; letters = 0; };
+  let clean = false;
+  let lastRunEnd = -Infinity;
+  const endRun = (i) => {
+    if (letters >= 2) lastRunEnd = i - 1;
+    run = '';
+    letters = 0;
+  };
   for (let i = 0; i < tokens.length; i += 1) {
-    if (/^(?:at|@)$/i.test(tokens[i])) {
+    const bare = stripQuotes(tokens[i]).replace(/[,;!?]+$/, '');
+    if (/^(?:at|@)$/i.test(bare.replace(/[.:]+$/, ''))) {
       const domain = spokenDomainFrom(tokens, i + 1);
-      if (letters >= MIN_SPELLED_LETTERS && domain) statements.push({ local: run, domain });
-      reset();
+      if (letters >= MIN_SPELLED_LETTERS && domain) statements.push({ local: clean ? run : null, domain });
+      endRun(i);
       continue;
     }
     // Hyphen-joined letters ("F-L-E-T") are one spelled stretch; a trailing
     // sentence period ("C-L-A-Y.") is punctuation, not a spoken "dot".
-    for (const piece of tokens[i].replace(/\.+$/, '').split('-').filter(Boolean)) {
+    for (const piece of bare.replace(/\.+$/, '').split('-').filter(Boolean)) {
       const unit = spelledUnit(piece);
-      if (unit === null) { reset(); continue; }
+      if (unit === null) { endRun(i); continue; }
+      if (!run) {
+        const prev = stripQuotes(tokens[i - 1]);
+        const startsClean = i === 0 || SENTENCE_END.test(prev) || INTRODUCERS.has(prev.toLowerCase().replace(/,+$/, ''));
+        clean = startsClean && i - lastRunEnd - 1 > MAX_INTERRUPTION_WORDS;
+      }
       run += unit;
       if (/^[a-z]$/.test(unit)) letters += 1;
     }

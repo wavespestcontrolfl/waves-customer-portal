@@ -38,7 +38,11 @@ describe('spelledEmailStatements', () => {
     ['a bare provider word stays bare', 'J-A-N-E at yahoo', [{ local: 'jane', domain: 'yahoo' }]],
     ['a name spelled elsewhere is not a statement', 'Clay, C-L-A-Y. And the email? D-R-A-Y 22 at yahoo.com', [{ local: 'dray22', domain: 'yahoo.com' }]],
     ['a spelled name followed by words is not a statement', 'Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com', []],
-    ['a word between two spelled parts leaves only the last part', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [{ local: 'rowe', domain: 'hotmail.com' }]],
+    ['an interrupted spelling is a statement the letters do not cover', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [{ local: null, domain: 'hotmail.com' }]],
+    ['a spoken word right before the letters may be part of the address', 'my email is jane D-O-E at gmail.com', [{ local: null, domain: 'gmail.com' }]],
+    ['speaker labels and curly apostrophes', 'Caller: Okay. It’s B-R-I-G-H-T at gmail.com. Agent: Thanks.', [{ local: 'bright', domain: 'gmail.com' }]],
+    ['a spelled name three words back is not an interruption', 'It is Rowe, R-O-W-E, and email is T-A-M-I at hotmail.com', [{ local: 'tami', domain: 'hotmail.com' }]],
+    ['the pronoun I is not a spelled run', 'I think it is S-M-I-T-H at gmail.com', [{ local: 'smith', domain: 'gmail.com' }]],
     ['fewer than three letters is not a spelling', 'J-O at gmail', []],
   ])('%s', (_label, text, statements) => {
     expect(spelledEmailStatements(text)).toEqual(statements);
@@ -57,6 +61,9 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['the provider was never named on the call', ['S-M-I-T-H-Y and then the rest'], 'smithy@gmail.com', false],
     ['the spelled letters are a different address', ['S-M-Y-T-H-E at gmail'], 'smithe@gmail.com', false],
     ['a spelled last name never vouches for a said email', ['Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com'], 'smith@me.com', false],
+    ['an interrupted spelling never vouches for its last part', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'rowe@hotmail.com', false],
+    ['an interrupted spelling never vouches for the joined address either', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
+    ['a mixed spoken and spelled address keeps the card', ['my email is jane D-O-E at gmail.com'], 'doe@gmail.com', false],
     ['the spelling names a different provider', ['B-R-I-G-H-T at yahoo dot com'], 'bright@gmail.com', false],
     ['a dotted foreign domain is not the .com address', ['J-A-N-E at yahoo.co.uk'], 'jane@yahoo.com', false],
     ['a spoken-dot foreign domain is not the .com address', ['J-A-N-E at yahoo dot co dot uk'], 'jane@yahoo.com', false],
