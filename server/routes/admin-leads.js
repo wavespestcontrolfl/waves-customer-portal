@@ -16,6 +16,7 @@ const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('
 const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
+const { leadAddressFields } = require('../utils/address-normalizer');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
@@ -2072,6 +2073,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           // call always runs inside `trx` (see findAccountByContact).
           fenceAttach: true,
         });
+        // The form's one-line address split into its parts, so this customer
+        // keys as the same house the form's own customer does.
+        const leadAddress = leadAddressFields(lockedLead);
         const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
           is_primary_profile: !account.existingCustomer,
@@ -2080,10 +2084,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           last_name: lockedLead.last_name || '',
           phone: lockedLead.phone || '',
           email: lockedLead.email || null,
-          address_line1: lockedLead.address || '',
-          city: lockedLead.city || '',
-          state: 'FL',
-          zip: lockedLead.zip || '',
+          address_line1: leadAddress.line1,
+          city: leadAddress.city || '',
+          state: leadAddress.state,
+          zip: leadAddress.zip || '',
           // member_since is the became-a-customer date — an assessment
           // provisions a PROSPECT, so it stays NULL until a real sale.
           ...(assessmentVisit ? {} : { member_since: etDateString() }),

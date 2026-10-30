@@ -781,6 +781,26 @@ function normalizeLeadAddress(input = {}) {
   };
 }
 
+// A lead's service address as customer fields. leads.address holds one free-text line, and the
+// website form saves its whole fullAddress there with no ZIP column ("12 Sample Ct East, Parrish,
+// FL 34219"). Copied as-is into a street field, that line keys as a different house than the same
+// address saved in parts, so the customer it creates never matches the form's own customer and a
+// later merge keeps both copies (owner 2026-10-30). A comma line that starts with a house number
+// and ends in a locality (a state, a ZIP, or the lead's own city) is split the way the form split
+// it; the lead's own city and zip columns still win. Anything else (a bare street, a call's
+// partial "12912", a unit tail like "123 Main St, Apt 4") is returned as before.
+function leadAddressFields(lead = {}) {
+  const raw = cleanString(lead.address);
+  const asIs = { line1: raw, line2: null, city: cleanString(lead.city) || null, state: 'FL', zip: cleanString(lead.zip) || null };
+  if (!raw.includes(',')) return asIs;
+  const tail = parseRawAddress(raw);
+  const leadCity = cleanString(lead.city).toLowerCase();
+  if (!(tail.state || tail.zip || (leadCity && cleanString(tail.city).toLowerCase() === leadCity))) return asIs;
+  const split = normalizeLeadAddress({ raw, city: lead.city, zip: lead.zip });
+  if (!/^\d/.test(split.line1) || split.unitConflict) return asIs;
+  return { line1: split.line1, line2: split.line2 || null, city: split.city || null, state: split.state || 'FL', zip: split.zip || null };
+}
+
 // Build a single-line display address from already-parsed parts, dropping any
 // empty piece so a missing zip never renders as "Sarasota, FL null" and a
 // missing city never leaves a dangling comma ("123 Main St, , FL 34231").
@@ -795,6 +815,7 @@ function formatAddress(parts = {}) {
 
 module.exports = {
   normalizeLeadAddress,
+  leadAddressFields,
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,
