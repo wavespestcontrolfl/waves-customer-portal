@@ -1824,21 +1824,8 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
 // itself never went through those adopt paths, so it is checked here before
 // the read-back card (and with it the first-touch hold) is dropped. Fails
 // closed: a failed lookup keeps the card.
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): when the dictation decoder left no
-// result at all (it did not run, or every model failed), the same rule is read
-// straight from the transcripts — callEmailCheck.spelled_match, computed before
-// the upserts. It never overrides a decoder that ran and found the spelling
-// ambiguous, and a domain-typo correction that would change the address keeps
-// the card, as in spelledEmailSettled.
-function spelledLettersSettled({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck }) {
-  if (dictationEmailPayload || callEmailCheck?.spelled_match !== true) return false;
-  const saved = String(extracted.email || '').trim().toLowerCase();
-  return !!saved && (!correctedEmail || String(correctedEmail).trim().toLowerCase() === saved);
-}
-
-async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck = null }) {
-  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)
-    && !spelledLettersSettled({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck })) return false;
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
   // No customer is exempt: the canonical customer is not known yet (Step 3
   // can still reassign a shared-phone call), so ANY record already holding
   // the address keeps the read-back card.
@@ -13195,14 +13182,13 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
     }
 
-    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): two deterministic checks on the
-    // address this pass is about to save, after every adopt and hold above. A
-    // domain with no mail server is set aside exactly like an unconfirmed
-    // dictation (email_raw), so no write or send path can use it. Otherwise the
-    // spelled-letter match is noted for the 10-05 trust rule below. A DNS
-    // hiccup is unknown, never a block.
+    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a DNS check on the address this
+    // pass is about to save, after every adopt and hold above. A domain with no
+    // mail server is set aside exactly like an unconfirmed dictation
+    // (email_raw), so no write or send path can use it, and the card says why.
+    // A DNS hiccup is unknown, never a block.
     if (extracted.email && callEmailChecksLive()) {
-      callEmailCheck = await screenCallEmail(extracted, { transcripts: [transcription, contactPassTranscript] });
+      callEmailCheck = await screenCallEmail(extracted);
       if (callEmailCheck?.dead_domain) {
         logger.info(`[call-proc] Set aside a call email whose domain has no mail server for ${maskSid(callSid)}`);
       }
@@ -14065,7 +14051,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
         // and it is the address being saved — no read-back card, no hold.
-        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail, callEmailCheck })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
@@ -14295,7 +14281,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
         // shadow branch.
-        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
         }
@@ -26034,7 +26020,6 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 CallRecordingProcessor.recordingTooShortForWords = recordingTooShortForWords;
-CallRecordingProcessor.spelledLettersSettled = spelledLettersSettled;
 CallRecordingProcessor.applyDeadDomainReason = applyDeadDomainReason;
 CallRecordingProcessor.callEmailCheckCardPayload = callEmailCheckCardPayload;
 

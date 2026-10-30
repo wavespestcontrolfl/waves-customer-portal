@@ -350,7 +350,7 @@ async function reportDecoderDown(reasons) {
       subject: 'FIX: call email spelling check could not run',
       headline: 'System — Call email spelling check could not run',
       summary: 'Both AI models failed, so the spelling hints for a call\'s email and address were skipped.',
-      text: `The call contact decoder failed on every model (${reasons}). Emails heard on calls fall back to the spelled-letter check and the read-back card until it recovers.`,
+      text: `The call contact decoder failed on every model (${reasons}). Emails heard on calls keep the read-back card and their first-touch hold until it recovers.`,
       audience: 'engineering',
       link: '/admin/communications',
       dedupeKey: `contact-decoder-down:${day}`,

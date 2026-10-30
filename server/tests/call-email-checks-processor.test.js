@@ -1,8 +1,7 @@
 // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the call processor's side of the
-// email checks. spelledLettersSettled is the 2026-10-05 trust rule read from
-// the transcripts when the dictation decoder left no result; applyDeadDomainReason
-// and callEmailCheckCardPayload turn a domain with no mail server into an
-// email_invalid card that says why. Fixtures are synthetic.
+// email checks. applyDeadDomainReason and callEmailCheckCardPayload turn a
+// domain with no mail server into an email_invalid card that says why.
+// Fixtures are synthetic.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({
@@ -14,27 +13,7 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const processor = require('../services/call-recording-processor');
 
-const { spelledLettersSettled, applyDeadDomainReason, callEmailCheckCardPayload } = processor;
-const SAVED = { email: 'brightonkayla@gmail.com' };
-
-describe('spelledLettersSettled', () => {
-  test('the letters match and the decoder left nothing: settled', () => {
-    expect(spelledLettersSettled({ extracted: SAVED, dictationEmailPayload: null, correctedEmail: null, callEmailCheck: { spelled_match: true } })).toBe(true);
-  });
-  test('never overrides a decoder that ran and held the spelling', () => {
-    const decoderHeld = { email_candidates: [{ value: 'brightonkayla@gmail.com' }, { value: 'brightonkayla0@gmail.com' }] };
-    expect(spelledLettersSettled({ extracted: SAVED, dictationEmailPayload: decoderHeld, correctedEmail: null, callEmailCheck: { spelled_match: true } })).toBe(false);
-  });
-  test('a domain-typo correction that would change the address keeps the card', () => {
-    expect(spelledLettersSettled({ extracted: { email: 'brightonkayla@gmial.com' }, dictationEmailPayload: null, correctedEmail: 'brightonkayla@gmail.com', callEmailCheck: { spelled_match: true } })).toBe(false);
-    expect(spelledLettersSettled({ extracted: SAVED, dictationEmailPayload: null, correctedEmail: 'brightonkayla@gmail.com', callEmailCheck: { spelled_match: true } })).toBe(true);
-  });
-  test('no match, no check (gate off), or no saved email: not settled', () => {
-    expect(spelledLettersSettled({ extracted: SAVED, dictationEmailPayload: null, correctedEmail: null, callEmailCheck: { spelled_match: false } })).toBe(false);
-    expect(spelledLettersSettled({ extracted: SAVED, dictationEmailPayload: null, correctedEmail: null, callEmailCheck: null })).toBe(false);
-    expect(spelledLettersSettled({ extracted: { email: null }, dictationEmailPayload: null, correctedEmail: null, callEmailCheck: { spelled_match: true } })).toBe(false);
-  });
-});
+const { applyDeadDomainReason, callEmailCheckCardPayload } = processor;
 
 describe('applyDeadDomainReason', () => {
   const DEAD = { dead_domain: { domain: 'nosuchdomain.me', deliverable: false, dns_error: 'ENOTFOUND' } };
