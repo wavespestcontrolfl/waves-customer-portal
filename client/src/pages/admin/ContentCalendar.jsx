@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { etDateString } from "../../lib/timezone";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { ActionFeedback, Badge, Button, Card, Checkbox, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle, Field, Input, Select, UiSurface } from "../../components/ui";
@@ -52,16 +52,25 @@ export default function ContentCalendar() {
   const [draftPosts, setDraftPosts] = useState([]);
   const [loadingDrafts, setLoadingDrafts] = useState(false);
   const [toast, setToast] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const loadGen = useRef(0);
   const loadCalendar = useCallback(async () => {
+    // Only the newest month request may commit: a slow earlier month must not
+    // replace the events of the month now on screen.
+    const gen = ++loadGen.current;
+    setLoadError("");
     const start = etDateString(new Date(month.year, month.month, 1, 12));
     const end = etDateString(new Date(month.year, month.month + 1, 0, 12));
     try {
       const data = await adminFetch(
         `/admin/content/calendar?start=${start}&end=${end}`,
       );
+      if (gen !== loadGen.current) return;
       setItems(data.calendar || data.items || []);
-    } catch {
+    } catch (e) {
+      if (gen !== loadGen.current) return;
       setItems([]);
+      setLoadError(e.message);
     }
   }, [month]);
   useEffect(() => {
@@ -79,6 +88,9 @@ export default function ContentCalendar() {
     ).then(data => setDraftPosts(data.posts || [])).catch(() => setDraftPosts([])).finally(() => setLoadingDrafts(false));
   }, [showSchedule, scheduleForm.type]);
   const shiftMonth = dir => {
+    // A selected day belongs to the month it was picked in (Oct 31 does not
+    // exist in November), so a month change clears it.
+    setSelectedDay(null);
     setMonth(prev => {
       let m = prev.month + dir;
       let y = prev.year;
@@ -200,10 +212,11 @@ export default function ContentCalendar() {
         </div>
         <div className="flex flex-wrap items-center gap-3 text-ui-body text-ink-secondary">
           {Object.values(TYPE_LABELS).map(label => <Badge key={label} tone="neutral">{label}</Badge>)}
-          <span>{items.length} posts this month</span>
+          {!loadError && <span>{items.length} posts this month</span>}
           <Button onClick={() => openSchedule("blog")}>Schedule</Button>
         </div>
       </div>
+      {loadError && <ActionFeedback error onRetry={loadCalendar}>Calendar unavailable: {loadError}</ActionFeedback>}
       <Card className="overflow-hidden">
         <div className="grid grid-cols-7 border-b border-hairline border-zinc-200">
           {DAYS.map(day => <div key={day} className="py-2 text-center text-ui-body font-medium text-ink-secondary">{day}</div>)}
