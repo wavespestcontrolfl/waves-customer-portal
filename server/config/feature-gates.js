@@ -197,6 +197,7 @@
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
+ *   GATE_ADS_GAP_RULE=shadow|true (the 2-hour Google Ads budget job decides from the technician's next 7 days of open stops instead of one day: runs the ad at its base budget while open stops are plentiful, drops it to the 1% floor when few are left, and keeps its state between; the owner can also hold a campaign at base or stop until a chosen end date. 'shadow' records what the new rule would do and changes nothing; 'true' makes it the rule. Read at call time via adsGapRuleMode(); unset or anything else = off, byte-identical to today. Changes ad budgets only; sends nothing to a customer)
  *   GATE_SECOND_TECH_LOWS=true (owner 2026-10-25, second technician census lows L1 + L3: (L1) the admin dashboard tech utilization counts only assignable field staff (active and field-dispatchable) and, for each, only the days in the window they work (technicians.work_days; no list = every day), 8 hours a work day, instead of every active row on every calendar day; (L3) the four Intelligence Bar schedule-tool sites that pick a technician by name text with an unordered first() match use resolveTechnicianByName instead: assignable technicians only, and a name that fits two technicians is an error that lists them, never a guess. Strict opt-in: exactly 'true', read at call time via secondTechLowsLive(). Ships DARK; off = both paths byte-identical to before. Admin-only, sends nothing to a customer.)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
@@ -2131,6 +2132,10 @@ const gates = {
   // only; BudgetManager reads adsCapacityWorkDaysLive() at CALL time. Ships
   // DARK. Kill switch: unset - capacity counts every assignable technician.
   adsCapacityWorkDays: process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true',
+
+  // Ads gap-fill rule (owner 2026-10-29, plan A). Registered for logGateStatus only; BudgetManager reads adsGapRuleMode() at CALL time.
+  // Ships DARK (shadow records only). Kill switch: unset - the one-day capacity rule decides as before.
+  adsGapRule: ['shadow', 'true'].includes(String(process.env.GATE_ADS_GAP_RULE || '').trim().toLowerCase()),
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
@@ -6960,6 +6965,15 @@ function adsCapacityWorkDaysLive() {
   return process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true';
 }
 
+// GATE_ADS_GAP_RULE read at CALL time: 'shadow' -> 'shadow', 'true' -> 'live', anything else (unset, 'false', 'live') -> 'off'.
+// BudgetManager.adjustBudgets and the /api/admin/ads/gap-rule routes read it. Off = the one-day capacity rule, byte-identical.
+function adsGapRuleMode() {
+  const v = String(process.env.GATE_ADS_GAP_RULE || '').trim().toLowerCase();
+  if (v === 'shadow') return 'shadow';
+  if (v === 'true') return 'live';
+  return 'off';
+}
+
 // GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
 // technicians.work_days (services/technician-eligibility.js): on, a technician
 // is skipped by slot offers and automatic placement on a day they do not work;
@@ -8628,6 +8642,8 @@ module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;
+// GATE_ADS_GAP_RULE reader, on its own line so gate PRs never conflict.
+module.exports.adsGapRuleMode = adsGapRuleMode;
 // GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.techWorkDaysLive = techWorkDaysLive;
 // GATE_TECH_JOB_TYPE_CHECKS reader, on its own line so gate PRs never conflict.

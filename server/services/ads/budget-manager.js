@@ -9,6 +9,8 @@ const { applyAssignable, absentTechDays } = require('../technician-eligibility')
 // Looked up on the module at call time: this file is loaded under many partial
 // feature-gates mocks, and a missing reader must read as "gate off".
 const adsCapacityWorkDaysLive = () => typeof featureGates.adsCapacityWorkDaysLive === 'function' && featureGates.adsCapacityWorkDaysLive();
+// GATE_ADS_GAP_RULE: 'off' | 'shadow' | 'live', same missing-reader rule (a partial mock reads as off).
+const adsGapRuleMode = () => (typeof featureGates.adsGapRuleMode === 'function' ? featureGates.adsGapRuleMode() : 'off');
 
 // Lazy so requiring budget-manager (e.g. from the scheduler at boot) doesn't
 // load the google-ads-api client until a push is actually attempted.
@@ -47,6 +49,124 @@ function boundReason(reason) {
   return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
 }
 
+
+// ---------------------------------------------------------------------------
+// Gap-fill rule (GATE_ADS_GAP_RULE): count the technician's open stops over the
+// next window_days ET days instead of checking one day. Pure helpers first, so
+// the cron, the admin routes and the tests share one definition.
+// ---------------------------------------------------------------------------
+const GAP_RULE_DEFAULTS = Object.freeze({
+  weekday_limit: 9,
+  saturday_limit: 8,
+  sunday_limit: 6,
+  window_days: 7,
+  run_at_open: 6,
+  stop_below_open: 3,
+});
+// field -> [min, max]
+const GAP_RULE_RANGES = Object.freeze({
+  weekday_limit: [0, 30],
+  saturday_limit: [0, 30],
+  sunday_limit: [0, 30],
+  window_days: [1, 14],
+  run_at_open: [1, 200],
+  stop_below_open: [0, 200],
+});
+const GAP_LAST_KEY = 'ads.gap_rule.last';
+const GAP_HISTORY_KEY = 'ads.gap_rule.history';
+const GAP_HISTORY_MAX = 120;
+const ET_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function gapFieldOk(field, v) {
+  const [min, max] = GAP_RULE_RANGES[field];
+  return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+}
+
+function parseJsonObject(v) {
+  if (v && typeof v === 'object') return v;
+  if (typeof v === 'string') {
+    try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
+  }
+  return null;
+}
+
+// ad_targets.metadata is written unvalidated by PUT /targets, so read it
+// defensively: every missing or invalid field falls back to its default. A
+// stop_below_open above run_at_open would leave no "keep" band and no valid
+// order, so it falls back to the default, capped at run_at_open.
+function normalizeGapSettings(targetsMetadata) {
+  const stored = parseJsonObject(parseJsonObject(targetsMetadata)?.gap_rule) || {};
+  const out = {};
+  for (const field of Object.keys(GAP_RULE_DEFAULTS)) {
+    out[field] = gapFieldOk(field, stored[field]) ? stored[field] : GAP_RULE_DEFAULTS[field];
+  }
+  if (out.stop_below_open > out.run_at_open) {
+    out.stop_below_open = Math.min(GAP_RULE_DEFAULTS.stop_below_open, out.run_at_open);
+  }
+  return out;
+}
+
+// Validates a PUT body (any subset of the 6 fields) and returns the merged
+// settings. { ok:false, error } names the bad field in plain words.
+function validateGapSettingsPatch(body, current) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Send an object with the settings to change.' };
+  const patch = {};
+  for (const [field, v] of Object.entries(body)) {
+    if (!(field in GAP_RULE_DEFAULTS)) return { ok: false, error: `${field} is not a gap-rule setting.` };
+    if (!gapFieldOk(field, v)) {
+      const [min, max] = GAP_RULE_RANGES[field];
+      return { ok: false, error: `${field} must be a whole number from ${min} to ${max}.` };
+    }
+    patch[field] = v;
+  }
+  if (!Object.keys(patch).length) return { ok: false, error: 'Send at least one setting to change.' };
+  const merged = { ...current, ...patch };
+  if (merged.stop_below_open > merged.run_at_open) {
+    return { ok: false, error: 'stop_below_open must not be more than run_at_open.' };
+  }
+  return { ok: true, patch, merged };
+}
+
+// 'base' | 'stop' | 'keep' for a total of open stops; never campaign-specific.
+function gapBand(totalOpen, settings) {
+  if (totalOpen >= settings.run_at_open) return 'base';
+  if (totalOpen < settings.stop_below_open) return 'stop';
+  return 'keep';
+}
+
+// The campaign-level decision: between the thresholds a campaign keeps its
+// state, and a 'spent' campaign (frozen at today's spend) maps to whichever of
+// base or stop its current budget is closer to. Never returns 'spent'.
+function decideGapMode(totalOpen, settings, campaign) {
+  const band = gapBand(totalOpen, settings);
+  if (band !== 'keep') return band;
+  if (campaign.budget_mode === 'stop') return 'stop';
+  if (campaign.budget_mode === 'spent') {
+    return parseFloat(campaign.daily_budget_current) < parseFloat(campaign.daily_budget_base) ? 'stop' : 'base';
+  }
+  return 'base';
+}
+
+// The owner's hold (ad_campaigns.metadata.budget_hold) while it is valid and
+// its inclusive ET end date has not passed. Anything malformed or expired is
+// ignored, so a bad row can never freeze a budget.
+function activeBudgetHold(campaignMetadata, todayEt) {
+  const hold = parseJsonObject(parseJsonObject(campaignMetadata)?.budget_hold);
+  if (!hold || (hold.mode !== 'base' && hold.mode !== 'stop')) return null;
+  if (typeof hold.until !== 'string' || !ET_DATE_RE.test(hold.until) || hold.until < todayEt) return null;
+  return hold;
+}
+
+function holdLogReason(hold) {
+  return `Hold: ${hold.mode} until ${hold.until} (set in the portal)`;
+}
+
+// Weekday of an ET calendar-date string (0 = Sunday). Noon UTC keeps the
+// date's own weekday whatever the zone or DST.
+function etDateWeekday(dateStr) {
+  return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+}
+
 class BudgetManager {
   /**
    * Core budget adjustment — runs every 2 hours via cron.
@@ -81,7 +201,12 @@ class BudgetManager {
       checkDate = etDateString(addETDays(now, 1));
     }
 
-    logger.info(`Budget adjust: checking capacity for ${checkDate} (${dayOfWeek === 0 ? 'Sunday→Monday' : hour < 14 ? 'today' : 'tomorrow'})`);
+    // Read once per run, at call time. 'off' (the default) takes today's
+    // exact path below: no settings read, no hold read, no extra query.
+    const gapMode = adsGapRuleMode();
+    if (gapMode !== 'live') {
+      logger.info(`Budget adjust: checking capacity for ${checkDate} (${dayOfWeek === 0 ? 'Sunday→Monday' : hour < 14 ? 'today' : 'tomorrow'})`);
+    }
 
     // Only campaigns we can control remotely. Meta (platform='facebook') is
     // ingested read-only (no Marketing API budget control here), so this
@@ -95,6 +220,26 @@ class BudgetManager {
       orange: parseFloat(targets?.capacity_orange_max || 95),
     };
 
+    const summary = { evaluated: 0, changed: 0, failed: 0 };
+    const todayEt = etDateString(now);
+    // Live: the 7-day window and its totals are computed ONCE here and shared
+    // by every campaign. Shadow: the old rule acts below and the gap rule is
+    // only recorded after the loop.
+    let gap = null;
+    const gapCampaigns = [];
+    if (gapMode === 'live') {
+      try {
+        gap = await this.evaluateGapRule(now, targets);
+      } catch (err) {
+        // No window, no decision: leave every budget as it is (the old rule is
+        // not a fallback) and let the cron record the failed tick.
+        logger.error(`[ads-gap-rule live] window failed, no budget changed: ${err.message}`);
+        return { evaluated: campaigns.length, changed: 0, failed: campaigns.length };
+      }
+      checkDate = gap.window_start;
+      logger.info(`[ads-gap-rule live] open ${gap.total_open} in ${gap.window_start}..${gap.window_end} -> ${gap.decision}`);
+    }
+
     for (const listed of campaigns) {
       // Set once Google accepts a TRANSITION push inside the transaction —
       // if the local writes (or COMMIT) then fail, PostgreSQL rolls the row
@@ -104,21 +249,30 @@ class BudgetManager {
       // recorded local state, so a failed write self-heals next run and a
       // rollback would undo a correct fix.
       let cronPushed = null;
+      let outcome = null; // 'changed' | 'failed', set where the run decides it
       const opId = randomUUID();
+      summary.evaluated += 1;
       try {
         const area = listed.target_area || 'general';
-        const capacity = await this.getCapacityForArea(area, checkDate);
-        const pct = capacity.utilizationPct;
-
+        let pct;
         let newMode;
-        if (pct <= thresholds.green) {
-          newMode = 'base'; // Full budget
-        } else if (pct <= thresholds.yellow) {
-          newMode = 'spent'; // Cap at today's spend level
-        } else if (pct <= thresholds.orange) {
-          newMode = 'spent'; // Hard cap
+        if (gap) {
+          pct = gap.capacity_pct;
         } else {
-          newMode = 'stop'; // 1% budget (never pause — kills QS)
+          const capacity = await this.getCapacityForArea(area, checkDate);
+          pct = capacity.utilizationPct;
+
+          if (pct <= thresholds.green) {
+            newMode = 'base'; // Full budget
+          } else if (pct <= thresholds.yellow) {
+            newMode = 'spent'; // Cap at today's spend level
+          } else if (pct <= thresholds.orange) {
+            newMode = 'spent'; // Hard cap
+          } else {
+            newMode = 'stop'; // 1% budget (never pause — kills QS)
+          }
+
+          if (gapMode === 'shadow') gapCampaigns.push({ id: listed.id, old_rule_mode: newMode });
         }
 
         // The guard→push→persist below runs against a FOR UPDATE re-read of
@@ -135,6 +289,21 @@ class BudgetManager {
           // during it is already reflected in this locked snapshot).
           const lockAcquiredAt = new Date();
           if (!campaign || campaign.status !== 'active') return;
+
+          // Holds and the live gap rule decide from the LOCKED row, so a hold set
+          // or cleared (or a mode changed) since the list read is what they see.
+          // Gate off reads no hold. A hold wins over both rules; without one, live
+          // uses the gap decision and shadow keeps the old rule's mode.
+          let transitionReason = null;
+          const held = gapMode === 'off' ? null : activeBudgetHold(campaign.metadata, todayEt);
+          if (held) {
+            newMode = held.mode;
+            transitionReason = holdLogReason(held);
+          } else if (gap) {
+            newMode = decideGapMode(gap.total_open, gap.settings, campaign);
+            transitionReason = gap.reason;
+          }
+          if (gap) gapCampaigns.push({ id: campaign.id, new_mode: newMode });
 
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
@@ -153,6 +322,7 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
+              outcome = 'failed';
               return;
             }
             pushedLive = true;
@@ -172,7 +342,9 @@ class BudgetManager {
             new_mode: newMode,
             previous_budget: campaign.daily_budget_current,
             new_budget: newBudget,
-            reason: `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}${pushedLive ? ' — pushed to Google Ads' : ''}`,
+            reason: transitionReason != null
+              ? boundReason(transitionReason)
+              : `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}${pushedLive ? ' — pushed to Google Ads' : ''}`,
             trigger: 'auto',
             capacity_pct: pct,
             check_date: checkDate,
@@ -180,6 +352,7 @@ class BudgetManager {
             google_ads_updated: pushedLive,
             created_at: new Date(),
           });
+          outcome = 'changed';
 
           logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%${pushedLive ? ', pushed to Google Ads' : ', local only'})`);
         } else if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
@@ -204,6 +377,7 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
+              outcome = 'failed';
               return;
             }
 
@@ -228,6 +402,7 @@ class BudgetManager {
               created_at: new Date(),
             });
 
+            outcome = 'changed';
             logger.info(`Budget: ${campaign.campaign_name} reconciled ${campaign.budget_mode} budget to ${expectedBudget} (pushed to Google Ads)`);
           }
         }
@@ -236,15 +411,118 @@ class BudgetManager {
         if (cronPushed) {
           const rollback = await this.rollbackAfterLivePush(cronPushed.campaign, err, cronPushed.attempted, cronPushed.startedAt, cronPushed.opId, cronPushed.preLive);
           if (rollback.code === 'apply_committed') {
+            outcome = 'changed';
             logger.info(`Budget adjust: ${listed.campaign_name} COMMIT ack was lost but the change is durable — no compensation needed`);
           } else {
+            outcome = 'failed';
             logger.error(`Budget adjust: ${listed.campaign_name} persist failed after live push — ${rollback.message}`);
           }
         } else {
+          outcome = 'failed';
           logger.error(`Budget adjust failed for ${listed.campaign_name}: ${err.message}`);
         }
       }
+      if (outcome === 'changed') summary.changed += 1;
+      else if (outcome === 'failed') summary.failed += 1;
     }
+
+    // Record what the gap rule decided (live) or would have decided (shadow).
+    // A recording problem never touches the budgets the loop already settled.
+    if (gapMode === 'shadow') {
+      try {
+        const shadow = await this.evaluateGapRule(now, targets);
+        logger.info(`[ads-gap-rule shadow] open ${shadow.total_open} in ${shadow.window_start}..${shadow.window_end} -> ${shadow.decision}`);
+        await this.recordGapRun('shadow', now, shadow, gapCampaigns);
+      } catch (err) {
+        logger.error(`[ads-gap-rule shadow] could not record the decision: ${err.message}`);
+      }
+    } else if (gapMode === 'live') {
+      try {
+        await this.recordGapRun('live', now, gap, gapCampaigns);
+      } catch (err) {
+        logger.error(`[ads-gap-rule live] could not record the decision: ${err.message}`);
+      }
+    }
+
+    return summary;
+  }
+
+  /**
+   * Gap-fill window: the next window_days ET dates, starting TOMORROW. Per
+   * day, stops = distinct customers on a live route stop (one grouped query
+   * for the whole window — the cron runs every 2 hours), limit = technicians
+   * who work that date × the weekday / Saturday / Sunday limit.
+   */
+  async getGapWindow(now, settings) {
+    const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+    const dates = [];
+    for (let i = 1; i <= settings.window_days; i += 1) dates.push(etDateString(addETDays(now, i)));
+    const start = dates[0];
+    const end = dates[dates.length - 1];
+    const rows = await db('scheduled_services')
+      .whereBetween('scheduled_date', [start, end])
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .where(function () {
+        this.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now());
+      })
+      .groupBy('scheduled_date')
+      .select(db.raw('scheduled_date::text AS day'))
+      .countDistinct('customer_id as stops');
+    const stopsByDay = new Map(rows.map((r) => [String(r.day).slice(0, 10), parseInt(r.stops, 10) || 0]));
+
+    const days = [];
+    for (const date of dates) {
+      const weekday = etDateWeekday(date);
+      const perTech = weekday === 6 ? settings.saturday_limit : weekday === 0 ? settings.sunday_limit : settings.weekday_limit;
+      const techs = await this.getTechCountForArea('general', date, { workDays: true });
+      const stops = stopsByDay.get(date) || 0;
+      const limit = techs * perTech;
+      days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops) });
+    }
+    const sum = (k) => days.reduce((n, d) => n + d[k], 0);
+    return { window_start: start, window_end: end, days, total_open: sum('open'), total_limit: sum('limit'), total_stops: sum('stops') };
+  }
+
+  /** Window + thresholds + the log reason, for the cron and the admin GET route. */
+  async evaluateGapRule(now, targets) {
+    const settings = normalizeGapSettings(targets?.metadata);
+    const win = await this.getGapWindow(now, settings);
+    return {
+      settings,
+      ...win,
+      decision: gapBand(win.total_open, settings),
+      capacity_pct: win.total_limit > 0 ? Math.round((100 * win.total_stops) / win.total_limit) : 100,
+      reason: `Gap rule: ${win.total_open} open stops ${win.window_start}..${win.window_end} (run at ≥${settings.run_at_open}, stop below ${settings.stop_below_open})`,
+    };
+  }
+
+  /** Writes system_settings 'ads.gap_rule.last' and appends 'ads.gap_rule.history' (last 120). */
+  async recordGapRun(mode, now, evaluation, campaigns) {
+    const at = now.toISOString();
+    const record = {
+      mode,
+      at,
+      window_start: evaluation.window_start,
+      window_end: evaluation.window_end,
+      days: evaluation.days,
+      total_open: evaluation.total_open,
+      total_limit: evaluation.total_limit,
+      total_stops: evaluation.total_stops,
+      decision: evaluation.decision,
+      campaigns,
+    };
+    const prior = await db('system_settings').where({ key: GAP_HISTORY_KEY }).first();
+    let history = [];
+    try { history = JSON.parse(prior?.value || '[]'); } catch { history = []; }
+    if (!Array.isArray(history)) history = [];
+    history.push({ at, mode, total_open: evaluation.total_open, decision: evaluation.decision });
+    history = history.slice(-GAP_HISTORY_MAX);
+    const upsert = (key, value, description) => db('system_settings')
+      .insert({ key, value, category: 'ads', description })
+      .onConflict('key')
+      .merge({ value, updated_at: now });
+    await upsert(GAP_LAST_KEY, JSON.stringify(record), 'Latest ads gap-rule evaluation');
+    await upsert(GAP_HISTORY_KEY, JSON.stringify(history), 'Recent ads gap-rule evaluations (last 120)');
   }
 
   calculateBudget(campaign, mode) {
@@ -318,7 +596,7 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(_area, dateStr) {
+  async getTechCountForArea(_area, dateStr, { workDays = false } = {}) {
     // Capacity is driven by the real assignable-technician count (active AND
     // field-dispatchable — a prospective placeholder or an office-only account
     // can take no slot, so it adds no capacity). There is no per-area tech
@@ -331,8 +609,10 @@ class BudgetManager {
     // only on a date they are not absent and not off that weekday (the shared
     // absentTechDays helper; weekdays off only while GATE_TECH_WORK_DAYS is on
     // too). Gate off or no date = every assignable technician, as before.
+    // workDays: true applies the same date filter whatever that gate says (the
+    // gap rule must never count an absent technician's day as open time).
     const techs = await applyAssignable(db('technicians'));
-    if (!dateStr || !adsCapacityWorkDaysLive() || !techs.length) return techs.length;
+    if (!dateStr || !(workDays || adsCapacityWorkDaysLive()) || !techs.length) return techs.length;
     const day = String(dateStr).slice(0, 10);
     const away = await absentTechDays(db, {
       dateFrom: day,
@@ -442,8 +722,14 @@ class BudgetManager {
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
    * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual' } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual', hold } = {}) {
     reason = boundReason(reason);
+    // `hold` (the owner's budget hold, saved as metadata.budget_hold) commits in
+    // the SAME locked transaction as the mode change, so the 2-hour job can never
+    // run between the two and undo the mode. Only the live-push path supports it.
+    const withHold = (campaign) => (hold
+      ? { metadata: JSON.stringify({ ...(parseJsonObject(campaign.metadata) || {}), budget_hold: hold }) }
+      : {});
     // This operation's identity stamp on its audit row (lets the rollback —
     // and the no-push catch below — recognize a lost-COMMIT-ack as "actually
     // committed"). The rollback's supersession anchor is taken in-lock.
@@ -484,7 +770,10 @@ class BudgetManager {
           // Under the lock: two concurrent applies of the same rec both pass
           // the route's unlocked no-op check; the loser must not re-push the
           // already-current mode and count a second "applied" change.
-          if (mode === campaign.budget_mode) {
+          // A hold always takes the guarded path below, even when the campaign is
+          // already in the held mode: a recorded mode or amount never proves what
+          // Google runs, so a linked campaign is always pushed the held amount.
+          if (mode === campaign.budget_mode && !hold) {
             const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
             err.code = 'mode_noop';
             throw err;
@@ -526,6 +815,7 @@ class BudgetManager {
           await trx('ad_campaigns').where({ id: campaignId }).update({
             budget_mode: mode,
             daily_budget_current: newBudget,
+            ...withHold(campaign),
             updated_at: new Date(),
           });
           await trx('ad_budget_log').insert({
@@ -562,6 +852,8 @@ class BudgetManager {
         throw err;
       }
     }
+    // A hold is saved only by the live-push path above, never dropped here.
+    if (hold) throw new Error('A budget hold can only be saved with requireLivePush.');
 
     // Legacy (manual route) path: DB-first with a best-effort push, but now
     // inside the SAME row-locked transaction the advisor apply and the cron
@@ -1115,3 +1407,11 @@ class BudgetManager {
 
 module.exports = new BudgetManager();
 module.exports.MAX_DAILY_BUDGET = MAX_DAILY_BUDGET;
+module.exports.GAP_RULE_DEFAULTS = GAP_RULE_DEFAULTS;
+module.exports.GAP_LAST_KEY = GAP_LAST_KEY;
+module.exports.normalizeGapSettings = normalizeGapSettings;
+module.exports.validateGapSettingsPatch = validateGapSettingsPatch;
+module.exports.gapBand = gapBand;
+module.exports.decideGapMode = decideGapMode;
+module.exports.activeBudgetHold = activeBudgetHold;
+module.exports.etDateWeekday = etDateWeekday;
