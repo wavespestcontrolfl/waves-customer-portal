@@ -549,6 +549,21 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
+    // GATE_SAVE_ROAD_BUY: only the admin dispatch route passes a spender; the rebooker
+    // buys the move's road times before its transaction. A technician passes none.
+    test('an admin Quick Move hands the rebooker its staff spender; a technician\'s hands none', async () => {
+      wireSingle();
+      const args = { serviceId: 'svc-1', technicianId: 'tech-1', reasonCode: 'weather_rain', scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } }, notifyCustomer: false };
+      await RainOut.commit({ ...args, roadSpender: 'staff-1' });
+      expect(SmartRebooker.reschedule).toHaveBeenLastCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        expect.objectContaining({ overlapAdvisory: true, placeInRoute: true, roadSpender: 'staff-1' }));
+      wireSingle();
+      await RainOut.commit(args);
+      expect(SmartRebooker.reschedule.mock.lastCall[5]).not.toHaveProperty('roadSpender');
+    });
+
     test('an ABSENT v2 template row falls back to the legacy row with legacy variables', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
@@ -2162,7 +2177,7 @@ describe('rain-out service', () => {
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([
-        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120, dayAlreadyLate: true },
         { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
       ]);
       getDailyRainOutlook.mockResolvedValue({
@@ -2190,6 +2205,9 @@ describe('rain-out service', () => {
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
+      // GATE_ROUTE_CHECK_LATE_DAYS: the rebooker's already-late mark rides to the sheet; a clean day has no key.
+      expect(options.days[0].dayAlreadyLate).toBe(true);
+      expect(options.days[1]).not.toHaveProperty('dayAlreadyLate');
       // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
       // wider 2-3h suggestedWindow, and the display is re-derived to match.
       expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });

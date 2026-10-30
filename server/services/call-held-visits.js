@@ -267,6 +267,12 @@ function callerName(call, caller = {}, customerNames) {
 
 const orNull = (value) => value || null;
 
+function billingChoiceField(extraction) {
+  if (!require('../config/feature-gates').callPrepayChoiceLive()) return {};
+  const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
+  return choice ? { billing_choice: choice } : {};
+}
+
 // The display row for one held candidate.
 function heldRow({ call, extraction, kind, minutes, movedFrom }, { dateET, customerNames, bookedRows = [] }) {
   const svc = extraction.property?.service_address || {};
@@ -288,6 +294,8 @@ function heldRow({ call, extraction, kind, minutes, movedFrom }, { dateET, custo
     // The part of the day the caller asked for, when there is no agreed time.
     daypart: DAYPARTS.has(sched.preferred_time_of_day) ? sched.preferred_time_of_day : null,
     notes: orNull(notes),
+    // GATE_CALL_PREPAY_CHOICE: the plan the caller chose on the call ('annual_prepay' | 'per_application'). Absent with the gate off.
+    ...billingChoiceField(extraction),
     // A day-only move: the old day and the visit that would move (display and link only).
     ...(kind === 'move_day_only' ? { from_date_et: movedFrom, from_visit_id: orNull(visitToMove(call, movedFrom, bookedRows)?.id) } : {}),
   };

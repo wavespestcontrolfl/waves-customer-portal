@@ -101,6 +101,7 @@ export default function RescheduleDialogView({
                     <div className="text-ui-body text-ink-secondary">
                       {windowFor(option.suggestedWindow?.start)?.display || option.suggestedWindow?.display}{" "}
                       · {option.currentLoad} jobs · {option.sameAreaServices} same area
+                      {option.dayAlreadyLate ? " · already late" : ""}
                     </div>
                   </div>
                   <Button onClick={() => handleReschedule(option)} disabled={sending}>Select</Button>

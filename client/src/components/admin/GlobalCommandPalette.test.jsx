@@ -386,10 +386,17 @@ describe('local page search', () => {
     expect(opener).toHaveFocus();
   });
 
-  test('the default-off flag preserves the assistant keyboard shortcut', async () => {
+  test('Cmd/Ctrl K opens the page finder, never the assistant, for a technician login', async () => {
+    fixture({ role: 'technician' });
+    await act(async () => fireEvent.keyDown(window, { key: 'k', metaKey: true }));
+    expect(screen.getByRole('searchbox', { name: 'Search pages' })).toBeVisible();
+    expect(screen.queryByPlaceholderText(/Ask anything/)).not.toBeInTheDocument();
+  });
+
+  test('before the session is verified Cmd/Ctrl K opens nothing', async () => {
     fixture({ enabled: false });
     await act(async () => fireEvent.keyDown(window, { key: 'k', metaKey: true }));
-    expect(screen.getByPlaceholderText(/Ask anything/)).toBeVisible();
+    expect(screen.queryByPlaceholderText(/Ask anything/)).not.toBeInTheDocument();
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
   });
 });

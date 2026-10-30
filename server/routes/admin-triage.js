@@ -29,8 +29,10 @@ const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candid
 const VERSION_BOUND_REASONS = [
   'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
   'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs', 'family_account_candidates', 'name_spelling_differs',
+  'call_prepay_choice',
 ];
-const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];
+// call_prepay_choice (GATE_CALL_PREPAY_CHOICE): the card carries the customer's estimate amount, and its one tap leads to an invoice: admin only.
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs', 'call_prepay_choice'];
 // Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
 // the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
 // what the card asks).
@@ -43,6 +45,7 @@ const NOT_A_VERDICT_MESSAGES = {
   family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
   text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
   name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
+  call_prepay_choice: 'This card offers to accept the customer\u2019s estimate as annual prepay, not a call verdict — use Accept as annual prepay, or Resolve or Dismiss.',
 };
 
 
@@ -604,6 +607,7 @@ router.get('/', async (req, res) => {
     // which cards qualify, so the screen holds no second copy of it.
     stampSaveContactNote(items);
     stampFamilyCardActions(items, req.techRole === 'admin');
+    await stampCallPrepayActions(items, req.techRole === 'admin');
 
     res.json({ items, counts });
   } catch (err) {
@@ -1928,6 +1932,35 @@ function stampFamilyCardActions(items, isAdmin = false) {
   }
 }
 
+// GATE_CALL_PREPAY_CHOICE: what the one-tap "Accept as annual prepay" on a call_prepay_choice card can do RIGHT NOW, read live (the
+// estimate may have been accepted, or the visit moved, since the card was filed): { can_accept, amount, message }. The server decides, so
+// the screen holds no second copy of the eligibility rule. A failed read offers nothing.
+async function stampCallPrepayActions(items, isAdmin = false) {
+  if (!isAdmin || !require('../config/feature-gates').callPrepayChoiceLive()) return;
+  const cards = items.filter((i) => i.reason_code === 'call_prepay_choice' && OPEN_STATES.includes(i.status));
+  if (!cards.length) return;
+  const { evaluateCallPrepay, previewTokenOf } = require('../services/call-prepay-choice');
+  for (const item of cards) {
+    try {
+      const payload = parseCardPayload(item) || {};
+      const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: payload.customer_id || item.customer_id, estimateId: payload.estimate_id || null });
+      item.call_prepay = ev.ok
+        ? {
+          can_accept: true, amount: ev.amount, preview_token: previewTokenOf(ev), message: null,
+          // The plan the token covers, from the same read: the card shows these, not the facts it was filed with.
+          plan: {
+            service_type: ev.coverage.coverageServiceType, cadence: ev.coverage.coverageCadence,
+            covered_visits: ev.coverage.coverageVisitCount, first_visit_date: ev.termStart,
+          },
+        }
+        : { can_accept: false, amount: payload.invoice_total ?? null, message: ev.message };
+    } catch (err) {
+      logger.warn(`[admin-triage] call prepay read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
+      item.call_prepay = { can_accept: false, amount: null, message: 'The estimate could not be read just now. Reload and try again.' };
+    }
+  }
+}
+
 const httpError = (status, message, code) => Object.assign(new Error(message), { status, code });
 const must = (ok, status, message, code) => { if (!ok) throw httpError(status, message, code); };
 
@@ -2051,6 +2084,45 @@ router.post('/:id/new-customer', familyCardRoute('start the new customer', async
   logger.info(`[admin-triage] new-customer card=${item.id} call=${call.id} started=${started} customer=${created}`);
   return res.json({ ok: true, id: item.id, status: 'resolved', reprocess: { started, customer_created: created, reason: started ? null : [out.reason, out.error, 'not_completed'].find(Boolean) } });
 }));
+
+// POST /api/admin/triage/:id/accept-call-prepay   { expected_updated_at, preview_token }
+// Accept as annual prepay (GATE_CALL_PREPAY_CHOICE, call_prepay_choice cards): the caller chose annual prepay on a call the pipeline booked.
+// Runs the SAME accept the New appointment form runs for "Billing on acceptance: Annual prepay" (markEstimateManuallyAccepted, billingTerm
+// prepay_annual, the term anchored to the booked visit, coverage from the booked series), links the booked visits to the estimate, then
+// resolves the card. It creates a DRAFT annual prepay invoice and a payment-pending term: the invoice is NOT sent and the customer gets
+// no message (termite estimates, whose accept can send the termite notice and agreement, get no card). Every refusal is a plain
+// message and changes nothing (estimate already accepted, no longer eligible, visit gone, customer
+// changed). Admin only; the version the screen showed must still be the card's (409 otherwise).
+router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
+  try {
+    must(require('../config/feature-gates').callPrepayChoiceLive(), 404, 'Not found');
+    must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    must(item, 404, 'Triage item not found');
+    must(OPEN_STATES.includes(item.status), 409, `Item already ${item.status}`);
+    must(item.reason_code === 'call_prepay_choice' && item.call_log_id, 400, 'Not an annual-prepay card');
+    must(req.body?.expected_updated_at && new Date(req.body.expected_updated_at).getTime() === new Date(item.updated_at).getTime(),
+      409, 'Card changed since it was displayed — reload and review the latest', 'STALE_CARD_VERSION');
+    const out = await require('../services/call-prepay-choice').acceptCallPrepayChoice({
+      item, adminUserId: req.technicianId || null, previewToken: typeof req.body?.preview_token === 'string' ? req.body.preview_token : null,
+    });
+    if (!out.ok) return res.status(409).json({ error: out.message, code: out.reason });
+    // The accept is done: close the card. Another admin who closed it first leaves it closed, and the answer still says the accept ran.
+    const result = await transitionCore({
+      id: item.id, nextStatus: 'resolved', note: 'accepted as annual prepay', assignedTo: req.technicianId, expectedUpdatedAt: req.body.expected_updated_at,
+    }).catch((e) => {
+      logger.warn(`[admin-triage] accept-call-prepay card ${item.id} not closed after the accept: ${e.code || e.name || 'error'}`);
+      return { outcome: 'not_closed' };
+    });
+    logger.info(`[admin-triage] accept-call-prepay card=${item.id} call=${item.call_log_id} invoice=${out.invoiceId || 'none'} card_closed=${result.outcome === 'ok'}`);
+    return res.json({ ok: true, id: item.id, status: result.outcome === 'ok' ? 'resolved' : item.status, invoice_id: out.invoiceId, amount: out.amount, warnings: out.warnings });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    // Code/name only: a knex message embeds bound values.
+    logger.error(`[admin-triage] accept-call-prepay failed: ${err.code || err.name || 'error'}`);
+    return res.status(500).json({ error: 'Failed to accept as annual prepay' });
+  }
+});
 
 // Is the customer's LIVE address one of the two premises the reviewer
 // compared (the office adopted the caller's number, or the on-file line
@@ -2639,6 +2711,8 @@ router.post('/:id/verdict', async (req, res) => {
           'text_number_differs',
           // …and a name-spelling check, settled by its own Resolve / Dismiss.
           'name_spelling_differs',
+          // …and the annual-prepay offer, settled by its own accept (or Resolve / Dismiss): a call verdict must never accept an estimate.
+          'call_prepay_choice',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

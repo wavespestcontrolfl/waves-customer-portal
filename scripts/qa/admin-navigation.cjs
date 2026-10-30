@@ -13,7 +13,7 @@ async function main() {
   let server;
   let browser;
   const check = (name, condition) => { assert.ok(condition, name); report.checks.push(name); };
-  async function openPage({ width = 1440, role = 'admin', enabled = true, hasTouch = false } = {}) {
+  async function openPage({ width = 1440, role = 'admin', hasTouch = false } = {}) {
     const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch, serviceWorkers: 'block' });
     page.on('pageerror', (error) => report.pageErrors.push(error.message));
     await page.addInitScript(() => {
@@ -32,7 +32,7 @@ async function main() {
       const fixtures = {
         '/health': { status: 'ok', gates: {} },
         '/admin/auth/me': { id: `fixture-${role}`, name: 'Fixture operator', role },
-        '/admin/feature-flags': { flags: { 'admin-navigation': enabled } },
+        '/admin/feature-flags': { flags: {} },
         '/admin/notifications/unread-count': { count: 0 },
         '/admin/communications/unread-count': { conversations: role === 'admin' ? 5 : 0 },
         '/admin/usage/track': { ok: true },
@@ -228,15 +228,11 @@ async function main() {
     await tech.getByRole('button', { name: 'Search pages', exact: true }).first().click();
     const techFinder = tech.getByRole('dialog', { name: 'Go to a page' });
     check('Technician page search excludes restricted destinations', await techFinder.getByRole('link', { name: /Contracts|Health|Estimates|Invoices/ }).count() === 0);
-    const legacy = await openPage({ enabled: false });
-    await legacy.goto(`${server.baseUrl}/admin/customers`);
-    await legacy.getByRole('navigation', { name: 'Admin sections' }).waitFor();
-    // The shell appears before auth; wait for its verified account outlet.
-    await legacy.getByRole('heading', { name: 'Customers', exact: true }).waitFor();
-    check('Flag off retains existing navigation', await legacy.getByRole('navigation', { name: 'Admin workspaces' }).count() === 0);
-    await legacy.keyboard.press('Control+k');
-    await legacy.getByPlaceholder(/Ask anything/).waitFor();
-    check('Flag off keeps the assistant shortcut', await legacy.getByRole('dialog', { name: 'Go to a page' }).count() === 0);
+    const techDesktop = await openPage({ role: 'technician' });
+    await techDesktop.goto(`${server.baseUrl}/admin/customers`);
+    await techDesktop.getByRole('navigation', { name: 'Admin workspaces' }).waitFor();
+    await techDesktop.getByRole('heading', { name: 'Customers', exact: true }).waitFor();
+    check('Technician desktop gets the grouped menu without owner-only workspaces', await techDesktop.getByRole('navigation', { name: 'Admin sections' }).count() === 0 && await techDesktop.getByRole('button', { name: 'Sales', exact: true }).count() === 0);
     check('No browser render errors', report.pageErrors.length === 0);
   } finally {
     fs.writeFileSync(path.join(output, 'verification.json'), JSON.stringify(report, null, 2));

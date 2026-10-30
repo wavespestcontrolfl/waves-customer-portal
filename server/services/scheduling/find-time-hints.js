@@ -18,6 +18,7 @@ const { checkArrivalPlacement } = require('./arrival-route');
 const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
 const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
 const { etParts } = require('../../utils/datetime-et');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 function toMin(hhmm) {
   const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
@@ -232,6 +233,8 @@ async function pickedByArrivalChecker({
       // Staff only: a technician's own picker spends no Google (Codex #6881),
       // counted against the staff user who asked (picker-road-spend.js).
       roads: paidRoads === true, roadSpender, pickerBudget,
+      // GATE_ROUTE_CHECK_LATE_DAYS: the list offers hours on an already-late day, so the pick is judged the same way.
+      ...(gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}),
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at
@@ -245,6 +248,7 @@ async function pickedByArrivalChecker({
       return {
         start: pickedWindow.start, fits: true, detour_minutes: fit.detourMinutes ?? null,
         drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
+        ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
       };
     }
     if (fit.reason === 'route_unverified') return noVerdict('route_unverified');
@@ -473,6 +477,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       // 'google' when the route check itself drove this hour on Google
       // (GATE_PICKER_ROAD_CHECK); otherwise set by the road re-pricing.
       ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
+      // GATE_ROUTE_CHECK_LATE_DAYS: the day's existing stops already arrive late; this hour adds no new late stop.
+      ...(slot.day_already_late === true ? { day_already_late: true } : {}),
       [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
@@ -487,6 +493,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     // GATE_AUTO_DISPATCH_DAY_RULES on) is a working day the strip offers
     // only when no other day has room.
     ...(closedDates?.has(date) ? { closed: true } : (lastResortDates?.has(date) ? { last_resort: true } : {})),
+    // The day's existing stops already break an arrival promise (GATE_ROUTE_CHECK_LATE_DAYS): a small tag, never a verdict.
+    ...(hours.some((hour) => hour.day_already_late) ? { already_late: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
 }
@@ -554,6 +562,7 @@ function publicChip(chip) {
     rain_chance: chip.rain_chance ?? null,
     stops_that_day: chip.stops_that_day ?? null,
     technician: chip.technician || null,
+    ...(chip.day_already_late === true ? { day_already_late: true } : {}),
   };
 }
 

@@ -377,6 +377,41 @@ describe('PUT /:id/update-details — arrival warnings for partial route edits',
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
+  // GATE_SAVE_ROAD_BUY (owner 2026-10-29): Edit's save buys the placement's Google
+  // road times BEFORE its transaction (requireAdmin: the staff user pays). The
+  // helper reads its own gate and is spied; the purchase is proven in
+  // save-road-buy.test.js.
+  test('an edit that moves the hour buys road times first, as the staff user, before the transaction', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const roadBuy = require('../services/scheduling/save-road-buy');
+    const buySpy = jest.spyOn(roadBuy, 'buyRoadsForVisitSave').mockResolvedValue({ lookups: 0 });
+    try {
+      const { status } = await put(SVC.id, { windowStart: '13:00' });
+      expect(status).toBe(200);
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0]).toMatchObject({
+        spender: 'staff-1', serviceId: SVC.id, changes: expect.objectContaining({ window_start: '13:00' }),
+      });
+      expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+      buySpy.mockClear();
+      await put(SVC.id, { notes: 'gate code 1234' });
+      expect(buySpy).not.toHaveBeenCalled();
+    } finally { buySpy.mockRestore(); }
+  });
+
+  // Codex #7043 r1: a reassignment is applied after the purchase (assignScheduleJobs),
+  // so the purchase must carry the requested technician, not the stored one.
+  test('an edit that moves the hour AND reassigns buys road times for the requested technician', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const roadBuy = require('../services/scheduling/save-road-buy');
+    const buySpy = jest.spyOn(roadBuy, 'buyRoadsForVisitSave').mockResolvedValue({ lookups: 0 });
+    try {
+      await put(SVC.id, { windowStart: '13:00', technicianId: 'tech-new' });
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0].changes).toMatchObject({ window_start: '13:00', technician_id: 'tech-new' });
+    } finally { buySpy.mockRestore(); }
+  });
+
   test('the kill switch keeps route-only edits on the legacy path', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'false';
     const { status, body } = await put(SVC.id, { routeOrder: 2 });
