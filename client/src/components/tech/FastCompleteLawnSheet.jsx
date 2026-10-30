@@ -268,6 +268,7 @@ const chinchByPlace = (chinch) => {
     unreadableIds: Array.isArray(decision?.unreadableIds) ? decision.unreadableIds : [],
     ...(Array.isArray(decision?.blockedIds) ? { blockedIds: decision.blockedIds } : {}),
     ...(Array.isArray(decision?.limitedIds) ? { limitedIds: decision.limitedIds } : {}),
+    ...(decision?.limitMessages && typeof decision.limitMessages === 'object' && !Array.isArray(decision.limitMessages) ? { limitMessages: decision.limitMessages } : {}),
     ...(decision?.amountBlocked === true ? { amountBlocked: true } : {}),
   }]));
 };
