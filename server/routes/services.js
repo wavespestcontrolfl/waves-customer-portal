@@ -12,7 +12,7 @@ const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
 
-// service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place).
+// service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place and 20261030120000 treated_places).
 const CUSTOMER_PRODUCT_COLUMNS = [
   'id', 'service_record_id', 'product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit',
   'total_amount', 'amount_unit', 'notes', 'created_at', 'updated_at', 'application_method', 'application_area', 'epa_reg_number',

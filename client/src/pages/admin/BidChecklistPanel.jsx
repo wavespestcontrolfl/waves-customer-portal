@@ -11,6 +11,10 @@ import { etDatetimeLocalValue } from "../../lib/timezone";
 // questions and site-visit dates, the estimate and proposal, the documents that came by email, a checklist and the
 // submission record. Nothing here is sent to a buyer, a general contractor or an agency.
 
+// A save whose answer never arrived (the network dropped) may or may not have been written. The page reloads what the
+// server has instead of saying "Not saved", so a blind retry does not repeat a line (same wording as the Bid kit).
+export const UNCONFIRMED_MESSAGE = "Could not confirm the save. The list below shows what the server has now.";
+
 export const TYPE_LABEL = {
   quote: "Quote request", itb: "Invitation to bid (ITB)", rfq: "Request for quote (RFQ)", rfp: "Request for proposal (RFP)",
   itn: "Invitation to negotiate (ITN)", federal: "Federal solicitation", gc_subcontract: "General contractor subcontract", other: "Other",
@@ -36,13 +40,17 @@ const Section = ({ title, children }) => (
 
 function Details({ bid, busy, save }) {
   const [form, setForm] = useState({});
+  const [unchanged, setUnchanged] = useState(false);
   useEffect(() => {
     setForm({
       type: bid.solicitation_type || "", scored: scoredOf(bid.scored), questions: etDatetimeLocalValue(bid.questions_due_at),
       walk: etDatetimeLocalValue(bid.job_walk_at), mandatory: !!bid.job_walk_mandatory,
     });
   }, [bid.solicitation_type, bid.scored, bid.questions_due_at, bid.job_walk_at, bid.job_walk_mandatory]);
-  const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
+  const set = (key) => (event) => {
+    setUnchanged(false);
+    setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
+  };
   return (
     <div className="grid gap-3 md:grid-cols-2">
       <Field id="bid-type" label="Solicitation type">
@@ -74,15 +82,24 @@ function Details({ bid, busy, save }) {
           </div>
         )}
       </div>
-      <div>
-        <Button disabled={busy} onClick={() => {
-          // A date goes in the request only when the operator changed it. The server treats a changed site-visit
-          // date as confirmed, so the prefilled date of an invite must not ride along with a type change.
-          const body = { solicitationType: orNull(form.type), scored: scoredToApi(form.scored), jobWalkMandatory: !!form.mandatory };
-          if (form.questions !== etDatetimeLocalValue(bid.questions_due_at)) body.questionsDueAt = orNull(form.questions);
-          if (form.walk !== etDatetimeLocalValue(bid.job_walk_at)) body.jobWalkAt = orNull(form.walk);
-          save(body, "Bid details saved");
-        }}>Save bid details</Button>
+      <div className="grid gap-2">
+        <div>
+          <Button disabled={busy} onClick={() => {
+            // A field goes in the request only when the operator changed it. The server treats a changed site-visit
+            // date as confirmed, so the prefilled date of an invite must not ride along with a type change. A field
+            // sent unchanged could also put back a value another save has moved since this panel last loaded.
+            const body = {};
+            if (orNull(form.type) !== (bid.solicitation_type || null)) body.solicitationType = orNull(form.type);
+            if (scoredToApi(form.scored) !== scoredToApi(scoredOf(bid.scored))) body.scored = scoredToApi(form.scored);
+            if (!!form.mandatory !== !!bid.job_walk_mandatory) body.jobWalkMandatory = !!form.mandatory;
+            if (form.questions !== etDatetimeLocalValue(bid.questions_due_at)) body.questionsDueAt = orNull(form.questions);
+            if (form.walk !== etDatetimeLocalValue(bid.job_walk_at)) body.jobWalkAt = orNull(form.walk);
+            if (Object.keys(body).length === 0) { setUnchanged(true); return; }
+            setUnchanged(false);
+            save(body, "Bid details saved");
+          }}>Save bid details</Button>
+        </div>
+        {unchanged && <ActionFeedback>Nothing changed</ActionFeedback>}
       </div>
     </div>
   );
@@ -215,7 +232,43 @@ function KitPill({ templateKey, kit }) {
 function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
   const [notes, setNotes] = useState(item.notes || "");
   const [editing, setEditing] = useState(false);
-  useEffect(() => setNotes(item.notes || ""), [item.notes]);
+  const draft = useRef(notes);
+  draft.current = notes;
+  const lastSent = useRef(item.notes || "");
+  const saving = useRef(false);
+  const again = useRef(false);
+  // A refresh replaces the note only while the field holds no unsaved typing (its text is still the note the server
+  // last had), focused or not: an untouched field must not keep an older note that its next blur would send back.
+  // Typing not saved yet stays, since a refresh can bring back a note older than the draft (the reply to a save the
+  // operator has typed past); the draft is saved on its next blur. The same holds while this row's note save is in
+  // flight or a newer draft is queued behind it: another reload (a tick) can bring back the older text, and the
+  // queued draft must still be the one sent.
+  useEffect(() => {
+    const unsaved = draft.current !== lastSent.current;
+    lastSent.current = item.notes || "";
+    if (unsaved || saving.current || again.current) return;
+    setNotes(item.notes || "");
+  }, [item.notes]);
+  // A note saves when its field loses focus. The save does not lock the panel (a tap that starts the blur would land
+  // on a control the save had just disabled and be lost). This row sends one note save at a time; a blur that comes
+  // while one is in flight sends the newer draft when it finishes.
+  const saveNotes = async () => {
+    if (saving.current) { again.current = true; return; }
+    saving.current = true;
+    try {
+      do {
+        again.current = false;
+        const text = draft.current;
+        if (text === lastSent.current) break;
+        // A failed save (refused, or no answer) stops here unless a newer draft was blurred behind it: that one was
+        // already left by the operator and is still sent.
+        if (await onNotes(item, text)) lastSent.current = text;
+        else if (!again.current) break;
+      } while (again.current);
+    } finally {
+      saving.current = false;
+    }
+  };
   if (editing) return <li data-section={item.section}><EditRow item={item} busy={busy} onSave={onEdit} onCancel={() => setEditing(false)} /></li>;
   return (
     // A stop check (a go / no-go question) sits first and is shaded so it reads apart from the paperwork lines.
@@ -233,7 +286,7 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
       </div>
       {item.source_text && <div className="text-ui-caption text-ink-secondary">From the solicitation: “{item.source_text}”</div>}
       <Input aria-label={`Note: ${item.label}`} placeholder="Note" maxLength={2000} value={notes}
-        onChange={(event) => setNotes(event.target.value)} onBlur={() => { if (notes !== (item.notes || "")) onNotes(item, notes); }} />
+        onChange={(event) => setNotes(event.target.value)} onBlur={saveNotes} />
     </li>
   );
 }
@@ -284,7 +337,7 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
             {items.map((item, index) => (
               <ChecklistRow key={item.id} item={item} kit={kit} first={index === 0} last={index === items.length - 1} busy={busy}
                 onTick={(row, checked) => run(() => act(`/${row.id}`, "PATCH", { checked }))}
-                onNotes={(row, notes) => run(() => act(`/${row.id}`, "PATCH", { notes }))}
+                onNotes={(row, notes) => run(() => act(`/${row.id}`, "PATCH", { notes }), { background: true })}
                 onArchive={(row) => run(() => act(`/${row.id}`, "DELETE"))}
                 onEdit={(row, changes) => run(() => act(`/${row.id}`, "PATCH", changes))}
                 onMove={(row, step) => {
@@ -361,16 +414,21 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
 
   // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
   // shown in the checklist section until the next success; it never throws.
+  // Reloads can overlap now (a note save runs beside a tick); only the newest reload is applied.
+  const refreshSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
       const res = await adminFetch(`/admin/bid-desk/${bidId}`);
       const body = await res.json().catch(() => ({}));
+      if (seq !== refreshSeq.current) return;
       if (!(res.ok && body.checklist_live)) throw new Error(`HTTP ${res.status}`);
       setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);
       setRefreshError("");
     } catch {
+      if (seq !== refreshSeq.current) return;
       setRefreshError("Could not reload the checklist, so the lines below may be out of date. Reload the page to check.");
     }
   }, [bidId, onProgress]);
@@ -383,11 +441,20 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   }, [bid.estimate_id, bid.solicitation_type, refresh]);
 
   // Runs one checklist call, then reloads the lines. Returns whether it worked.
-  const run = async (call) => {
-    setBusy(true);
+  // A background run (a note save) leaves the panel unlocked: the operator may keep typing and tapping.
+  const run = async (call, { background = false } = {}) => {
+    if (!background) setBusy(true);
     setMessage({ text: "", error: false });
     try {
-      const res = await call();
+      let res;
+      try {
+        res = await call();
+      } catch {
+        // No answer arrived: the server may have written the change. Show what it has now.
+        setMessage({ text: UNCONFIRMED_MESSAGE, error: true });
+        await refresh();
+        return false;
+      }
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       await refresh();
@@ -398,7 +465,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       setMessage({ text: `Not saved: ${err.message}`, error: true });
       return false;
     } finally {
-      setBusy(false);
+      if (!background) setBusy(false);
     }
   };
 

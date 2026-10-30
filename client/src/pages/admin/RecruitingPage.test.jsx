@@ -194,6 +194,8 @@ describe('RecruitingPage — stage change dialog', () => {
 
     await waitFor(() => expect(patchedBody).not.toBeNull());
     expect(patchedBody.status).toBe('interview');
+    // bound to the stage the operator saw on the detail (audit R1)
+    expect(patchedBody.expected_status).toBe('new');
     expect(patchedBody.notify).toEqual({
       sms: true,
       email: true,
@@ -303,6 +305,157 @@ describe('RecruitingPage — stage change dialog', () => {
     await waitFor(() => expect(patchedBody).not.toBeNull());
     expect(patchedBody.status).toBe('interview');
     expect(patchedBody).not.toHaveProperty('notify');
+  });
+});
+
+describe('RecruitingPage — stale stage decision (audit R1)', () => {
+  it('a 409 shows the refusal and replaces the detail with the newer stage and its history', async () => {
+    const conflict = {
+      error: "Cannot move: the application is now 'rejected', not 'new'. Nothing was changed or sent.",
+      application: detailFixture({
+        status: 'rejected',
+        status_history: [{ from: 'new', to: 'rejected', note: 'No license', by: 'tech-uuid-2', at: '2026-10-29T19:00:00Z' }],
+      }),
+    };
+    const base = buildFetchMock();
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if (url.endsWith('/admin/careers/app-1/status') && options.method === 'PATCH') {
+        return Promise.resolve({ ok: false, status: 409, json: vi.fn(async () => conflict), clone: () => ({ json: async () => conflict }) });
+      }
+      return base(url, options);
+    }));
+
+    await openInterviewStageDialog();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    expect(await screen.findByText(/now 'rejected', not 'new'/)).toBeInTheDocument();
+    expect(screen.queryByText(/Text sent/)).not.toBeInTheDocument();
+    // the detail under the dialog now shows the newer stage and why
+    expect(screen.getByText('rejected')).toBeInTheDocument();
+    expect(screen.getByText('No license')).toBeInTheDocument();
+    // this dialog was opened on the old stage: Confirm could only 409 again
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+  });
+});
+
+describe('RecruitingPage — stage history and notes (audit R2)', () => {
+  it('shows a note saved with a stage change in the detail, and the applicant entries on reopen', async () => {
+    const savedHistory = [
+      { from: 'new', to: 'reviewed', note: 'Called back, strong fit', by: 'tech-uuid-1', at: '2026-10-29T19:15:00Z' },
+    ];
+    const base = buildFetchMock();
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (url.includes('/admin/careers/app-1/stage-preview')) {
+        return Promise.resolve(apiResponse(previewFixture({ status: 'reviewed', templated: false, sms_body: null, email_subject: null, email_body: null })));
+      }
+      if (url.endsWith('/admin/careers/app-1/status') && options.method === 'PATCH') {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({ status: 'reviewed', status_history: savedHistory }),
+          sent: { sms: 'not_requested', email: 'not_requested' },
+        }));
+      }
+      return base(url, options);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reviewed' }));
+    await screen.findByRole('heading', { name: 'Move to Reviewed' });
+    fireEvent.change(await screen.findByLabelText('Note'), { target: { value: 'Called back, strong fit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await screen.findByText('No message sent.');
+
+    // the detail under the stage dialog now lists the saved note
+    expect(await screen.findByText('Called back, strong fit')).toBeInTheDocument();
+    expect(screen.getByText(/New → Reviewed/)).toBeInTheDocument();
+  });
+
+  it('labels each entry with who made it: the applicant, the named staff member, or Staff', async () => {
+    const base = buildFetchMock();
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if (url.endsWith('/admin/careers/app-1')) {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({
+            status: 'interview',
+            status_history: [
+              { from: 'new', to: 'reviewed', note: null, by: 'bbbbbbbb-0000-4000-8000-000000000002', at: '2026-10-27T14:00:00Z' },
+              { from: 'reviewed', to: 'interview', note: null, by: 'tech-uuid-1', by_name: 'Sam Office', at: '2026-10-28T14:00:00Z' },
+              { from: 'interview', to: 'interview', note: 'Interview booked Tue Nov 3, 4:30 PM (phone)', by: 'applicant', at: '2026-10-28T16:00:00Z' },
+            ],
+          }),
+        }));
+      }
+      return base(url, options);
+    }));
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+
+    expect(await screen.findByText('Interview booked Tue Nov 3, 4:30 PM (phone)')).toBeInTheDocument();
+    expect(screen.getByText(/Interview · Applicant/)).toBeInTheDocument();
+    expect(screen.getByText(/Reviewed → Interview · Sam Office/)).toBeInTheDocument();
+    // A staff id with no name on file says Staff, never the raw id.
+    expect(screen.getByText(/New → Reviewed · Staff/)).toBeInTheDocument();
+    expect(screen.queryByText(/bbbbbbbb-/)).not.toBeInTheDocument();
+  });
+});
+
+describe('RecruitingPage — queue reads (audit R3)', () => {
+  function failedResponse(status, error) {
+    const body = { error };
+    return { ok: false, status, json: vi.fn(async () => body), clone: () => ({ json: async () => body }) };
+  }
+
+  it("a failed read for another tab shows the error with Try again, never the previous tab's cards", async () => {
+    let rejectedFails = true;
+    const base = buildFetchMock();
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (url.includes('/admin/careers?status=rejected')) {
+        return Promise.resolve(rejectedFails
+          ? failedResponse(503, 'Failed to load applications')
+          : apiResponse({ applications: [], counts: { new: 1 } }));
+      }
+      return base(url, options);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    expect(await screen.findByText('Jordan Lee')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: /Rejected/ }));
+
+    expect(await screen.findByText('Failed to load applications')).toBeInTheDocument();
+    expect(screen.queryByText('Jordan Lee')).not.toBeInTheDocument();
+    expect(screen.queryByText(/No rejected applications/)).not.toBeInTheDocument();
+
+    rejectedFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/No rejected applications/)).toBeInTheDocument();
+    expect(screen.queryByText('Failed to load applications')).not.toBeInTheDocument();
+  });
+
+  it('a failed first read shows the error, not an empty queue', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(failedResponse(503, 'Failed to load applications'))));
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+
+    expect(await screen.findByText('Failed to load applications')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText(/No new applications/)).not.toBeInTheDocument();
+  });
+});
+
+describe('RecruitingPage — stage dialog field labels (audit R4)', () => {
+  it('names the text and email editors by channel', async () => {
+    vi.stubGlobal('fetch', buildFetchMock());
+
+    await openInterviewStageDialog();
+
+    expect(screen.getByLabelText('Text message')).toHaveValue('Hi Jordan, pick a time: [interview link]');
+    expect(screen.getByLabelText('Subject')).toHaveValue("Let's set up your interview with Waves");
+    expect(screen.getByLabelText('Email message')).toHaveValue('Pick a time: [interview link]');
+    expect(screen.getByLabelText('Note')).toHaveValue('');
   });
 });
 

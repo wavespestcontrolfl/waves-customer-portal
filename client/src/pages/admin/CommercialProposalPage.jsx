@@ -1376,13 +1376,13 @@ function CommercialProposalEditor() {
   };
 
   // Mirrors the estimates-list Mark won flow: proposals are won manually (no
-  // online checkout); the server creates the customer when none is linked and,
-  // in invoice mode, builds the first invoice from the proposal lines.
+  // online checkout); the server creates the customer when none is linked. No
+  // invoice is made at the win: each visit bills when it is completed.
   const markWon = async () => {
     setError(null);
     const invoiceMode = !!estimate?.billByInvoice;
     const confirmMsg = invoiceMode
-      ? `Mark ${estimate?.customerName || 'this proposal'} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+      ? `Mark ${estimate?.customerName || 'this proposal'} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. No invoice is created now: each visit is billed once when it is completed, including any one-time work booked on it. The customer is NOT texted and NOT auto-scheduled.`
       : `Mark ${estimate?.customerName || 'this proposal'} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`;
     if (!window.confirm(confirmMsg)) return;
     setMarkingWon(true);
@@ -1397,9 +1397,6 @@ function CommercialProposalEditor() {
       });
       const notes = [];
       if (result?.createdCustomer?.id) notes.push('A new customer record was created from the proposal.');
-      if (result?.proposalInvoice?.invoiceNumber) {
-        notes.push(`Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`);
-      }
       if (result?.warnings?.length) notes.push(...result.warnings);
       if (notes.length) window.alert(`Marked won:\n\n${notes.join('\n')}`);
       await reload();
@@ -1473,8 +1470,11 @@ function CommercialProposalEditor() {
       )}
 
       <div className="flex flex-col lg:flex-row gap-5 items-start">
-        {/* Main column */}
-        <div className="flex-1 min-w-0 w-full space-y-5">
+        {/* Main column. Read-only while a send or a Mark won runs: each ends in a reload that replaces the form and
+            clears Unsaved changes, so an edit typed meanwhile would be lost without a trace (pipeline audit 10-30,
+            item 3). A disabled fieldset turns off every field, picker and row button inside it at once. Preflight is
+            off in this app, so the fieldset's browser border, padding and margin are reset here. */}
+        <fieldset disabled={sending || markingWon} className="flex-1 min-w-0 w-full space-y-5 m-0 p-0 border-0">
           {!locked && (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
@@ -2219,7 +2219,7 @@ function CommercialProposalEditor() {
               onChange={(e) => { setTerms(e.target.value); touch(); }}
             />
           </FoldCard>
-        </div>
+        </fieldset>
 
         {/* Sidebar: totals + actions */}
         <div className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 space-y-4">

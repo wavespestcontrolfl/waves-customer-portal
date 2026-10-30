@@ -330,16 +330,23 @@ async function exerciseSavedViews(page, context, server, report, kind) {
 
   // Exercise a real shell link and browser Back, including the shell's own
   // pathname scroll reset and a new table component instance.
-  let mobileMenu;
+  // A phone has no side menu (owner 2026-10-29): a bottom tab goes straight
+  // there, any other page through page search, so Back returns to this table.
+  let finder;
   if (report.width === 390) {
-    await page.getByRole("button", { name: "Open menu", exact: true }).click();
-    mobileMenu = page.getByRole("dialog", { name: "Admin menu", exact: true });
-    await mobileMenu.getByRole("link", { name: spec.away, exact: true }).click();
+    const tab = page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: spec.away, exact: true });
+    if (await tab.count()) await tab.click();
+    else {
+      await page.getByRole("button", { name: "Search pages", exact: true }).click();
+      finder = page.getByRole("dialog", { name: "Go to a page", exact: true });
+      await finder.getByRole("searchbox").fill(spec.away);
+      await finder.getByRole("link", { name: new RegExp(`^${spec.away}`) }).first().click();
+    }
   } else {
     await page.getByRole("link", { name: spec.away, exact: true }).click();
   }
   await page.waitForURL((location) => location.pathname !== spec.path);
-  if (mobileMenu) await mobileMenu.waitFor({ state: "hidden" });
+  if (finder) await finder.waitFor({ state: "hidden" });
   await page.goBack();
   await search.waitFor();
   await pager.getByText(`Page 2 of ${spec.total}`, { exact: true }).waitFor();

@@ -285,3 +285,38 @@ describe('determineLeadSource — AI-assistant referral (owner-approved 2026-09-
     expect(r.source).not.toBe('ai_assistant');
   });
 });
+
+// leads.gclid is varchar(200) (migration 20260401000110) while the other click-id
+// columns are 255, and leads.service_interest is varchar(255). A longer value made the
+// leads insert throw after the customer row had saved, so the Leads queue missed it.
+describe('buildLeadWebhookIntake — leads column widths', () => {
+  test('a gclid longer than leads.gclid is cut to 200 and still reads as paid google_ads', () => {
+    const intake = buildLeadWebhookIntake({ attribution: { gclid: 'g'.repeat(255) } });
+    expect(intake.gclid).toHaveLength(200);
+    expect(intake.leadSource).toMatchObject({ source: 'google_ads', channel: 'paid' });
+  });
+
+  test('a normal gclid is unchanged', () => {
+    expect(buildLeadWebhookIntake({ gclid: 'CjwKCAjw3ejRBhAdEiwA' }).gclid).toBe('CjwKCAjw3ejRBhAdEiwA');
+  });
+
+  test('the other click ids keep their 255-character cap', () => {
+    const long = 'x'.repeat(300);
+    const intake = buildLeadWebhookIntake({ attribution: { wbraid: long, gbraid: long, fbclid: long, fbc: long, fbp: long } });
+    for (const key of ['wbraid', 'gbraid', 'fbclid', 'fbc', 'fbp']) expect(intake[key]).toHaveLength(255);
+  });
+
+  test('a free-text service longer than leads.service_interest is cut to 255', () => {
+    const intake = buildLeadWebhookIntake({ service_interest: 'Please look at the yard and the lanai '.repeat(10) });
+    expect(intake.serviceInterest).toHaveLength(255);
+  });
+
+  test('the quote wizard and property lookup writers cap gclid at 200 too', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['../routes/public-quote.js', '../routes/public-property-lookup.js']) {
+      const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+      expect(src).toMatch(/const gclid = attr\?\.gclid \? String\(attr\.gclid\)\.slice\(0, 200\) : null;/);
+    }
+  });
+});

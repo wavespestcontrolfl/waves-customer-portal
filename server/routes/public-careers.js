@@ -5,7 +5,8 @@
  * off, same unobservable-when-dark contract as the photo funnels). Guard
  * chain copies the public lead webhook: IP limiter → per-phone limiter →
  * honeypot silent-200 → Turnstile (shadow-verified; 403 only when the
- * leadTurnstile gate enforces) → validation → single insert.
+ * leadTurnstile gate enforces) → validation → single insert (a resubmission
+ * of the same application inside 15 minutes files and sends nothing new).
  *
  * An applicant is NEVER a customer or lead (call-pipeline job_applicant
  * rule) and NOTHING here sends applicant-facing comms — the owner calls or
@@ -79,7 +80,14 @@ router.post('/apply', applyIpLimiter, applyPhoneLimiter, async (req, res) => {
       }
     }
 
-    const row = await createJobApplication({ body, database: db });
+    const { created, row } = await createJobApplication({ body, database: db });
+    // The same application again inside the resubmission window (a retry
+    // after a lost response): it is already filed, and its screen, bell and
+    // receipt already ran, so answer as before and start nothing again.
+    if (!created) {
+      logger.info(`[careers] resubmission of application ${row.id}: nothing new filed or sent`);
+      return res.status(200).json({ success: true });
+    }
 
     // Fire-and-forget: AI ranking screen (assist only — never an outcome).
     const { screenJobApplication } = require('../services/job-application-screen');

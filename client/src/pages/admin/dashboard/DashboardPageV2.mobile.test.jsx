@@ -18,12 +18,27 @@ vi.mock("../../../utils/admin-fetch", () => ({
   isRateLimitError: () => false,
 }));
 vi.mock("../../../hooks/useIsMobile", () => ({ default: () => true }));
+// The page reads one flag (dashboard-ai-charts); off unless a test turns it on.
+const { aiCharts } = vi.hoisted(() => ({ aiCharts: { on: false } }));
 vi.mock("../../../hooks/useFeatureFlag", () => ({
-  useFeatureFlag: () => false,
+  useFeatureFlag: () => aiCharts.on,
 }));
-vi.mock("../../../components/dashboard/AiChartsPanel", () => ({
-  default: () => null,
-}));
+// A stand-in builder with its own local state: if a section switch unmounted
+// the panel, the typed prompt would be gone.
+vi.mock("../../../components/dashboard/AiChartsPanel", async () => {
+  const { createElement, useState } = await import("react");
+  return {
+    default: function AiChartsPanelStub({ active }) {
+      const [draft, setDraft] = useState("");
+      return createElement("input", {
+        "aria-label": "Describe a metric",
+        "data-active": String(active),
+        value: draft,
+        onChange: (e) => setDraft(e.target.value),
+      });
+    },
+  };
+});
 
 class FakeResizeObserver {
   observe() {}
@@ -98,6 +113,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    aiCharts.on = false;
   });
 
   it.each([
@@ -144,6 +160,27 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
       expect(document.getElementById(id)).not.toBeInTheDocument();
     }
     expect(navButton("Today").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("keeps the chart builder's unfinished work across a section switch", async () => {
+    aiCharts.on = true;
+    render(
+      <MemoryRouter>
+        <DashboardPageV2 />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
+    fireEvent.change(screen.getByLabelText("Describe a metric"), { target: { value: "new customers by city" } });
+
+    // Hidden, not unmounted — and told it is inactive, so its mic unmounts.
+    fireEvent.click(navButton("Growth"));
+    expect(screen.getByLabelText("Describe a metric")).not.toBeVisible();
+    expect(screen.getByLabelText("Describe a metric")).toHaveAttribute("data-active", "false");
+
+    fireEvent.click(navButton("Today"));
+    expect(screen.getByLabelText("Describe a metric")).toBeVisible();
+    expect(screen.getByLabelText("Describe a metric")).toHaveAttribute("data-active", "true");
+    expect(screen.getByLabelText("Describe a metric")).toHaveValue("new customers by city");
   });
 
   it("switches sections on pill tap and marks the pill current", async () => {

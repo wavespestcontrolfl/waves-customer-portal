@@ -31,6 +31,8 @@
       "what": "Hermes worker HMAC-signed header (timestamp + nonce + body hash) or per-endpoint bearer" },
     { "name": "mcpAuth", "module": "server/routes/mcp.js", "local": true,
       "what": "GATE_MCP_READ_TOOLS + MCP_SERVICE_TOKEN bearer via constant-time compare" },
+    { "name": "mcpAdminAuth", "module": "server/routes/mcp-admin.js", "local": true,
+      "what": "GATE_MCP_ADMIN_READ + an mcp_read JWT (a staff access token is refused) whose technician row is still an active full-access admin with the key's token version; fails closed" },
     { "name": "ingestAuth", "module": "server/routes/ops-digest-ingest.js", "local": true,
       "what": "OPS_DIGEST_INGEST_TOKEN bearer via constant-time compare; 404 unset, 401 mismatch — fails closed" },
     { "name": "terminalAuthenticate", "module": "server/routes/stripe-terminal.js", "local": true,

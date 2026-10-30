@@ -732,6 +732,9 @@ router.get('/:token', async (req, res, next) => {
         // creditApplied drives the "Account credit applied" line.
         amountDue: parseFloat(data.amount_due != null ? data.amount_due : data.total),
         creditApplied: parseFloat(data.credit_applied || 0),
+        // Part payments already received on this open invoice (amount due
+        // above is net of them); drives the "Paid so far" line.
+        amountPaid: parseFloat(data.amount_paid || 0),
         dueDate: data.due_date,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,

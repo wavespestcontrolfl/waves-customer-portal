@@ -16,9 +16,9 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { bidDeskLive, bidChecklistLive, bidDeskAutoDatesLive } = require('../../config/feature-gates');
+const { bidDeskLive, bidChecklistLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
-const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS } = require('./rules');
+const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
 const { closeDoneAlerts } = require('./close-alerts');
 const { shortDateET } = require('../admin-alert-names');
@@ -198,6 +198,10 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       return { bidId: existing.id, created: false, kind, owedLinkId: alertKind ? link.id : null };
     }
 
+    // GATE_BID_DESK_NOT_OUR_WORK: a NEW bid for grounds upkeep is filed as no bid, with no bell. Never for a bid a person
+    // marked by hand, and the bid is not reopened later (an addendum joins it and rings nothing).
+    const declined = !manual && bidDeskNotOurWorkLive()
+      && notOurWork([parsed.project_title, parsed.package_name].filter(Boolean).join(' ') || email.subject);
     const [bid] = await trx('bid_opportunities').insert({
       source: detected.source,
       buyer_name: parsed.buyer_name,
@@ -212,14 +216,15 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       due_confirmed: autoConfirmsDate(parsed, kind, historical),
       job_walk_at: parsed.job_walk_at,
       questions_due_at: parsed.questions_due_at,
-      status: 'new',
+      status: declined ? 'no_bid' : 'new',
+      decision_note: declined ? NOT_OUR_WORK_NOTE : null,
       historical,
       needs_date_confirmation: false,
       first_email_id: email.id,
       gmail_thread_id: email.gmail_thread_id || null,
       group_key: parsed.group_key,
     }).returning(BID_COLUMNS);
-    const alertKind = quiet ? null : 'new';
+    const alertKind = quiet || declined ? null : 'new';
     const [link] = await trx('bid_opportunity_emails')
       .insert({ bid_id: bid.id, email_id: email.id, kind, received_at: email.received_at, alert_kind: alertKind })
       .returning(['id']);

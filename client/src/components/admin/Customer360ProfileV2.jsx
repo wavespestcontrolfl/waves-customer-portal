@@ -82,6 +82,7 @@ import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
+import MistingRecordsPanel from "./MistingRecordsPanel";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
@@ -3234,12 +3235,14 @@ const BILLING_LANE_OPTIONS = [
   { value: "one_time", label: "One-time" },
 ];
 
+const SAVED_REFRESH_FAILED_MESSAGE = "The change was saved. Refresh this record to see it.";
+
 // The ONE place the billing lane is set (customers.billing_mode). Every
 // billing flow — the monthly cron, completion invoicing, booking price
 // stamps, the schedule sheet's prediction — reads this instead of inferring
 // from tier/rate field combinations, so a customer can never sit in two
 // lanes at once. Named export for component tests/harnesses.
-export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate, canEdit }) {
+export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate, canEdit, onSaved }) {
   const [mode, setMode] = useState(billingMode || "");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -3270,6 +3273,15 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       setMsg("Saved");
     } catch (e) {
       setErr(e.message || "Save failed");
+      setSaving(false);
+      return;
+    }
+    // The write is done. Refresh the parent record in its own step: a failed
+    // refresh must never read as a failed save.
+    try {
+      await onSaved?.();
+    } catch {
+      setMsg(SAVED_REFRESH_FAILED_MESSAGE);
     }
     setSaving(false);
   };
@@ -3334,6 +3346,7 @@ function AdminAutopayPanelV2({
   collectionHold = null,
 }) {
   const [state, setState] = useState(null);
+  const [loadError, setLoadError] = useState(false);
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -3342,18 +3355,36 @@ function AdminAutopayPanelV2({
     if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
   }, [msg, err]);
 
+  // Tracks the customer this panel is bound to so a slow read for a customer
+  // the admin already left cannot write into the new customer's panel.
+  const currentCustomerRef = useRef(customerId);
   const load = () => {
+    const reqId = customerId;
+    setLoadError(false);
     fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
       headers: {
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       },
     })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setState(d))
-      .catch(() => {});
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => {
+        if (currentCustomerRef.current !== reqId) return;
+        setState(d);
+        setLoadError(false);
+      })
+      .catch(() => {
+        if (currentCustomerRef.current !== reqId) return;
+        setLoadError(true);
+      });
   };
 
   useEffect(() => {
+    currentCustomerRef.current = customerId;
+    setState(null);
+    setLoadError(false);
     load();
   }, [customerId]);
 
@@ -3408,7 +3439,15 @@ function AdminAutopayPanelV2({
     setCharging(false);
   };
 
-  const stateLabel = state?.state || "unknown";
+  // Three distinct states: still reading, could not read (retry offered), and
+  // the status the server returned. "unknown" is only for a 200 with no state.
+  // A failed re-read (e.g. after Charge now) keeps the last status, flagged.
+  const readFailed = loadError && !state;
+  const stateLabel = readFailed
+    ? "Could not read"
+    : state
+      ? state.state || "unknown"
+      : "Loading…";
   const isAlertState = stateLabel === "paused" || stateLabel === "failed";
 
   return (
@@ -3437,6 +3476,22 @@ function AdminAutopayPanelV2({
                 {stateLabel}
               </span>{" "}
             </div>
+            {loadError && (
+              <div role="alert" className="text-ui-label text-alert-fg mt-1.5 flex items-center gap-2 flex-wrap">
+                <span>
+                  {state
+                    ? "Couldn't refresh the auto-pay status. It may be out of date."
+                    : "Couldn't read the auto-pay status."}
+                </span>
+                <button data-ui-text-action
+                  type="button"
+                  className="underline"
+                  onClick={load}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {state && (
               <div className="text-ui-label text-ink-secondary mt-1.5 leading-relaxed">
                 Next charge:{" "}
@@ -5394,6 +5449,7 @@ function CustomerWorkspaceHeader({
         <div
           className="c360-more-action"
           ref={menuRef}
+          data-modal-escape-owned={menuOpen ? "true" : undefined}
           onKeyDown={(event) => {
             if (event.key === "Escape" && menuOpen) {
               event.stopPropagation();
@@ -5674,6 +5730,9 @@ function CustomerCallMessage({ message: m }) {
   );
 }
 
+// Names the overlay dialog. Only one customer overlay is open at a time.
+const CUSTOMER_OVERLAY_TITLE_ID = "customer-overlay-title";
+
 function CustomerOverlayHeader({
   c,
   isAdmin,
@@ -5700,7 +5759,7 @@ function CustomerOverlayHeader({
             {" "}
             <div className="flex items-center gap-3 flex-wrap">
               {" "}
-              <div className="text-22 font-medium tracking-tight text-zinc-900">
+              <div id={CUSTOMER_OVERLAY_TITLE_ID} className="text-22 font-medium tracking-tight text-zinc-900">
                 {c.firstName} {c.lastName}
               </div>
               {c.profileLabel && (
@@ -6050,6 +6109,7 @@ function CustomerProfileOverview({
                   technician session would only 403 on expand */}
       {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
       {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
+      {!embedded && isAdmin && <MistingRecordsPanel customerId={customerId} />}
       {accountProperties.length > 0 && (
         <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
           {" "}
@@ -6169,10 +6229,10 @@ function CustomerProfileOverview({
         {" "}
         <div>
           {" "}
-          <div className="text-ui-body font-medium text-zinc-900">
+          <div id="has-left-review-v2-label" className="text-ui-body font-medium text-zinc-900">
             Already left a Google review
           </div>{" "}
-          <div className="text-ui-caption text-ink-secondary">
+          <div id="has-left-review-v2-desc" className="text-ui-caption text-ink-secondary">
             When on, this customer is excluded from review-request and 48h
             followup SMS.
           </div>
@@ -6184,6 +6244,8 @@ function CustomerProfileOverview({
         </div>{" "}
         <Switch
           id="has-left-review-v2"
+          aria-labelledby="has-left-review-v2-label"
+          aria-describedby="has-left-review-v2-desc"
           checked={!!c.hasLeftGoogleReview}
           disabled={!isAdmin}
           onChange={async (val) => {
@@ -6351,6 +6413,8 @@ function CustomerProfileBilling({
   setRemovePaymentMethod,
   setCancelSignupOpen,
   setCancelPlanOpen,
+  onRefresh,
+  onRefreshFailed,
 }) {
   return (
     <div className="c360-billing-content">
@@ -6414,6 +6478,7 @@ function CustomerProfileBilling({
         tier={c.tier}
         monthlyRate={c.monthlyRate}
         canEdit={isAdmin}
+        onSaved={onRefresh}
       />{" "}
       <AdminAutopayPanelV2
         customerId={c.id}
@@ -6426,6 +6491,11 @@ function CustomerProfileBilling({
         customerId={c.id}
         customerName={`${c.firstName} ${c.lastName}`}
         canEdit={isAdmin}
+        onChanged={() => {
+          // The credit is already saved; a failed refresh only means the
+          // surrounding record is stale, never that the credit failed.
+          Promise.resolve(onRefresh?.()).catch(() => onRefreshFailed?.());
+        }}
       />{" "}
       {isAdmin && (
         <AnnualPrepayPanelV2
@@ -7662,25 +7732,44 @@ function PropertyNeighborhood({ property, showAddress, onUpdated }) {
 export function CustomerNeighborhoodBlock({ customerId }) {
   const [properties, setProperties] = useState(null);
   const [loadError, setLoadError] = useState("");
+  const seq = useRef(0);
+
+  // Try again reruns this read in place, as on the access codes block below:
+  // no need to leave the customer and come back.
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    try {
+      const data = await adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`);
+      if (mine !== seq.current) return;
+      setLoadError("");
+      setProperties(Array.isArray(data?.properties) ? data.properties : null);
+    } catch (err) {
+      if (mine !== seq.current) return;
+      // Off (404) or not a full admin (403): the block is not shown at all.
+      if (err?.status === 404 || err?.status === 403) {
+        setLoadError("");
+        setProperties(null);
+        return;
+      }
+      setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
+    }
+  }, [customerId]);
 
   useEffect(() => {
-    let cancelled = false;
     setProperties(null);
     setLoadError("");
-    adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`)
-      .then((data) => { if (!cancelled) setProperties(Array.isArray(data?.properties) ? data.properties : null); })
-      .catch((err) => {
-        if (cancelled || err?.status === 404 || err?.status === 403) return;
-        setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
-      });
-    return () => { cancelled = true; };
-  }, [customerId]);
+    load();
+    return () => { seq.current += 1; };
+  }, [load]);
 
   if (loadError) {
     return (
       <div className="mt-3">
         <AccessPrefsSubheading>Neighborhood</AccessPrefsSubheading>
-        <div className="text-ui-label text-ink-secondary">{loadError}</div>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
       </div>
     );
   }
@@ -7992,6 +8081,7 @@ function CustomerProfileProperty({
           <summary>Property service tools & historical maps</summary>
           <PropertyZonesPanel customerId={customerId} />
           <TermiteStationsGate customerId={customerId} />
+          <MistingRecordsPanel customerId={customerId} />
         </details>
       )}
       {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
@@ -8593,6 +8683,7 @@ function CustomerProfileEditor({
   setSavingEdit,
   initialEditForm,
   reloadCustomer,
+  setProfileActionErr,
 }) {
   const density = useUiDensity();
   if (!editOpen) return null;
@@ -8860,10 +8951,19 @@ function CustomerProfileEditor({
                       body: JSON.stringify(payload),
                     });
                     onCustomerMutation?.({ customerId, action: "update" });
-                    await reloadCustomer();
-                    setEditOpen(false);
                   } catch (e) {
                     setEditErr(apiErrorMessage(e, "Save failed"));
+                    setSavingEdit(false);
+                    return;
+                  }
+                  // The write succeeded: close the form first so it can never
+                  // be submitted twice, then refresh. A failed refresh says
+                  // the change was saved; it is never shown as a failed save.
+                  setEditOpen(false);
+                  try {
+                    await reloadCustomer();
+                  } catch {
+                    setProfileActionErr?.(SAVED_REFRESH_FAILED_MESSAGE);
                   }
                   setSavingEdit(false);
                 }}
@@ -10010,6 +10110,7 @@ function CustomerWorkspacePresentation({
 
 function CustomerOverlayPresentation({
   panelRef,
+  dialogRef,
   headerProps,
   activeTab,
   profileContentId,
@@ -10019,16 +10120,29 @@ function CustomerOverlayPresentation({
   actions,
   dialogs,
 }) {
-  const density = useUiDensity();
   const { onClose, setActiveTab } = headerProps;
+  // The overlay opts into the documented comfortable density (14px text) once;
+  // UiSurface also provides it to every control rendered inside the panel.
   return createPortal(
-    <div data-ui-density={density}
+    <UiSurface
+      density="comfortable"
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
+      {/* The dialog (focus boundary) holds the scrolling panel AND the
+          mobile action bars, which must stay siblings of the overflow-scroll
+          .c360-panel for iOS position:fixed (see CustomerProfileMobileActions).
+          It neither scrolls nor transforms, so the fixed bars are unaffected. */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={CUSTOMER_OVERLAY_TITLE_ID}
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full max-w-[900px] h-full outline-none"
+      >
       <div
         ref={panelRef}
-        onClick={(e) => e.stopPropagation()}
         className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
       >
         <CustomerProfileStyles />
@@ -10070,8 +10184,9 @@ function CustomerOverlayPresentation({
         />
       </div>
       {actions}
+      </div>
       {dialogs}
-    </div>,
+    </UiSurface>,
     document.body,
   );
 }
@@ -10127,7 +10242,7 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
   useEffect(() => {
     if (lastMutation?.customer_id !== customerId) return;
     void reloadCustomer().catch(() => {
-      if (customerIdRef.current === customerId) setProfileActionErr("The change was saved. Refresh this record to see it.");
+      if (customerIdRef.current === customerId) setProfileActionErr(SAVED_REFRESH_FAILED_MESSAGE);
     });
   }, [lastMutation, customerId, customerIdRef, reloadCustomer]);
 
@@ -10760,7 +10875,6 @@ function useCustomerProfileNavigation({
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const [removePaymentMethod, setRemovePaymentMethod] = useState(null);
-  const panelRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
   const tabsAnchorRef = useRef(null);
   const profileContentId = useId();
@@ -10815,16 +10929,22 @@ function useCustomerProfileNavigation({
     cancelPlanOpen ||
     !!refundPayment ||
     !!removePaymentMethod;
-  useEffect(() => {
-    if (embedded) return undefined;
-    const handler = (e) => {
-      if (e.key !== "Escape" || subModalOpen) return;
+  // The shared overlay is a modal dialog: useModalFocus traps Tab inside the
+  // dialog (the scrolling panel plus the mobile action bars), owns Escape, and
+  // returns focus to the opener. Nested dialogs
+  // register after it, so the topmost one always receives Escape first; the
+  // callback below only runs when the overlay itself is on top. The full-page
+  // (embedded) workspace is not a dialog and never traps focus. The hook binds
+  // once its panel exists, so it stays off while the loading screen shows.
+  const panelRef = useRef(null);
+  const dialogRef = useModalFocus(
+    !embedded && !loading && !!data?.customer,
+    () => {
+      if (subModalOpen) return;
       if (!guardNavigateAway()) return;
       onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen, guardNavigateAway]);
+    },
+  );
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e) => {
@@ -10901,6 +11021,7 @@ function useCustomerProfileNavigation({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11108,6 +11229,17 @@ function CustomerProfilePending({
   profileLoadError,
   onRetry,
 }) {
+  // Escape still closes the overlay while it loads or shows its load error.
+  // Focus management starts once the loaded dialog mounts (see
+  // useCustomerProfileNavigation), so the opener is captured only once.
+  useEffect(() => {
+    if (embedded) return undefined;
+    const handler = (e) => {
+      if (e.key === "Escape") onClose?.();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [embedded, onClose]);
   const content = (
     <div
       className={
@@ -11252,6 +11384,7 @@ export default function Customer360ProfileV2({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11538,6 +11671,8 @@ export default function Customer360ProfileV2({
         setRemovePaymentMethod={setRemovePaymentMethod}
         setCancelSignupOpen={setCancelSignupOpen}
         setCancelPlanOpen={setCancelPlanOpen}
+        onRefresh={reloadCustomer}
+        onRefreshFailed={() => setProfileActionErr(SAVED_REFRESH_FAILED_MESSAGE)}
       />
     ),
     services: (
@@ -11620,6 +11755,7 @@ export default function Customer360ProfileV2({
   return (
     <Presentation
       panelRef={panelRef}
+      dialogRef={dialogRef}
       headerPast={headerPast}
       headerProps={{
         c,
@@ -11745,6 +11881,7 @@ export default function Customer360ProfileV2({
             setSavingEdit={setSavingEdit}
             initialEditForm={initialEditForm}
             reloadCustomer={reloadCustomer}
+            setProfileActionErr={setProfileActionErr}
           />
         </>
       }

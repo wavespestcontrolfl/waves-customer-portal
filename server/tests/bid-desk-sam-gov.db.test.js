@@ -121,6 +121,31 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
+  test('GATE_BID_DESK_NOT_OUR_WORK: a grounds-upkeep notice is filed as no bid with no bell; off, it files and rings as before', async () => {
+    const upkeep = (id) => notice(id, { title: 'Grounds Maintenance Services' });
+    process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
+    try {
+      const mixed = notice('n-fert', { title: 'Mowing and Fertilization' });
+      const run = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-1'), mixed]), apiKey: 'test-key' });
+      expect(run).toMatchObject({ filed: 2, rung: 1 });
+      const declined = await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first();
+      expect(declined).toMatchObject({
+        status: 'no_bid', decision_note: 'Not our work: mowing, edging or trimming (owner 2026-10-29).', owed_alert_kind: null, owed_alert_key: null, notified_at: null,
+      });
+      expect(await mockPg('bid_opportunities').where({ external_id: 'n-fert' }).first()).toMatchObject({ status: 'new', decision_note: null });
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).not.toContain(declined.id);
+      // A republished notice (new deadline) refreshes the declined bid but rings nothing.
+      raiseAdminAlert.mockClear();
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([{ ...upkeep('n-1'), responseDeadLine: '2026-11-12T14:00:00-05:00' }]), apiKey: 'test-key' });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect((await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first()).status).toBe('no_bid');
+    } finally { delete process.env.GATE_BID_DESK_NOT_OUR_WORK; }
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-2')]), apiKey: 'test-key' });
+    expect(await mockPg('bid_opportunities').where({ external_id: 'n-2' }).first()).toMatchObject({ status: 'new', decision_note: null });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('a failed bell stays owed and the 15-minute sweep rings it; a decided bid never rings', async () => {
     raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
     const first = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-3'), notice('n-4')]), apiKey: 'test-key' });

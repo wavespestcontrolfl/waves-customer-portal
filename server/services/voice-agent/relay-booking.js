@@ -155,8 +155,16 @@ function slotStartMinutes(slot) {
  * here would only be safe once the OFFER step can also resolve and thread
  * the same identity — until then, matching the offer's inputs exactly (this
  * function's own contract, above) beats a one-sided credit.
+ *
+ * `serviceLines` (GATE_SERVICE_LINE_MAP=live, the caller's catalog service's
+ * line) is NOT an identity and is safe to thread for the same reason it is
+ * safe to omit one above: the line rule changes no geometry (no credit, no
+ * packing, no grace). It only drops the slots of technicians that are not the
+ * line's home or gap technician and lets the home technician claim a start both
+ * have, so the saved slot.technician_id is the line's technician. A start only
+ * another line's technician had comes back slot_gone. Unset = today's recheck.
  */
-async function revalidateSlot({ offer, durationMinutes = null }) {
+async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'engine_unavailable' };
   if (!offer || !offer.lat || !offer.lng || !offer.date) return { status: 'need_location' };
@@ -194,10 +202,23 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     expandOpenDays: offer.expandOpenDays === true,
     // No serviceIdentity — see this function's doc comment (Codex r6 P2):
     // the offer never had one, so the recheck must not manufacture one.
+    serviceLines,
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
   return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
+}
+
+// The booked service's line as `serviceLines` for the recheck: [line] while the
+// service-line map is LIVE and the catalog row has a line, else undefined (no read at
+// all with the gate off). A Waves Assessment has no line (liveServiceLine): today's recheck.
+async function bookingServiceLines(db, catalogRow) {
+  const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
+  if (!lineMapLive() || !catalogRow) return undefined;
+  const line = await liveServiceLine(db, {
+    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null,
+  });
+  return line ? [line] : undefined;
 }
 
 // The window the booked row will OCCUPY, resolved from the admin-portal
@@ -702,6 +723,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
+    serviceLines: await bookingServiceLines(db, catalogRow),
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '

@@ -23,21 +23,32 @@ jest.mock('../services/account-membership-email', () => ({
   sendMembershipReactivated: jest.fn(async () => ({ ok: true })),
 }));
 
-const mockState = { customer: null, term: null, visits: [], patches: [] };
+// trxCustomer / trxVisits: what the transaction's reads see when it differs
+// from the pre-transaction read (a write committed in between); undefined =
+// the same. events: the comms lock and the customer row lock, in order.
+const mockState = { customer: null, term: null, visits: [], patches: [], trxCustomer: undefined, trxVisits: undefined, events: [] };
 
 jest.mock('../models/db', () => {
-  const build = (table) => {
+  const build = (table, inTransaction = false) => {
     const query = {};
-    for (const method of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereRaw', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate']) {
+    for (const method of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereRaw', 'orWhere', 'select', 'orderBy', 'limit']) {
       query[method] = () => query;
     }
+    query.forUpdate = () => {
+      if (table === 'customers') mockState.events.push('customer-row-lock');
+      return query;
+    };
     query.first = async () => {
-      if (table === 'customers') return { ...mockState.customer };
+      if (table === 'customers') {
+        if (inTransaction && mockState.trxCustomer !== undefined) return mockState.trxCustomer ? { ...mockState.trxCustomer } : undefined;
+        return { ...mockState.customer };
+      }
       if (table === 'annual_prepay_terms') return mockState.term;
       return null;
     };
     query.then = (resolve, reject) => {
-      const rows = table === 'scheduled_services' ? mockState.visits : [];
+      const visits = inTransaction && mockState.trxVisits !== undefined ? mockState.trxVisits : mockState.visits;
+      const rows = table === 'scheduled_services' ? visits : [];
       return Promise.resolve(rows).then(resolve, reject);
     };
     query.update = async (patch) => { mockState.patches.push({ table, ...patch }); return 1; };
@@ -45,8 +56,11 @@ jest.mock('../models/db', () => {
   };
   const db = jest.fn((table) => build(table));
   db.transaction = jest.fn(async (fn) => {
-    const trx = jest.fn((table) => build(table));
-    trx.raw = jest.fn(async () => ({ rows: [] }));
+    const trx = jest.fn((table) => build(table, true));
+    trx.raw = jest.fn(async (_sql, bindings) => {
+      if (String(bindings?.[0] || '').startsWith('customer-comms:')) mockState.events.push('comms-lock');
+      return { rows: [] };
+    });
     return fn(trx);
   });
   db.raw = jest.fn(async () => ({ rows: [] }));
@@ -93,6 +107,9 @@ beforeEach(() => {
   mockState.term = null;
   mockState.visits = [];
   mockState.patches = [];
+  mockState.trxCustomer = undefined;
+  mockState.trxVisits = undefined;
+  mockState.events = [];
 });
 
 describe('PUT /admin/customers/:id billingMode validation', () => {
@@ -156,5 +173,32 @@ describe('PUT /admin/customers/:id billingMode validation', () => {
     const ok = await save({ billingMode: null });
     expect(ok.status).toBe(200);
     expect(lanePatch()).toMatchObject({ billing_mode: null });
+  });
+  // Customers audit C01: a Schedule booking can commit an unpriced visit after
+  // the pre-transaction check. The save takes the comms lock the booking holds
+  // while it inserts visits, then judges the rules again on the locked row.
+  test('a visit booked after the pre-check refuses the switch under the lock', async () => {
+    mockState.customer.billing_mode = 'per_application';
+    mockState.customer.per_application_fee = '91.00';
+    mockState.trxVisits = [{ id: 's9', service_type: 'Pest Control', is_callback: false, scheduled_date: '2099-03-05' }];
+    const r = await save({ billingMode: 'per_visit' });
+    expect(r).toMatchObject({ status: 400, body: { error: "Per visit bills each visit's own price — 1 upcoming visit (first 2099-03-05) has no price and would complete unbilled. Price or cancel it before switching." } });
+    expect(lanePatch()).toBeUndefined();
+    expect(mockState.events.indexOf('comms-lock')).toBeGreaterThanOrEqual(0);
+    expect(mockState.events.indexOf('comms-lock')).toBeLessThan(mockState.events.indexOf('customer-row-lock'));
+  });
+
+  test('a monthly rate cleared before the lock refuses monthly membership', async () => {
+    mockState.customer.monthly_rate = 55;
+    mockState.trxCustomer = { ...mockState.customer, monthly_rate: 0 };
+    const r = await save({ billingMode: 'monthly_membership' });
+    expect(r).toMatchObject({ status: 400, body: { error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' } });
+    expect(lanePatch()).toBeUndefined();
+  });
+
+  test('a save without a billing type change takes no comms lock for it', async () => {
+    const r = await save({ crmNotes: 'Called back' });
+    expect(r.status).toBe(200);
+    expect(mockState.events).not.toContain('comms-lock');
   });
 });

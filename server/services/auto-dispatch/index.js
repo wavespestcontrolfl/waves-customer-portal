@@ -896,7 +896,9 @@ async function flagMissingGeo(service) {
       action: await audit.namedVisitAction(service.customer_id,
         [(who) => `fix the address pin for ${who}'s visit`, (who) => `fix ${who}'s address pin`],
         'fix the address pin on a visit'),
-      why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
+      why: service.routeOnly === true
+        ? `The ${shortDateET(`${date}T12:00:00Z`)} visit has no map pin, so its route cannot be checked until its address pin is fixed.`
+        : `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,
       subject: { type: 'visit', id: String(service.id) },
@@ -982,8 +984,9 @@ function stillLiveOn(row, date) {
   return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
     && row.customer_active !== false && !row.customer_deleted_at
     // Locked, excluded or customer-confirmed after pass 1: eligibility denies
-    // it outright, so it is no longer skipped for its pin (r21, r24 P2).
-    && !heldOutOfAutoDispatch(row);
+    // it outright, so it is no longer skipped for its pin (r21, r24 P2). A visit that is not a
+    // recurring child (GATE_ROUTE_WARNING_DETAIL) keeps its notice: the pin serves its route check.
+    && !(require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row) ? null : heldOutOfAutoDispatch(row));
 }
 
 async function stillMissingPin(run, picked) {
@@ -1004,6 +1007,16 @@ async function stillMissingPin(run, picked) {
 }
 
 async function raiseMissingGeoNotices(run) {
+  // GATE_ROUTE_WARNING_DETAIL: visits in the next week the run never loads (one-time, rodent, project,
+  // locked or confirmed) join the same lane when they have no pin. Read failure = the lane as before.
+  if (require('../scheduling/route-warning-detail').routeWarningDetailLive()) {
+    try {
+      const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
+      run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
+    }
+  }
   if (!run.missingGeoWanted.length) return;
   try {
     // Re-read every wanted visit BEFORE the budget picks, so a visit fixed

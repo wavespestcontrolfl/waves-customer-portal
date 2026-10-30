@@ -1,9 +1,14 @@
 // Weather-evidence reader and source checks shared by Inventory and Job Card.
 // The general label_verified_at stamp and all application rates stay untouched.
 const { gateEnvValue } = require('../config/feature-gates');
-const { currentEpaSourceStatus } = require('./epa-product-label');
+const { keptEpaSourceStatus } = require('./epa-label-check-keep');
 
 const WEATHER_FIELDS = ['minTempF', 'maxTempF', 'maxWindMph', 'rainFreeHours'];
+// Why a reviewed label is not current, for each EPA answer; no answer at all says "try again".
+const SOURCE_REASONS = {
+  superseded: 'EPA label changed — read and review the latest label',
+  inactive: 'EPA registration cancelled or label removed — review the product',
+};
 const SNAPSHOT_FIELDS = ['name', 'epa_reg_number', 'formulation', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rainfast_minutes', 'rain_free_hours'];
 
 function labelProductSnapshot(product) {
@@ -23,7 +28,7 @@ function reviewedWeather(product, sourceStatus) {
     return { limits: empty, verified: false, unresolved: true, reason: 'Label review revoked or product changed' };
   }
   if (sourceStatus !== 'current') {
-    return { limits: empty, verified: false, unresolved: true, reason: sourceStatus === 'superseded' ? 'EPA label changed — read and review the latest label' : 'Current EPA label could not be verified — try again' };
+    return { limits: empty, verified: false, unresolved: true, reason: SOURCE_REASONS[sourceStatus] || 'Current EPA label could not be verified — try again' };
   }
   const limits = {};
   let unresolved = false;
@@ -39,7 +44,8 @@ async function checkReviewedWeatherSources(products) {
   if (!gateEnvValue('GATE_LABEL_PIPELINE')) return {};
   const approved = products.filter((product) => product.label_weather_review?.active?.status === 'approved'
     && sameLabelProduct(product, product.label_weather_review.active.productSnapshot));
-  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await currentEpaSourceStatus(product.label_weather_review.active.source)])));
+  // A failed EPA check uses the last check that got an answer, up to 7 days old (epa-label-check-keep.js).
+  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await keptEpaSourceStatus(product.label_weather_review.active.source)])));
 }
 
-module.exports = { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct, reviewedWeather, checkReviewedWeatherSources };
+module.exports = { WEATHER_FIELDS, SOURCE_REASONS, labelProductSnapshot, sameLabelProduct, reviewedWeather, checkReviewedWeatherSources };

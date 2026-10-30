@@ -5425,6 +5425,8 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // the lock above releases still makes the write miss and 409, instead
       // of silently letting the former technician's move commit.
       requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
+      // GATE_SAVE_ROAD_BUY: only an admin's Quick Move buys road times.
+      ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
     });
 
     if (!result.ok) {
@@ -6411,6 +6413,10 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = !keepSlot;
+  // GATE_SAVE_ROAD_BUY: an ADMIN's move buys the Google road times its check
+  // and route number read, before the rebooker's transaction (the staff user
+  // pays). A technician never buys: no spender, no purchase.
+  if (actor.techRole === 'admin' && actor.technicianId) rescheduleOptions.roadSpender = actor.technicianId;
   // ...and a service already under way (en route / on site) is not rewound:
   // a move may override a live visit, a reassignment may not.
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
@@ -6676,6 +6682,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
+        // GATE_SAVE_ROAD_BUY: the admin's anchor hour buys its road times
+        // before the series transaction (a technician is refused above).
+        ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Same staleness fence via the series writer's own expectAnchor
         // mechanism, on the FULL pin the resolution read (date, start, end,
         // duration — rescheduleExpectPredicate, the shape the non-series
@@ -7455,6 +7464,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       jobId: req.params.id,
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
+      place: true, // GATE_ROUTE_CHECK_ASSIGN_SAVES: the office board numbers the stop
     });
     res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {

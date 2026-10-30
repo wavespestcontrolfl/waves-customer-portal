@@ -267,6 +267,8 @@ describe('POST /analyze', () => {
       // The prospect note is stored for admin, not echoed into model context/copy.
       const stored = inserts.lawn_diagnostics[0];
       expect(stored.ai_analysis).toContain('brown patches by the driveway');
+      // No score is posted here: the worst finding (moderate) sets it, never a 0 ("Needs attention").
+      expect(stored.overall_score).toBe(55);
       expect(mockLadder.mock.calls[0][0]).not.toHaveProperty('note');
     });
   });

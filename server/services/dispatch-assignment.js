@@ -146,7 +146,7 @@ async function flushDispatchQualityDates(qualityDates) {
   return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null, place } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -285,6 +285,15 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         // same tracking_key (codex P1, pre-push audit on 925e9e977).
         await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx, auto: true });
       }
+    }
+    // GATE_ROUTE_CHECK_ASSIGN_SAVES: the update above dropped the old stop
+    // number; an office board assign (`place: true`, only PUT /jobs/:id/assign)
+    // numbers the visit on the new technician's day in this same transaction,
+    // under the fences taken above (the advisory lock re-enters in one
+    // session). Other callers write their own route_order and never place.
+    // Gate off: touches nothing. Never throws; stop numbers only.
+    if (place === true && newTechId) {
+      await require('./scheduling/staff-save-route-check').placeAssignedVisit(assignmentTrx, { serviceId: jobId });
     }
   };
 

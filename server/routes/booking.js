@@ -418,6 +418,44 @@ function reserviceCandidateOutranks(candidate, existing) {
   return reserviceAdjustedScore(candidate) < reserviceAdjustedScore(existing);
 }
 
+// Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): the offer ranking for
+// `serviceLines` (capability categories), or null (today's offers). A plain
+// function so the gate/empty/failure branches stay out of buildBookingAvailability.
+// Fail-open: an unreadable map is logged and offers what today's code offers.
+async function loadLineOfferRanking(serviceLines) {
+  if (!Array.isArray(serviceLines) || !serviceLines.length) return null;
+  try {
+    return await require('../services/scheduling/line-technician').lineOfferRanking(db, { lines: serviceLines });
+  } catch (err) {
+    logger.warn(`[booking] line map offer ranking unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+// The find-time slots a line ranking keeps, lower rank first. Array#sort is stable,
+// so find-time's score order holds inside one rank. Without a ranking: `slots` itself.
+function orderByLineRank(slots, ranking) {
+  if (!ranking) return slots;
+  return slots
+    .map((slot) => ({ slot, rank: ranking.rankOf(slot.technician && slot.technician.id) }))
+    .filter((entry) => entry.rank !== null)
+    .sort((a, b) => a.rank - b.rank)
+    .map((entry) => entry.slot);
+}
+
+// A slot's line rank: 0 when no ranking is in play (every claim then ties, as today).
+function lineRankOf(ranking, slot) {
+  return ranking ? ranking.rankOf(slot.technician.id) : 0;
+}
+
+// Whether `candidate` (line rank `rank`) takes a date+start `existing` (rank
+// `heldRank`) already holds: a lower line rank always, a higher one never, a
+// tie by the re-service profile's own rule (first claim keeps it otherwise).
+function claimDisplaces(candidate, existing, rank, heldRank) {
+  if (rank !== heldRank) return rank < heldRank;
+  return reserviceCandidateOutranks(candidate, existing);
+}
+
 // Whether the re-service rank profile actually applies (the gate AND the
 // caller's opt-in). A plain function so every top-level call site is a
 // single non-branching assignment — keeps the branch itself out of
@@ -1633,8 +1671,15 @@ function detachVoiceRouteCheck(plan, candidates) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel }) {
+// `serviceLines`: opt-in capability categories of the service being booked
+// (GATE_SERVICE_LINE_MAP=live only; see loadLineOfferRanking). A mapped line
+// keeps only its home and gap technician's slots, home first at a start both
+// have. No geometry changes: grace, packing and signatures are untouched.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines }) {
   config = applySchedulingPolicy(config);
+  // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
+  // caller names `serviceLines`, the gate is live and a line has a technician set.
+  const lineRanking = await loadLineOfferRanking(serviceLines);
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
   // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
@@ -1846,9 +1891,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // (e.g. a packed day beating an empty one at the same start) displaces it,
   // so the empty-day penalty applies before this dedupe, not after.
   const keepsFirstClaim = (existing) => Boolean(existing) && !reserviceRankActive;
-  const claimSlot = (key, candidate) => {
+  // Line map LIVE: a gap technician's slot never displaces the home technician's
+  // at a date+start both have (rank 0 everywhere when the map is not in play).
+  const claimedLineRank = new Map();
+  const claimSlot = (key, candidate, lineRank = 0) => {
     const existing = candidateMap.get(key);
-    if (existing && !reserviceCandidateOutranks(candidate, existing)) return;
+    if (existing && !claimDisplaces(candidate, existing, lineRank, claimedLineRank.get(key))) return;
+    claimedLineRank.set(key, lineRank);
     candidateMap.set(key, candidate);
   };
 
@@ -1955,13 +2004,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
       end: minToTime12(endMin),
-    });
+    }, lineRankOf(lineRanking, slot));
   };
 
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
-  const offerSlots = graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []);
+  const offerSlots = orderByLineRank(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), lineRanking);
   for (const slot of offerSlots) {
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -2123,6 +2172,19 @@ function bookingOfferWindow(config, today) {
   };
 }
 
+// The capability categories ('general', 'lawn', ...) a /book funnel serviceKey
+// ('pest_control', 'pest_control+lawn_care') covers, unique; null unless the line
+// map is LIVE and the key names a line.
+function funnelServiceLines(serviceKey) {
+  const { lineMapLive } = require('../services/scheduling/line-technician');
+  if (!lineMapLive()) return null;
+  const { categoryForCatalogCategory } = require('../services/auto-dispatch/service-category');
+  const lines = normalizeBookingServiceKeys(serviceKey)
+    .map((key) => categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key]))
+    .filter(Boolean);
+  return lines.length ? [...new Set(lines)].sort() : null;
+}
+
 // The /book funnel's offer builder — GET /availability, POST /find-slots and
 // the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
 // through it, so an offer and its later createSelfBooking commit come from
@@ -2134,10 +2196,14 @@ function bookingOfferWindow(config, today) {
 // tag either way, so a gate flip between this mint and /confirm can't be
 // redeemed under the wrong policy.
 function buildFunnelAvailability(args) {
+  // Service-line map LIVE: the funnel service's lines, so /availability, /find-slots, the
+  // capture-intent revalidation and both pin readers offer (and re-check) one technician set.
+  // Gate off or shadow: nothing named, no query.
+  const serviceLines = funnelServiceLines(args.serviceKey);
   // `appendOnly` (the portal assistant's availabilityForPin call alone): its commit, confirmBooking, stores an
   // unassigned visit with no certified route order, so a mid-route insertion offer could not be honored.
   // Undefined for every other caller: the gate's value, as before.
-  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() && !args.appendOnly });
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() && !args.appendOnly, ...(serviceLines ? { serviceLines } : {}) });
 }
 
 // The customer a /book offer may be made to, or null. The ONE eligibility
@@ -7212,6 +7278,8 @@ module.exports._internals = {
   resolveOfferCoords,
   customerBookingLocation,
   buildBookingAvailability,
+  buildFunnelAvailability,
+  funnelServiceLines,
   availabilityForExistingCustomer,
   availabilityForPin,
   bookableOfferCustomer,

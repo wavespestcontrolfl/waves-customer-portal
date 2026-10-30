@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), currentEpaSourceStatus: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), checkEpaSource: jest.fn() }));
 
 const jobCard = require('../services/job-card');
 
@@ -626,8 +626,8 @@ describe('mixForProduct', () => {
     ['2026-09-04', null, null, false, 'No property pin on file — no forecast'],
     ['2026-09-04', 27.4, -82.5, true, 'Current EPA label could not be verified — try again'],
   ])('mix source checks run only when the verdict can use them (%s, %s)', async (date, lat, lng, shouldCheck, reason) => {
-    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
-    sourceCheck.mockReset().mockResolvedValue('unavailable');
+    const sourceCheck = require('../services/epa-product-label').checkEpaSource;
+    sourceCheck.mockReset().mockResolvedValue({ status: 'unavailable', checkedAt: 0 });
     process.env.GATE_LABEL_PIPELINE = 'true';
     try {
       const reviewed = { ...product, name: 'Synthetic label product', epa_reg_number: '123-456', formulation: 'SC' };
@@ -1120,7 +1120,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     process.env.GATE_PROTOCOL_SOP = 'true';
     process.env.GATE_SPRAY_RAIN_RULES = 'true';
-    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
+    const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
       const guide = async (oil) => {
         const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' }, products_catalog: [oil] });
@@ -1133,7 +1133,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(shown.mix).toEqual([1.28, 1.28]);
       expect(shown.summary).not.toMatch(/Mix withheld/);
       // An approved review whose facts are conditional stays open: it withholds the mix whatever the forecast.
-      sourceCheck.mockReset().mockResolvedValue('current');
+      sourceCheck.mockReset().mockResolvedValue({ status: 'current', checkedAt: 0 });
       process.env.GATE_LABEL_PIPELINE = 'true';
       const conditional = { status: 'conditional', value: null, quote: 'Do not apply if rain is expected (sites vary).', page: 3 };
       const reviewed = { ...oil };

@@ -37,7 +37,12 @@ describe('trigger registry catalog contract', () => {
     } else {
       expect(rule.expiryDays).toBe(rule.severity === 'fyi' ? 7 : 30);
     }
-    expect(Object.keys(rule).filter((k) => !['area', 'severity', 'who', 'doneWhen', 'closedBy', 'expiryDays'].includes(k))).toEqual([]);
+    expect(Object.keys(rule).filter((k) => !['area', 'severity', 'who', 'doneWhen', 'closedBy', 'expiryDays', 'contact', 'promise'].includes(k))).toEqual([]);
+    // Customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1): only `true`, never both, and only
+    // on a needs-you type for a person: a customer alert is never an FYI, a fault or Claude's.
+    for (const flag of ['contact', 'promise']) if (rule[flag] !== undefined) expect(rule[flag]).toBe(true);
+    expect(rule.contact === true && rule.promise === true).toBe(false);
+    if (rule.contact || rule.promise) expect([rule.severity, rule.who]).toEqual(['needs-you', 'person']);
     expect(trigger.informational).toBeUndefined(); // superseded by severity 'fyi'
   });
 
@@ -45,6 +50,16 @@ describe('trigger registry catalog contract', () => {
     for (const [, trigger] of entries) {
       if (trigger.rule.severity === 'fyi') expect(trigger.rule.doneWhen).toBeUndefined();
     }
+  });
+
+  test('the customer declarations are exactly these (a change here changes what rings once GATE_CUSTOMER_ALERTS_RING is on)', () => {
+    const declared = (flag) => entries.filter(([, t]) => t.rule[flag] === true).map(([key]) => key).sort();
+    expect(declared('contact')).toEqual([
+      'appointment_reschedule_intent', 'bundle_quote_requested', 'customer_email_received', 'customer_missed_call',
+      'customer_voicemail_callback', 'new_lead', 'relay_unbooked_call', 'reservice_self_booked', 'sandy_transfer_no_context',
+      'sms_reply',
+    ]);
+    expect(declared('promise')).toEqual(['call_commitment_overdue', 'promise_chaser', 'sms_operational_followup']);
   });
 
   test('the fyi set is the 7 former informational types', () => {

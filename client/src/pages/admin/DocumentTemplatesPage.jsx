@@ -68,13 +68,6 @@ const DEFAULT_PREVIEW_CONTEXT = {
   },
 };
 
-const DEFAULT_SEND_VALUES = {
-  serviceName: "Quarterly Pest Control",
-  agreementStartDate: "2026-06-10",
-  serviceDate: "2026-06-10",
-  inspectionDate: "2026-06-10",
-};
-
 const BULK_AUDIENCES = [
   { value: "active_pest", label: "Active pest customers" },
   { value: "active_lawn", label: "Active lawn customers" },
@@ -97,7 +90,12 @@ const BULK_CHANNELS = [
 function api(path, options = {}) {
   return rawAdminFetch(path, options).then(async (res) => {
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      // An issue refused for unresolved merge fields names them, so staff
+      // know which Values to fill in.
+      const missing = body.unresolvedVariables?.length ? ` Missing: ${body.unresolvedVariables.join(", ")}.` : "";
+      throw new Error(`${body.error || `HTTP ${res.status}`}${missing}`);
+    }
     return body;
   });
 }
@@ -126,6 +124,30 @@ function extractVariables(text) {
     return _match;
   });
   return [...found].sort();
+}
+
+// The merge fields Create link fills from Values: the server fills customer.*
+// and business.* from the record. Read from the active version, the text an
+// issue renders.
+function issueValueFields(version) {
+  return extractVariables(`${version?.title || ""}\n${version?.body || ""}`)
+    .filter((key) => !key.startsWith("customer.") && !key.startsWith("business."));
+}
+
+// Values shaped like those fields, e.g. {"agreement": {"start_date": ""}}.
+// A placeholder only: it is never sent.
+function valuesExample(fields) {
+  const example = {};
+  for (const key of fields) {
+    const parts = key.split(".");
+    let node = example;
+    for (const part of parts.slice(0, -1)) {
+      if (!node[part] || typeof node[part] !== "object") node[part] = {};
+      node = node[part];
+    }
+    node[parts[parts.length - 1]] = "";
+  }
+  return JSON.stringify(example, null, 2);
 }
 
 function safeJsonParse(text, fallback = {}) {
@@ -184,6 +206,24 @@ function versionFromApi(version, template) {
   };
 }
 
+function draftsFromDetail(data) {
+  return {
+    template: templateFromApi(data.template),
+    version: versionFromApi(data.template?.activeVersion || data.versions?.[0], data.template),
+  };
+}
+
+// Saving one part of a template reloads both. The other part keeps its
+// unsaved edits: a field that differs from the saved value it was loaded
+// from keeps the edit, and every other field takes the fresh saved value.
+function keepUnsavedEdits(saved, draft, next) {
+  const merged = { ...next };
+  for (const key of Object.keys(draft)) {
+    if (JSON.stringify(draft[key]) !== JSON.stringify(saved[key])) merged[key] = draft[key];
+  }
+  return merged;
+}
+
 // `embedded` (under ContractsPage): the hub owns the header card, so this
 // page hands its category tabs + actions up via `onSecondaryNav` instead of
 // rendering its own header. Standalone rendering is unchanged.
@@ -208,8 +248,11 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [customerQuery, setCustomerQuery] = useState("");
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [customerSearchError, setCustomerSearchError] = useState("");
+  const [customerSearchAttempt, setCustomerSearchAttempt] = useState(0);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
-  const [sendValues, setSendValues] = useState(JSON.stringify(DEFAULT_SEND_VALUES, null, 2));
+  // Starts empty: a real document never gets sample values staff did not enter.
+  const [sendValues, setSendValues] = useState("");
   const [sendAllowUnresolved, setSendAllowUnresolved] = useState(false);
   const [sendPropertyAddress, setSendPropertyAddress] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
@@ -224,13 +267,26 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkPreviewLoading, setBulkPreviewLoading] = useState(false);
   const editorRef = useRef(null);
   const listRequestRef = useRef(0);
   const listPendingRef = useRef(null);
   const detailRequestRef = useRef(0);
+  const bulkPreviewRequestRef = useRef(0);
   const lastLoadedCategoryRef = useRef(null);
   const newModeRef = useRef(newMode);
   newModeRef.current = newMode;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+
+  // A bulk filter or template change means the shown preview, and any preview
+  // still in flight, describes another audience: drop it so a late response
+  // cannot bring it back, and Send waits for a fresh preview.
+  const invalidateBulkPreview = useCallback(() => {
+    bulkPreviewRequestRef.current += 1;
+    setBulkPreview(null);
+    setBulkPreviewLoading(false);
+  }, []);
 
   // On the single-column mobile layout the editor renders below the template
   // list, so selecting a template or starting a new one updates content that
@@ -274,7 +330,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setVersionDraft(EMPTY_VERSION);
         setPreview(null);
         setSigningUrl("");
-        setBulkPreview(null);
+        invalidateBulkPreview();
         setBulkResult(null);
         setDetailError("");
       }
@@ -290,23 +346,26 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setLoading(false);
       }
     }
-  }, [category]);
+  }, [category, invalidateBulkPreview]);
 
-  const loadDetail = useCallback(async (key) => {
+  // keepUnsaved: "template" or "version" — the part that was NOT just saved,
+  // whose unsaved edits survive the reload (see keepUnsavedEdits).
+  const loadDetail = useCallback(async (key, { keepUnsaved = null } = {}) => {
     if (!key || newMode) return;
     const request = ++detailRequestRef.current;
+    const saved = keepUnsaved && detailRef.current ? draftsFromDetail(detailRef.current) : null;
     setDetailError("");
     try {
       const data = await api(`/admin/document-templates/${encodeURIComponent(key)}`);
       if (request !== detailRequestRef.current) return;
       setDetail(data);
-      const nextTemplate = templateFromApi(data.template);
-      const nextVersion = versionFromApi(data.template?.activeVersion || data.versions?.[0], data.template);
-      setTemplateDraft(nextTemplate);
-      setVersionDraft(nextVersion);
+      const next = draftsFromDetail(data);
+      const nextTemplate = next.template;
+      setTemplateDraft((draft) => (keepUnsaved === "template" && saved ? keepUnsavedEdits(saved.template, draft, nextTemplate) : nextTemplate));
+      setVersionDraft((draft) => (keepUnsaved === "version" && saved ? keepUnsavedEdits(saved.version, draft, next.version) : next.version));
       setPreview(null);
       setSigningUrl("");
-      setBulkPreview(null);
+      invalidateBulkPreview();
       setBulkResult(null);
       if (nextTemplate.templateKey?.includes("lawn")) {
         setBulkGuideType("lawn");
@@ -321,7 +380,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setDetailError(err.message || "Could not load document template");
       }
     }
-  }, [newMode]);
+  }, [newMode, invalidateBulkPreview]);
 
   useEffect(() => {
     loadTemplates();
@@ -341,6 +400,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
   useEffect(() => {
     const term = customerQuery.trim();
+    setCustomerSearchError("");
     if (selectedCustomer && term === customerSearchLabel(selectedCustomer)) {
       setCustomerResults([]);
       setCustomerLoading(false);
@@ -359,7 +419,12 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         const data = await api(`/admin/customers?search=${encodeURIComponent(term)}&limit=8&sort=name&suggest=1`);
         if (!cancelled) setCustomerResults(data.customers || []);
       } catch {
-        if (!cancelled) setCustomerResults([]);
+        // A failed search is not "no matching customers": say so, keep the
+        // query, and offer a retry.
+        if (!cancelled) {
+          setCustomerResults([]);
+          setCustomerSearchError("Customer search failed.");
+        }
       } finally {
         if (!cancelled) setCustomerLoading(false);
       }
@@ -369,7 +434,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [customerQuery, selectedCustomer]);
+  }, [customerQuery, selectedCustomer, customerSearchAttempt]);
 
   const activeVersion = detail?.template?.activeVersion;
   const selectedCustomerId = selectedCustomer?.id || sendCustomerId.trim();
@@ -387,12 +452,14 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       ...extractVariables(versionDraft.body),
     ])].sort();
   }, [templateDraft.variables, versionDraft.title, versionDraft.body]);
+  const issueFields = useMemo(() => issueValueFields(activeVersion), [activeVersion]);
   const bulkEnabled = Boolean(!newMode
     && templateDraft.templateKey
     && templateDraft.category === "marketing"
     && templateDraft.documentType === "customer_guide"
     && templateDraft.requiresSignature === false);
   const bulkSendableCount = bulkPreview?.counts?.sendable || 0;
+  const bulkBusy = bulkLoading || bulkPreviewLoading;
 
   const updateTemplate = (key, value) => {
     setTemplateDraft((prev) => ({ ...prev, [key]: value }));
@@ -417,7 +484,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setCustomerQuery("");
     setCustomerResults([]);
     setSelectedCustomer(null);
-    setBulkPreview(null);
+    invalidateBulkPreview();
     setBulkResult(null);
     setToast("");
     setListError("");
@@ -458,7 +525,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         });
         setToast("Template saved");
         await loadTemplates();
-        await loadDetail(templateDraft.templateKey);
+        await loadDetail(templateDraft.templateKey, { keepUnsaved: "version" });
       }
     } catch (err) {
       setError(err.message || "Could not save template");
@@ -483,7 +550,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       });
       setToast("Version published");
       await loadTemplates();
-      await loadDetail(templateDraft.templateKey);
+      await loadDetail(templateDraft.templateKey, { keepUnsaved: "template" });
     } catch (err) {
       setError(err.message || "Could not publish version");
     } finally {
@@ -503,9 +570,13 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setSaving(true);
     setError("");
     try {
+      // The text in the editor, unsaved edits included — not the saved version.
       const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/preview`, {
         method: "POST",
-        body: { context: safeJsonParse(previewContext, DEFAULT_PREVIEW_CONTEXT) },
+        body: {
+          context: safeJsonParse(previewContext, DEFAULT_PREVIEW_CONTEXT),
+          draft: { title: versionDraft.title, body: versionDraft.body },
+        },
       });
       setPreview(data.rendered);
     } catch (err) {
@@ -543,10 +614,18 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
   const copySigningUrl = async () => {
     if (!signingUrl) return;
-    await navigator.clipboard?.writeText(signingUrl).catch(() => {});
-    setToast("Document link copied");
+    setToast("");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(signingUrl);
+      setError("");
+      setToast("Document link copied");
+    } catch {
+      setError("Could not copy the link. Select the link above and copy it.");
+    }
   };
 
+  // Values must parse: a guide never goes out with values staff did not enter.
   const bulkPayload = () => ({
     audience: bulkAudience,
     guideType: bulkGuideType,
@@ -556,42 +635,66 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     days: Number(bulkDays) || 30,
     limit: Number(bulkLimit) || 100,
     skipRecentDays: Number(bulkSkipRecentDays) || 0,
-    values: safeJsonParse(sendValues, DEFAULT_SEND_VALUES),
+    values: parseJsonOrThrow(sendValues, "Values"),
     allowUnresolved: sendAllowUnresolved,
   });
 
   const runBulkPreview = async ({ silent = false } = {}) => {
     if (!bulkEnabled) return;
-    setBulkLoading(true);
     setError("");
     if (!silent) {
       setToast("");
       setBulkResult(null);
     }
+    const templateKey = templateDraft.templateKey;
+    const request = ++bulkPreviewRequestRef.current;
+    setBulkPreviewLoading(true);
     try {
-      const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/bulk-preview`, {
+      const payload = bulkPayload();
+      const data = await api(`/admin/document-templates/${encodeURIComponent(templateKey)}/bulk-preview`, {
         method: "POST",
-        body: bulkPayload(),
+        body: payload,
       });
-      setBulkPreview(data);
+      // An input or the template changed, or a newer preview started, while
+      // this one was in flight: its counts and sample are another audience's.
+      if (request !== bulkPreviewRequestRef.current) return;
+      // Send batch sends exactly this reviewed request.
+      setBulkPreview({ ...data, reviewed: { templateKey, payload } });
       if (!silent) setToast("Bulk audience preview ready");
     } catch (err) {
-      setError(err.message || "Could not preview bulk send");
+      if (request === bulkPreviewRequestRef.current) setError(err.message || "Could not preview bulk send");
     } finally {
-      setBulkLoading(false);
+      if (request === bulkPreviewRequestRef.current) setBulkPreviewLoading(false);
     }
   };
 
   const sendBulkGuide = async () => {
-    if (!bulkEnabled || !bulkPreview || bulkSendableCount <= 0) return;
     setConfirmBulkSend(false);
-    setBulkLoading(true);
+    if (!bulkEnabled || !bulkPreview || bulkSendableCount <= 0) return;
+    const { templateKey, payload } = bulkPreview.reviewed;
     setError("");
     setToast("");
+    let current;
     try {
-      const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/bulk-send`, {
+      current = bulkPayload();
+    } catch (err) {
+      setError(err.message);
+      return;
+    }
+    // The confirmation covers the reviewed request only. Anything changed
+    // since the preview (Values included) needs a fresh preview first.
+    if (templateKey !== templateDraft.templateKey || JSON.stringify(current) !== JSON.stringify(payload)) {
+      invalidateBulkPreview();
+      setError("The bulk send settings or Values changed after the preview. Run Preview again before sending.");
+      return;
+    }
+    setBulkLoading(true);
+    try {
+      const data = await api(`/admin/document-templates/${encodeURIComponent(templateKey)}/bulk-send`, {
         method: "POST",
-        body: bulkPayload(),
+        // The server recounts the audience and refuses when its count is
+        // not the one staff confirmed.
+        body: { ...payload, expectedSendable: bulkSendableCount },
       });
       setBulkResult(data);
       setToast(`Bulk send complete: ${numberLabel(data.summary?.sentEmail || 0)} email, ${numberLabel(data.summary?.sentSms || 0)} SMS`);
@@ -849,6 +952,9 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   <div className="mb-3">
                     <div className="ui-label text-ink-secondary">Preview context</div>
                     <div className="mt-1 text-ui-body text-zinc-900">Rendered output</div>
+                    <div className="mt-1 text-ui-body text-ink-secondary">
+                      Preview renders the text in the editor, unsaved edits included, with this sample data. Customer documents never use it.
+                    </div>
                   </div>
                   <Textarea
                     value={previewContext}
@@ -953,7 +1059,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                           )}
                         </div>
                       )}
-                      {!selectedCustomer && customerQuery.trim().length >= 2 && !customerLoading && customerResults.length === 0 && (
+                      {customerSearchError && (
+                        <ActionFeedback error onRetry={() => setCustomerSearchAttempt((attempt) => attempt + 1)}>{customerSearchError}</ActionFeedback>
+                      )}
+                      {!selectedCustomer && customerQuery.trim().length >= 2 && !customerLoading && !customerSearchError && customerResults.length === 0 && (
                         <div className="text-ui-body text-ink-secondary">No matching customers found.</div>
                       )}
                     </div>
@@ -964,8 +1073,13 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                         placeholder="Overrides the customer's primary address on the document"
                       />
                     </Field>
-                    <Field label="Values">
-                      <Textarea value={sendValues} onChange={(event) => setSendValues(event.target.value)} className="min-h-32" />
+                    <Field label="Values" help={issueFields.length ? `Fields this document takes from Values: ${issueFields.join(", ")}.` : undefined}>
+                      <Textarea
+                        value={sendValues}
+                        onChange={(event) => setSendValues(event.target.value)}
+                        placeholder={valuesExample(issueFields)}
+                        className="min-h-32"
+                      />
                     </Field>
                     <Checkbox label="Allow unresolved fields" checked={sendAllowUnresolved} onChange={(event) => setSendAllowUnresolved(event.target.checked)} />
                   </div>
@@ -993,11 +1107,11 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                       <div className="mt-1 text-ui-body text-zinc-900">Preview audience and send</div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="secondary" onClick={runBulkPreview} disabled={!bulkEnabled || bulkLoading}>
+                      <Button size="sm" variant="secondary" onClick={runBulkPreview} disabled={!bulkEnabled || bulkBusy}>
                         <Eye size={14} className="mr-1.5" />
                         Preview
                       </Button>
-                      <Button size="sm" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setConfirmBulkSend(true); }} disabled={!bulkEnabled || bulkLoading || !bulkPreview || bulkSendableCount <= 0}>
+                      <Button size="sm" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setConfirmBulkSend(true); }} disabled={!bulkEnabled || bulkBusy || !bulkPreview || bulkSendableCount <= 0}>
                         <Send size={14} className="mr-1.5" />
                         Send batch
                       </Button>
@@ -1019,7 +1133,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                               setBulkAudience(next);
                               if (next === "active_lawn") setBulkGuideType("lawn");
                               if (next === "active_pest") setBulkGuideType("pest");
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           >
                             {BULK_AUDIENCES.map((option) => (
@@ -1032,7 +1146,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkGuideType}
                             onChange={(event) => {
                               setBulkGuideType(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           >
                             {BULK_GUIDE_TYPES.map((option) => (
@@ -1045,7 +1159,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkChannel}
                             onChange={(event) => {
                               setBulkChannel(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           >
                             {BULK_CHANNELS.map((option) => (
@@ -1061,7 +1175,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkLimit}
                             onChange={(event) => {
                               setBulkLimit(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           />
                         </Field>
@@ -1070,7 +1184,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkSearch}
                             onChange={(event) => {
                               setBulkSearch(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                             placeholder="Optional name, phone, email, address"
                           />
@@ -1080,7 +1194,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkCity}
                             onChange={(event) => {
                               setBulkCity(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                             placeholder="Optional city"
                           />
@@ -1093,7 +1207,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkDays}
                             onChange={(event) => {
                               setBulkDays(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           />
                         </Field>
@@ -1105,7 +1219,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             value={bulkSkipRecentDays}
                             onChange={(event) => {
                               setBulkSkipRecentDays(event.target.value);
-                              setBulkPreview(null);
+                              invalidateBulkPreview();
                             }}
                           />
                         </Field>
@@ -1182,7 +1296,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         <DialogBody>Send {templateDraft.name} to {numberLabel(bulkSendableCount)} customer{bulkSendableCount === 1 ? "" : "s"}?</DialogBody>
         <DialogFooter>
           <Button variant="secondary" onClick={() => setConfirmBulkSend(false)}>Cancel</Button>
-          <Button onClick={sendBulkGuide} disabled={bulkLoading}>Send batch</Button>
+          <Button onClick={sendBulkGuide} disabled={bulkBusy}>Send batch</Button>
         </DialogFooter>
       </Dialog>
     </UiSurface>

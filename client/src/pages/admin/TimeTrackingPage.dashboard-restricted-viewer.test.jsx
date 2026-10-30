@@ -89,6 +89,9 @@ it("codex round-3 P2: hides the OT summary text and the bar chart's overtime spl
 
   await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
   expect(screen.queryByText(/OT:/)).not.toBeInTheDocument();
+  // No Reg/OT key either: this viewer's bars carry no overtime split.
+  expect(screen.queryByText("Reg")).not.toBeInTheDocument();
+  expect(screen.queryByText("OT")).not.toBeInTheDocument();
 });
 
 it("control: an admin viewer sees the OT summary text", async () => {
@@ -102,6 +105,45 @@ it("control: an admin viewer sees the OT summary text", async () => {
 
   await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
   expect(screen.getByText(/OT:/)).toBeInTheDocument();
+  expect(screen.getByText("Reg")).toBeInTheDocument();
+  expect(screen.getByText("OT")).toBeInTheDocument();
+});
+
+it("team overtime is each technician's own overtime, never one 40-hour line across the team", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  const day = (techId, date, minutes, ot) => ({
+    technician_id: techId,
+    tech_name: techId,
+    work_date: date,
+    total_shift_minutes: minutes,
+    overtime_minutes: ot,
+    unpaid_meal_minutes: 0,
+  });
+  // Two technicians at 30 h each: 60 h for the team, no one past 40 h.
+  stubFetch({
+    ...BASE_RESPONSE,
+    viewerRole: "admin",
+    weekDailies: ["tech-1", "tech-2"].flatMap((id) =>
+      ["2026-09-22", "2026-09-23", "2026-09-24"].map((date) => day(id, date, 600, 0))),
+  });
+  const { unmount } = render(<DashboardTab showToast={() => {}} />);
+  const summary = await screen.findByText(/Week total:/);
+  expect(summary).toHaveTextContent("Week total: 60.0h");
+  expect(summary).toHaveTextContent("OT: 0.0h");
+  unmount();
+
+  // One technician at 45 h: the 5 h the server put on the last day is the OT.
+  stubFetch({
+    ...BASE_RESPONSE,
+    viewerRole: "admin",
+    weekDailies: [
+      day("tech-1", "2026-09-22", 900, 0),
+      day("tech-1", "2026-09-23", 900, 0),
+      day("tech-1", "2026-09-24", 900, 300),
+    ],
+  });
+  render(<DashboardTab showToast={() => {}} />);
+  expect(await screen.findByText(/Week total:/)).toHaveTextContent("OT: 5.0h");
 });
 
 it("control: an admin viewer still sees every tile (Revenue/Jobs Done/Utilization included)", async () => {
