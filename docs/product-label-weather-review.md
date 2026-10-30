@@ -54,13 +54,17 @@ Inventory, Job Card, and mix-calculator reads validate active evidence against
 the latest PPLS filename and PDF checksum. A newer document, changed bytes, or
 cancelled registration makes the review inactive and the weather verdict UNKNOWN.
 Checks are coalesced in a bounded 128-entry cache for at most 60 seconds; no PDF
-bytes are retained there. Approval always bypasses that cache. An unavailable EPA
-source uses the last check that got an answer for the same filename and checksum,
-up to 7 days old (owner 2026-10-30, `epa-label-check-keep.js`): each answer is
-kept in `system_settings` (`epa_label_check:*`, at most one write an hour while it
-is unchanged), so a deploy does not lose it. With no such answer the review is
-inactive and the verdict UNKNOWN. Approval never uses the kept answer. Source
-requests happen outside catalog transactions and make no model calls.
+bytes are retained there. Approval always bypasses that cache. EPA's own record of
+a cancelled or inactive registration, or of a label it no longer lists, is an
+answer (`inactive`, "EPA registration cancelled or label removed"), not an outage.
+An unavailable EPA source (no answer) uses the last check that got an answer for
+the same filename and checksum, up to 7 days old (owner 2026-10-30,
+`epa-label-check-keep.js`): each answer is kept in `system_settings`
+(`epa_label_check:*`, at most one write an hour while it is unchanged), so a deploy
+does not lose it, and a kept `superseded` or `inactive` is never replaced by an
+older `current`. With no such answer the review is inactive and the verdict
+UNKNOWN. Approval never uses the kept answer. Source requests happen outside
+catalog transactions and make no model calls.
 
 Conditional restrictions remain UNKNOWN unless another reviewed limit already
 establishes HOLD. If no numeric limit is established, the card stays UNKNOWN.

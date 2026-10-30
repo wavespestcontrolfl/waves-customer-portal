@@ -65,14 +65,16 @@ function activeIngredientNamesOf(item) {
 function selectEpaSource(payload, registration) {
   const matches = (payload?.items || []).filter((item) => item.eparegno === registration);
   if (matches.length !== 1 || matches[0].product_status !== 'Active' || matches[0].cancel_flag !== 'No') {
-    throw labelError('No single active EPA registration matched. Check the catalog registration.');
+    // inactive: EPA's own record for this number says it is cancelled or not active. An empty or doubled answer is
+    // not proof of that (currentEpaSourceStatus reads it as an outage).
+    throw Object.assign(labelError('No single active EPA registration matched. Check the catalog registration.'), { inactive: matches.length === 1 });
   }
   const item = matches[0];
   const documents = (item.pdffiles || []).filter((doc) => {
     const match = PDF_RE.exec(doc.pdffile || '');
     return match && `${Number(match[1])}-${Number(match[2])}` === registration && doc.epa_reg_num === registration;
   }).sort((a, b) => b.pdffile.localeCompare(a.pdffile));
-  if (!documents.length) throw labelError('No supported label PDF matches this registration.');
+  if (!documents.length) throw Object.assign(labelError('No supported label PDF matches this registration.'), { inactive: true });
   return {
     registration, productName: String(item.productname || '').slice(0, 300), brandNames: brandNamesOf(item),
     activeIngredientNames: activeIngredientNamesOf(item),
@@ -238,7 +240,11 @@ async function currentEpaSourceStatus(source, { refresh = false } = {}) {
       if (latest.filename !== source.filename) return 'superseded';
       const document = await downloadEpaLabel(latest);
       return document.sha256 === source.sha256 ? 'current' : 'superseded';
-    } catch { return 'unavailable'; }
+    } catch (err) {
+      // 'inactive' is EPA's answer (the registration is cancelled or not active, or its label is no longer listed),
+      // not an outage: the kept last check (epa-label-check-keep.js) never covers it.
+      return err?.inactive ? 'inactive' : 'unavailable';
+    }
   })();
   sourceChecks.set(key, { promise, expiresAt: Date.now() + 60000 });
   if (sourceChecks.size > 128) sourceChecks.delete(sourceChecks.keys().next().value);

@@ -206,6 +206,7 @@ async function decideLabelReview(productId, actorId, { candidateId, decision, id
   if (decision === 'approve') {
     const sourceStatus = await currentEpaSourceStatus(draft.source, { refresh: true });
     if (sourceStatus === 'unavailable') throw labelError('EPA source is unavailable. Try again later.', 502);
+    if (sourceStatus === 'inactive') throw labelError('EPA lists this registration as cancelled or its label as removed. Check the product before approval.', 409);
     if (sourceStatus !== 'current') throw labelError('The source document changed. Extract it again before approval.', 409);
   }
   return db.transaction(async (trx) => {

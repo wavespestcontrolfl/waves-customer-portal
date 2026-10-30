@@ -112,7 +112,17 @@ test('EPA unavailability during uncached approval returns a retryable error with
   expect(row.label_weather_review.active).toBeUndefined();
 });
 
-test.each(['superseded', 'unavailable'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
+test('a cancelled registration or a removed label refuses approval with its reason', async () => {
+  const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  currentEpaSourceStatus.mockResolvedValueOnce('inactive');
+  await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true }))
+    .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/cancelled/) });
+  expect(row.label_weather_review.active).toBeUndefined();
+  expect(reviewedWeather({ ...row, label_weather_review: { active: { status: 'approved', productSnapshot: labelProductSnapshot(row) } } }, 'inactive').reason)
+    .toBe('EPA registration cancelled or label removed — review the product');
+});
+
+test.each(['superseded', 'unavailable', 'inactive'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true });
   currentEpaSourceStatus.mockResolvedValue(status);

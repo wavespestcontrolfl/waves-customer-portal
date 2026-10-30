@@ -4,6 +4,7 @@
 // label_verified_at, the catalog rate columns, protocols or pricing.
 const { gateEnvValue } = require('../config/feature-gates');
 const { keptEpaSourceStatus } = require('./epa-label-check-keep');
+const { SOURCE_REASONS } = require('./product-label-weather');
 
 const MAX_DIRECTIONS = 40;
 // Catalog weather columns are not part of rate identity: editing a wind limit
@@ -68,7 +69,7 @@ function reviewedRates(product, sourceStatus) {
     return { directions: [], verified: false, reason: 'Rate review revoked or product changed' };
   }
   if (sourceStatus !== 'current') {
-    return { directions: [], verified: false, reason: sourceStatus === 'superseded' ? 'EPA label changed — read and review the latest label' : 'Current EPA label could not be verified — try again' };
+    return { directions: [], verified: false, reason: SOURCE_REASONS[sourceStatus] || 'Current EPA label could not be verified — try again' };
   }
   return { directions: review.facts?.directions || [], verified: true, source: review.source, reviewedAt: review.reviewedAt };
 }

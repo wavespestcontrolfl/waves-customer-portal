@@ -87,7 +87,7 @@ test('a weather-column edit does not retire a rate review; an identity edit does
   expect(reviewedRates(row, 'current')).toMatchObject({ verified: false, directions: [] });
 });
 
-test.each(['superseded', 'unavailable'])('approved directions are withheld when the EPA source is %s', async (status) => {
+test.each(['superseded', 'unavailable', 'inactive'])('approved directions are withheld when the EPA source is %s', async (status) => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID, 'rates');
   await approve(review.draft.id);
   expect(reviewedRates(row, status)).toMatchObject({ verified: false, directions: [] });

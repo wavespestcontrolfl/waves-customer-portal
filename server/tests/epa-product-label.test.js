@@ -114,6 +114,19 @@ test('a changed PDF checksum and an unavailable EPA lookup never count as curren
   expect(await currentEpaSourceStatus(source)).toBe('unavailable');
 });
 
+test('EPA\'s own record of a cancelled registration or a removed label is "inactive"; an empty answer is an outage', async () => {
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: 'synthetic-pdf-bytes' };
+  let answer;
+  jest.spyOn(Date, 'now').mockReturnValue(5000000);
+  jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify(answer)));
+  const check = (items) => { answer = { items }; return currentEpaSourceStatus(source, { refresh: true }); };
+  expect(await check([{ ...row(), cancel_flag: 'Yes' }])).toBe('inactive');
+  expect(await check([{ ...row(), product_status: 'Cancelled' }])).toBe('inactive');
+  expect(await check([{ ...row(), pdffiles: [] }])).toBe('inactive');
+  expect(await check([])).toBe('unavailable');
+  expect(await check([row(), row()])).toBe('unavailable');
+});
+
 describe('findEpaRegistrationByName — exact brand-name proof, never containment', () => {
   const recordFor = (registration, productname, alts, extra = {}) => ({
     eparegno: registration, productname, product_status: 'Active', cancel_flag: 'No',

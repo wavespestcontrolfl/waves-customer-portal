@@ -58,6 +58,15 @@ test('a changed label stays changed; another label file or checksum never borrow
   expect(await keptEpaSourceStatus({ ...source, filename: '091234-00401-20260101.pdf' })).toBe('unavailable');
 });
 
+test('a cancelled registration is kept too: current, then cancelled, then an outage reads cancelled (pre-push audit P1)', async () => {
+  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('inactive').mockResolvedValue('unavailable');
+  expect(await keptEpaSourceStatus(source)).toBe('current');
+  now += 60000;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+  now += DAY;
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+});
+
 test('the same answer is written at most once an hour', async () => {
   currentEpaSourceStatus.mockResolvedValue('current');
   await keptEpaSourceStatus(source);

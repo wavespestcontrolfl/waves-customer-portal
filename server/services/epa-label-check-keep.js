@@ -4,8 +4,10 @@
 // 7 days"). Production often fails to reach EPA: on 10-28 and 10-29, Antapex read "Current EPA label could not be
 // verified" on 10 of its 11 visit-days, so the card showed none of its reviewed weather limits. A deploy clears the
 // 60-second memory cache (epa-product-label.js), so the answer is kept in system_settings. Only a failed check
-// ('unavailable') reads it back, and only for the same label file and checksum. Approval never uses it: it checks
-// fresh (product-label-review.js). A database error never fails the check; the fresh answer stands.
+// ('unavailable': EPA did not answer) reads it back, and only for the same label file and checksum. An answer that
+// the label changed or the registration is no longer active is kept like 'current', so an outage never revives an
+// older 'current'. Approval never uses it: it checks fresh (product-label-review.js). A database error never fails
+// the check; the fresh answer stands.
 const { createHash } = require('crypto');
 const db = require('../models/db');
 const { currentEpaSourceStatus } = require('./epa-product-label');
@@ -38,7 +40,7 @@ async function keptEpaSourceStatus(source) {
     const row = await db('system_settings').where({ key }).first();
     const kept = row?.value ? JSON.parse(row.value) : null;
     const fresh = kept && kept.sha256 === source.sha256 && kept.filename === source.filename && now - Date.parse(kept.checkedAt) < KEEP_MS;
-    return fresh && ['current', 'superseded'].includes(kept.status) ? kept.status : status;
+    return fresh && ['current', 'superseded', 'inactive'].includes(kept.status) ? kept.status : status;
   } catch {
     return status;
   }
