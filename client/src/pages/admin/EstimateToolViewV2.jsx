@@ -67,6 +67,7 @@ import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/Scop
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
+import { leadServiceAddress } from "../../utils/format-address";
 
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -2863,13 +2864,14 @@ export default function EstimateToolViewV2({
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
     const hadSelection = !!(form.customerId || form.leadId || linkedLead || existingCustomerMatch);
     const previousPick = pickedContactRef.current;
+    const leadAddress = leadServiceAddress(lead);
     setForm((f) => ({
       ...f,
       leadId: lead.id,
       customerId: "",
       propertyId: "",
-      ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
-      address: lead.address || f.address,
+      ...(leadAddress && leadAddress !== f.address ? clearedPropertyFields() : {}),
+      address: leadAddress || f.address,
       customerName: name || f.customerName || "",
       // A value the lead does not have keeps what the operator TYPED, and
       // nothing else: not while another person is selected (hadSelection),

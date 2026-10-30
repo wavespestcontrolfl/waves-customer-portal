@@ -40,6 +40,7 @@ import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
 import { etDateString } from "../../lib/timezone";
 import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
+import { leadServiceAddress } from "../../utils/format-address";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const CONTACT_EVIDENCE_LABELS = new Map([
@@ -384,7 +385,8 @@ function leadEstimateParams(lead) {
   if (customerName) params.set("customerName", customerName);
   if (lead.phone) params.set("customerPhone", lead.phone);
   if (lead.email) params.set("customerEmail", lead.email);
-  if (lead.address) params.set("address", lead.address);
+  const address = leadServiceAddress(lead);
+  if (address) params.set("address", address);
   if (lead.service_interest)
     params.set("serviceInterest", lead.service_interest);
   return params;
