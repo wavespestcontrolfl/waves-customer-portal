@@ -3944,8 +3944,8 @@ the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 the agent's `get_lead_details` tool strips it; a missing, blank or
 non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
-validated against a FIXED allowlist (`server/routes/lead-webhook.js`
-`sanitizeHeardAbout`): `google_search`, `google_maps`, `chatgpt`,
+validated against a FIXED allowlist (`server/services/heard-about.js`
+`sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
 `other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
 `truck_yard_sign`, `other`. Any other value — including free text — is
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
@@ -4656,9 +4656,20 @@ Attribution (referrer/UTM/click-ids) resolves through
 `server/services/lead-source-resolver.js`, which shares its AI-assistant
 referral detection table with `/api/webhooks/lead`'s classifier (see that
 entry above) — a ChatGPT/Perplexity/Gemini/Copilot/Claude referral
-classifies `ai_assistant` here identically. `heard_about` (also described
-under `/api/webhooks/lead` above) is NOT currently read by this endpoint —
-only `/api/webhooks/lead` / `/api/leads` persist it.
+classifies `ai_assistant` here identically. This endpoint also accepts the
+OPTIONAL `heard_about` / `heard_about_prompt` pair described under
+`/api/webhooks/lead` above (owner-approved 2026-10-30, "count customers from
+AI"; the online quote wizard asks it on its contact step). Both go through
+the same shared module (`server/services/heard-about.js`), so the allowlist,
+the silent-drop of unknown values, and the AI-only 500-character prompt are
+identical; the request never fails or changes shape because of them. A new
+lead row stores them; a lead re-attached through the voicemail prefill token
+takes them only while its `heard_about` is empty (a recorded answer is never
+replaced). STAFF-ONLY like the webhook's copy: neither joins `message`, the
+snapshot, or any customer-facing text. The same pair on
+`/api/public/quote/calculate` fills a still-empty answer only, so either
+stage may carry it. Unknown body fields are not rejected here (the route
+destructures what it reads), so Astro and the portal deploy in either order.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
@@ -4753,6 +4764,17 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Optional `heard_about` / `heard_about_prompt` (owner-approved 2026-10-30,
+"count customers from AI"): the wizard's self-reported "How did you hear
+about us?" answer and its AI-only "What did you ask it?" follow-up, validated
+by the shared `server/services/heard-about.js` allowlist (see
+`/api/webhooks/lead`). A new lead row stores them; on the lead-token update
+they land only while the row's `heard_about` is empty, in the same UPDATE as
+the rest of the stage, so a recorded answer (the property-lookup stage's, or
+a staff correction) and its prompt are never overwritten. Unknown values are
+silently dropped, the question is never required, and the response is
+unchanged; the pair is staff-only, never part of `extracted_data`, the
+quote text, or any customer-facing copy.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
