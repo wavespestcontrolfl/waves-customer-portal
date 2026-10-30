@@ -48,4 +48,29 @@ function attachStopRain(services, date, hourlyByZone) {
   }
 }
 
-module.exports = { attachStopRain, zoneHourlyOutlooks, hourKey };
+const HOUR_MS = 3600000;
+
+/**
+ * The board's weather bar (owner 2026-10-30: NWS, like the stop figures, in
+ * place of Open-Meteo): the outlook hour that holds `nowMs` at one point,
+ * bounded the same way. `{}` when no hour holds it, so the bar reads
+ * "Weather unavailable"; a missing reading stays null, never a made-up 0.
+ */
+async function weatherNow(lat, lng, nowMs = Date.now()) {
+  const hours = await boundedHourlyRain(lat, lng);
+  const hour = (Array.isArray(hours) ? hours : []).find((h) => {
+    const start = Date.parse(h?.startTime);
+    return start <= nowMs && nowMs < start + HOUR_MS;
+  });
+  if (!hour) return {};
+  const whole = (v) => (Number.isFinite(v) ? Math.round(v) : null);
+  return {
+    temp: whole(hour.temperatureF),
+    windSpeed: whole(hour.windMph),
+    rainProbability: Number.isFinite(hour.rainChance) ? hour.rainChance : null,
+    // Backup hours carry source 'open-meteo'; NWS hours carry none.
+    source: hour.source || 'nws',
+  };
+}
+
+module.exports = { attachStopRain, zoneHourlyOutlooks, weatherNow, hourKey };
