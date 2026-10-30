@@ -262,7 +262,6 @@ class BudgetManager {
         const area = listed.target_area || 'general';
         let pct;
         let newMode;
-        let holdReason = null;
         if (gap) {
           pct = gap.capacity_pct;
         } else {
@@ -279,14 +278,7 @@ class BudgetManager {
             newMode = 'stop'; // 1% budget (never pause — kills QS)
           }
 
-          if (gapMode === 'shadow') {
-            gapCampaigns.push({ id: listed.id, old_rule_mode: newMode });
-            const held = activeBudgetHold(listed.metadata, todayEt);
-            if (held) {
-              newMode = held.mode;
-              holdReason = holdLogReason(held);
-            }
-          }
+          if (gapMode === 'shadow') gapCampaigns.push({ id: listed.id, old_rule_mode: newMode });
         }
 
         // The guard→push→persist below runs against a FOR UPDATE re-read of
@@ -304,10 +296,16 @@ class BudgetManager {
           const lockAcquiredAt = new Date();
           if (!campaign || campaign.status !== 'active') return;
 
-          // Live gap rule: decide from the LOCKED row, so a hold set or cleared
-          // (or a mode changed) since the list read is what the decision sees.
-          let transitionReason = holdReason;
-          if (gap) {
+          // Holds and the live gap rule decide from the LOCKED row, so a hold set
+          // or cleared (or a mode changed) since the list read is what they see.
+          let transitionReason = null;
+          if (gapMode === 'shadow') {
+            const held = activeBudgetHold(campaign.metadata, todayEt);
+            if (held) {
+              newMode = held.mode;
+              transitionReason = holdLogReason(held);
+            }
+          } else if (gap) {
             const held = activeBudgetHold(campaign.metadata, todayEt);
             if (held) {
               newMode = held.mode;

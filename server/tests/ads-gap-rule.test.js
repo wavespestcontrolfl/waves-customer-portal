@@ -22,6 +22,8 @@ jest.mock('../services/ads/google-ads', () => ({
 const mockCampaignUpdate = jest.fn().mockResolvedValue(1);
 const mockLogInsert = jest.fn().mockResolvedValue([]);
 let campaignRows = [];
+// The FOR UPDATE re-read; null = same as the list read.
+let lockedRow = null;
 let targetsRow = {};
 let stopRows = [];
 let settingsStore = {};
@@ -35,7 +37,7 @@ const mockDb = jest.fn((table) => {
     const builder = {
       where: jest.fn(() => builder),
       forUpdate: jest.fn(() => builder),
-      first: jest.fn(() => Promise.resolve(campaignRows[0] ?? null)),
+      first: jest.fn(() => Promise.resolve(lockedRow ?? campaignRows[0] ?? null)),
       update: mockCampaignUpdate,
       then: (resolve, reject) => Promise.resolve(campaignRows).then(resolve, reject),
     };
@@ -118,6 +120,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGapMode = 'off';
   campaignRows = [];
+  lockedRow = null;
   targetsRow = {};
   stopRows = [];
   settingsStore = {};
@@ -339,6 +342,15 @@ describe('adjustBudgets: shadow', () => {
     campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5', metadata: { budget_hold: { mode: 'base', until: '2026-10-28' } } })];
     await BudgetManager.adjustBudgets();
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.05); // old rule: stop
+  });
+
+  test('the hold is read from the locked row, not the earlier list read', async () => {
+    // Set between the list read and the row lock: the locked row is what counts.
+    campaignRows = [campaign({ budget_mode: 'stop', daily_budget_current: '0.05' })];
+    lockedRow = campaign({ budget_mode: 'stop', daily_budget_current: '0.05', metadata: { budget_hold: { mode: 'base', until: '2026-10-30' } } });
+    await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 5);
+    expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({ new_mode: 'base', reason: 'Hold: base until 2026-10-30 (set in the portal)' }));
   });
 
   test('a failed record write does not fail the budget run', async () => {
