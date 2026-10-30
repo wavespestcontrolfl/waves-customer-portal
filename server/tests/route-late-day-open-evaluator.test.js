@@ -135,17 +135,19 @@ describe('lateDays on: the hours that add no new late stop are listed and flagge
 describe('the insertion margin (GATE_STAFF_ROUTE_INSERTION) on a late day', () => {
   const { _internals } = require('../services/scheduling/arrival-route');
 
-  test('every place is tried: the hour that puts the visit first is listed, the hours that make A late are not', () => {
+  test('every place is tried: the hours that make A late, or push the already-late B more than 15 minutes later, are not listed', () => {
     process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     const { placements } = enumerateArrivalPlacements(context(LATE_DAY, prospective('09:00', 60)),
       { durationMinutes: 60, earliestStartMin: 8 * 60, latestServiceEndMin: 19 * 60, lateDays: true });
     const starts = placements.map((p) => p.windowStart);
-    // At 08:00 the visit goes ahead of A and B; B (already late) lands far past its window, which the
-    // 15 minute insertion margin would refuse if an already-late stop counted.
-    expect(starts).toContain('08:00');
+    // 08:00 puts the visit ahead of A and B: A stays on time, but B (already late) would arrive far later
+    // than it does without the visit, past the 15 minute cap. 09:00 and 10:00 make A late.
+    expect(starts).not.toContain('08:00');
     expect(starts).not.toContain('09:00');
     expect(starts).not.toContain('10:00');
-    expect(placements.find((p) => p.windowStart === '08:00').fit.routeOrder.slice(0, 3)).toEqual(['__candidate__', 'A', 'B']);
+    // The hours after B crowd nobody and are listed (the visit goes last).
+    expect(starts).toContain('15:00');
+    expect(placements.find((p) => p.windowStart === '15:00').fit.routeOrder.slice(-1)).toEqual(['__candidate__']);
     // Without the option the same insertion check lists nothing on this day.
     const plain = enumerateArrivalPlacements(context(LATE_DAY, prospective('09:00', 60)),
       { durationMinutes: 60, earliestStartMin: 8 * 60, latestServiceEndMin: 19 * 60 });

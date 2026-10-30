@@ -618,10 +618,18 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
  *  - dayEndExceeded: at some position the route runs past the day end. */
 const EXPLAIN_MAX_STOPS = 30;
 
-// The stops that arrive after their promised window in `order` (day end ignored), or null when the order cannot be simulated.
-function lateStopIds(simulate, order) {
+// The stops that arrive after their promised window in `order` (day end ignored) with how late each is,
+// as a Map of id -> lateMinutes, or null when the order cannot be simulated.
+function lateStopMinutes(simulate, order) {
   const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
-  return simulation ? simulation.arrivals.filter(arrival => arrival.lateMinutes > 0).map(arrival => arrival.id) : null;
+  return simulation ? new Map(simulation.arrivals.filter(arrival => arrival.lateMinutes > 0)
+    .map(arrival => [arrival.id, arrival.lateMinutes])) : null;
+}
+
+// The ids alone: the stops that arrive after their promised window in `order`, or null when it cannot be simulated.
+function lateStopIds(simulate, order) {
+  const late = lateStopMinutes(simulate, order);
+  return late ? [...late.keys()] : null;
 }
 
 function explainLateness({ sequencers, groupedPending, simulate, target }) {
@@ -657,19 +665,25 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
  *  Re-selects a winner among the same candidate orders and the same blockers, but lets a stop
  *  that is already late stay late. Same definition of late as explainLateness (the 2-hour
  *  arrival promise, baselineLate = stops late without the new visit): an order wins only when
- *  the new visit keeps its OWN window and no stop that is on time without it becomes late.
- *  A late stop after the new visit is not held to the insertion margin. Null = not a day that
- *  is already late, or no order qualifies: the refusal stands. */
+ *  the new visit keeps its OWN window, no stop that is on time without it becomes late, and no
+ *  stop that is already late arrives more than INSERTION_MARGIN_MINUTES (15) later than it does
+ *  without the new visit (its smallest baseline lateness across the orders tried, so the cap is
+ *  strict). A late stop after the new visit is not held to the insertion margin. Null = not a
+ *  day that is already late, or no order qualifies: the refusal stands. */
 function lateDayWinner(orders, { sequencers, groupedPending, simulate, ...selectArgs }) {
-  const baselineLists = sequencers.map(sequence => lateStopIds(simulate, sequence(groupedPending)));
-  if (baselineLists.some(list => !list?.length)) return null;
-  const baselineLate = new Set(baselineLists.flat());
+  const baselineLists = sequencers.map(sequence => lateStopMinutes(simulate, sequence(groupedPending)));
+  if (baselineLists.some(list => !list?.size)) return null;
+  const baselineLate = new Map();
+  for (const list of baselineLists) {
+    for (const [id, minutes] of list) baselineLate.set(id, Math.min(minutes, baselineLate.get(id) ?? Infinity));
+  }
   const tolerantSimulate = (order, usedLegs, extra = {}) => {
     const simulation = simulate(order, usedLegs, { ...extra, reportLate: true });
-    return simulation && simulation.arrivals.every(arrival => !(arrival.lateMinutes > 0) || baselineLate.has(arrival.id))
+    return simulation && simulation.arrivals.every(arrival => !(arrival.lateMinutes > 0)
+      || (baselineLate.has(arrival.id) && arrival.lateMinutes <= baselineLate.get(arrival.id) + INSERTION_MARGIN_MINUTES))
       ? simulation : null;
   };
-  return selectWinningOrder(orders, { ...selectArgs, simulate: tolerantSimulate, marginSkipIds: baselineLate }).winner;
+  return selectWinningOrder(orders, { ...selectArgs, simulate: tolerantSimulate, marginSkipIds: new Set(baselineLate.keys()) }).winner;
 }
 
 /** Shape the certified winner into evaluateArrivalPlacement's public
