@@ -2611,6 +2611,80 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
     });
   });
 
+  // GATE_SAVE_ROAD_BUY (owner 2026-10-29): an ADMIN's booking or move buys the
+  // placement's Google road times BEFORE its transaction; a technician's bar
+  // never does. The helpers read their own gate and are spied: the purchase is
+  // proven in save-road-buy.test.js.
+  describe('GATE_SAVE_ROAD_BUY wiring', () => {
+    const roadBuy = require('../services/scheduling/save-road-buy');
+    const admin = { isAdmin: true, technicianId: 'staff-1' };
+    let createBuy;
+    let moveBuy;
+    beforeEach(() => {
+      createBuy = jest.spyOn(roadBuy, 'buyRoadsBeforeSave').mockResolvedValue({ lookups: 0 });
+      moveBuy = jest.spyOn(roadBuy, 'buyRoadsForVisitSave').mockResolvedValue({ lookups: 0 });
+    });
+    afterEach(() => { createBuy.mockRestore(); moveBuy.mockRestore(); });
+
+    const book = (context) => {
+      const located = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', latitude: '27.5', longitude: '-82.4', ...MEMBER_BILLING }) });
+      wireDb({
+        customers: [located(), located()],
+        technicians: [1, 2, 3].map(() => chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true }) })),
+        technician_absences: [chain(), chain()],
+        scheduled_services: [chain(), chain({ returning: jest.fn().mockResolvedValue([{ id: 'appt-1', technician_id: 'tech-1', window_start: '10:00:00', window_end: '11:00:00' }]) })],
+      });
+      return executeTool('create_appointment', {
+        customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', technician_id: 'tech-1',
+      }, context);
+    };
+
+    test('create_appointment: an admin books after buying the hour\'s road times, outside the transaction', async () => {
+      const result = await book(admin);
+      expect(result).toMatchObject({ success: true });
+      expect(createBuy).toHaveBeenCalledTimes(1);
+      expect(createBuy.mock.calls[0][0]).toMatchObject({
+        spender: 'staff-1', date: '2099-01-15', technicianId: 'tech-1', windowStart: '10:00', windowEnd: '11:00',
+        prospective: { lat: '27.5', lng: '-82.4', service_type: 'Pest Control' },
+      });
+      expect(createBuy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+    });
+
+    test('create_appointment: a technician, or no actor, buys nothing', async () => {
+      await book({ isAdmin: false, technicianId: 'tech-9' });
+      await book({});
+      expect(createBuy).not.toHaveBeenCalled();
+    });
+
+    test('reschedule_appointment: an admin move buys its landing hour first, outside the transaction', async () => {
+      const appt = { id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-14',
+        window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control' };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), chain()],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM' }, admin);
+      expect(moveBuy).toHaveBeenCalledTimes(1);
+      expect(moveBuy.mock.calls[0][0]).toMatchObject({
+        spender: 'staff-1', serviceId: 'svc-1',
+        changes: { scheduled_date: '2099-01-15', window_start: '10:00', window_end: '11:00' },
+      });
+      expect(moveBuy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+    });
+
+    test('reschedule_appointment: a technician buys nothing', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', customer_id: 'cust-1', status: 'confirmed',
+          scheduled_date: '2099-01-14', window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control' }) }), chain(), chain()],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM' }, { isAdmin: false, technicianId: 'tech-9' });
+      expect(moveBuy).not.toHaveBeenCalled();
+    });
+  });
+
   // Placement first, then the route warning (Codex P1 on 9837f0c3d4). The REAL
   // arrival evaluator on an in-memory route (helpers/in-memory-route.js): read
   // where it is saved the visit misses a promise that the staff placement then

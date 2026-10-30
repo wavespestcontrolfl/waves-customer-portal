@@ -34,11 +34,16 @@ jest.mock('../services/scheduling/arrival-route', () => ({
   placeMovedVisit: jest.fn(),
 }));
 jest.mock('../routes/booking', () => ({ _internals: { bookInsertionOffersLive: jest.fn() } }));
+jest.mock('../services/scheduling/save-road-buy', () => ({
+  buyRoadsBeforeSave: jest.fn().mockResolvedValue({ lookups: 0 }),
+  buyRoadsForVisitSave: jest.fn().mockResolvedValue({ lookups: 0 }),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, placeMovedVisit } = require('../services/scheduling/arrival-route');
 const { bookInsertionOffersLive } = require('../routes/booking')._internals;
+const { buyRoadsBeforeSave, buyRoadsForVisitSave } = require('../services/scheduling/save-road-buy');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
@@ -138,6 +143,40 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     expect(require('../services/scheduling/occupancy').findConflictingVisits).toHaveBeenCalledWith(
       expect.objectContaining({ arrivalWindow: expect.objectContaining({ serviceId: 'svc-1', roads: 'cache' }) }));
     expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeGreaterThan(trxScheduled.update.mock.invocationCallOrder[0]);
+  });
+
+  // GATE_SAVE_ROAD_BUY: an admin's move (the dispatch route's roadSpender) buys
+  // the placement's road times BEFORE the save transaction opens, never inside it.
+  test('an admin move buys its road times before the transaction, for the landing hour', async () => {
+    wireRescheduleMocks(service());
+    await move(TARGET, { start: '09:00', end: '10:00' }, { ...STAFF, roadSpender: 'staff-1' });
+    expect(buyRoadsBeforeSave).toHaveBeenCalledTimes(1);
+    expect(buyRoadsBeforeSave).toHaveBeenCalledWith(expect.objectContaining({
+      spender: 'staff-1', serviceId: 'svc-1', date: TARGET, technicianId: TECH, windowStart: '09:00', check: true,
+      changes: expect.objectContaining({ window_start: '09:00' }),
+    }));
+    expect(buyRoadsBeforeSave.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+  });
+
+  test('a move with no spender (a technician, a customer page, an automatic mover) buys nothing', async () => {
+    wireRescheduleMocks(service());
+    await move(TARGET, { start: '09:00', end: '10:00' }, STAFF);
+    wireRescheduleMocks(service());
+    await move(TARGET, { start: '09:00', end: '10:00' }, { overlapAdvisory: true, placeInRoute: true });
+    expect(buyRoadsBeforeSave).not.toHaveBeenCalled();
+    expect(buyRoadsForVisitSave).not.toHaveBeenCalled();
+  });
+
+  test('Quick Move buys for the route number only: no advisory check runs there', async () => {
+    wireRescheduleMocks(service());
+    await move(TARGET, { start: '09:00', end: '10:00' }, { overlapAdvisory: true, placeInRoute: true, roadSpender: 'staff-1' });
+    expect(buyRoadsBeforeSave).toHaveBeenCalledWith(expect.objectContaining({ spender: 'staff-1', check: false }));
+  });
+
+  test('a caller that numbers no day and runs no staff check buys nothing, spender or not', async () => {
+    wireRescheduleMocks(service());
+    await move(TARGET, { start: '09:00', end: '10:00' }, { overlapAdvisory: true, roadSpender: 'staff-1' });
+    expect(buyRoadsBeforeSave).not.toHaveBeenCalled();
   });
 
   test('a same-day start change is a move too', async () => {
