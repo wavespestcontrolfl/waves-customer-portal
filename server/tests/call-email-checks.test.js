@@ -29,14 +29,16 @@ describe('callEmailChecksLive', () => {
 
 describe('spelledEmailStatements', () => {
   test.each([
-    ['hyphen-joined letters across a space', 'It is B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com', [{ local: 'brightonkayla', provider: 'gmail' }]],
-    ['letters then a number', 'D-R-A-Y 22 at yahoo.com.', [{ local: 'dray22', provider: 'yahoo' }]],
-    ['letters and digits all hyphen-joined', 'D-R-A-Y-2-2 at yahoo.com', [{ local: 'dray22', provider: 'yahoo' }]],
-    ['phonetic markers', 'T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com', [{ local: 'thebaitshopgm', provider: 'icloud' }]],
-    ['digit words and a spoken dot', 'J-A-N-E dot D-O-E one two at gmail', [{ local: 'jane.doe12', provider: 'gmail' }]],
-    ['a name spelled elsewhere is not a statement', 'Clay, C-L-A-Y. And the email? D-R-A-Y 22 at yahoo.com', [{ local: 'dray22', provider: 'yahoo' }]],
+    ['hyphen-joined letters across a space', 'It is B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com', [{ local: 'brightonkayla', domain: 'gmail.com' }]],
+    ['letters then a number', 'D-R-A-Y 22 at yahoo.com.', [{ local: 'dray22', domain: 'yahoo.com' }]],
+    ['letters and digits all hyphen-joined', 'D-R-A-Y-2-2 at yahoo.com', [{ local: 'dray22', domain: 'yahoo.com' }]],
+    ['phonetic markers', 'T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com', [{ local: 'thebaitshopgm', domain: 'icloud.com' }]],
+    ['digit words and a spoken dot', 'J-A-N-E dot D-O-E one two at gmail dot com', [{ local: 'jane.doe12', domain: 'gmail.com' }]],
+    ['a spoken multi-part domain is kept whole', 'J-A-N-E at yahoo dot co dot uk', [{ local: 'jane', domain: 'yahoo.co.uk' }]],
+    ['a bare provider word stays bare', 'J-A-N-E at yahoo', [{ local: 'jane', domain: 'yahoo' }]],
+    ['a name spelled elsewhere is not a statement', 'Clay, C-L-A-Y. And the email? D-R-A-Y 22 at yahoo.com', [{ local: 'dray22', domain: 'yahoo.com' }]],
     ['a spelled name followed by words is not a statement', 'Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com', []],
-    ['a word between two spelled parts leaves only the last part', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [{ local: 'rowe', provider: 'hotmail' }]],
+    ['a word between two spelled parts leaves only the last part', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', [{ local: 'rowe', domain: 'hotmail.com' }]],
     ['fewer than three letters is not a spelling', 'J-O at gmail', []],
   ])('%s', (_label, text, statements) => {
     expect(spelledEmailStatements(text)).toEqual(statements);
@@ -56,19 +58,23 @@ describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
     ['the spelled letters are a different address', ['S-M-Y-T-H-E at gmail'], 'smithe@gmail.com', false],
     ['a spelled last name never vouches for a said email', ['Let me spell my last name. S-M-I-T-H. My email is smith at yahoo dot com'], 'smith@me.com', false],
     ['the spelling names a different provider', ['B-R-I-G-H-T at yahoo dot com'], 'bright@gmail.com', false],
+    ['a dotted foreign domain is not the .com address', ['J-A-N-E at yahoo.co.uk'], 'jane@yahoo.com', false],
+    ['a spoken-dot foreign domain is not the .com address', ['J-A-N-E at yahoo dot co dot uk'], 'jane@yahoo.com', false],
+    ['the full spoken domain matches', ['J-A-N-E at yahoo dot com'], 'jane@yahoo.com', true],
+    ['a bare provider word is ambiguous and keeps the card', ['B-R-I-G-H-T at gmail'], 'bright@gmail.com', false],
   ])('%s', (_label, transcripts, email, want) => {
     expect(spelledEmailMatches({ transcripts, email })).toBe(want);
   });
 
   test('a corrected spelling keeps the card, whichever spelling was saved', () => {
-    const transcripts = ['S-M-I-T-H at gmail, no sorry, S-M-Y-T-H at gmail'];
+    const transcripts = ['S-M-I-T-H at gmail.com, no sorry, S-M-Y-T-H at gmail.com'];
     expect(spelledEmailMatches({ transcripts, email: 'smith@gmail.com' })).toBe(false);
     expect(spelledEmailMatches({ transcripts, email: 'smyth@gmail.com' })).toBe(false);
   });
 
   test('a near-miss spelling in either transcript means the letters are not settled', () => {
     expect(spelledEmailMatches({
-      transcripts: ['S-M-I-T-H-Y at gmail', 'S-M-I-T-H-Y-J at gmail'],
+      transcripts: ['S-M-I-T-H-Y at gmail.com', 'S-M-I-T-H-Y-J at gmail.com'],
       email: 'smithy@gmail.com',
     })).toBe(false);
   });

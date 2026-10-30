@@ -41,11 +41,25 @@ function spelledUnit(token) {
   return null;
 }
 
+// The whole domain spoken after "at": "gmail.com", "yahoo.co.uk", or the
+// spoken form "gmail dot com" / "yahoo dot co dot uk". A bare provider word
+// ("at gmail") stays bare, so it never equals a full domain.
+function spokenDomainFrom(tokens, start) {
+  let domain = String(tokens[start] || '').toLowerCase().replace(/[^a-z0-9.-]+$/, '').replace(/\.+$/, '');
+  if (!/^[a-z0-9][a-z0-9.-]*$/.test(domain)) return null;
+  for (let j = start + 1; /^(?:dot|period|point)$/i.test(tokens[j] || ''); j += 2) {
+    const label = String(tokens[j + 1] || '').toLowerCase().replace(/[^a-z0-9-]+$/, '');
+    if (!/^[a-z0-9-]+$/.test(label)) break;
+    domain += `.${label}`;
+  }
+  return domain;
+}
+
 // The spelled email statements in one transcript: a spelled run (three or more
-// spelled letters) that ends directly on "at" / "@", paired with the provider
-// word right after it. "F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
-// [{ local: 'fletchershyla', provider: 'gmail' }]; "S-C-L-A-Y 18 at yahoo.com" ->
-// [{ local: 'sclay18', provider: 'yahoo' }]. A spelled name that runs into a
+// spelled letters) that ends directly on "at" / "@", paired with the whole
+// domain spoken right after it. "F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
+// [{ local: 'fletchershyla', domain: 'gmail.com' }]; "S-C-L-A-Y 18 at yahoo.com" ->
+// [{ local: 'sclay18', domain: 'yahoo.com' }]. A spelled name that runs into a
 // word ("S-M-I-T-H. My email is ...") is not a statement: the evidence must be
 // the email itself, not a name spelled elsewhere on the call.
 function spelledEmailStatements(text) {
@@ -57,8 +71,8 @@ function spelledEmailStatements(text) {
   const reset = () => { run = ''; letters = 0; };
   for (let i = 0; i < tokens.length; i += 1) {
     if (/^(?:at|@)$/i.test(tokens[i])) {
-      const provider = String(tokens[i + 1] || '').toLowerCase().replace(/[^a-z0-9.]+$/, '').split('.')[0];
-      if (letters >= MIN_SPELLED_LETTERS && provider) statements.push({ local: run, provider });
+      const domain = spokenDomainFrom(tokens, i + 1);
+      if (letters >= MIN_SPELLED_LETTERS && domain) statements.push({ local: run, domain });
       reset();
       continue;
     }
@@ -78,7 +92,7 @@ const KNOWN_DOMAIN_SET = new Set(KNOWN_DOMAINS);
 
 // True when the call has at least one spelled email statement and EVERY spelled
 // email statement in either transcript is this exact address (local part and
-// provider), on a known consumer mail provider. A correction ("S-M-I-T-H at
+// the whole spoken domain), on a known consumer mail provider. A correction ("S-M-I-T-H at
 // gmail, no, S-M-Y-T-H at gmail") or the two transcripts hearing different
 // letters keeps the read-back card. A custom domain is never trusted this way:
 // it is usually said, not spelled, and a misheard one can belong to someone else.
@@ -90,9 +104,8 @@ function spelledEmailMatches({ transcripts = [], email } = {}) {
   const domain = value.slice(at + 1);
   if (!KNOWN_DOMAIN_SET.has(domain)) return false;
   if ((local.match(/[a-z]/g) || []).length < MIN_SPELLED_LETTERS) return false;
-  const provider = domain.split('.')[0];
   const statements = transcripts.filter(Boolean).flatMap((t) => spelledEmailStatements(String(t)));
-  return statements.length > 0 && statements.every((st) => st.local === local && st.provider === provider);
+  return statements.length > 0 && statements.every((st) => st.local === local && st.domain === domain);
 }
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
