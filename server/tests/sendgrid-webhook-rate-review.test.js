@@ -210,6 +210,18 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
   const deadDomainBounce = () => event({ type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' });
   afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
 
+  test('the message row: gate off schedules a provider retry; gate on records a bounce with no retry', () => {
+    const { computeEmailMessageEventUpdates } = require('../routes/webhooks-sendgrid');
+    const message = { ...MESSAGE, template_key: 'appointment.confirmation' };
+    const off = computeEmailMessageEventUpdates(deadDomainBounce(), message);
+    expect(off.status).toBe('failed');
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    const on = computeEmailMessageEventUpdates(deadDomainBounce(), message);
+    expect(on.status).toBe('bounced');
+    expect(on.bounced_at).toBeInstanceOf(Date);
+    expect(on.provider_retry_next_at).toBeUndefined();
+  });
+
   test.each([
     ['gate off: the sender-retry rail, no recovery', undefined, { retry: 1, recovery: 0 }],
     ['gate on: the bounce recovery lane, no retry alert', 'true', { retry: 0, recovery: 1 }],

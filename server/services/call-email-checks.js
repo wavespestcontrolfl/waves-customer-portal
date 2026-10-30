@@ -11,7 +11,7 @@
 //     quarantine arbiter's DNS evidence (MX, implicit A/AAAA, RFC 7505 null MX).
 //   - isNoMailServerReason: a SendGrid failure that says the domain has no mail
 //     server, which SendGrid files as a "blocked" bounce.
-const { KNOWN_DOMAINS, damerauLevenshtein } = require('../utils/email-typo-correction');
+const { KNOWN_DOMAINS } = require('../utils/email-typo-correction');
 
 // Safe against suites that mock feature-gates with a partial object.
 function callEmailChecksLive() {
@@ -41,44 +41,47 @@ function spelledUnit(token) {
   return null;
 }
 
-// The runs a transcript spells: "F-L-E-T-C-H-E-R S-H-Y-L-A at gmail" -> ["fletchershyla"],
-// "S-C-L-A-Y 18" -> ["sclay18"]. A run counts only with at least three spelled letters.
-function spelledRuns(text) {
+// The spelled email statements in one transcript: a spelled run (three or more
+// spelled letters) that ends directly on "at" / "@", paired with the provider
+// word right after it. "F-L-E-T-C-H-E-R S-H-Y-L-A at gmail dot com" ->
+// [{ local: 'fletchershyla', provider: 'gmail' }]; "S-C-L-A-Y 18 at yahoo.com" ->
+// [{ local: 'sclay18', provider: 'yahoo' }]. A spelled name that runs into a
+// word ("S-M-I-T-H. My email is ...") is not a statement: the evidence must be
+// the email itself, not a name spelled elsewhere on the call.
+function spelledEmailStatements(text) {
   const reduced = String(text || '').replace(PHONETIC_MARKER, '$1');
-  const runs = [];
+  const tokens = reduced.split(/[\s,;:!?"“”()]+/).filter(Boolean);
+  const statements = [];
   let run = '';
   let letters = 0;
-  const close = () => {
-    if (letters >= MIN_SPELLED_LETTERS) runs.push(run);
-    run = '';
-    letters = 0;
-  };
-  for (const raw of reduced.split(/[\s,;:!?"“”()]+/).filter(Boolean)) {
+  const reset = () => { run = ''; letters = 0; };
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (/^(?:at|@)$/i.test(tokens[i])) {
+      const provider = String(tokens[i + 1] || '').toLowerCase().replace(/[^a-z0-9.]+$/, '').split('.')[0];
+      if (letters >= MIN_SPELLED_LETTERS && provider) statements.push({ local: run, provider });
+      reset();
+      continue;
+    }
     // Hyphen-joined letters ("F-L-E-T") are one spelled stretch; a trailing
     // sentence period ("C-L-A-Y.") is punctuation, not a spoken "dot".
-    for (const token of raw.replace(/\.+$/, '').split('-').filter(Boolean)) {
-      const unit = spelledUnit(token);
-      if (unit === null) { close(); continue; }
+    for (const piece of tokens[i].replace(/\.+$/, '').split('-').filter(Boolean)) {
+      const unit = spelledUnit(piece);
+      if (unit === null) { reset(); continue; }
       run += unit;
       if (/^[a-z]$/.test(unit)) letters += 1;
     }
   }
-  close();
-  return runs;
+  return statements;
 }
 
 const KNOWN_DOMAIN_SET = new Set(KNOWN_DOMAINS);
 
-// A spelled run that is close to the saved local part but not equal to it: the
-// two transcripts (or two passes of the spelling) heard different letters.
-const NEAR_MISS_EDITS = 2;
-const isNearMiss = (run, local) => run !== local && damerauLevenshtein(run, local) <= NEAR_MISS_EDITS;
-
-// True when a transcript shows the caller spelling this exact local part, no
-// transcript spells a near-miss of it, the domain is a known consumer mail
-// provider, and the provider's name was said on the call. A custom domain is
-// never trusted this way: it is usually said, not spelled, and a misheard one
-// can belong to someone else.
+// True when the call has at least one spelled email statement and EVERY spelled
+// email statement in either transcript is this exact address (local part and
+// provider), on a known consumer mail provider. A correction ("S-M-I-T-H at
+// gmail, no, S-M-Y-T-H at gmail") or the two transcripts hearing different
+// letters keeps the read-back card. A custom domain is never trusted this way:
+// it is usually said, not spelled, and a misheard one can belong to someone else.
 function spelledEmailMatches({ transcripts = [], email } = {}) {
   const value = String(email || '').trim().toLowerCase();
   const at = value.lastIndexOf('@');
@@ -88,11 +91,8 @@ function spelledEmailMatches({ transcripts = [], email } = {}) {
   if (!KNOWN_DOMAIN_SET.has(domain)) return false;
   if ((local.match(/[a-z]/g) || []).length < MIN_SPELLED_LETTERS) return false;
   const provider = domain.split('.')[0];
-  const texts = transcripts.filter(Boolean).map(String);
-  const providerSaid = texts.some((t) => new RegExp(`\\b${provider}\\b`, 'i').test(t));
-  if (!providerSaid) return false;
-  const runs = texts.flatMap((t) => spelledRuns(t));
-  return runs.includes(local) && !runs.some((run) => isNearMiss(run, local));
+  const statements = transcripts.filter(Boolean).flatMap((t) => spelledEmailStatements(String(t)));
+  return statements.length > 0 && statements.every((st) => st.local === local && st.provider === provider);
 }
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
@@ -145,7 +145,7 @@ function isNoMailServerReason(text) {
 
 module.exports = {
   callEmailChecksLive,
-  spelledRuns,
+  spelledEmailStatements,
   spelledEmailMatches,
   checkEmailDomain,
   screenCallEmail,

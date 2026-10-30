@@ -26,6 +26,14 @@ const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// this domain" as a blocked bounce. That is a bad address, not a sender block:
+// no provider retry, no "the recipient did not bounce" handling, anywhere in
+// this webhook. Gate off = providerRetry.isProviderBlockedEvent exactly.
+function isProviderBlock(ev) {
+  return providerRetry.isProviderBlockedEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev);
+}
+
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
@@ -412,7 +420,7 @@ async function handleEvent(ev) {
       // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
       // server is a bad address, not a sender block — no retry rail for it.
       const noMailServer = bounceRecovery.isNoMailServerEvent(ev);
-      if (providerRetry.isProviderBlockedEvent(ev) && !noMailServer) {
+      if (isProviderBlock(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if ((noMailServer || bounceRecovery.isHardBounceEvent(ev)) && !isRateReview) {
@@ -535,7 +543,7 @@ async function processWebhookEvent(ev, messageId, email, handler) {
 function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   const event = String(ev?.event || '').toLowerCase();
   const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
-  if (providerRetry.isProviderBlockedEvent(ev)) {
+  if (isProviderBlock(ev)) {
     return {
       delivery: {
         // SendGrid sometimes reports reputation/content blocks as
@@ -668,7 +676,7 @@ function eventOccurredAt(ev, fallback = new Date()) {
 }
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
-  if (providerRetry.isProviderBlockedEvent(ev)) {
+  if (isProviderBlock(ev)) {
     return {
       // Provider/IP/content rejection, not a bad recipient address. `failed`
       // remains retryable when the owning workflow runs again and, unlike
@@ -858,7 +866,7 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
 async function reconcileSummaryForEmailEvent(ev, message, updates, client) {
   if (!updates) return;
   const Summary = require('../services/visit-completion-summary');
-  const providerBlock = providerRetry.isProviderBlockedEvent(ev);
+  const providerBlock = isProviderBlock(ev);
   const optOutDrop = ev.event === 'dropped' && Summary.summaryEmailOptOutDrop(ev.reason || ev.response);
   const terminalBounce = ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerBlock && !optOutDrop;
   if (terminalBounce || (providerBlock && updates.provider_retry_exhausted_at)) {
@@ -914,7 +922,7 @@ async function handleEmailMessageEvent(ev, message, client = db) {
     // A block that lands after the customer's email was corrected hits a row the correction stamped
     // (never scheduled): settle it through the same path the correction uses, so its reservation
     // reopens and a previsit claim is freed instead of the row reading as accepted.
-    if (updates && providerRetry.isProviderBlockedEvent(ev)) {
+    if (updates && isProviderBlock(ev)) {
       await providerRetry.settleLateBlockOfReplacedRecipient(message, client, now);
     }
     await reconcileSummaryForEmailEvent(ev, message, updates, client);
@@ -1067,7 +1075,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
     case 'blocked':
     case 'dropped': {
       await client('automation_step_sends').where({ id: sendRow.id }).update({
-        status: providerRetry.isProviderBlockedEvent(ev) ? 'failed' : 'bounced',
+        status: isProviderBlock(ev) ? 'failed' : 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
       });
