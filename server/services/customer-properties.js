@@ -726,6 +726,49 @@ async function customersWithStreetLineHoldingLocality(conn = db) {
   return [...new Set([...profiles, ...saved].filter(streetLineHoldsLocality).map((row) => row.id))].sort();
 }
 
+// A customer whose profile has no map pin is the address-review queue's (its
+// 15-minute bell); the two address checks below leave that customer's primary
+// saved address to it and report everything else.
+const OUTSIDE_REVIEW_QUEUE = (q) => q.where('p.is_primary', false)
+  .orWhere((pinned) => pinned.whereNotNull('c.latitude').whereNotNull('c.longitude'));
+
+/**
+ * Live customers with an active saved address that has no map pin (owner
+ * 2026-10-30: the hourly geocode backstop pins the profile and the visits,
+ * never a saved address). Read-only; the daily lead-to-cash sweep reports the
+ * ids.
+ */
+async function customersWithUnpinnedSavedAddress(conn = db) {
+  const rows = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
+    .whereNull('c.deleted_at').where('p.active', true)
+    .where((q) => q.whereNull('p.latitude').orWhereNull('p.longitude'))
+    .where(OUTSIDE_REVIEW_QUEUE)
+    .select('p.customer_id as id');
+  return [...new Set(rows.map((row) => row.id))].sort();
+}
+
+/**
+ * Live customers with a street but no city, state or ZIP: on the profile of a
+ * pinned customer, or on an active saved address (the booking screen calls
+ * that saved address "Address incomplete"). Owner 2026-10-30: 37 pinned
+ * customers had no ZIP or city, and the review queue only judges customers
+ * without a pin. Read-only; the daily lead-to-cash sweep reports the ids.
+ */
+async function customersWithIncompleteAddress(conn = db) {
+  const street = (t) => `btrim(coalesce(${t}.address_line1, '')) <> ''`;
+  const missing = (t) => ['city', 'state', 'zip'].map((f) => `btrim(coalesce(${t}.${f}, '')) = ''`).join(' OR ');
+  const [profiles, saved] = await Promise.all([
+    conn('customers as c').whereNull('c.deleted_at').whereNotNull('c.latitude').whereNotNull('c.longitude')
+      .whereRaw(street('c')).whereRaw(`(${missing('c')})`)
+      .select('c.id'),
+    conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
+      .where('p.active', true).whereRaw(street('p')).whereRaw(`(${missing('p')})`)
+      .where(OUTSIDE_REVIEW_QUEUE)
+      .select('p.customer_id as id'),
+  ]);
+  return [...new Set([...profiles, ...saved].map((row) => row.id))].sort();
+}
+
 /**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
@@ -1470,6 +1513,8 @@ module.exports = {
   addressCanNameProperty,
   sweepMissingPrimaryProperties,
   customersWithStreetLineHoldingLocality,
+  customersWithUnpinnedSavedAddress,
+  customersWithIncompleteAddress,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,

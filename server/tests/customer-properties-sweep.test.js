@@ -5,7 +5,9 @@ const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { sweepMissingPrimaryProperties, customersWithStreetLineHoldingLocality } = require('../services/customer-properties');
+const {
+  sweepMissingPrimaryProperties, customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddress, customersWithIncompleteAddress,
+} = require('../services/customer-properties');
 const logger = require('../services/logger');
 
 // Fake knex: `customers as c` list → candidates; `customers` by id → the
@@ -167,5 +169,60 @@ describe('customersWithStreetLineHoldingLocality (daily lead-to-cash sweep check
       "(c.address_line1 LIKE '%,%' OR c.address_line1 ~* '\\s(fl|florida)\\M')",
       "(p.address_line1 LIKE '%,%' OR p.address_line1 ~* '\\s(fl|florida)\\M')",
     ]);
+  });
+});
+
+describe('address gap checks (daily lead-to-cash sweep)', () => {
+  // Fake knex that records every filter, nested where-callbacks included, and answers per table.
+  function fakeConn(rows) {
+    const calls = [];
+    const conn = (table) => {
+      const name = table.split(' ')[0];
+      const q = {};
+      for (const m of ['whereNull', 'whereNotNull', 'join', 'orWhereNull']) q[m] = (...args) => { calls.push([name, m, ...args]); return q; };
+      q.whereRaw = (sql) => { calls.push([name, 'whereRaw', sql]); return q; };
+      q.where = (arg, value) => {
+        if (typeof arg === 'function') { calls.push([name, 'where(fn)']); arg(q); } else calls.push([name, 'where', arg, value]);
+        return q;
+      };
+      q.orWhere = (arg, value) => {
+        if (typeof arg === 'function') { calls.push([name, 'orWhere(fn)']); arg(q); } else calls.push([name, 'orWhere', arg, value]);
+        return q;
+      };
+      q.select = async () => rows[name] || [];
+      return q;
+    };
+    return { conn, calls };
+  }
+
+  test('unpinned saved addresses: active rows with no pin, leaving an unpinned customer\'s primary to the review queue; one id per customer', async () => {
+    const { conn, calls } = fakeConn({ customer_properties: [{ id: 'c2' }, { id: 'c1' }, { id: 'c2' }] });
+    expect(await customersWithUnpinnedSavedAddress(conn)).toEqual(['c1', 'c2']);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['customer_properties', 'whereNull', 'c.deleted_at'],
+      ['customer_properties', 'where', 'p.active', true],
+      ['customer_properties', 'whereNull', 'p.latitude'],
+      ['customer_properties', 'orWhereNull', 'p.longitude'],
+      ['customer_properties', 'where', 'p.is_primary', false],
+      ['customer_properties', 'whereNotNull', 'c.latitude'],
+      ['customer_properties', 'whereNotNull', 'c.longitude'],
+    ]));
+  });
+
+  test('incomplete addresses: a pinned profile or a saved address with a street but no city, state or ZIP; one id per customer', async () => {
+    const { conn, calls } = fakeConn({ customers: [{ id: 'c3' }, { id: 'c1' }], customer_properties: [{ id: 'c1' }, { id: 'c2' }] });
+    expect(await customersWithIncompleteAddress(conn)).toEqual(['c1', 'c2', 'c3']);
+    const raws = calls.filter((c) => c[1] === 'whereRaw').map((c) => `${c[0]}: ${c[2]}`);
+    expect(raws).toEqual([
+      "customers: btrim(coalesce(c.address_line1, '')) <> ''",
+      "customers: (btrim(coalesce(c.city, '')) = '' OR btrim(coalesce(c.state, '')) = '' OR btrim(coalesce(c.zip, '')) = '')",
+      "customer_properties: btrim(coalesce(p.address_line1, '')) <> ''",
+      "customer_properties: (btrim(coalesce(p.city, '')) = '' OR btrim(coalesce(p.state, '')) = '' OR btrim(coalesce(p.zip, '')) = '')",
+    ]);
+    // The profile query reads pinned customers only; the saved-address query leaves an unpinned customer's primary out.
+    expect(calls).toEqual(expect.arrayContaining([
+      ['customers', 'whereNotNull', 'c.latitude'], ['customers', 'whereNotNull', 'c.longitude'],
+      ['customer_properties', 'where', 'p.is_primary', false],
+    ]));
   });
 });
