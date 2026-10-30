@@ -428,6 +428,14 @@ export const ADMIN_MOBILE_TABS = MOBILE_TAB_IDS.map((itemId) =>
   materializeItem(itemId, "mobileTab"),
 );
 
+// The bottom tabs one login sees: owner-only tabs for the owner, the
+// technician tab (Today) for technicians. The tab bar and the Settings tab's
+// page list both read this rule, so a page is either a tab or a Settings row.
+export function getAdminMobileTabs(role) {
+  return ADMIN_MOBILE_TABS.filter((item) => (!item.adminOnly || role === "admin")
+    && (!item.technicianTab || role === "technician"));
+}
+
 // The grouped shell reuses the canonical destinations and their individual
 // access rules. A parent never lends its permissions to a child.
 export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)

@@ -83,6 +83,13 @@ describe('GATE_ADS_CAPACITY_WORK_DAYS', () => {
     expect(mockAbsenceReads).toBe(0);
   });
 
+  test('workDays: true drops an absent technician even with GATE_ADS_CAPACITY_WORK_DAYS off (the gap rule)', async () => {
+    mockAbsences = [{ technician_id: 2, absence_date: FRI }];
+    expect(await BudgetManager.getTechCountForArea('general', FRI, { workDays: true })).toBe(2);
+    // the old capacity rule, gate off: unchanged, every assignable technician
+    expect(await BudgetManager.getTechCountForArea('general', FRI)).toBe(3);
+  });
+
   test('gate on drops a technician who is absent on that date, keeps the others', async () => {
     process.env.GATE_ADS_CAPACITY_WORK_DAYS = 'true';
     mockAbsences = [{ technician_id: 2, absence_date: FRI }];

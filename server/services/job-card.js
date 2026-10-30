@@ -918,14 +918,18 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     const dry = rule?.dryBeforeRain?.hours;
     // The Waves rule gives a dry time to a tank spray whose label gives none (plan step 2: a label's "no spraying
     // during rain" line covers the start hour only), unless the label waters it in or the catalog states an
-    // interval. A dust is not a spray.
-    const dust = /\bdust\b/i.test([product.application_method, product.formulation, product.name].join(' '));
-    const waves = !dry && !rule?.waterIn && limits.rainFreeHours == null && isTankMixable(product) && !dust ? rainRules.waves[product.id] : null;
+    // interval. A dust, a tablet (mosquito dunks) or an adjuvant (the surfactant follows the product it is mixed
+    // with) is not a spray of its own (label audit 2026-10-30).
+    const notSpray = /\b(dust|tablets?|briquets?)\b/i.test([product.application_method, product.formulation, product.name].join(' '))
+      || /\badjuvant\b/i.test(String(product.category));
+    const waves = !dry && !rule?.waterIn && limits.rainFreeHours == null && isTankMixable(product) && !notSpray ? rainRules.waves[product.id] : null;
     return [
       ...siteLimitChecks(limits, rule?.heat),
       // "Do not make applications during rain": the hour the work starts (now, once the window opened).
       rule?.duringRain && rainCheck({ rows: startRows, complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
-      dry && rainCheck({ hours: dry, source: 'label advice', holdAbove: Infinity, gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
+      // A label's own dry time reaches the Warning level above 80%, like every other rain rule (owner page 2026-10-29;
+      // label audit 2026-10-30: it was capped at a caution while the Waves rule could warn).
+      dry && rainCheck({ hours: dry, source: 'label advice', gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
       limits.rainFreeHours != null && rainCheck({ hours: limits.rainFreeHours, source: 'product limit', text: (pct) => `rain ${pct}% inside ${limits.rainFreeHours} h` }),
       waves && rainCheck({ hours: waves.hours, source: 'Waves rule', text: (pct) => `rain ${pct}% inside ${waves.hours} h — Waves rule` }),
     ].filter(Boolean);

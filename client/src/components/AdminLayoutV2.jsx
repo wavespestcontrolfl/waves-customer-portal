@@ -15,22 +15,20 @@ import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/Schedul
  * remap the same tokens on a `[data-theme="tech-dark"]` scope without
  * touching this component.
  */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
   Search,
-  Menu,
   Sparkles,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
-import useModalFocus from "../hooks/useModalFocus";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
-  ADMIN_MOBILE_TABS,
+  getAdminMobileTabs,
   isAdminNavItemActive,
   isPathAdminOnly,
 } from "../config/adminNavigation";
@@ -122,11 +120,6 @@ export default function AdminLayoutV2() {
   // Staff-session state machine (verify, offline pass, cross-tab sign-in,
   // 401 handling): see useStaffSession.
   const { user, userId, authStatus, sessionReady } = useStaffSession();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const menuTriggerRef = useRef(null);
-  // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
-  // focus returns to the "Open menu" button (F0014).
-  const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
   // Per verified account, like the field-workspace read below: an account
   // switch in another tab refetches flags (Codex #5573 r8).
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, userId);
@@ -168,11 +161,6 @@ export default function AdminLayoutV2() {
     }
   }, [user, location.pathname, navigate]);
 
-  // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
-  useEffect(() => {
-    if (isMobile) setSidebarOpen(false);
-  }, [location.pathname, location.search, location.hash, isMobile]);
-
   // .admin-main is the scroll container (the window never scrolls in this
   // shell), so the browser's scroll restoration can't reach it. Snap to the
   // top on navigation so pages don't open at the previous page's scroll
@@ -208,18 +196,11 @@ export default function AdminLayoutV2() {
     navigate("/admin/login", { replace: true });
   };
 
-  const closeSidebarForPalette = useCallback(() => {
-    // The assistant must capture an opener that survives the hidden drawer.
-    if (isMobile && sidebarOpen) menuTriggerRef.current?.focus({ preventScroll: true });
-    setSidebarOpen(false);
-  }, [isMobile, sidebarOpen]);
   // The page-data provider takes this opener as a context value, so it has to
-  // be stable across renders that change neither the drawer nor the viewport.
-  const openPalette = useCallback(() => { if (fieldBusy) return; closeSidebarForPalette(); paletteRef.current?.open(); },
-    [closeSidebarForPalette, fieldBusy]);
+  // be stable across renders.
+  const openPalette = useCallback(() => { if (fieldBusy) return; paletteRef.current?.open(); }, [fieldBusy]);
   const openPageFinder = useCallback(() => { if (fieldBusy) return; paletteRef.current?.openNavigation(); }, [fieldBusy]);
 
-  const sidebarVisible = !isMobile || sidebarOpen;
   // /admin/today keeps the admin top bar and tab bar on a phone, like every
   // other page (owner 2026-10-05); the navigation hold below covers them.
   const mainPadding = MAIN_PADDING[Number(isMobile)];
@@ -269,29 +250,9 @@ export default function AdminLayoutV2() {
             zIndex: 90,
           }}
         >
-          <button
-            type="button"
-            ref={menuTriggerRef}
-            onClick={() => setSidebarOpen(true)}
-            aria-label="Open menu"
-            aria-expanded={sidebarOpen}
-            aria-controls="admin-sidebar"
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-primary)",
-              width: 44,
-              height: 44,
-              borderRadius: 6,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-            }}
-          >
-            <Menu size={22} strokeWidth={1.75} />
-          </button>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
+          {/* No menu button: on a phone the Settings tab is the one full menu
+              (owner 2026-10-29), so the top bar keeps search, Ask and the bell. */}
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 24, marginLeft: 8 }} />
           <div style={{ flex: 1 }} />
           <Button density="comfortable" variant="ghost" onClick={openPageFinder} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>
           <button
@@ -320,57 +281,30 @@ export default function AdminLayoutV2() {
         </div>
       )}
 
-      {/* Backdrop — only when mobile sidebar is open */}
-      {isMobile && sidebarOpen && (
-        <div
-          onClick={() => setSidebarOpen(false)}
+      {/* Sidebar: computer only. A phone reaches every page from the bottom
+          tabs and the Settings tab, which lists the rest of this menu. */}
+      {!isMobile && (
+        <aside
+          id="admin-sidebar"
+          {...fieldHold}
           style={{
+            width: 240,
+            background: "var(--surface-primary)",
+            borderRight: "1px solid var(--border-default)",
+            display: "flex",
+            flexDirection: "column",
+            flexShrink: 0,
             position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            zIndex: 99,
+            left: 0,
+            top: 0,
+            bottom: 0,
+            zIndex: 100,
+            overflowY: "hidden",
           }}
-        />
+        >
+          <AdminWorkspaceNavigation user={user} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} />
+        </aside>
       )}
-
-      {/* Sidebar */}
-      <aside
-        id="admin-sidebar"
-        {...fieldHold}
-        ref={drawerRef}
-        role={isMobile && sidebarOpen ? "dialog" : undefined}
-        aria-modal={isMobile && sidebarOpen ? true : undefined}
-        aria-label={isMobile && sidebarOpen ? "Admin menu" : undefined}
-        // When mobile + closed the sidebar is translated offscreen but still
-        // rendered; `inert` pulls it (and its links) out of the tab order and
-        // AT tree so a keyboard user can't Tab into the invisible menu.
-        {...(!sidebarVisible ? { inert: "" } : {})}
-        style={{
-          width: 240,
-          background: "var(--surface-primary)",
-          borderRight: "1px solid var(--border-default)",
-          display: "flex",
-          flexDirection: "column",
-          flexShrink: 0,
-          position: "fixed",
-          left: 0,
-          top: isMobile ? "var(--vv-offset-top, 0px)" : 0,
-          bottom: isMobile ? "var(--keyboard-inset, 0px)" : 0,
-          paddingTop: isMobile ? "env(safe-area-inset-top, 0px)" : undefined,
-          paddingLeft: isMobile ? "env(safe-area-inset-left, 0px)" : undefined,
-          paddingBottom: isMobile
-            ? "env(safe-area-inset-bottom, 0px)"
-            : undefined,
-          zIndex: 100,
-          overflowY: "hidden",
-          transform: sidebarVisible ? "translateX(0)" : "translateX(-100%)",
-          transition: "transform 0.2s ease",
-          boxShadow:
-            isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
-        }}
-      >
-        <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} />
-      </aside>
 
       {/* Main content */}
       <main id="admin-main" tabIndex={-1}
@@ -422,10 +356,7 @@ export default function AdminLayoutV2() {
           }}
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
-            {ADMIN_MOBILE_TABS.filter(
-              (item) => (!item.adminOnly || user?.role === "admin")
-                && (!item.technicianTab || user?.role === "technician"),
-            ).map((item) => {
+            {getAdminMobileTabs(user?.role).map((item) => {
               const { path, icon: Icon, label } = item;
               const active = isAdminNavItemActive(
                 item,
@@ -491,7 +422,7 @@ export default function AdminLayoutV2() {
       )}
 
       {/* Global ⌘K palette */}
-      <GlobalCommandPalette ref={paletteRef} user={user} onNavigate={closeSidebarForPalette} />
+      <GlobalCommandPalette ref={paletteRef} user={user} />
     </div>
     </AdminNavigationProvider>
     </IntelligenceBarPageDataProvider>
