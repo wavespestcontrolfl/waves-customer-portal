@@ -98,6 +98,11 @@ function sanitizeCampaignWrite(body, isUpdate) {
   if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
     return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
   }
+  // metadata.budget_hold is the owner's budget switch. Only the hold routes write
+  // it: they push the held budget and check the end date.
+  if (out.metadata != null && Object.prototype.hasOwnProperty.call(metadataObject(out.metadata), 'budget_hold')) {
+    return { ok: false, error: "budget_hold can't be set here — use the hold switch (POST /campaigns/:id/hold)." };
+  }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
     const n = toFiniteNumber(out.monthly_budget);
@@ -218,10 +223,25 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
         return res.status(400).json({ error: "Use /pause or /enable to change a Google campaign's status — they sync Google Ads." });
       }
     }
-    const [campaign] = await db('ad_campaigns')
-      .where({ id: req.params.id })
-      .update({ ...clean.value, updated_at: new Date() })
-      .returning('*');
+    let campaign;
+    if (clean.value.metadata === undefined) {
+      [campaign] = await db('ad_campaigns')
+        .where({ id: req.params.id })
+        .update({ ...clean.value, updated_at: new Date() })
+        .returning('*');
+    } else {
+      // A metadata replacement keeps the owner's hold: read it under the row lock
+      // so a hold saved meanwhile is not erased.
+      campaign = await db.transaction(async (trx) => {
+        const locked = await trx('ad_campaigns').where({ id: req.params.id }).forUpdate().first();
+        if (!locked) return null;
+        const patch = { ...clean.value, updated_at: new Date() };
+        const hold = metadataObject(locked.metadata).budget_hold;
+        if (hold !== undefined) patch.metadata = JSON.stringify({ ...metadataObject(patch.metadata), budget_hold: hold });
+        const [row] = await trx('ad_campaigns').where({ id: req.params.id }).update(patch).returning('*');
+        return row;
+      });
+    }
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ campaign });
   } catch (err) { next(err); }

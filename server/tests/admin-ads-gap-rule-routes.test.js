@@ -279,3 +279,23 @@ describe('DELETE /campaigns/:id/hold', () => {
     expect((await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`)).status).toBe(404);
   });
 });
+
+describe('generic campaign writes cannot touch the hold', () => {
+  test('POST /campaigns and PUT /campaigns/:id refuse metadata.budget_hold (object or JSON string)', async () => {
+    const hold = { mode: 'base', until: inDays(3) };
+    const create = await call('POST', '/campaigns', { campaign_name: 'X', platform: 'google_ads', metadata: { budget_hold: hold } });
+    expect(create.status).toBe(400);
+    expect(create.body.error).toMatch(/budget_hold/);
+    const update = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: JSON.stringify({ budget_hold: hold }) });
+    expect(update.status).toBe(400);
+    expect(campaignWrites).toHaveLength(0);
+  });
+
+  test('PUT /campaigns/:id metadata replacement keeps an active hold (read under the row lock)', async () => {
+    const hold = { mode: 'stop', until: inDays(5) };
+    campaignRow.metadata = { keep: 'me', budget_hold: hold };
+    const res = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: { note: 'new' } });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', budget_hold: hold });
+  });
+});
