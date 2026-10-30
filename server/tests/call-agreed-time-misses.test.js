@@ -27,8 +27,8 @@ const PROMPT = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-10-05', 
 
 describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
-    expect(PROMPT_VERSION).toBe('v32');
-    expect(PROMPT_HASH).toMatch(/^v32-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v33');
+    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
   });
 });
 
@@ -268,6 +268,73 @@ describe('case: the day/time conflict rule (staff closing slip, v32)', () => {
       expect(e.confirmed_start_at).toBeNull();
       expect(canAutoRoute(extraction({ status: e.scheduling_status, confirmed_start_at: e.confirmed_start_at }), { addressValidation: AV_CLEAN }).allowed).toBe(false);
     }
+  });
+});
+
+// Prompt v33 (2026-10-30 call audit): a call started at 12:52 AM on a Friday; the caller said Friday
+// was "tomorrow", accepted five o'clock, and staff closed with "see you tomorrow at five". The
+// extraction read "tomorrow" as Saturday, called the day contested, and nothing was booked.
+describe('case: calls after midnight (v33)', () => {
+  const fixture = require('../fixtures/call-extraction-eval/synthetic-after-midnight-tomorrow.json');
+  const byId = (id) => fixture.cases.find((c) => c.id === id);
+  const { buildExtractionPromptParts } = require('../services/prompts/call-extraction-v1');
+  const { afterMidnightDayRule, auditAppointmentContract } = require('../services/prompts/appointment-confirmed-rules');
+  const SYSTEM_REF = 'the "Call date in Eastern Time" given in the user message';
+
+  test('the rule renders with the call date in one message and with the date-line reference in the system layout', () => {
+    expect(PROMPT).toContain(afterMidnightDayRule('2026-10-05'));
+    const { system, user } = buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-11-06', { callTimeET: '12:40 AM' });
+    expect(system).toContain(afterMidnightDayRule(SYSTEM_REF));
+    expect(user).toContain('Call time in Eastern Time (when the call started): 12:40 AM');
+    expect(user).not.toContain('CALLS AFTER MIDNIGHT');
+  });
+
+  test('the rule reads "tomorrow" on a 12:00-4:00 AM call as the call date, and a stated other day governs', () => {
+    const rule = afterMidnightDayRule('2026-11-06');
+    expect(rule).toContain('when the call time given at the top is from 12:00 AM up to 4:00 AM');
+    expect(rule).toContain('names the coming daytime, which is the CALL DATE itself (2026-11-06), not the day after it');
+    expect(rule).toContain('A weekday that names the call date ("Friday" on a call that started early on a Friday) is that same day, so it agrees with "tomorrow"');
+    expect(rule).toContain('the stated weekday or date governs');
+    expect(rule).toContain('Outside 12:00 AM to 4:00 AM, "tomorrow" is the day after the call date as usual.');
+  });
+
+  test('the rule sits right after the day/time conflict rule, before the existing-appointment line, in both layouts', () => {
+    const { system } = buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-11-06', { callTimeET: '12:40 AM' });
+    for (const [text, ref] of [[PROMPT, '2026-10-05'], [system, SYSTEM_REF]]) {
+      expect(text.indexOf(afterMidnightDayRule(ref))).toBe(text.indexOf(DAY_TIME_CONFLICT_RULE) + DAY_TIME_CONFLICT_RULE.length + 1);
+      expect(text.indexOf(afterMidnightDayRule(ref))).toBeLessThan(text.indexOf('EXISTING APPOINTMENT:'));
+    }
+  });
+
+  test('the self-audit does not carry it: no judge is given the call clock', () => {
+    expect(auditAppointmentContract('2026-11-06')).not.toContain('CALLS AFTER MIDNIGHT');
+    expect(auditAppointmentContract('2026-11-06', { v2OnlyRules: false })).not.toContain('CALLS AFTER MIDNIGHT');
+  });
+
+  test('a 12:52 AM ET start renders as the call time the rule compares against', () => {
+    expect(callTimeETString('2026-10-30T04:52:53.766Z')).toBe('12:52 AM');
+    expect(callTimeETString('2026-11-06T05:40:00Z')).toBe('12:40 AM');
+  });
+
+  test('the fixture weekdays and offsets match (Nov 6 2026 is a Friday, Nov 7 a Saturday, both EST)', () => {
+    const weekday = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
+    expect(weekday(byId('after-midnight-tomorrow-is-call-date').call_date_et)).toBe('Friday');
+    expect(byId('after-midnight-tomorrow-is-call-date').expect.confirmed_start_at.slice(0, 10)).toBe('2026-11-06');
+    expect(weekday(byId('after-midnight-weekday-names-later-day').expect.confirmed_start_at)).toBe('Saturday');
+    expect(byId('daytime-tomorrow-is-next-day').expect.confirmed_start_at.slice(0, 10)).toBe('2026-11-07');
+    for (const c of fixture.cases) {
+      expect(c.expect.confirmed_start_at).toMatch(/-05:00$/);
+      expect(c.transcript).not.toMatch(/\d{3}[-. ]\d{3}[-. ]\d{4}/);
+      expect(c.transcript).toContain('Pat Example');
+    }
+  });
+
+  test('routing books the after-midnight extraction on the call date', () => {
+    const e = byId('after-midnight-tomorrow-is-call-date').expect;
+    expect(canAutoRoute(extraction({
+      status: e.scheduling_status,
+      confirmed_start_at: e.confirmed_start_at,
+    }), { addressValidation: AV_CLEAN }).allowed).toBe(true);
   });
 });
 

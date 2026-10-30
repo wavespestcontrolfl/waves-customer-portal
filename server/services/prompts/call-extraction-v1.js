@@ -7,6 +7,7 @@ const {
   STAFF_HEDGE_RULE,
   CALLER_PROPOSED_TIME_RULE,
   DAY_TIME_CONFLICT_RULE,
+  afterMidnightDayRule,
 } = require('./appointment-confirmed-rules');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
@@ -187,7 +188,13 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // self-audit grades by it. billing_choice: the plan the CALLER chose for a recurring plan
 // (annual_prepay or per_application), judged over the whole call, pinned with the caller's own words;
 // no consumer in this change. New instructions and field: a new cohort.
-const PROMPT_VERSION = 'v32';
+// v33: CALLS AFTER MIDNIGHT rule. 2026-10-30: a call started at 12:52 AM on a Friday; the caller
+// said "I get out of work on Friday at four. Like, which is tomorrow.", accepted five o'clock, and
+// staff closed with "we'll see you tomorrow at five". The extraction read "tomorrow" as Saturday,
+// called the day contested and nothing was booked. On a call from 12:00 AM up to 4:00 AM,
+// "tomorrow" is the call date (the coming daytime), a weekday naming the call date agrees with it,
+// and a weekday or date naming another day governs. Extraction only: no judge has the call's clock.
+const PROMPT_VERSION = 'v33';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -305,6 +312,7 @@ ${MISSING_AMPM_RULE}
 ${STAFF_HEDGE_RULE}
 ${CALLER_PROPOSED_TIME_RULE}
 ${DAY_TIME_CONFLICT_RULE}
+${afterMidnightDayRule(todayRef)}
 ${EXISTING_APPOINTMENT_RULE}
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.

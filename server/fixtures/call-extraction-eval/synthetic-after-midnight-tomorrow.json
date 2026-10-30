@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "call-extraction-synthetic-transcripts.v1",
+  "description": "Synthetic, de-identified transcripts for the call extraction prompt v33 rule CALLS AFTER MIDNIGHT. Every name and address is invented (Pat Example, Sam, 100 Example Lane, Sampleton); no real call or customer is stored. The cases are the model's judgement to make, so tests pin the contract the model is given and what routing does with each expected extraction. Use them as replay inputs for a model bake-off.",
+  "cases": [
+    {
+      "id": "after-midnight-tomorrow-is-call-date",
+      "why": "The call starts at 12:40 AM on a Friday. The caller says Friday is 'tomorrow' and accepts four o'clock; staff close with 'see you tomorrow at four'. Friday and 'tomorrow' are the same day: confirmed on the call date (prompt v33).",
+      "call_date_et": "2026-11-06",
+      "call_time_et": "12:40 AM",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, this is Pat Example at 100 Example Lane in Sampleton. I keep finding spiders in the house and I can't sleep.\nAgent: We can come out. What does your day look like?\nCaller: I work until three on Friday, which is tomorrow.\nAgent: Okay, so how about four o'clock?\nCaller: Yes, four works.\nAgent: Great. We'll see you tomorrow at four.\nCaller: Thank you.",
+      "expect": {
+        "scheduling_status": "confirmed",
+        "confirmed_start_at": "2026-11-06T16:00:00-05:00"
+      }
+    },
+    {
+      "id": "after-midnight-weekday-names-later-day",
+      "why": "The same 12:40 AM Friday call, but the caller names Saturday as 'tomorrow' and accepts ten o'clock Saturday. The stated weekday governs: confirmed on Saturday (prompt v33).",
+      "call_date_et": "2026-11-06",
+      "call_time_et": "12:40 AM",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, this is Pat Example at 100 Example Lane in Sampleton. I keep finding spiders in the house and I can't sleep.\nAgent: We can come out. What does your day look like?\nCaller: I'm off on Saturday, which is tomorrow.\nAgent: Okay, how about ten o'clock on Saturday?\nCaller: Yes, ten works.\nAgent: Great. We'll see you Saturday at ten.\nCaller: Thank you.",
+      "expect": {
+        "scheduling_status": "confirmed",
+        "confirmed_start_at": "2026-11-07T10:00:00-05:00"
+      }
+    },
+    {
+      "id": "daytime-tomorrow-is-next-day",
+      "why": "Control: the call starts at 10:15 AM on a Friday and staff and the caller settle 'tomorrow at four'. Outside 12:00 AM to 4:00 AM, 'tomorrow' is the day after the call date (Saturday).",
+      "call_date_et": "2026-11-06",
+      "call_time_et": "10:15 AM",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, this is Pat Example at 100 Example Lane in Sampleton. I keep finding spiders in the house.\nAgent: We can come out. Does tomorrow at four work?\nCaller: Yes, tomorrow at four works.\nAgent: Great. We'll see you tomorrow at four.\nCaller: Thank you.",
+      "expect": {
+        "scheduling_status": "confirmed",
+        "confirmed_start_at": "2026-11-07T16:00:00-05:00"
+      }
+    }
+  ]
+}
