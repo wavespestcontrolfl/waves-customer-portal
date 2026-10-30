@@ -10588,8 +10588,11 @@ async function fileApplicantCareersRowStep({ call, callSid, extracted, v2Result 
     logger.info(`[call-proc] Careers row for ${maskSid(callSid)}: ${outcome.reason}`);
     return outcome;
   } catch (err) {
-    logger.warn(`[call-proc] Careers row failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
-    return { created: false, id: null, reason: 'error', error: err.message };
+    // Code/name only: a knex message embeds the bound row (the applicant's name,
+    // phone, email and call summary), so the raw message is never logged.
+    const code = err?.code || err?.name || 'error';
+    logger.warn(`[call-proc] Careers row failed (non-blocking) for ${maskSid(callSid)}: ${code}`);
+    return { created: false, id: null, reason: 'error', error: code };
   }
 }
 

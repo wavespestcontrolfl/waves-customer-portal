@@ -422,5 +422,23 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: { status: 'valid', extraction: { call_nature: 'new_lead' } } })).toBeNull();
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: null })).toBeNull();
     });
+    test('gate on: a failed insert logs the error code only, never the bound applicant details', async () => {
+      process.env.GATE_CALL_APPLICANT_HANDLING = 'true';
+      const jobApps = require('../services/job-applications');
+      const logger = require('../services/logger');
+      const insertErr = Object.assign(new Error('insert into "job_applications" ... values (Pat Example, +19415550100, pat@example.com)'), { code: '23505' });
+      const createSpy = jest.spyOn(jobApps, 'createJobApplicationFromCall').mockRejectedValue(insertErr);
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      try {
+        const out = await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: applicant });
+        expect(out).toEqual({ created: false, id: null, reason: 'error', error: '23505' });
+        const logged = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+        expect(logged).toContain('23505');
+        expect(logged).not.toMatch(/Pat Example|5550100|pat@example\.com/);
+      } finally {
+        createSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
   });
 });
