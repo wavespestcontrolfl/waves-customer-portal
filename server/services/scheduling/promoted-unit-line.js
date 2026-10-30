@@ -9,6 +9,9 @@
  * line has no technician set, or the line's pick is the reserved visit's own
  * technician. Otherwise { technicianId }: the program's own technician, or null
  * when nobody can take it that day. Reads only; a failed read keeps today's copy.
+ * The read runs in its own savepoint (`database.transaction`): the accept passes
+ * its transaction, and a PostgreSQL error (a statement timeout) would otherwise
+ * abort it, so every later accept query would fail instead of falling back.
  */
 const logger = require('../logger');
 
@@ -16,12 +19,12 @@ async function ownLineTechnicianForPromotedUnit(database, { row, unit, unitDate,
   const lineTechnician = require('./line-technician');
   if (!lineTechnician.lineMapLive()) return null;
   try {
-    const pick = await lineTechnician.pickLineTechnician(database, {
+    const pick = await database.transaction((sp) => lineTechnician.pickLineTechnician(sp, {
       serviceId: row.service_id || null,
       serviceKey: unit.catalogServiceKey || null,
       serviceType: row.service_type,
       date: unitDate,
-    });
+    }));
     if (!pick.mapped) return null;
     const reservedTech = reservedStart.technician_id;
     if (pick.technicianId && reservedTech && String(pick.technicianId) === String(reservedTech)) return null;

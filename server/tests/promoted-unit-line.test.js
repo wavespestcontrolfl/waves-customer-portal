@@ -15,7 +15,12 @@ jest.mock('../services/scheduling/line-technician', () => ({
 const lineTechnician = require('../services/scheduling/line-technician');
 const { ownLineTechnicianForPromotedUnit } = require('../services/scheduling/promoted-unit-line');
 
-const database = jest.fn();
+// The accept's transaction: the lookup runs in a savepoint (`database.transaction`), so a
+// failed read rolls back only the savepoint and the accept can go on.
+const savepoint = jest.fn();
+const database = Object.assign(jest.fn(), {
+  transaction: jest.fn(async (work) => work(savepoint)),
+});
 const args = (over = {}) => ({
   row: { service_id: 'svc-lawn', service_type: 'Lawn Care' },
   unit: { catalogServiceKey: 'lawn_care_monthly' },
@@ -49,7 +54,8 @@ describe('ownLineTechnicianForPromotedUnit', () => {
   test('a different technician owns the line: split to that technician', async () => {
     lineTechnician.pickLineTechnician.mockResolvedValue({ mapped: true, line: 'lawn', technicianId: 'tech-lawn', reason: 'home' });
     await expect(ownLineTechnicianForPromotedUnit(database, args())).resolves.toEqual({ technicianId: 'tech-lawn' });
-    expect(lineTechnician.pickLineTechnician).toHaveBeenCalledWith(database, {
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(lineTechnician.pickLineTechnician).toHaveBeenCalledWith(savepoint, {
       serviceId: 'svc-lawn', serviceKey: 'lawn_care_monthly', serviceType: 'Lawn Care', date: '2027-05-20',
     });
   });
@@ -65,9 +71,17 @@ describe('ownLineTechnicianForPromotedUnit', () => {
     expect(out).toEqual({ technicianId: 'tech-lawn' });
   });
 
-  test('an unreadable map keeps today\'s copy', async () => {
+  test('an unreadable map keeps today\'s copy, and the failed read stays inside its savepoint', async () => {
     lineTechnician.pickLineTechnician.mockRejectedValue(new Error('db down'));
     await expect(ownLineTechnicianForPromotedUnit(database, args())).resolves.toBeNull();
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(lineTechnician.pickLineTechnician).toHaveBeenCalledWith(savepoint, expect.anything());
+  });
+
+  test('gate not live: no savepoint either', async () => {
+    lineTechnician.lineMapLive.mockReturnValue(false);
+    await ownLineTechnicianForPromotedUnit(database, args());
+    expect(database.transaction).not.toHaveBeenCalled();
   });
 });
 

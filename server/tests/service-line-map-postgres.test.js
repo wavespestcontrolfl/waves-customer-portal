@@ -412,6 +412,22 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       expect(lawn.notes).toContain('This program has its own technician, so we will set its time separately.');
     });
 
+    test('live: a database error inside the map lookup stays in its savepoint; the accept completes with today\'s copy', async () => {
+      const spy = jest.spyOn(lineTech, 'pickLineTechnician').mockImplementation(async (conn) => {
+        await conn.raw('select 1/0'); // a real PostgreSQL error on the accept's connection
+        return null;
+      });
+      try {
+        const lawn = await acceptPestLawn('live');
+        expect(spy).toHaveBeenCalled();
+        expect(lawn).not.toBeNull();
+        expect(String(lawn.window_start).slice(0, 5)).toBe('09:00');
+        expect(lawn.technician_id).toBe(hireId);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('shadow: the lawn program copies the picked slot and technician, as today', async () => {
       const lawn = await acceptPestLawn('shadow');
       expect(lawn).not.toBeNull();
