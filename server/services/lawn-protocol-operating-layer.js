@@ -4,7 +4,7 @@ const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 const featureGates = require('../config/feature-gates');
 const { activeProtocolProducts } = require('./lawn-protocol-retired');
-const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram, isWeedSpotRow } = require('./lawn-program');
+const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram, isAsNeededRow } = require('./lawn-program');
 const { roundSpotMonth } = require('./lawn-rounds');
 
 // The checked-in field reference and plan matcher are released with protocol
@@ -265,16 +265,17 @@ const stepMonthOf = (roundStep, realMonth) => (roundStep ? roundStep.month : rea
 const namedSpotWindow = (spotWindow) => (spotWindow ? { spotWindow } : {});
 
 // A 9x rounds visit (`roundStep`, lawn-rounds.js roundStepForVisit; a caller that already knows the spot month passes `spotMonth`): the
-// round window's own weed and spot rows (the Celsius weed mix, Blindside, Dismiss: lawn-program.js isWeedSpotRow) are replaced by those of
-// the window of the REAL service date's month, with the St. Augustine green-up exception (roundSpotMonth). `rows` are the round window's
-// rows. Returns { rows, spotWindow }; the same rows and no spot window when the real window is the round's window or does not exist.
+// round window's own as-needed rows (the weed, disease and insect spots, the wetting agent, the curative granule, the fire ant add-on:
+// lawn-program.js isAsNeededRow) are replaced by those of the window of the REAL service date's month, with the St. Augustine green-up
+// exception (roundSpotMonth). `rows` are the round window's rows. Returns { rows, spotWindow }; the same rows and no spot window when the
+// real window is the round's window or does not exist.
 async function withRoundSpotRows(knex, protocol, window, rows, { roundStep, realMonth, strict, includeBermudaRemoval }) {
   if (!roundStep) return { rows, spotWindow: null };
   const spotMonth = roundStep.spotMonth ?? roundSpotMonth({ round: roundStep.round, realMonth, grassTrack: protocol.grass_track });
   const spotWindow = windowForVisit(protocol, null, spotMonth);
   const spot = !spotWindow || spotWindow.id === window.id
     ? { rows, spotWindow: null }
-    : { rows: [...rows.filter((row) => !isWeedSpotRow(row)), ...(await readWindowProducts(knex, spotWindow, { strict, includeBermudaRemoval })).filter(isWeedSpotRow)], spotWindow };
+    : { rows: [...rows.filter((row) => !isAsNeededRow(row)), ...(await readWindowProducts(knex, spotWindow, { strict, includeBermudaRemoval })).filter(isAsNeededRow)], spotWindow };
   return { ...spot, rows: await withCatchUpRows(knex, protocol, spot.rows, { roundStep, strict }) };
 }
 
@@ -292,7 +293,7 @@ async function withCatchUpRows(knex, protocol, rows, { roundStep, strict }) {
 }
 
 // `roundStep` ({ round, month }): a 9x rounds visit. Its program rows come from the window of the ROUND's step month (`roundStep.month`; a
-// pinned `windowKey` still wins, as it does for every visit) and its weed and spot rows from the REAL date's window (withRoundSpotRows).
+// pinned `windowKey` still wins, as it does for every visit) and its as-needed rows from the REAL date's window (withRoundSpotRows).
 // The result then also names that window (`spotWindow`). Without `roundStep` nothing here differs from the one-window read.
 async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false, roundStep } = {}) {
   // An appointment's assigned version must not fall through to the currently
