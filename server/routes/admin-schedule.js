@@ -20373,8 +20373,21 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       .where(function () {
         this.whereNull('fee_status').orWhereIn('fee_status', ['charging', 'charge_review']);
       })
-      .select('scheduled_service_id');
-    for (const r of requests) mark(r.scheduled_service_id, 'secured with a card whose late-cancel fee has not been settled');
+      .select('scheduled_service_id', 'fee_status');
+    // A recurring visit's fee is never charged (one-time visits only, owner
+    // ruling 2026-10-29) — unless a fee event is already in flight.
+    const undecidedIds = requests.filter((r) => !r.fee_status).map((r) => r.scheduled_service_id);
+    const recurringIds = new Set();
+    if (undecidedIds.length > 0) {
+      const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
+      const lineage = await conn('scheduled_services').whereIn('id', undecidedIds)
+        .select('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+      for (const v of lineage) if (isRecurringLineageVisit(v)) recurringIds.add(String(v.id));
+    }
+    for (const r of requests) {
+      if (!r.fee_status && recurringIds.has(String(r.scheduled_service_id))) continue;
+      mark(r.scheduled_service_id, 'secured with a card whose late-cancel fee has not been settled');
+    }
   }
   // An invoice already holding money for a future visit — the deposit and
   // pay-ahead shapes that stamp neither field above. Derived from the

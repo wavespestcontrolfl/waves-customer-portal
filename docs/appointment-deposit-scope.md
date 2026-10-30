@@ -14,6 +14,12 @@
 > Implementation: retune `pricing_config.estimate_card_hold` from $49 →
 > $75 in the admin pricing panel (DB-authoritative, shared with the
 > estimate card-hold lane; frozen terms protect already-agreed $49 fees).
+>
+> **Owner ruling (Adam, 2026-10-29):** the fee is for **one-time visits
+> only**. Recurring-plan visits (including a new plan's first visit) on the
+> `/secure` lane carry no fee clause in the SMS, email, or page, and the
+> fee rail refuses them (`recurring_visit`), including rows that agreed
+> before the ruling.
 
 **Ask (Adam, 2026-08-01):** for speculative one-time appointments (example: a fly
 inspection that may or may not turn into paid work), require a deposit — ~$75 or a

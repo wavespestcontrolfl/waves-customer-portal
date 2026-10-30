@@ -2485,7 +2485,8 @@ async function buildCardRequestLink(visit) {
     service_type: visit.service_type || 'service',
     date_line: card.dateLineFor(visit.scheduled_date),
     secure_link: result.secureUrl,
-    cancel_fee_line: card.cancelFeeLine(),
+    // The funnel's own fee clause ('' on a recurring-plan visit).
+    cancel_fee_line: result.cancelFeeLine || '',
   };
   // The base render is the live kill-switch check, exactly as in the
   // funnel; only then the plan-choice overlay, honoring the EXISTING
