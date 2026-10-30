@@ -51,6 +51,36 @@ function withoutToken(row) {
   };
 }
 
+// History names the staff member behind each stage change: `by` holds the
+// technician id the status PATCH recorded, and each such entry gains
+// `by_name` in the response (the stored history is not rewritten). A failed
+// name read leaves the entries as they are; the page then says "Staff".
+async function withHistoryActors(application) {
+  const history = Array.isArray(application && application.status_history) ? application.status_history : null;
+  const ids = [...new Set((history || []).map((entry) => entry && entry.by)
+    .filter((by) => typeof by === 'string' && UUID_RE.test(by)))];
+  if (!ids.length) return application;
+  try {
+    const staff = await db('technicians').whereIn('id', ids).select('id', 'name');
+    const names = new Map(staff.filter((row) => row.name).map((row) => [row.id, row.name]));
+    return {
+      ...application,
+      status_history: history.map((entry) => (entry && names.has(entry.by)
+        ? { ...entry, by_name: names.get(entry.by) }
+        : entry)),
+    };
+  } catch (err) {
+    logger.warn(`[admin-careers] history names unavailable (application ${application.id}): ${RecruitingComms.errorSummary(err)}`);
+    return application;
+  }
+}
+
+// Every response that carries an application: no interview token, and
+// staff names on its history.
+function presentApplication(row) {
+  return withHistoryActors(withoutToken(row));
+}
+
 router.get('/', async (req, res) => {
   try {
     // Offset pagination so a >200-row status can never permanently hide
@@ -122,7 +152,7 @@ router.get('/:id', async (req, res) => {
       logger.warn(`[admin-careers] reply media signing failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
       replyMedia = {};
     }
-    res.json({ application: withoutToken(row), reply_media: replyMedia });
+    res.json({ application: await presentApplication(row), reply_media: replyMedia });
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has
@@ -474,19 +504,19 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     if (!txResult) return res.status(404).json({ error: 'Not found' });
-    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: withoutToken(txResult.row) });
+    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
     if (!interviewApplicable) {
-      return res.json({ application: withoutToken(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
+      return res.json({ application: await presentApplication(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
     }
     if (!willSend) {
       const sent = { sms: plan.wantSms ? 'disabled' : 'not_requested', email: plan.wantEmail ? 'disabled' : 'not_requested' };
-      return res.json({ application: withoutToken(updated), sent });
+      return res.json({ application: await presentApplication(updated), sent });
     }
 
     const { sent, responseRow } = await deliverStageComms(req.params.id, req.technicianId, updated, plan);
-    res.json({ application: withoutToken(responseRow), sent });
+    res.json({ application: await presentApplication(responseRow), sent });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to update application' });

@@ -261,6 +261,15 @@ function stageChangeLabel(entry) {
   return `${STATUS_LABEL[entry.from] || entry.from} → ${to}`;
 }
 
+// Who made a history entry: the applicant, or the staff member the server
+// named (by_name). A staff id with no name on file still says "Staff",
+// never the raw id.
+function historyActor(entry) {
+  if (entry.by === "applicant") return "Applicant";
+  if (entry.by_name) return entry.by_name;
+  return entry.by ? "Staff" : "";
+}
+
 // status_history is append-only, newest last — reverse for display. It holds
 // every stage change with the note typed into the stage dialog (recruiting
 // audit R2), plus the applicant's own booking and withdrawal entries.
@@ -277,7 +286,7 @@ function StatusHistoryList({ history }) {
           <div key={`${entry.at}-${i}`} className="border-hairline border rounded p-2">
             <div className="text-14 text-zinc-600">
               {formatETDateTime(entry.at)} · {stageChangeLabel(entry)}
-              {entry.by === "applicant" ? " · Applicant" : ""}
+              {historyActor(entry) ? ` · ${historyActor(entry)}` : ""}
             </div>
             {entry.note && (
               <div className="mt-1 text-14 text-zinc-800 whitespace-pre-wrap">

@@ -7566,6 +7566,12 @@ answers, over-length city, unknown role all reject; answer keys are an
 ALLOWLIST — unknown keys are dropped by contract, and `source` is
 server-sanitized attribution, not applicant content). Applicants
 are NEVER customers or leads — the route never touches either table.
+A resubmission (the same contact, answers, role, language and SMS consent
+inside 15 minutes; the form re-sends identical content with a fresh
+Turnstile token when a committed POST's answer is lost) files nothing new
+and starts none of the side effects below, and answers the same 200
+`{success:true}`; the check runs under the per-phone advisory lock the
+call-filed path takes (`createJobApplication`, team/staff audit F6).
 Post-insert side effects are fire-and-forget: an AI ranking
 screen that is assist-only (it never changes status or any
 applicant-facing outcome — every decision is the owner's, which also
