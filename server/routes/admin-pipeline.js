@@ -28,8 +28,9 @@ const SAVED_VIEW_FILTERS = new Set([
 
 router.use(adminAuthenticate, requireAdmin);
 
+// technicians has one `name` column (no first_name / last_name).
 function performedBy(req) {
-  return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin';
+  return req.technician?.name || 'Admin';
 }
 
 function searchDigits(search) {
