@@ -7,7 +7,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { first_name: 'Ava', last_name: 'Admin' };
+    req.technician = { name: 'Ava Admin' };
     req.technicianId = 'admin-1';
     // Role comes from the (mocked) auth layer exactly as admin-auth.js sets
     // req.techRole; tests pick a technician via the x-test-role header.

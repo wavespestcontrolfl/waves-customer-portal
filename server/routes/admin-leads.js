@@ -119,6 +119,12 @@ const createLeadSchema = Joi.object({
   }).allow('', null),
 }).unknown(true);
 
+// The signed-in staff member's name for lead history. technicians has one `name`
+// column (no first_name / last_name), so reading those wrote "undefined " or "".
+function staffName(req) {
+  return req.technician?.name || 'Admin';
+}
+
 // A YYYY-MM-DD string that names a date that actually exists. JS Date
 // auto-rolls overflow (2026-02-31 → Mar 3), so the round-trip check is what
 // catches impossible dates the shape regex passes.
@@ -917,8 +923,8 @@ router.post('/', async (req, res, next) => {
     await db('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'created',
-      description: `Lead created manually by ${req.technician.first_name}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      description: `Lead created manually by ${staffName(req)}`,
+      performed_by: staffName(req),
       metadata: notes ? JSON.stringify({ notes }) : null,
     });
 
@@ -1187,7 +1193,7 @@ router.put('/:id', async (req, res, next) => {
     }
     updates.updated_at = new Date();
 
-    const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
+    const performedBy = staffName(req);
     let previousStatus;
     const responseLead = await db.transaction(async (trx) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
@@ -1261,7 +1267,7 @@ router.delete('/:id', async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (lead.deleted_at) return res.json({ success: true, deleted: true, alreadyDeleted: true });
 
-    const performedBy = req.technician.first_name + ' ' + (req.technician.last_name || '');
+    const performedBy = staffName(req);
     await db.transaction(async (trx) => {
       // Scoped to deleted_at IS NULL so a concurrent delete can't double-stamp
       // or double-log; 0 rows means the other request already handled it.
@@ -1299,7 +1305,7 @@ router.post('/:id/activity', async (req, res, next) => {
       lead_id: req.params.id,
       activity_type: activity_type || 'note',
       description: description || '',
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      performed_by: staffName(req),
       metadata: metadata ? JSON.stringify(metadata) : null,
     }).returning('*');
     res.json({ activity });
@@ -1444,7 +1450,7 @@ router.post('/:id/assign', async (req, res, next) => {
       activity_type: 'assigned',
       // technicians has one `name` column (no first_name / last_name).
       description: tech ? `Assigned to ${tech.name}` : 'Unassigned',
-      performed_by: req.technician.name,
+      performed_by: staffName(req),
     });
     res.json({ lead });
   } catch (err) { next(err); }
@@ -1705,7 +1711,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const updated = await recordLeadSmsOutreach({
       leadId: req.params.id,
       message,
-      performedBy: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
+      performedBy: staffName(req),
     });
     res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
   } catch (err) {
@@ -1762,7 +1768,7 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
         lead_id: req.params.id,
         activity_type: 'callback_scheduled',
         description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
-        performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+        performed_by: staffName(req),
         metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
       });
       return true;
@@ -1900,7 +1906,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // insert only sets columns the live schema actually has.
     const cols = await db('scheduled_services').columnInfo();
 
-    const performedBy = req.technician.first_name + ' ' + (req.technician.last_name || '');
+    const performedBy = staffName(req);
 
     // Advisory occupancy-overlap notes (owner ruling 2026-08-25, same as
     // routes/admin-schedule.js — staff-side saves never block on schedule
