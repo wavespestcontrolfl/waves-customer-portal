@@ -421,12 +421,13 @@ export default function MistingRecordsPanel({ customerId }) {
     if (!hit) return "Removed property";
     return properties.length < 2 ? "" : hit.label || "";
   };
-  // A removed property (row deleted, or retired by the office) is shown read-only.
-  const isRemoved = (propertyId) => !propertyId || !properties.some((p) => p.id === propertyId);
   const currentFor = (propertyId) => current.find((c) => c.propertyId === propertyId);
   const homesWithoutSystem = properties.filter((p) => !currentFor(p.id));
 
-  const saved = (text) => {
+  // A save that finishes after the sheet switched customers belongs to the old customer: ignore it, so it
+  // never clears the new customer's open form or shows a success message there (same rule as confirmVoid).
+  const saved = (text, forCustomerId) => {
+    if (customerRef.current !== forCustomerId) return;
     setMode(null);
     setMsg(text);
     reload();
@@ -504,7 +505,7 @@ export default function MistingRecordsPanel({ customerId }) {
                   calibration={cal}
                   onCancel={() => setMode(null)}
                   onNewCalibration={() => setMode({ type: "calibrate", base: cal })}
-                  onSaved={() => saved("Refill saved.")}
+                  onSaved={() => saved("Refill saved.", customerId)}
                 />
               )}
               {!(mode?.type === "refill" && mode.calibration.id === cal.id) && (
@@ -531,7 +532,7 @@ export default function MistingRecordsPanel({ customerId }) {
               properties={properties}
               initial={{ ...(mode.base ? fromCalibration(mode.base) : blankCalibration()), ...(mode.base || properties.length < 2 ? {} : { propertyId: homesWithoutSystem[0]?.id || "" }) }}
               onCancel={() => setMode(null)}
-              onSaved={() => saved("Calibration saved.")}
+              onSaved={() => saved("Calibration saved.", customerId)}
             />
           )}
 
@@ -550,7 +551,7 @@ export default function MistingRecordsPanel({ customerId }) {
                     </div>
                     {r.notes && <div className={cn("text-ui-label text-ink-secondary", r.voidedAt && "line-through")}>{r.notes}</div>}
                     {r.voidedAt && <div className="text-ui-label">Voided {dayOf(r.voidedAt)}: {r.voidReason}</div>}
-                    {!r.voidedAt && !isRemoved(r.propertyId) && (
+                    {!r.voidedAt && (
                       <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid("refill", r.id)}>
                         Void
                       </button>
@@ -581,6 +582,12 @@ export default function MistingRecordsPanel({ customerId }) {
                         {propertyName(c.propertyId) ? ` ${propertyName(c.propertyId)}.` : ""} By {c.recordedBy?.name || "staff"}.
                       </div>
                       {c.voidedAt && <div className="text-ui-label">Voided {dayOf(c.voidedAt)}: {c.voidReason}</div>}
+                      {!c.voidedAt && (
+                        <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid("calibration", c.id)}>
+                          Void
+                        </button>
+                      )}
+                      {voidBox("calibration", c.id)}
                     </li>
                   ))}
                 </ul>

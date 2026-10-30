@@ -160,7 +160,7 @@ describe("MistingRecordsPanel", () => {
     expect(screen.getByText(/Gone model.*Removed property\./)).toBeInTheDocument();
   });
 
-  it("shows a retired property's records read-only under Removed property", async () => {
+  it("lists a retired property's records under Removed property with no new work, but still lets staff void a mistake", async () => {
     await openPanel(records({
       calibrations: [calibration({ id: "c-old", propertyId: "retired-1", isCurrent: false, model: "Retired model" })],
       refills: [refill({ id: "r-old", propertyId: "retired-1", calibrationId: "c-old" })],
@@ -168,10 +168,29 @@ describe("MistingRecordsPanel", () => {
     expect(screen.getByText("No misting system on file.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Log refill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New calibration" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Void" })).not.toBeInTheDocument();
     expect(screen.getByText(/counter reset, Removed property, by Test Tech/)).toBeInTheDocument();
+    // The refill's Void; the server allows voiding a record at a removed property.
+    expect(screen.getAllByRole("button", { name: "Void" })).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
     expect(screen.getByText(/Retired model.*Removed property\./)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Void" })).toHaveLength(2);
+  });
+
+  it("voids an earlier (superseded) calibration with an inline reason", async () => {
+    await openPanel(records({
+      calibrations: [calibration(), calibration({ id: "c-earlier", isCurrent: false, model: "Earlier model", createdAt: "2026-02-01T15:00:00.000Z" })],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
+    const item = screen.getByText(/Earlier model/).closest("li");
+    fireEvent.click(within(item).getByRole("button", { name: "Void" }));
+    fireEvent.change(within(item).getByLabelText("Why void this record?"), { target: { value: "Typed the wrong flow" } });
+    mockFetch.mockResolvedValueOnce({ calibration: calibration({ id: "c-earlier", isCurrent: false, voidedAt: "2026-03-02T00:00:00.000Z" }) });
+    mockFetch.mockResolvedValueOnce(records({ calibrations: [calibration()] }));
+    fireEvent.click(within(item).getByRole("button", { name: "Void record" }));
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/admin/misting-records/calibrations/c-earlier/void", {
+      method: "POST",
+      body: JSON.stringify({ reason: "Typed the wrong flow" }),
+    }));
   });
 
   it("voids with an inline reason, never a browser prompt", async () => {
@@ -352,6 +371,31 @@ describe("MistingRecordsPanel", () => {
       fireEvent.click(screen.getByText("Product changed? Record a new calibration."));
       expect(screen.getByRole("form", { name: "Install calibration" })).toBeInTheDocument();
     });
+  });
+
+  it("ignores a save that finishes after the customer changed: the new customer's open form stays", async () => {
+    mockFetch.mockResolvedValueOnce(records({ calibrations: [calibration()] }));
+    const { rerender } = render(<MistingRecordsPanel customerId={CUSTOMER} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show" }));
+    fireEvent.click(screen.getByRole("button", { name: "Log refill" }));
+    let finishSave;
+    mockFetch.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Save refill" }));
+    await waitFor(() => expect(finishSave).toEqual(expect.any(Function)));
+
+    const OTHER = "99999999-9999-4999-8999-999999999999";
+    mockFetch.mockResolvedValueOnce(records({ calibrations: [calibration({ id: "c-other", customerId: OTHER })] }));
+    rerender(<MistingRecordsPanel customerId={OTHER} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show" }));
+    fireEvent.click(screen.getByRole("button", { name: "Log refill" }));
+    expect(screen.getByRole("form", { name: "Log refill" })).toBeInTheDocument();
+    const callsBefore = mockFetch.mock.calls.length;
+
+    finishSave({ refill: refill() });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("form", { name: "Log refill" })).toBeInTheDocument();
+    expect(screen.queryByText("Refill saved.")).not.toBeInTheDocument();
+    expect(mockFetch.mock.calls.length).toBe(callsBefore);
   });
 
   it("resets when the customer changes", async () => {
