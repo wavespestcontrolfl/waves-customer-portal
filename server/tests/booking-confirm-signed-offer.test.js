@@ -1045,6 +1045,61 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
   });
 
+  // The re-service route rebuilds availability at one pin and passes it as
+  // callbackVisit.expectedLocation. createSelfBooking re-reads the customer, so
+  // a pin moved BEFORE its own snapshot would otherwise compare B with B.
+  describe('re-service expectedLocation fence (capacity off, the production state)', () => {
+    const withGates = async (fn) => {
+      const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+      const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+      process.env.GATE_SCHEDULING_CAPACITY = 'false';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'false';
+      const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+      try { await fn({ conflictSpy }); } finally {
+        conflictSpy.mockRestore(); laneSpy.mockRestore();
+        if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+        else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+        if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+        else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+      }
+    };
+    const visitAt = (location) => ({
+      serviceKey: 'pest_re_service',
+      serviceId: 'eeee4444-ff55-4666-8777-aaaa8888bbbb',
+      serviceType: 'Pest Control Re-Service',
+      durationMinutes: 30,
+      expectedLocation: location,
+    });
+
+    test('a pin moved between the availability rebuild and the booking snapshot is refused; nothing is booked', async () => {
+      await withGates(async ({ conflictSpy }) => {
+        const moved = { latitude: LAT + 0.02, longitude: LNG - 0.02 };
+        loadedCustomer = { ...CUST, ...moved };
+        fencedCustomer = { ...loadedCustomer };
+        await expect(createSelfBooking(callbackPayload({
+          callbackVisit: visitAt({ lat: LAT, lng: LNG }),
+        }))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+        expect(conflictSpy).not.toHaveBeenCalled();
+        expect(capturedScheduledInsert).toBeUndefined();
+      });
+    });
+
+    test('an unchanged pin books as before', async () => {
+      await withGates(async () => {
+        loadedCustomer = { ...CUST, latitude: LAT, longitude: LNG };
+        fencedCustomer = { ...loadedCustomer };
+        const row = await (async () => {
+          await expect(createSelfBooking(callbackPayload({
+            callbackVisit: visitAt({ lat: LAT, lng: LNG }),
+          }))).rejects.toThrow(SENTINEL);
+          return capturedScheduledInsert;
+        })();
+        expect(row).toMatchObject({ is_callback: true });
+      });
+    });
+  });
+
   test('a re-service address changed while its missing pin resolves is refused under the customer fence', async () => {
     loadedCustomer = { ...CUST, latitude: null, longitude: null };
     fencedCustomer = { ...loadedCustomer };
