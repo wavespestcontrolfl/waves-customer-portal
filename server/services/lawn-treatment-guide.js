@@ -48,6 +48,9 @@ const CHINCH_RUNGS = Object.freeze([
 const CHINCH_TRIGGERS = Object.freeze(CHINCH_RUNGS.flat());
 // application-limits' type for the yearly application count (checkLimits).
 const YEARLY_CAP = 'annual_max_apps';
+// The label's own prohibition (oxadiazon on a home lawn): a block with this type, not a product_limits row. Stays a block.
+const { CODE: PROHIBITED_TYPE } = require('./lawn-prohibited-products');
+const LIMIT_WARNING_FALLBACK = 'A yearly limit is reached for this product.';
 
 const CHECKS = Object.freeze({
   fungus: 'Check first: look at the blades and the edge of the patch.',
@@ -152,7 +155,9 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAll
   // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
   // has no finding is neither.
   // The passed-over Group 11 rows are blocked outright: no limit read is needed, and no list or search offers them.
-  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: group11HeldAddOns(candidates, rows, { takeAllMapped }).map((c) => idOf(c.raw.product.id)), unreadable: [] };
+  // `limitWarned` (owner 2026-10-30: a yearly limit is a warning, never a block): the picks closed ONLY by a limit that was READ,
+  // `{ [productId]: the limit's own words }`. They are offered (card, list, search) and are in neither `blocked` nor `unreadable`.
+  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: group11HeldAddOns(candidates, rows, { takeAllMapped }).map((c) => idOf(c.raw.product.id)), unreadable: [], limitWarned: {} };
   if (!chosen.length) return offers;
   const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
   if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
@@ -167,6 +172,7 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAll
     if (kind !== TAKE_ALL_KIND) offers[kind] = offerFor(kind, candidate, { capped, rows });
     if (isBlocked(candidate, capped)) offers.blocked.push(id);
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
+    else if (limitWarningOf(candidate, capped)) offers.limitWarned[id] = limitWarningOf(candidate, capped);
   }
   if (placeBlocked) { offers.placeBlocked = placeBlocked; offers.placeTypes = placeTypes; }
   return offers;
@@ -261,20 +267,30 @@ async function readCaps({ products, rows, svc, knex, place = null }) {
 // Take-all fungus is told by the staged trigger or by the add-on's own protocol line.
 const isTakeAll = (candidate, rows) => TAKE_ALL_TRIGGER.test(stagedRowOf(rows, candidate.raw)?.gates?.trigger || '') || TAKE_ALL_LINE.test(candidate.item?.line || '');
 
-// One kind's offer, or null. Any block (a reached cap, another limit, a read that failed and came
-// back as a block with no type, a city hold) keeps the product off the card. A take-all card names
-// no product, so it stands, with `blocked` so a later trouble-area card still holds back.
+// One kind's offer, or null. A city hold, or a read that failed (a block with no limit type), keeps the product off the card.
+// A yearly limit that was READ (count, interval or amount) does not: it is a WARNING, never a block (owner 2026-10-30; the
+// 09-28 ruling for every product_limits row), so the product is offered with the limit's own words in `limitWarning`. A take-all
+// card names no product, so it stands, with `blocked` so a later trouble-area card still holds back.
 // v13VisitLimits fails closed per product: a read that failed comes back as a block with no limit type
-// (a real limit always names one). A named limit or a city hold forbids the product; a typeless block
-// is an unreadable limit.
+// (a real limit always names one). A city hold, or the label's own prohibition (oxadiazon on a home lawn: not a limit row),
+// forbids the product; a typeless block is an unreadable limit.
 const limitBlocks = (candidate, capped) => capped.get(idOf(candidate.raw.product.id)) || [];
-const isBlocked = (candidate, capped) => heldByCity(candidate.raw) || limitBlocks(candidate, capped).some((block) => block.type);
-const isUnreadable = (candidate, capped) => !isBlocked(candidate, capped) && limitBlocks(candidate, capped).length > 0;
+// A limit row that was read (it names its type) and is not the label prohibition.
+const isLimitBlock = (block) => !!block.type && block.type !== PROHIBITED_TYPE;
+const isBlocked = (candidate, capped) => heldByCity(candidate.raw) || limitBlocks(candidate, capped).some((block) => block.type && !isLimitBlock(block));
+const isUnreadable = (candidate, capped) => !isBlocked(candidate, capped) && limitBlocks(candidate, capped).length > 0 && !limitBlocks(candidate, capped).some(isLimitBlock);
+// The limit's own words when a pick is closed only by a limit that was read, else null.
+const limitWarningOf = (candidate, capped) => {
+  if (isBlocked(candidate, capped) || isUnreadable(candidate, capped)) return null;
+  const found = limitBlocks(candidate, capped).find(isLimitBlock);
+  return found ? found.message || LIMIT_WARNING_FALLBACK : null;
+};
 
 function offerFor(kind, candidate, { capped, rows }) {
   const blocked = isBlocked(candidate, capped) || isUnreadable(candidate, capped);
-  if (kind === 'fungus' && isTakeAll(candidate, rows)) return { item: candidate.item, takeAll: true, blocked };
-  return blocked ? null : { item: candidate.item };
+  const limitWarning = limitWarningOf(candidate, capped);
+  if (kind === 'fungus' && isTakeAll(candidate, rows)) return { item: candidate.item, takeAll: true, blocked, ...(limitWarning ? { limitWarning } : {}) };
+  return blocked ? null : { item: candidate.item, ...(limitWarning ? { limitWarning } : {}) };
 }
 
 /**
@@ -296,7 +312,26 @@ function blockedProductIds({ offers, chinch, weedMix }) {
     : [...(weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : []), ...(weedMix?.blockedIds || [])])
     // Unreadable at some place (GATE_LAWN_TROUBLE_AREAS): not forbidden.
     .filter((id) => !(weedMix?.unreadableIds || []).includes(id));
-  return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
+  // A product a yearly limit closes is a warning, never a block (owner 2026-10-30): see limitWarnedProducts.
+  const warned = new Set(Object.keys(limitWarnedProducts({ offers, chinch, weedMix })).map((id) => id.toLowerCase()));
+  return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))].filter((id) => !warned.has(id.toLowerCase()));
+}
+
+/**
+ * The guide-governed products a yearly limit that was READ closes, `{ [productId]: the limit's own words }` (owner 2026-10-30,
+ * and the 09-28 ruling for every product_limits row: a limit is a warning, never a block). The picks (`offers.limitWarned`), the
+ * chinch rungs whose own limit was read (`limitedIds`) and the weed group's `blockedIds`. A product whose read FAILED is not here
+ * (see unreadableProductIds), and neither is a city hold or the Group 11 take-all hold (see blockedProductIds). Offered, never
+ * removed: the sheet shows the words and completes; the closeout tells the office (recordedProductLimitFindings). Pure.
+ */
+function limitWarnedProducts({ offers, chinch, weedMix }) {
+  const words = {};
+  const put = (id, message) => { if (id && !words[idOf(id)]) words[idOf(id)] = message || LIMIT_WARNING_FALLBACK; };
+  for (const [id, message] of Object.entries(offers?.limitWarned || {})) put(id, message);
+  for (const id of chinch?.limitedIds || []) put(id, chinch.limitMessages?.[idOf(id)]);
+  const unreadable = (weedMix?.unreadableIds || []).map(idOf);
+  for (const id of weedMix?.blockedIds || []) if (!unreadable.includes(idOf(id))) put(id, weedMix.limitMessages?.[idOf(id)]);
+  return words;
 }
 
 /**
@@ -471,7 +506,9 @@ function chinchProducts(staged) {
 // rung that a sibling's interval or blackout keeps off the offer; the sheet's search leaves out only the rungs in `limitedIds`.
 function chooseChinch(products, capped) {
   const limitedIds = products.filter((product) => (capped.get(product.productId) || []).some((block) => block.type)).map((product) => product.productId);
-  return { ...walkChinch(products, capped), limitedIds };
+  // `limitMessages` (additive, only when a limit was read): each limited rung's own words, for the sheet's warning.
+  const limitMessages = Object.fromEntries(limitedIds.map((id) => [id, (capped.get(id) || []).find((block) => block.type)?.message]).filter(([, message]) => message));
+  return { ...walkChinch(products, capped), limitedIds, ...(Object.keys(limitMessages).length ? { limitMessages } : {}) };
 }
 
 function walkChinch(products, capped) {
@@ -508,6 +545,9 @@ const cardFor = (kind, fields) => ({
   actionLabel: 'Add it', dismissLabel: null, ...fields,
 });
 const protocolLine = (item) => item.line || item.name;
+// A product offered under a yearly limit (a warning, never a block): the card's line carries the limit's own words and the promise.
+const LIMIT_WARNING_TAIL = 'You can still complete. The office gets an alert.';
+const limitNoteOf = (limitWarning, before = null) => (limitWarning ? { note: [before, `${limitWarning} ${LIMIT_WARNING_TAIL}`].filter(Boolean).join(' ') } : {});
 
 /**
  * The cards for a confirmed assessment, in screen order. `offers` is `{ fungus, caterpillars,
@@ -551,7 +591,7 @@ function weedFinding(s) {
 
 function fungusCard({ s, offers, troubleAreas }) {
   if (!atLeast(s.fungus, 'minor') || !offers.fungus?.item) return null;
-  const { item, takeAll, blocked } = offers.fungus;
+  const { item, takeAll, blocked, limitWarning } = offers.fungus;
   const finding = `Photos show ${s.fungus} fungus activity.`;
   // The check only: take-all is treated on known trouble areas, and none is on file.
   // The product is held, not offered: it names no add button and must not be addable from anywhere else.
@@ -563,6 +603,7 @@ function fungusCard({ s, offers, troubleAreas }) {
     // A take-all card offered because the lawn has take-all areas on file names them (GATE_LAWN_TROUBLE_AREAS).
     // GATE_LAWN_TROUBLE_AREAS: the card's row may go only on these mapped places (the sheet offers only them; /complete enforces it for a card row).
     ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.`, allowedPlaces: [...new Set(troubleAreas.map((area) => area.place))], checkOnlyNote: TAKE_ALL_NOTE } : {}),
+    ...limitNoteOf(limitWarning, takeAll ? `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.` : null),
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
   });
 }
@@ -591,8 +632,9 @@ function chinchCardPlaces(byPlace) {
 
 function caterpillarsCard({ s, offers }) {
   if (!atLeast(s.insect, 'moderate') || !offers.caterpillars?.item) return null;
-  const { item } = offers.caterpillars;
+  const { item, limitWarning } = offers.caterpillars;
   return cardFor('caterpillars', {
+    ...limitNoteOf(limitWarning),
     title: 'Insects: check for caterpillars',
     finding: `Photos show ${s.insect} insect damage.`,
     check: CHECKS.caterpillars,
@@ -606,8 +648,9 @@ function caterpillarsCard({ s, offers }) {
 
 function dryCard({ s, offers }) {
   if (!atLeast(s.drought, 'minor') || !offers.dry_spots?.item) return null;
-  const { item } = offers.dry_spots;
+  const { item, limitWarning } = offers.dry_spots;
   return cardFor('dry_spots', {
+    ...limitNoteOf(limitWarning),
     title: 'Dry spots',
     finding: `Photos show ${s.drought} drought stress.`,
     detail: protocolLine(item),
@@ -728,6 +771,7 @@ module.exports = {
   takeAllAddOns,
   weedOffer,
   blockedProductIds,
+  limitWarnedProducts,
   unreadableProductIds,
   UNREADABLE_NOTE,
   resolveChinch,

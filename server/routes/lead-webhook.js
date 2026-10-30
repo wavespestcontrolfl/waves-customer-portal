@@ -1538,7 +1538,10 @@ function getLeadWebhookAttribution(body = {}) {
     utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
     utmContent: body.utm_content || body['Utm Content'] || attrUtm.content || '',
     utmTerm: body.utm_term || body['Utm Term'] || attrUtm.term || '',
-    gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || ''),
+    // leads.gclid is varchar(200) (migration 20260401000110); the other click-id
+    // columns are 255. Same caps as LEAD_CLICK_ID_MAX in lead-estimate-link.js: a
+    // longer gclid made the leads insert throw after the customer row was saved.
+    gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '', 200),
     wbraid: truncateClickId(body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || ''),
     gbraid: truncateClickId(body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || ''),
     // Meta click id + first-party cookies (the gclid analog), for Meta web-lead
@@ -1554,8 +1557,8 @@ function getLeadWebhookAttribution(body = {}) {
   };
 }
 
-function truncateClickId(value) {
-  return value ? String(value).slice(0, 255) : '';
+function truncateClickId(value, max = 255) {
+  return value ? String(value).slice(0, max) : '';
 }
 
 // The neighbor page's optional "Which home had the sign?" answer: printable
@@ -1620,7 +1623,9 @@ function buildLeadWebhookIntake(body = {}) {
   const normalizedName = normalizeLeadName(body);
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
   const lastName = capitalizeName(normalizedName.last_name || '');
-  const serviceInterest = normalizeLeadServiceInterest(body);
+  // leads.service_interest is varchar(255), and a free-text answer is not a known label,
+  // so it would pass through uncapped and fail the leads insert after the customer saved.
+  const serviceInterest = normalizeLeadServiceInterest(body).slice(0, 255);
   const serviceKey = normalizeLeadServiceKey(body);
   // Declared "when do you want this handled?" — exact key only (a substring
   // sweep would catch address/attribution fields, same trap as `message`).

@@ -1006,40 +1006,30 @@ async function attachProposalCustomer(trx, updatedEstimate) {
   return proposalCustomer;
 }
 
-// Invoice-mode win: the first invoice built from the proposal line items.
-async function createProposalWinInvoice(trx, updatedEstimate) {
-  let proposalInvoice;
+// Invoice-mode win: no invoice (owner 2026-10-30, audit item 1 option A: every visit bills when it is completed). The
+// win only refuses an authored term that contradicts the customer's payer, whose terms bill those visits.
+async function assertInvoiceModeWinTerms(trx, updatedEstimate) {
   try {
-    proposalInvoice = await proposalWin.createProposalAcceptanceInvoice({
+    await proposalWin.assertProposalTermsMatchPayer({
       trx,
-      estimate: updatedEstimate,
-      proposal: normalizeProposal(updatedEstimate),
       customerId: updatedEstimate.customer_id,
+      proposal: normalizeProposal(updatedEstimate),
     });
   } catch (err) {
-    logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
+    logger.warn(`[estimate-manual-acceptance] proposal payer-term check failed for estimate ${updatedEstimate.id}: ${err.message}`);
     // Expected validation conflicts (4xx, e.g. the payer-term mismatch 409)
     // carry an actionable operator message (codex #3297 r2e).
     if (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
       throw httpError(err.message, err.statusCode);
     }
-    throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
+    throw httpError('The customer\u2019s payer terms could not be checked; the estimate was not marked accepted.', 500);
   }
-  // Invoice mode promises a first invoice; with no billable lines the trx
-  // rolls back rather than record a win with no invoice.
-  if (!proposalInvoice) {
-    throw httpError(
-      'This invoice-mode proposal has no billable line items to invoice. Add priced lines or turn off invoice mode before winning it.',
-      400,
-    );
-  }
-  return proposalInvoice;
 }
 
 // Step 5 (commercial proposal): record the win. A proposal's pricing lives in
-// estimate_data.proposal.buildings, which EstimateConverter does not read, so
-// the proposal records the win (status + linked-lead) and, in invoice mode,
-// builds its first invoice from the proposal lines (#1917).
+// estimate_data.proposal, which EstimateConverter does not read, so the
+// proposal records the win (status + linked-lead). It makes no invoice in any
+// mode: every visit bills when it is completed (owner 2026-10-30).
 async function winCommercialProposal(trx, updatedEstimate) {
   const proposalCustomer = await attachProposalCustomer(trx, updatedEstimate);
   // Flag the customer commercial for a TAXABLE proposal even when no first
@@ -1073,8 +1063,8 @@ async function winCommercialProposal(trx, updatedEstimate) {
       409,
     );
   }
-  const proposalInvoice = updatedEstimate.bill_by_invoice ? await createProposalWinInvoice(trx, updatedEstimate) : null;
-  return { proposalCustomer, proposalInvoice };
+  if (updatedEstimate.bill_by_invoice) await assertInvoiceModeWinTerms(trx, updatedEstimate);
+  return { proposalCustomer };
 }
 
 // What the bar card's pins ask of the conversion itself. With "no linked
@@ -1338,7 +1328,7 @@ async function acceptInTransaction(trx, ctx) {
     throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
   }
 
-  let win = { proposalCustomer: null, proposalInvoice: null, conversion: null };
+  let win = { proposalCustomer: null, conversion: null };
   const before = isCommercialProposal ? null : await captureStateBefore(trx, ctx, updatedEstimate);
   if (isCommercialProposal) win = { ...win, ...(await winCommercialProposal(trx, updatedEstimate)) };
   else win.conversion = await convertAcceptedEstimate(trx, ctx, updatedEstimate, annualPrepayAmount);
@@ -1393,18 +1383,15 @@ async function runPostCommitWork(claim, ctx, { leadLinkService, warnings }) {
 }
 
 function acceptResponse(claim, billingTerm, warnings) {
-  const { proposalInvoice, proposalCustomer } = claim;
+  const { proposalCustomer } = claim;
   return {
     estimate: claim.acceptedEstimate,
     alreadyAccepted: claim.alreadyAccepted,
     conversion: claim.conversion,
     billingTerm,
     warnings,
-    // #1917 proposal win surfaces: the auto-built invoice + whether a new
-    // customer was created, so the admin UI can link to them.
-    proposalInvoice: proposalInvoice
-      ? { id: proposalInvoice.id, invoiceNumber: proposalInvoice.invoice_number, token: proposalInvoice.token, total: proposalInvoice.total }
-      : null,
+    // #1917 proposal win surfaces whether a new customer was created, so the
+    // admin UI can link to it.
     createdCustomer: proposalCustomer?.created ? { id: proposalCustomer.customerId } : null,
   };
 }

@@ -360,6 +360,83 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     });
   });
 
+  describe('estimate accept, live (build 4 part B)', () => {
+    // A pest + lawn estimate accepted on the pest slot of the pest home tech: live books the
+    // lawn program the same day with no time on the lawn technician; shadow copies the slot.
+    const acceptPestLawn = async (mode) => {
+      process.env.GATE_SERVICE_LINE_MAP = mode;
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('lawn', ownerId, null)]);
+      const converter = require('../services/estimate-converter');
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      const service = await db('services').where({ service_key: 'pest_general_quarterly' }).first('id', 'name', 'service_key');
+      const trx = await db.transaction();
+      try {
+        await trx('customers').insert({
+          id: customerId, first_name: 'Synthetic', last_name: 'Fixture', email: `${customerId}@example.invalid`,
+          phone: '+19415550101', active: true, property_type: 'residential', address_line1: '101 Example Court',
+          city: 'Parrish', state: 'FL', zip: '34219', pipeline_stage: 'active_customer', autopay_enabled: false,
+        });
+        await trx('estimates').insert({
+          id: estimateId, customer_id: customerId, status: 'accepted', token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
+          category: 'RESIDENTIAL', monthly_total: 95, annual_total: 1140,
+          estimate_data: { result: { recurring: { services: [
+            { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly', annual: 600, mo: 50, perTreatment: 150 },
+            { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9, frequency: 'every_6_weeks', annual: 540, mo: 45, perTreatment: 60 },
+          ] } } },
+        });
+        await trx('scheduled_services').insert({
+          customer_id: customerId, technician_id: hireId, source_estimate_id: estimateId, service_id: service.id,
+          service_key_snapshot: service.service_key, service_type: service.name, scheduled_date: MONDAY,
+          window_start: '09:00', window_end: '10:00', status: 'pending', estimated_duration_minutes: 60, estimated_price: 150,
+        });
+        await converter.convertEstimate(estimateId, {
+          database: trx, skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true,
+          deferFollowUpReminderRegistration: true, deferCommercialScheduleNotification: true,
+        });
+        const rows = await trx('scheduled_services').where({ source_estimate_id: estimateId })
+          .whereNull('recurring_parent_id')
+          .select('service_type', 'scheduled_date', 'window_start', 'technician_id', 'notes');
+        return rows.find((r) => /lawn/i.test(r.service_type)) || null;
+      } finally {
+        await trx.rollback();
+      }
+    };
+
+    test('live: the lawn program is booked the same day with no time on the lawn technician', async () => {
+      const lawn = await acceptPestLawn('live');
+      expect(lawn).not.toBeNull();
+      expect(lawn.window_start).toBeNull();
+      expect(lawn.technician_id).toBe(ownerId);
+      expect(String(lawn.scheduled_date instanceof Date ? lawn.scheduled_date.toISOString() : lawn.scheduled_date)).toContain(MONDAY);
+      expect(lawn.notes).toContain('This program has its own technician, so we will set its time separately.');
+    });
+
+    test('live: a database error inside the map lookup stays in its savepoint; the accept completes with today\'s copy', async () => {
+      const spy = jest.spyOn(lineTech, 'pickLineTechnician').mockImplementation(async (conn) => {
+        await conn.raw('select 1/0'); // a real PostgreSQL error on the accept's connection
+        return null;
+      });
+      try {
+        const lawn = await acceptPestLawn('live');
+        expect(spy).toHaveBeenCalled();
+        expect(lawn).not.toBeNull();
+        expect(String(lawn.window_start).slice(0, 5)).toBe('09:00');
+        expect(lawn.technician_id).toBe(hireId);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('shadow: the lawn program copies the picked slot and technician, as today', async () => {
+      const lawn = await acceptPestLawn('shadow');
+      expect(lawn).not.toBeNull();
+      expect(String(lawn.window_start).slice(0, 5)).toBe('09:00');
+      expect(lawn.technician_id).toBe(hireId);
+      expect(lawn.notes).not.toContain('its own technician');
+    });
+  });
+
   describe('Team-tab editor routes', () => {
     test('gate off: all three routes answer 404', async () => {
       for (const [method, path] of [['get', '/service-lines'], ['put', '/service-lines'], ['get', '/service-lines/shadow-summary']]) {

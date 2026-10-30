@@ -45,7 +45,6 @@ const {
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
-const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
 const {
   createOrReuseAdminEstimate,
@@ -4390,6 +4389,9 @@ router.get('/', async (req, res, next) => {
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
+          // The row offers "Send booking link" only when the route would not refuse it
+          // on the row alone (recurring-only and invoice-mode offers never qualify).
+          bookingLinkEligible: bookingLinkEligible(e, estData),
           // Scaffolds count: a disabled machine-seeded proposal must route
           // to the proposal builder, not the normal edit flow (revise
           // rejects COMMERCIAL rows).
@@ -4818,18 +4820,18 @@ router.put('/:id/proposal', async (req, res, next) => {
           return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 or Net-60 for an invoiced proposal, or turn off Bill by invoice.' });
         }
       } else if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
-        // Structured payment terms exist because billing CONSUMES them (the
-        // acceptance invoice's due date). Only invoice-mode proposals have
-        // that path — on any other proposal the field would render a promise
-        // no invoice ever reads. Payment language for manually-billed
-        // agreements belongs in Additional terms (codex #3297 r4).
+        // Structured Net terms belong to invoice mode: the signed agreement
+        // prints them and the win checks them against the customer's payer,
+        // whose terms bill each visit. On any other proposal the field would
+        // render a promise no billing path reads. Payment language for
+        // manually-billed agreements belongs in Additional terms (codex #3297 r4).
         return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
       }
       // The invoice-mode state the term was checked against, re-asserted at write time below.
       savingPaymentTerm = canonicalPaymentTerms ? { billByInvoice: canonicalPaymentTerms !== AUTOPAY_PAYMENT_TERMS } : false;
       // A linked ACTIVE payer's terms are the standing billing relationship
-      // (they drive statement accrual and the acceptance invoice via
-      // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
+      // (they drive statement accrual for every visit; the win re-checks them
+      // in assertProposalTermsMatchPayer). Authoring a CONTRADICTING term here
       // would render a promise the invoice won't keep — reject it at the
       // only surface that authors terms, so agreement and invoice always
       // match (codex #3297 r2d).
@@ -4902,18 +4904,6 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
       }
     }
-    // The acceptance invoice bills every program's first application PLUS all
-    // corrective work (and tax) on ONE invoice — each estimate column can
-    // pass the per-column bound while the combined first invoice overflows
-    // invoices.subtotal/total, also decimal(10,2), at mark-won (codex 1A-ii
-    // r14). Reuse the canonical builder so the bound matches exactly what a
-    // win would bill. Checked regardless of the current billing mode —
-    // bill_by_invoice can flip after authoring.
-    const firstInvoice = buildProposalFirstInvoice(normalized);
-    if (firstInvoice.subtotal > DB_TOTAL_MAX || firstInvoice.total > DB_TOTAL_MAX) {
-      return res.status(400).json({ error: 'The combined acceptance invoice (first applications plus corrective work and tax) exceeds $99,999,999.99 — reduce the amounts before saving.' });
-    }
-
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
     const hadFixedValidity = hasFixedBidValidity(estimate);
@@ -5729,6 +5719,34 @@ router.post('/:id/follow-up', async (req, res, next) => {
   }
 });
 
+// The one-time service the booking link pre-selects in /book (the same line the
+// auto-accept flow uses), or '' when the estimate has none. Shared by the route
+// below and the list's bookingLinkEligible.
+function bookingLinkOneTimeLabel(estimateData) {
+  try {
+    const estData = typeof estimateData === 'string' ? JSON.parse(estimateData) : estimateData;
+    const { oneTimeList } = acceptanceServiceLists(estData || {});
+    return oneTimeList[0]?.name || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+// Whether a list row may offer "Send booking link": the route's refusals that
+// depend on the row alone (status, archived, invoice mode, unresolved manager
+// approval, and a recurring-only offer, which routes through onboarding). The
+// phone checks and the booked-slot guard stay request-time in the route.
+function bookingLinkEligible(estimate, estimateData = estimate.estimate_data) {
+  if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) return false;
+  if (estimate.archived_at || estimate.bill_by_invoice) return false;
+  try {
+    if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
+  } catch (_) {
+    return false; // unreadable estimate_data: hide the action, never fail the list
+  }
+  return !!bookingLinkOneTimeLabel(estimateData) || !(Number(estimate.monthly_total || 0) > 0);
+}
+
 // POST /api/admin/estimates/:id/send-booking-link — manual override that
 // mirrors the post-accept one-time booking SMS. Re-fires the same flow the
 // system auto-runs when a customer accepts a one-time estimate: pre-select
@@ -5775,14 +5793,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // pre-select the service in /book. A missing one-time line on a
     // recurring estimate is a hard refusal: recurring customers belong in
     // onboarding, not the self-booking flow.
-    let oneTimeLabel = '';
-    try {
-      const estData = typeof estimate.estimate_data === 'string'
-        ? JSON.parse(estimate.estimate_data)
-        : estimate.estimate_data;
-      const { oneTimeList } = acceptanceServiceLists(estData || {});
-      oneTimeLabel = oneTimeList[0]?.name || '';
-    } catch (_) { /* fall through to recurring-only refusal below */ }
+    const oneTimeLabel = bookingLinkOneTimeLabel(estimate.estimate_data);
     if (!oneTimeLabel && Number(estimate.monthly_total || 0) > 0) {
       return res.status(400).json({
         error: 'No one-time service on this estimate — recurring offers route through onboarding, not /book.',
