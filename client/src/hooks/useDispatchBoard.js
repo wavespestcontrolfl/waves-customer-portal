@@ -121,6 +121,9 @@ export const TECH_ABSENCE_EVENT = 'waves:tech-absence-changed';
 // Minimum gap between roster re-reads triggered by pings from a tech the
 // roster does not carry (see handleTechStatus).
 export const UNKNOWN_TECH_REFETCH_MS = 60_000;
+// Focus, visibilitychange and online usually arrive together (and a socket
+// reconnect right after them): they collapse into one board re-read.
+export const RESYNC_DEBOUNCE_MS = 300;
 
 export function useDispatchBoard() {
   const [techsMap, setTechsMap] = useState(() => new Map());
@@ -129,6 +132,14 @@ export function useDispatchBoard() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // The socket is the only live feed: while it is down (or a re-read after
+  // it came back has not landed) a broadcast may have been missed, so the
+  // board can be out of date. See requestResync.
+  const [socketUp, setSocketUp] = useState(true);
+  const [stale, setStale] = useState(false);
+  // refreshSeqRef value when the board was marked possibly-out-of-date; only
+  // a read that STARTED after that clears it.
+  const staleSinceSeqRef = useRef(0);
 
   // Track the latest techsMap in a ref so the socket handler closure
   // always sees current state without re-subscribing on every render.
@@ -277,6 +288,7 @@ export function useDispatchBoard() {
       hydratedRef.current = true;
       setError(null);
       setLoading(false);
+      if (seq > staleSinceSeqRef.current) setStale(false);
     } catch (err) {
       // `error` is reserved for the board never having loaded: whichever
       // request is the LATEST when the board is still unhydrated owns
@@ -305,6 +317,75 @@ export function useDispatchBoard() {
   useEffect(() => {
     loadBoard();
   }, [loadBoard]);
+
+  // ---- recovery re-read ----
+  // A broadcast missed while the socket was down, the tab was asleep or the
+  // network was gone is never replayed by the server, so the board re-reads
+  // through the same sequenced loader on socket reconnect, window focus, tab
+  // visible and browser online. Debounced, and at most one resync read in
+  // flight: signals that land while one is pending queue exactly one more
+  // (that read starts after the signal, so it cannot predate it).
+  const resyncTimerRef = useRef(null);
+  const resyncRunningRef = useRef(false);
+  const resyncQueuedRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (resyncTimerRef.current) clearTimeout(resyncTimerRef.current);
+      resyncTimerRef.current = null;
+    };
+  }, []);
+
+  const runResync = useCallback(async () => {
+    if (resyncRunningRef.current) {
+      resyncQueuedRef.current = true;
+      return;
+    }
+    resyncRunningRef.current = true;
+    try {
+      do {
+        resyncQueuedRef.current = false;
+        await loadBoard();
+      } while (resyncQueuedRef.current && mountedRef.current);
+    } finally {
+      resyncRunningRef.current = false;
+    }
+  }, [loadBoard]);
+
+  const requestResync = useCallback(() => {
+    if (resyncTimerRef.current) clearTimeout(resyncTimerRef.current);
+    resyncTimerRef.current = setTimeout(() => {
+      resyncTimerRef.current = null;
+      if (mountedRef.current) runResync();
+    }, RESYNC_DEBOUNCE_MS);
+  }, [runResync]);
+
+  const markMaybeStale = useCallback(() => {
+    staleSinceSeqRef.current = refreshSeqRef.current;
+    setStale(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    function onFocus() { requestResync(); }
+    function onVisibility() {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') requestResync();
+    }
+    function onOnline() { requestResync(); }
+    function onOffline() { markMaybeStale(); }
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [requestResync, markMaybeStale]);
 
   // ---- socket subscription ----
   useEffect(() => {
@@ -379,14 +460,37 @@ export function useDispatchBoard() {
 
     socket.on('dispatch:tech_absence', handleTechAbsence);
 
+    // Connection state. 'connect' also fires on the FIRST connect, which the
+    // mount hydration already covers, so only a connect that follows a
+    // disconnect / failed attempt re-reads the board.
+    let needsResync = false;
+    function handleDisconnect() {
+      needsResync = true;
+      setSocketUp(false);
+      markMaybeStale();
+    }
+    function handleConnect() {
+      setSocketUp(true);
+      if (needsResync) {
+        needsResync = false;
+        requestResync();
+      }
+    }
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleDisconnect);
+
     // Cleanup: remove ALL handlers AND disconnect. Any one missing leaks.
     return () => {
       socket.off('dispatch:tech_status', handleTechStatus);
       socket.off('dispatch:job_update', handleJobUpdate);
       socket.off('dispatch:tech_absence', handleTechAbsence);
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleDisconnect);
       socket.disconnect();
     };
-  }, [refreshTechs, applyTechStatus, applyJobUpdate]);
+  }, [refreshTechs, applyTechStatus, applyJobUpdate, requestResync, markMaybeStale]);
 
   // Derived: stable array snapshot for consumers. Sorted by name to
   // match the API endpoint's ORDER BY so the roster doesn't reshuffle
@@ -415,5 +519,7 @@ export function useDispatchBoard() {
     loading,
     error,
     refreshTechs,
+    // 'live' | 'reconnecting' (socket down) | 'stale' (back up, re-read pending)
+    boardStatus: !socketUp ? 'reconnecting' : stale ? 'stale' : 'live',
   };
 }

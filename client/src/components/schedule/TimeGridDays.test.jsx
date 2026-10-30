@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDays from './TimeGridDays';
 
+const dnd = vi.hoisted(() => ({ props: null }));
+const modal = vi.hoisted(() => ({ props: null }));
+vi.mock('./RescheduleConfirmModal', () => ({
+  default: (props) => {
+    modal.props = props;
+    return props.open ? <div>Move confirmation</div> : null;
+  },
+}));
+
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children }) => <div>{children}</div>,
+  DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
   useSensors: () => [],
@@ -138,5 +147,107 @@ describe('TimeGridDays closeout-owed chip', () => {
     expect(await screen.findAllByText('Closeout owed')).toHaveLength(1);
     fireEvent.click(screen.getByTitle(/Owed Customer/));
     expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-owed' }));
+  });
+});
+
+describe('TimeGridDays committed move followed by a failed week read', () => {
+  const service = {
+    id: 'svc-1',
+    customerName: 'Synthetic Customer',
+    status: 'confirmed',
+    windowStart: '09:00',
+    windowEnd: '10:00',
+    technicianId: 'tech-1',
+    technicianName: 'Alex Tech',
+  };
+  const movedService = { ...service, windowStart: '10:00', windowEnd: '11:00' };
+  const payload = (services) => ({
+    startDate: '2026-11-02',
+    days: [
+      { date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, services: services[0] },
+      { date: '2026-11-03', dayOfWeek: 'Tue', dayNum: 3, services: services[1] },
+    ],
+  });
+  const unavailable = { ok: false, status: 503, statusText: 'Unavailable', text: async () => 'refresh temporarily unavailable' };
+
+  it('keeps the moved result, says it moved, and retries only the refresh', async () => {
+    vi.stubGlobal('alert', vi.fn());
+    let gets = 0;
+    let posts = 0;
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') { posts += 1; return response({ success: true, notificationSent: true }); }
+      gets += 1;
+      if (gets === 1) return response(payload([[service], []]));
+      if (gets === 2) return unavailable;
+      return response(payload([[], [movedService]]));
+    });
+    const onChange = vi.fn();
+    render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+    await screen.findByText('Synthetic Customer');
+
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    expect(modal.props.open).toBe(true);
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'sms', scope: 'this_only' }); });
+
+    // The move committed: no failure alert, confirmation closed, parent told.
+    expect(posts).toBe(1);
+    expect(alert).not.toHaveBeenCalled();
+    expect(modal.props.open).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('alert')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    // The moved state stays: the visit sits on Tuesday, not back on Monday.
+    const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
+    expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+    expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(gets).toBe(3);
+    expect(posts).toBe(1); // retry re-reads only; the move is never re-sent
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Synthetic Customer')).toBeInTheDocument();
+  });
+
+  it('keeps the notice up when the retry also fails', async () => {
+    let gets = 0;
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') return response({ success: true });
+      gets += 1;
+      return gets === 1 ? response(payload([[service], []])) : unavailable;
+    });
+    render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+    await screen.findByText('Synthetic Customer');
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(gets).toBe(3));
+    expect(screen.getByRole('alert')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+  });
+
+  it('still reports a real move failure and reverts when the POST itself fails', async () => {
+    vi.stubGlobal('alert', vi.fn());
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') return { ok: false, status: 500, statusText: 'Boom', text: async () => 'move refused' };
+      return response(payload([[service], []]));
+    });
+    const onChange = vi.fn();
+    render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+    await screen.findByText('Synthetic Customer');
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('Reschedule failed'));
+    expect(modal.props.open).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
