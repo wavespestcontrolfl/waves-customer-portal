@@ -707,6 +707,26 @@ async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 }
 }
 
 /**
+ * Live customers whose street line, on the profile or an active saved address,
+ * also holds its city, state or ZIP (streetLineHoldsLocality): the same house
+ * then keys twice and a merge keeps both copies (owner 2026-10-30, #7131).
+ * Read-only; the daily lead-to-cash sweep reports the ids. The SQL keeps only
+ * lines with a comma or a state word; the predicate decides.
+ */
+async function customersWithStreetLineHoldingLocality(conn = db) {
+  const { streetLineHoldsLocality } = require('../utils/address-normalizer');
+  const candidate = (column) => `(${column} LIKE '%,%' OR ${column} ~* '\\s(fl|florida)\\M')`;
+  const [profiles, saved] = await Promise.all([
+    conn('customers as c').whereNull('c.deleted_at').whereRaw(candidate('c.address_line1'))
+      .select('c.id', 'c.address_line1', 'c.city'),
+    conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
+      .where('p.active', true).whereRaw(candidate('p.address_line1'))
+      .select('p.customer_id as id', 'p.address_line1', 'p.city'),
+  ]);
+  return [...new Set([...profiles, ...saved].filter(streetLineHoldsLocality).map((row) => row.id))].sort();
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -1449,6 +1469,7 @@ module.exports = {
   removeManualProperty,
   addressCanNameProperty,
   sweepMissingPrimaryProperties,
+  customersWithStreetLineHoldingLocality,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,
