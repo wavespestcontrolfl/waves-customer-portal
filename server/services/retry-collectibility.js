@@ -149,7 +149,12 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
     .whereRaw("(metadata IS NULL OR metadata->>'idempotency_key' IS NULL)")
     .first('id');
   if (keylessConsumedToday) attemptNumber += 1;
-  const base = `autopay_monthly_${customerId}_${todayEt}`;
+  // An EARLIER month collected today (Charge now with a month picked) carries that month in its
+  // key: the bare key is today's, so a never-attempted earlier month would otherwise hand out the
+  // same key as today's own dues charge (or another earlier month's), and Stripe would replay one
+  // PaymentIntent for both. The current month's key is unchanged (chargeMonthly's own default).
+  const monthPart = monthKey === todayEt.slice(0, 7) ? '' : `_${monthKey}`;
+  const base = `autopay_monthly_${customerId}_${todayEt}${monthPart}`;
   return attemptNumber > 0 ? `${base}_r${attemptNumber}` : base;
 }
 

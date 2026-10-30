@@ -314,7 +314,9 @@ describe('Customer 360 collections dispute-hold notice', () => {
       await waitFor(() => expect(screen.queryByText(/Checking for a billing hold/i)).not.toBeInTheDocument());
 
       fireEvent.click(charge);
-      expect(confirmSpy.mock.calls[0][0]).toBe('Charge Avery Customer $100.00 now?');
+      // the confirm names the month the list shows (this ET month by default)
+      const thisMonth = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', year: 'numeric' });
+      expect(confirmSpy.mock.calls[0][0]).toBe(`Charge Avery Customer $100.00 for ${thisMonth} dues now?`);
       expect(screen.queryByText(/goes past the hold/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/Couldn't check/i)).not.toBeInTheDocument();
     });

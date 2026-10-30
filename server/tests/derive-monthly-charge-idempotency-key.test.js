@@ -80,6 +80,12 @@ const monthlyRow = (id, createdAt, idempotencyKey, extra = {}) => ({
 });
 const { etDateString } = require('../utils/datetime-et');
 
+// The sequencing cases below are about the CURRENT month (what the cron and the plain Charge now
+// button pass); the fixtures' own billed_month is not filtered by this conn.
+const CURRENT_MONTH = etDateString().slice(0, 7);
+const [curYear, curMonth] = CURRENT_MONTH.split('-').map(Number);
+const PREVIOUS_MONTH = new Date(Date.UTC(curYear, curMonth - 2, 1)).toISOString().slice(0, 7);
+
 describe('deriveMonthlyChargeIdempotencyKey', () => {
   test('a more-recently-inserted retry-sweep failure is skipped — the monthly family\'s own latest key still advances correctly', async () => {
     const conn = makeConn([
@@ -90,7 +96,7 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       // reuse r1.
       monthlyRow('p-retry-sweep', '2026-09-23T10:07:00Z', 'autopay_retry_p-monthly-r1_0'),
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/);
   });
 
@@ -102,7 +108,7 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       { id: 'p-deferred', customer_id: 'cust-1', status: 'failed', created_at: '2026-09-23T08:00:05Z',
         metadata: JSON.stringify({ billed_month: '2026-09', deferred_reason: 'lock_contention' }) },
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/);
   });
 
@@ -114,7 +120,7 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
     const conn = makeConn([
       monthlyRow('p-refunded', '2026-09-23T08:00:00Z', 'autopay_monthly_cust-1_2026-09-23', { status: 'refunded', payment_date: etDateString() }),
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/);
   });
 
@@ -123,7 +129,7 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       monthlyRow('p-declined', '2026-09-23T08:00:00Z', 'autopay_monthly_cust-1_2026-09-23'),
       monthlyRow('p-refunded', '2026-09-23T09:00:00Z', 'autopay_monthly_cust-1_2026-09-23_r1', { status: 'refunded', payment_date: etDateString() }),
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/);
   });
 
@@ -132,7 +138,7 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       { id: 'p-legacy-refunded', customer_id: 'cust-1', status: 'refunded', created_at: '2026-09-23T08:00:00Z',
         payment_date: etDateString(), metadata: JSON.stringify({ billed_month: '2026-09' }) },
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/);
   });
 
@@ -141,13 +147,13 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       { id: 'p-old-refunded', customer_id: 'cust-1', status: 'refunded', created_at: '2026-09-02T08:00:00Z',
         payment_date: '2026-09-02', metadata: JSON.stringify({ billed_month: '2026-09' }) },
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/);
   });
 
   test('no prior failure at all → the bare key (shared with chargeMonthly\'s own default)', async () => {
     const conn = makeConn([]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/);
   });
 
@@ -156,7 +162,25 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
       { id: 'p-retry-only', customer_id: 'cust-1', status: 'failed', created_at: '2026-09-23T10:07:00Z',
         metadata: JSON.stringify({ billed_month: '2026-09', idempotency_key: 'autopay_retry_x_0' }) },
     ]);
-    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/);
+  });
+
+  // Charge now with an earlier month picked (owner 2026-10-30): the bare key is today's, so a
+  // never-attempted earlier month must not hand out the key today's own dues charge uses.
+  test('an earlier month collected today carries the month in its key; the current month is unchanged', async () => {
+    const earlier = await deriveMonthlyChargeIdempotencyKey('cust-1', PREVIOUS_MONTH, makeConn([]));
+    const current = await deriveMonthlyChargeIdempotencyKey('cust-1', CURRENT_MONTH, makeConn([]));
+    expect(earlier).toBe(`autopay_monthly_cust-1_${etDateString()}_${PREVIOUS_MONTH}`);
+    expect(current).toBe(`autopay_monthly_cust-1_${etDateString()}`);
+  });
+
+  test('an earlier month with a prior monthly attempt advances its own suffix inside its month namespace', async () => {
+    const conn = makeConn([
+      { id: 'p-canceled', customer_id: 'cust-1', status: 'canceled', created_at: '2026-09-28T12:00:00Z',
+        metadata: JSON.stringify({ billed_month: PREVIOUS_MONTH, idempotency_key: 'autopay_monthly_cust-1_2026-09-28' }) },
+    ]);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', PREVIOUS_MONTH, conn);
+    expect(key).toBe(`autopay_monthly_cust-1_${etDateString()}_${PREVIOUS_MONTH}_r1`);
   });
 });

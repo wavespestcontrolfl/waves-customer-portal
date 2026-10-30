@@ -6932,12 +6932,12 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     // A needs-you money item must ring: with GATE_ADMIN_BELL_POLICY on, billing is not
     // allowlisted, and bell: true is the sanctioned site-level opt-in (as autopay-sca-parked.js).
     bell: true,
-    // Customer 360's Charge now posts no amount: it bills monthly_rate stamped billed_month = the
-    // CURRENT month, the stamp every dues-coverage reader (the cron, monthlyDuesCollected at plan-visit
-    // completion) trusts. So it is the right tool only while it is still the canceled month. An
-    // invoice made by hand carries no dues-month stamp (create() strips it), so a plan visit of that
-    // month completed later could mint the month's dues again.
-    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. While it is still ${monthWords}, Charge now on the customer's page collects it and records ${monthWords} as paid. After that, Charge now bills the new month, and an invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. Marking this done only closes this alert: it records nothing on the account. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
+    // Customer 360's Charge now bills monthly_rate for the month picked in its month list (this month
+    // or the 2 before it), stamped billed_month, the stamp every dues-coverage reader (the cron,
+    // monthlyDuesCollected at plan-visit completion) trusts. An invoice made by hand carries no
+    // dues-month stamp (create() strips it), so a plan visit of that month completed later could mint
+    // the month's dues again.
+    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. To collect it, pick ${monthWords} in the month list beside Charge now on the customer's page: that charge records ${monthWords} as paid. An invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. Marking this done only closes this alert: it records nothing on the account. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
     dedupeKey: `autopay-canceled:${customerId}:${piId}`,
     metadata: {
       customer_id: customerId,
