@@ -218,6 +218,10 @@ const TIMETRACKING_TAB_GROUPS = [
 const STAFF_LEAF_BY_KEY = Object.fromEntries(
   STAFF_SECTIONS.map((s) => [s.key, s]),
 );
+// Office-only leaves read routes a technician login cannot reach
+// (docs/technician-reachable-routes.md), so a technician never sees them: its
+// Staff page is Dashboard, its own pay stubs and the team roster.
+const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // Gate-off or non-admin deep links to pay-growth fall back to the group's
@@ -228,11 +232,14 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 //
 // The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
 // The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
-// Timesheet when off and waits (null) while its one request is pending.
+// Timesheet (Dashboard for a technician) when off and waits (null) while its one
+// request is pending. A technician's link to an office-only leaf opens Dashboard.
 export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off") {
+  if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";
   if (rawTab === "pay-stubs") {
     if (payStubsStatus === "ready") return "pay-stubs";
-    return payStubsStatus === "loading" ? null : "timesheet";
+    if (payStubsStatus === "loading") return null;
+    return role === "admin" ? "timesheet" : "dashboard";
   }
   if (rawTab === "payroll") {
     if (role !== "admin" || payrollAvailable === false) return "team";
@@ -255,6 +262,12 @@ export default function TimeTrackingPage() {
   // unknown: no leaf renders and no beacon fires until it resolves.
   const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
   const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status);
+  // The leaves this viewer can open in a section; a section with none is not shown.
+  const visibleLeaves = (group) => group.tabs
+    .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
+    .filter((key) => key !== "payroll" || payrollGateOpen)
+    .filter((key) => key !== "pay-stubs" || payStubs.status === "ready")
+    .filter((key) => readStaffRole() === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key));
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -277,7 +290,7 @@ export default function TimeTrackingPage() {
       <AdminCommandHeader
         title="Staff"
         icon={Users}
-        sections={TIMETRACKING_TAB_GROUPS.map((g) => ({
+        sections={TIMETRACKING_TAB_GROUPS.filter((g) => visibleLeaves(g).length > 0).map((g) => ({
           key: g.key,
           label: g.label,
           Icon: g.Icon,
@@ -285,17 +298,13 @@ export default function TimeTrackingPage() {
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
           const g = TIMETRACKING_TAB_GROUPS.find((x) => x.key === key);
-          if (g) setTab(g.tabs[0]);
+          if (g && visibleLeaves(g).length) setTab(visibleLeaves(g)[0]);
         }}
         ariaLabel="Staff section"
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
         secondarySections={
-          activeGroup.tabs.length > 1
-            ? activeGroup.tabs
-                .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
-                .filter((key) => key !== "payroll" || payrollGateOpen)
-                .filter((key) => key !== "pay-stubs" || payStubs.status === "ready")
-                .map((key) => STAFF_LEAF_BY_KEY[key])
+          visibleLeaves(activeGroup).length > 1
+            ? visibleLeaves(activeGroup).map((key) => STAFF_LEAF_BY_KEY[key])
             : []
         }
         secondaryActiveKey={tab}
@@ -2887,9 +2896,11 @@ export function TeamTab({ showToast }) {
   const [hiring, setHiring] = useState(false);
   const hireInFlightRef = useRef(false);
   const [resendingId, setResendingId] = useState(null);
-  // The capabilities routes are admin-only; the roster itself is readable by
-  // technicians, so the action is hidden for them rather than 403ing.
+  // The add, edit, earnings, capabilities and activate routes are admin-only;
+  // the roster itself is readable by technicians, so those actions are hidden
+  // for them rather than 403ing. A technician changes only its own photo.
   const isAdmin = useMemo(() => readStaffRole() === "admin", []);
+  const ownStaffId = useMemo(() => readStaffProfile().id || null, []);
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file>per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -3169,17 +3180,19 @@ export function TeamTab({ showToast }) {
         <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
           Technicians
         </div>{" "}
-        <button
-          onClick={() => {
-            setShowAdd(true);
-            setEditingId(null);
-            setForm(EMPTY_TECH_FORM);
-            setShowPayrollSection(false);
-          }}
-          style={sBtn(D.teal, D.white)}
-        >
-          + Add Technician
-        </button>{" "}
+        {isAdmin && (
+          <button
+            onClick={() => {
+              setShowAdd(true);
+              setEditingId(null);
+              setForm(EMPTY_TECH_FORM);
+              setShowPayrollSection(false);
+            }}
+            style={sBtn(D.teal, D.white)}
+          >
+            + Add Technician
+          </button>
+        )}{" "}
       </div>
       {/* Add / Edit form */}
       {showAdd && (
@@ -3968,71 +3981,75 @@ export function TeamTab({ showToast }) {
                   {" "}
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {" "}
-                    <button
-                      onClick={() => startEdit(t)}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        color: D.teal,
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Edit
-                    </button>{" "}
-                    <button
-                      onClick={() => setEarningsTech(t)}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        color: D.green,
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Earnings
-                    </button>{" "}
                     {isAdmin && (
+                      <>
+                        <button
+                          onClick={() => startEdit(t)}
+                          style={{
+                            padding: "4px 10px",
+                            background: "transparent",
+                            border: `1px solid ${D.border}`,
+                            borderRadius: 6,
+                            color: D.teal,
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Edit
+                        </button>{" "}
+                        <button
+                          onClick={() => setEarningsTech(t)}
+                          style={{
+                            padding: "4px 10px",
+                            background: "transparent",
+                            border: `1px solid ${D.border}`,
+                            borderRadius: 6,
+                            color: D.green,
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Earnings
+                        </button>{" "}
+                        <button
+                          onClick={() => setCapabilitiesTech(t)}
+                          style={{
+                            padding: "4px 10px",
+                            background: "transparent",
+                            border: `1px solid ${D.border}`,
+                            borderRadius: 6,
+                            color: D.teal,
+                            fontSize: 14,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Capabilities
+                        </button>
+                      </>
+                    )}{" "}
+                    {(isAdmin || t.id === ownStaffId) && (
                       <button
-                        onClick={() => setCapabilitiesTech(t)}
+                        onClick={() => handlePhotoClick(t.id)}
+                        disabled={uploadingId !== null}
                         style={{
                           padding: "4px 10px",
                           background: "transparent",
                           border: `1px solid ${D.border}`,
                           borderRadius: 6,
                           color: D.teal,
-                          fontSize: 14,
-                          cursor: "pointer",
+                          fontSize: 11,
+                          cursor: uploadingId !== null ? "wait" : "pointer",
+                          opacity:
+                            uploadingId !== null && uploadingId !== t.id
+                              ? 0.4
+                              : uploadingId === t.id
+                                ? 0.6
+                                : 1,
                         }}
                       >
-                        Capabilities
+                        {uploadingId === t.id ? "Uploading…" : "Photo"}
                       </button>
                     )}{" "}
-                    <button
-                      onClick={() => handlePhotoClick(t.id)}
-                      disabled={uploadingId !== null}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        color: D.teal,
-                        fontSize: 11,
-                        cursor: uploadingId !== null ? "wait" : "pointer",
-                        opacity:
-                          uploadingId !== null && uploadingId !== t.id
-                            ? 0.4
-                            : uploadingId === t.id
-                              ? 0.6
-                              : 1,
-                      }}
-                    >
-                      {uploadingId === t.id ? "Uploading…" : "Photo"}
-                    </button>{" "}
                     {t.hire_action === "hire" && (
                       <button
                         onClick={(event) => {
@@ -4070,29 +4087,31 @@ export function TeamTab({ showToast }) {
                         {resendingId === t.id ? "Sending…" : "Resend link"}
                       </button>
                     )}{" "}
-                    <button
-                      onClick={(event) => {
-                        if (t.active) {
-                          event.currentTarget.focus({ preventScroll: true });
-                          setDeactivateError("");
-                          setDeactivateTech(t);
-                        } else {
-                          handleActivate(t);
-                        }
-                      }}
-                      title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        color: t.active ? D.amber : D.green,
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {t.active ? "Deactivate" : "Activate"}
-                    </button>{" "}
+                    {isAdmin && (
+                      <button
+                        onClick={(event) => {
+                          if (t.active) {
+                            event.currentTarget.focus({ preventScroll: true });
+                            setDeactivateError("");
+                            setDeactivateTech(t);
+                          } else {
+                            handleActivate(t);
+                          }
+                        }}
+                        title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
+                        style={{
+                          padding: "4px 10px",
+                          background: "transparent",
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 6,
+                          color: t.active ? D.amber : D.green,
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {t.active ? "Deactivate" : "Activate"}
+                      </button>
+                    )}{" "}
                   </div>{" "}
                 </td>{" "}
               </tr>
@@ -4366,12 +4385,16 @@ function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm })
 
 // The signed-in staff profile AdminLayoutV2 stores at login; role decides
 // which roster actions render (the server enforces it regardless).
-function readStaffRole() {
+function readStaffProfile() {
   try {
-    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}").role || null;
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}") || {};
   } catch {
-    return null;
+    return {};
   }
+}
+
+function readStaffRole() {
+  return readStaffProfile().role || null;
 }
 
 // Roster sublabel for the Team table: "5 qualified", "2 need review · 1 off",
