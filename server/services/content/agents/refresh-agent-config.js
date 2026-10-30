@@ -70,6 +70,16 @@ each query YOU judge genuinely unanswered AND in-scope for this page:
   flow — a pest-pricing calculator link on a lawn page is the wrong CTA).
 - notes_for_reviewer must map every listed query → its new block, or its
   skip reason.
+- SAME-QUESTION entries: when gsc_signal.same_question is present (bucket
+  'same_question_refresh'), the one listed query is a question this site was
+  about to publish as a separate article, and was folded into THIS page
+  instead because this page already holds its topic words in its title, slug
+  or primary keyword. No impressions or positions are known for it, so ignore
+  the 9–30 framing above. Treat it like any other listed query: add ONE
+  self-contained answer block when the question is in scope and groundable,
+  keep the page's own topic and title, and skip it (with the reason in
+  notes_for_reviewer) when it is a different question that merely shares a
+  word with this page.
 
 ${CITABILITY_AGENT_GUIDANCE}
 

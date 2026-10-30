@@ -21,6 +21,7 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvTimestamp: () => null,
   isEnabled: () => true,
   blogSearchSuggestLive: () => mockSuggestLive,
+  sameQuestionCheckLive: () => false,
 }));
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
