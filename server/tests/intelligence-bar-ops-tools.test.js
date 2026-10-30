@@ -564,7 +564,7 @@ describe('intelligence bar set_railway_gate', () => {
   // thing — the card must say so instead of presenting 'true' as "on".
   // Codex r2 on #5514: a gate with no description on file is never offered
   // (no card, no network call) — the card could not say what it does.
-  test.each(['GATE_AUTO_APPLY_ACCOUNT_CREDIT', 'GATE_LATE_PAYMENT_CHECKER_OFF'])('%s has no description on file: refused before any network call', async (name) => {
+  test.each(['GATE_AUTO_APPLY_ACCOUNT_CREDIT'])('%s has no description on file: refused before any network call', async (name) => {
     configure();
     const result = await propose({ gate_name: name, value: 'true' });
     expect(result.preview).toBeUndefined();

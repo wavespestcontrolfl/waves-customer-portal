@@ -4993,23 +4993,10 @@ const gates = {
   // holds, denies, or changes a send.
   dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
 
-  // Retire the legacy account-level late-payment checker (dunning
-  // unification, PR 3a): with the Day 90 ladder owning every overdue
-  // invoice through its final notice, the Mon–Fri 10:10 checker is
-  // redundant with, and can double-nag alongside, the per-invoice ladder.
-  // Ships DARK: off unless exactly 'true', and only honoured while
-  // GATE_DUNNING_LADDER_90 is also live (off, the ladder ends at Day 30 and
-  // the checker is the only 60/90-day sender). This entry is for
-  // logGateStatus only: services/late-payment-checker.js reads it at call
-  // time in checkAndNotify(), and services/invoice-followups.js in
-  // latePaymentCheckerRetiredLive() (reopened-invoice revival).
-  latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
-
   // Orphan-invoice adoption sweep (dunning unification, PR 3b): invoices sent
   // outside the direct-send path never got an invoice_followup_sequences row.
-  // Ships DARK: off unless exactly 'true', and only runs while
-  // GATE_LATE_PAYMENT_CHECKER_OFF is honoured (the sweep never adopts beside
-  // a running checker, nor an invoice the checker ever contacted). This
+  // Ships DARK: off unless exactly 'true'. The sweep never adopts an invoice
+  // the retired legacy checker ever contacted. This
   // entry is for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_ADOPT_ORPHANS at call time inside runPending().
   dunningAdoptOrphans: process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true',
@@ -5441,8 +5428,7 @@ const gates = {
   // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
   // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
   // 60/90 late check) sent 0 messages in the last 30 days — the invoice
-  // follow-up ladder, late-payment-checker.js, and the pre-visit balance
-  // reminder own these now. Ships DARK: off unless exactly 'true'. This
+  // follow-up ladder and the pre-visit balance reminder own these now. Ships DARK: off unless exactly 'true'. This
   // entry is for logGateStatus only:
   // server/services/workflows/balance-reminder.js's dailyCheck()/
   // latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at call time,
@@ -5459,23 +5445,14 @@ const gates = {
   //     also live (its Day 60/90 steps are what actually replace it);
   //     legacy-off with the ladder gate unset logs a warn and runs
   //     latePaymentCheck's legacy body unchanged.
-  // Neither retirement needs GATE_LATE_PAYMENT_CHECKER_OFF or
-  // GATE_DUNNING_ADOPT_ORPHANS: those two gate the SEPARATE late-payment-
-  // checker.js system's own retirement/orphan-adoption and are independent
-  // of whether this file's two methods still run. The at-risk
+  // Neither retirement needs GATE_DUNNING_ADOPT_ORPHANS: that gate is
+  // independent of whether this file's two methods still run. The at-risk
   // pipeline_stage stamp both methods carried for 60/90-day debt is shared
   // (invoice-followups.js's markAtRiskForLongOverdue, warn-and-continue on
   // failure rather than a bare await) with the ladder's own Day 60/90 steps
-  // (fireTouch, on GATE_DUNNING_LADDER_90 AND this gate) and with
-  // late-payment-checker.js's own tiers — including for an invoice with no
-  // invoice_followup_sequences row, which late-payment-checker.js is the
-  // only sender left for once this gate retires latePaymentCheck()
-  // (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default). That
-  // checker call is gated on THIS gate alone (not unconditional): it reaches
-  // customers latePaymentCheck()'s own active/waveguard_tier filters would
-  // have excluded, so stamping unconditionally there would break
-  // "unset = byte-identical." Also guarded against overwriting a
-  // churned/archived customer's stage. Unset = byte-identical.
+  // (fireTouch, on GATE_DUNNING_LADDER_90 AND this gate). Also guarded
+  // against overwriting a churned/archived customer's stage. Unset =
+  // byte-identical.
   balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 
   // Customer-level overdue reminders (dunning consolidation, PR 1: inert
@@ -7972,7 +7949,7 @@ function knownGateCatalog() {
     let reader = 'strict';
     if (looseEvidence.has(name)) reader = strictEvidence.has(name) ? 'mixed' : 'loose';
     // Inverted (negative-polarity) gates: 'true' DISABLES the named thing
-    // (GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker off), so the bar
+    // (GATE_BALANCE_REMINDER_LEGACY_OFF=true turns the legacy reminder off), so the bar
     // never presents 'true' as "on" for these.
     const inverted = INVERTED_GATE_RE.test(name);
     catalog.set(name, { name, kind, boolean: kind === 'boolean', inverted, reader, description: doc ? doc.description : null });

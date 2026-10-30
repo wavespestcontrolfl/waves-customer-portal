@@ -67,8 +67,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
-// Delivered statuses, the whitelist late-payment-checker.js's own candidate
-// query uses: a sequence is only revived on an invoice the customer has.
+// Delivered statuses (the retired late-payment checker's candidate query
+// used the same whitelist): a sequence is only revived on an invoice the
+// customer has.
 const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 
 // A dunning touch fires on its first ELIGIBLE send day or not at all (owner
@@ -515,8 +516,8 @@ function followupSteps() {
 
 // The at-risk pipeline_stage stamp for 60/90-day debt once the legacy
 // balance-reminder late check retires (GATE_BALANCE_REMINDER_LEGACY_OFF):
-// called from this ladder's Day 60/90 steps and late-payment-checker.js's
-// tiers (the legacy method keeps its own inline stamp while it runs). The
+// called from this ladder's Day 60/90 steps (the legacy method keeps its own
+// inline stamp while it runs). The
 // caller has already confirmed the tier and a delivery. Only an active
 // customer in a live customer stage (or NULL, a legacy row) moves:
 // fireTouch excludes only deleted customers, so a churned/past/dormant
@@ -825,18 +826,11 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
 
 // GATE_DUNNING_ADOPT_ORPHANS, read at call time (strict 'true'): an invoice
 // sent outside the direct-send path (the only caller of scheduleForInvoice)
-// never got a sequence row and was left to the legacy late-payment-checker.js
-// alone. The sweep only runs once that checker is retired
-// (latePaymentCheckerRetiredLive): beside a still-running checker every
-// adoption is a same-morning handoff (#5179 drew seven audit rounds of
-// them). Off, or the checker still running: byte-identical — runPending
-// never looks for orphans (the adopt gate alone logs one warning).
+// never got a sequence row and was left to the legacy late-payment checker
+// alone (deleted 2026-10-29). Off: byte-identical — runPending never looks
+// for orphans.
 function adoptOrphanInvoicesLive() {
-  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && latePaymentCheckerRetiredLive();
-}
-
-function adoptGateSetWithCheckerRunning() {
-  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && !latePaymentCheckerRetiredLive();
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true';
 }
 
 /**
@@ -882,8 +876,7 @@ async function selectAdoptionCandidates() {
     .whereNull('s.id')
     // Delivered statuses ONLY — not "not draft/terminal", which also admits
     // 'scheduled'/'sending', an invoice queued for its FIRST send that has
-    // not reached the customer; the same evidence late-payment-checker.js's
-    // own candidate query requires.
+    // not reached the customer.
     .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
@@ -959,18 +952,13 @@ async function selectAdoptionCandidates() {
  * past_final_step, ach_failure_history); oldest-sent-first either way, same
  * selection as the live sweep.
  *
- * The live sweep runs under the legacy checker's own cron lock (Codex #5202
- * r1 P1): a checker run that started before the gate flip, or on a draining
- * pod, finishes (and writes its history) before candidates are read. If that
- * lock is held, the sweep is refused for this run.
+ * The live sweep runs under the 'late-payment-check' cron lock (the retired
+ * checker's old lock, kept so two pods never sweep at once). If that lock is
+ * held, the sweep is refused for this run.
  */
 async function adoptOrphanInvoices({ dryRun = false } = {}) {
   if (dryRun) return selectAdoptionCandidates();
 
-  if (!latePaymentCheckerRetiredLive()) {
-    logger.warn('[invoice-followups] adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep (and the script\'s --execute) only run once the legacy checker is retired');
-    return { adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_running' };
-  }
   const { runExclusive } = require('../utils/cron-lock');
   const locked = await runExclusive('late-payment-check', async () => {
     const { candidates, skipped } = await selectAdoptionCandidates();
@@ -990,7 +978,7 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
   // runExclusive's own refusal is { skipped: true, reason }; the body's
   // result carries a skipped ARRAY, which is truthy even when empty.
   if (locked?.skipped === true) {
-    logger.warn(`[invoice-followups] adoption refused this run: the late-payment checker's lock is held (${locked.reason})`);
+    logger.warn(`[invoice-followups] adoption refused this run: the late-payment-check lock is held (${locked.reason})`);
     return { adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_lock_held' };
   }
   const leftForAPerson = locked.skipped.filter((s) => s.reason !== 'legacy_history_unreadable' && s.reason !== 'ach_history_unreadable').length;
@@ -1018,10 +1006,7 @@ async function runPending() {
 
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
-  if (latePaymentCheckerRetiredLive()) await reviveReopenedLowStepSequences();
-  if (adoptGateSetWithCheckerRunning()) {
-    logger.warn('[invoice-followups] GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep only runs once the legacy checker is retired');
-  }
+  await reviveReopenedLowStepSequences();
   // Adoption runs BEFORE the batch select; an adopted row is always dated
   // after this run, so the batch never picks it up today.
   // A sweep failure never costs the day's due touches (Codex #5202 r2 P1): a
@@ -1280,7 +1265,7 @@ async function runCustomerScheduleEngine(now) {
  * again — no loop.
  *
  * Delivered/published statuses only (PUBLISHED_INVOICE_STATUSES, the same
- * whitelist late-payment-checker.js's own candidate query uses) — not the wider
+ * whitelist the retired late-payment checker used) — not the wider
  * "not terminal" test, for the same reason: a sequence's invoice should
  * never be draft/scheduled/sending by the time it HAS a finished sequence,
  * but if one ever were, it has not reached the customer and must not be
@@ -1383,8 +1368,7 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
  * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
  * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
  * A payment finish before Day 30 keeps its lower index; see
- * reviveReopenedLowStepSequences below for what owns THAT case once the
- * legacy checker retires. The same invoice guards as the send batch apply.
+ * reviveReopenedLowStepSequences below for what owns THAT case. The same invoice guards as the send batch apply.
  */
 async function reviveLegacyFinishedSequences() {
   const revived = await reviveFinishedSequences(config.steps.length, followupSteps().length);
@@ -1392,24 +1376,13 @@ async function reviveLegacyFinishedSequences() {
   return revived;
 }
 
-// GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'). A
-// sequence that finished BEFORE the legacy Day 30 end — an invoice paid
+// A sequence that finished BEFORE the legacy Day 30 end — an invoice paid
 // (stopOnPayment) after only its early touches fired, then reopened by a
-// dispute/refund reversal — has always relied on the legacy
-// late-payment-checker.js as its ONLY fallback: hasActiveSequence
-// deliberately excludes a low-step 'completed' row from "owned" (codex
-// #5126 r1) precisely so that checker picks it back up. Retiring the
-// checker removes that fallback with nothing to replace it (Codex pre-push
-// r1 P1) — this revives it here instead, at the step it finished on, so the
-// ladder owns the reopened invoice the same way it already owns a Day 60/90
-// finish above. Off (checker still running): unchanged, this never runs.
-// Retirement requires the Day 90 ladder to be live: with the ladder off the
-// follow-up cadence ends at Day 30 and the checker is the only sender of the
-// 60- and 90-day reminders (Codex on #5175).
-function latePaymentCheckerRetiredLive() {
-  return process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true' && ladderThrough90Live();
-}
-
+// dispute/refund reversal — used to rely on the legacy late-payment checker
+// (deleted 2026-10-29) as its only fallback: hasActiveSequence deliberately
+// excludes a low-step 'completed' row from "owned" (codex #5126 r1). This
+// revives it, at the step it finished on, so the ladder owns the reopened
+// invoice the same way it owns a Day 60/90 finish above.
 async function reviveReopenedLowStepSequences() {
   // step_index === config.steps.length (exhausted the legacy cadence
   // without ever being paid) sits OUTSIDE [0, config.steps.length) — never
@@ -2692,7 +2665,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // best-effort lifecycle stamp must never throw out of fireTouch and cost
   // the step advance / interaction logging below, or strand the sequence on
   // this step for as long as the stamp keeps failing. Same reasoning
-  // late-payment-checker.js's own callers use.
+  // the retired late-payment checker's callers used.
   // Only once the legacy latePaymentCheck is actually retired (its gate on
   // AND the ladder live, the same pair it honours): until then that cron
   // still owns this stamp, and an ungated stamp here would change live
@@ -4513,8 +4486,8 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
 }
 
 /**
- * Called by late-payment-checker.js to decide whether an invoice is already
- * handled by the per-invoice sequence (so we skip the account-level reminder).
+ * Decides whether an invoice is already handled by the per-invoice sequence
+ * (so the account-level reminder skips it).
  */
 async function hasActiveSequence(invoiceId) {
   const ladder = ladderThrough90Live();
@@ -4594,7 +4567,7 @@ async function liveNextTouchAt(invoiceId, seq, now = new Date()) {
 /**
  * True when an admin has explicitly STOPPED this invoice's follow-up sequence.
  * A stop is a deliberate "stop all automated dunning for this invoice" instruction
- * (e.g. customer is paying by mailed check). The account-level late-payment-checker
+ * (e.g. customer is paying by mailed check). The account-level balance reminder
  * must honor it too — otherwise stopping follow-ups in the invoice UI silently hands
  * the customer off to the legacy reminder path and they keep getting "X days overdue"
  * texts. `hasActiveSequence` deliberately excludes 'stopped' (a stopped sequence is no
@@ -4652,7 +4625,6 @@ module.exports = {
   isStaleTouch,
   FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID,
   markAtRiskForLongOverdue,
-  latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
   // The Intelligence Bar's send-now card: the same text rendering and digest the service pins at dispatch.
   approvalDigest,

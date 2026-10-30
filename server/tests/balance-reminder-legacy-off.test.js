@@ -3,8 +3,7 @@
  * owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/urgent
  * pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/60/90 late
  * check) sent 0 messages in the last 30 days — the invoice follow-up
- * ladder, late-payment-checker.js, and the pre-visit balance reminder own
- * these now.
+ * ladder and the pre-visit balance reminder own these now.
  *
  * GATE_BALANCE_REMINDER_LEGACY_OFF is checked inside BOTH methods
  * themselves (not just the scheduler's cron body), so an explicit call from
@@ -41,11 +40,8 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/invoice-followups', () => ({
   hasActiveSequence: jest.fn(async () => false),
   isDunningStopped: jest.fn(async () => false),
-  // The real readers, so the sequence-less-owner coupling reads the env.
-  latePaymentCheckerRetiredLive: () => process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true'
-    && process.env.GATE_DUNNING_LADDER_90 === 'true',
-  adoptOrphanInvoicesLive: () => process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true'
-    && process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true' && process.env.GATE_DUNNING_LADDER_90 === 'true',
+  // The real reader, so the sequence-less-owner coupling reads the env.
+  adoptOrphanInvoicesLive: () => process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true',
 }));
 
 const db = require('../models/db');
@@ -56,8 +52,8 @@ const balanceReminder = require('../services/workflows/balance-reminder');
 
 const DAILY_RETIRED_LOG = '[balance-reminders] dailyCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the pre-visit balance reminder owns these now';
 const DAILY_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for dailyCheck: the pre-visit balance reminder replacement (PREVISIT_BALANCE_REMINDER + its SMS template) is not live yet';
-const LATE_RETIRED_LOG = '[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these';
-const LATE_NO_ORPHAN_OWNER_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live';
+const LATE_RETIRED_LOG = '[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and orphan adoption own these';
+const LATE_NO_ORPHAN_OWNER_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: orphan adoption is not live';
 const LATE_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live';
 
 beforeEach(() => {
@@ -68,6 +64,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   PrevisitBalanceReminder.gateEnabled.mockReturnValue(false);
   PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(false);
 });
@@ -75,6 +72,7 @@ beforeEach(() => {
 afterAll(() => {
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
 });
 
 // A minimal, chainable stand-in for the imminent-overdue alert sweep's own
@@ -313,9 +311,13 @@ describe('latePaymentCheck', () => {
       throw new Error(`unexpected table ${table}`);
     });
   }
-  beforeEach(() => mockUnpaidCheck(undefined));
+  // Orphan adoption owns sequence-less invoices; live by default here.
+  beforeEach(() => {
+    mockUnpaidCheck(undefined);
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+  });
 
-  test('both gates on: retires — returns without querying or sending, logs the retirement line', async () => {
+  test('ladder gate and orphan adoption live: retires — returns without querying or sending, logs the retirement line', async () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
@@ -324,34 +326,14 @@ describe('latePaymentCheck', () => {
     expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
   });
 
-  test('checker retired but orphan adoption off: nobody owns sequence-less invoices, so latePaymentCheck keeps running', async () => {
+  test('orphan adoption off: nobody owns sequence-less invoices, so latePaymentCheck keeps running', async () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
-    try {
-      await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
-      expect(db).toHaveBeenCalled();
-      expect(logger.warn).toHaveBeenCalledWith(LATE_NO_ORPHAN_OWNER_WARN);
-      expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
-    } finally {
-      delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
-    }
-  });
-
-  test('checker retired and orphan adoption live: retires', async () => {
-    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    try {
-      await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
-      expect(db.mock.calls).toEqual([['invoices']]);
-      expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
-    } finally {
-      delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
-      delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
-    }
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(LATE_NO_ORPHAN_OWNER_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
   });
 
   test('an open legacy unpaid-status invoice keeps latePaymentCheck running (neither replacement reads that status)', async () => {

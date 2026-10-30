@@ -13,8 +13,8 @@ const { buildContract } = require('../services/intelligence-bar/authorization-co
 const gatePreview = {
   preview: true,
   tool: 'set_railway_gate',
-  gate: 'GATE_LATE_PAYMENT_CHECKER_OFF',
-  controls: 'retires the legacy late-payment checker',
+  gate: 'GATE_EXAMPLE_LEGACY_OFF',
+  controls: 'retires an example legacy sender',
   current_value: 'false',
   new_value: 'true',
   meaning: "Inverted gate: 'true' turns the thing it names OFF.",
@@ -41,9 +41,9 @@ const gbPreview = {
 
 describe('feature-switch cards show the live preview facts', () => {
   test('Railway gate card: change, meaning, controls, target and restart — not the raw params', () => {
-    const shown = confirmationDisplayParams('set_railway_gate', { gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' }, gatePreview);
+    const shown = confirmationDisplayParams('set_railway_gate', { gate_name: 'GATE_EXAMPLE_LEGACY_OFF', value: 'true' }, gatePreview);
     expect(shown).toEqual({
-      gate: 'GATE_LATE_PAYMENT_CHECKER_OFF',
+      gate: 'GATE_EXAMPLE_LEGACY_OFF',
       change: 'false → true',
       meaning: gatePreview.meaning,
       controls: gatePreview.controls,
@@ -66,7 +66,7 @@ describe('feature-switch cards show the live preview facts', () => {
 
   test('the contract effects carry those lines — each GrowthBook rule on its own line', () => {
     for (const [toolName, params, preview] of [
-      ['set_railway_gate', { gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' }, gatePreview],
+      ['set_railway_gate', { gate_name: 'GATE_EXAMPLE_LEGACY_OFF', value: 'true' }, gatePreview],
       ['set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true }, gbPreview],
     ]) {
       const displayParams = confirmationDisplayParams(toolName, params, preview);

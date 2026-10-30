@@ -1,7 +1,7 @@
 // Day 90 follow-up ladder (GATE_DUNNING_LADDER_90, dunning unification,
 // owner rulings 2026-09-27): Day 3/10/17/30/60/90 with touches a week or
 // more apart, Day 90 the only final notice, and a finished sequence still
-// owns its invoice so the late-payment checker never picks it up afterwards.
+// owns its invoice (the late-payment checker is deleted).
 // Gate off: the legacy Day 3/7/14/30 ladder, byte-identical.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -36,12 +36,10 @@ beforeEach(() => {
   jest.setSystemTime(NOW);
   jest.clearAllMocks();
   delete process.env.GATE_DUNNING_LADDER_90;
-  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_DUNNING_LADDER_90;
-  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 
 // Each `invoice_followup_sequences as s` read is answered in order: the
@@ -101,23 +99,15 @@ const finished = (overrides = {}) => ({
   invoice_sms_sent_at: null, invoice_created_at: tenAmET('2026-01-01'), ...overrides,
 });
 
-describe('reopened-invoice revival once the legacy checker retires', () => {
-  test('gate off: no revival read at all', async () => {
-    const { joined } = setupDb({ joinedReads: [[]] });
+describe('reopened-invoice revival (the legacy checker is deleted)', () => {
+  test('Day 90 ladder off: only the reopened-invoice revival read runs before the send batch', async () => {
+    const { joined } = setupDb({ joinedReads: [[], []] });
     await runPending();
-    expect(joined).toHaveLength(1); // the send batch only
+    expect(joined).toHaveLength(2); // reopened revival + the send batch
   });
 
-  test('legacy-off without the Day 90 ladder: not retired, no revival read', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    const { joined } = setupDb({ joinedReads: [[]] });
-    await runPending();
-    expect(joined).toHaveLength(1);
-  });
-
-  test('both gates on: a sequence completed at a low step (paid early, sent long ago) on a reopened invoice resumes at that step, RE-ANCHORED to now, without sending', async () => {
+  test('ladder on: a sequence completed at a low step (paid early, sent long ago) on a reopened invoice resumes at that step, RE-ANCHORED to now, without sending', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const { joined, seqUpdates, lockReads } = setupDb({ joinedReads: [[], [finished()], []] });
     const result = await runPending();
     // ladder revival [4,6), then the reopened revival [0,4), then the batch
@@ -136,7 +126,6 @@ describe('reopened-invoice revival once the legacy checker retires', () => {
 
   test('a sequence that exhausted the legacy cadence unpaid (step 4) is outside the reopened range and left alone', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const { seqUpdates } = setupDb({ joinedReads: [[], [], []] });
     await runPending();
     expect(seqUpdates).toHaveLength(0);
@@ -144,7 +133,6 @@ describe('reopened-invoice revival once the legacy checker retires', () => {
 
   test('a payment that settled the invoice between the select and the update leaves the sequence completed', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const { seqUpdates, lockReads } = setupDb({
       joinedReads: [[], [finished()], []],
       invoiceAtLock: { status: 'paid', payer_id: null, scheduled_send_error: null },
@@ -156,7 +144,6 @@ describe('reopened-invoice revival once the legacy checker retires', () => {
 
   test('a reopened invoice the legacy checker already contacted is never revived: left for a person, logged', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const logger = require('../services/logger');
     const { seqUpdates, lockReads } = setupDb({
       joinedReads: [[], [finished()], []],

@@ -87,8 +87,18 @@ function chain({ result = [], first, returning } = {}) {
   return q;
 }
 
+let activeQueues = null;
+// runPending opens with the reopened-invoice revival read on
+// `invoice_followup_sequences as s` (nothing to revive here), then the batch.
+function runPendingWithRevival() {
+  const batch = activeQueues?.get('invoice_followup_sequences as s');
+  if (batch) batch.unshift(chain({ result: [] }));
+  return InvoiceFollowUps.runPending();
+}
+
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
+  activeQueues = tableQueues;
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
     if ((!queue || !queue.length) && table === 'notification_prefs') return chain({ first: undefined });
@@ -215,7 +225,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'invoice.followup_3_day',
@@ -317,7 +327,7 @@ describe('invoice follow-up email sidecar', () => {
     let ownershipCalls;
     try {
       if (options.operator) await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
-      else await InvoiceFollowUps.runPending();
+      else await runPendingWithRevival();
       ownershipCalls = ownership.mock.calls.slice();
     } finally {
       ownership.mockRestore();
@@ -393,7 +403,7 @@ describe('invoice follow-up email sidecar', () => {
       invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
     BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     const heldAt = sequenceUpdate.update.mock.calls[0][0].next_touch_at;
     const tuesdayTick = new Date('2026-06-02T14:16:00.000Z'); // Tue 10:16 NY
     expect(heldAt <= tuesdayTick).toBe(true);
@@ -415,7 +425,7 @@ describe('invoice follow-up email sidecar', () => {
       invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
     BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     const [update] = sequenceUpdate.update.mock.calls[0];
@@ -455,7 +465,7 @@ describe('invoice follow-up email sidecar', () => {
       const verdict = await withProviderHandoff(jest.fn());
       return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
     });
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
@@ -502,7 +512,7 @@ describe('invoice follow-up email sidecar', () => {
       const verdict = await withProviderHandoff(jest.fn());
       return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
     });
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
       expect.anything(), expect.objectContaining({ reason: expected.reason }),
     );
@@ -533,7 +543,7 @@ describe('invoice follow-up email sidecar', () => {
       const verdict = await withProviderHandoff(jest.fn());
       return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
     });
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
@@ -614,7 +624,7 @@ describe('invoice follow-up email sidecar', () => {
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
       reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed',
     });
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'invoice_followup_sequence' });
     expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('holdExempt'); // an automated touch waits
@@ -644,7 +654,7 @@ describe('invoice follow-up email sidecar', () => {
     sendCustomerMessage.mockResolvedValueOnce({
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
     });
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
@@ -667,7 +677,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
@@ -688,7 +698,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
@@ -703,7 +713,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
@@ -768,7 +778,7 @@ describe('invoice follow-up email sidecar', () => {
       'invoice_followup_sequences as s': [pendingQuery],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(pendingQuery.whereNotIn).toHaveBeenCalledWith('i.status', [
       'paid',
@@ -845,7 +855,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     if (appSelected && !legacyOldEmail) {
       if (appSelected === 'prior+fresh-email') expect(EmailTemplates.sendTemplate).toHaveBeenCalled();
@@ -899,7 +909,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1, last_touch_at: acceptedAt,
@@ -931,7 +941,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ next_touch_at: expect.any(Date) }));
     expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
@@ -962,7 +972,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(smsLog.insert).toHaveBeenCalledWith(expect.objectContaining({
       status: 'scheduled', scheduled_for: new Date('2026-05-27T12:00:00.000Z'),
@@ -993,7 +1003,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', customerId: 'cust-1' }));
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1, last_touch_at: priorAt }));
@@ -1031,7 +1041,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
-    await InvoiceFollowUps.runPending();
+    await runPendingWithRevival();
 
     expect(failingSmsLog.insert).toHaveBeenCalled();
     expect(JSON.parse(failingSmsLog.insert.mock.calls[0][0].metadata)).toMatchObject({

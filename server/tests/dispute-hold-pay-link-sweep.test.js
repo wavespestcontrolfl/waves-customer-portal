@@ -135,7 +135,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/customer-dunning/send.js', // GATED: the customer-level schedule (invoice_followup_customer); send-now passes holdExempt 'operator'
       'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
       'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
-      'services/late-payment-checker.js', // GATED: late_payment_checker / late_payment_checker_microdeposit
       'services/messaging/billing-text-verdict.js', // NOT A SENDER: the #5440 visit-summary fold's yes/no verdict (policy lookup keys). The text that carries the pay link is visit-completion-summary.js, gated below
       'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
       'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
@@ -173,7 +172,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     ]);
     // thank-you / receipt texts carry no pay link (a payment was just received)
     const NON_PAY_LINK_ENTRY_POINTS = ['invoice_followup_thank_you', 'balance_reminder_payment_received'];
-    for (const file of ['services/customer-dunning/send.js', 'services/invoice-followups.js', 'services/late-payment-checker.js',
+    for (const file of ['services/customer-dunning/send.js', 'services/invoice-followups.js',
       'services/previsit-balance-reminder.js', 'services/workflows/balance-reminder.js']) {
       const literals = [...read(file).matchAll(/entryPoint:\s*['"]([a-z_]+)['"]/g)].map((m) => m[1]);
       expect(literals.length).toBeGreaterThan(0);
@@ -181,9 +180,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
         expect([file, [...gated, ...NON_PAY_LINK_ENTRY_POINTS].includes(literal)]).toEqual([file, true]);
       }
     }
-    // late-payment-checker passes its entry point through a variable: every value it is given is gated
-    const checkerValues = [...read('services/late-payment-checker.js').matchAll(/entryPoint:\s*'([a-z_]+)'/g)].map((m) => m[1]);
-    expect(checkerValues.sort()).toEqual(['late_payment_checker', 'late_payment_checker_microdeposit']);
   });
 
   test('every file that consults the rail guard for a billing reminder is classified', () => {
@@ -191,7 +187,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/billing-reminder-delivery.js', // gated via its senders' boundaries; a suppressed leg is RELEASED (no failed row), episode stays open
       'services/collections/outbound-voice/collections-conversation.js', // EXEMPT: customer-requested pay link (holdExempt 'customer')
       'services/invoice-followups.js', // GATED (early consult + both boundaries); send-now = holdExempt 'operator'
-      'services/late-payment-checker.js', // GATED
       'services/messaging/billing-email-replay-eligibility.js', // replay eligibility: waits with holdDefer
       'services/messaging/deferred-replay-registry.js', // queued replays: disputeHoldRecheck waits (retryAt), sends after release
       'services/previsit-balance-reminder.js', // GATED
@@ -205,7 +200,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/customer-dunning/schedule.js', // verdict helper only (isTerminalEmailRefusal, for the told / held disposition)
       'services/customer-dunning/send.js', // verdict helper only (isTerminalEmailRefusal)
       'services/invoice-followups.js', // verdict helpers only
-      'services/late-payment-checker.js', // verdict helpers only
       'services/previsit-balance-reminder.js', // sendReminderChannels: a suppressed leg is released, episode stays open
       'services/workflows/balance-reminder.js', // sendReminderChannels: same
     ]);
@@ -266,7 +260,6 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     const RELEASES = {
       'services/billing-reminder-delivery.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(entry\)/,
       'services/invoice-followups.js': /heldByDisputeHold\(sendResult\)[\s\S]{0,400}releaseHeldReservation\(smsLedger\)/,
-      'services/late-payment-checker.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\)/,
       'services/previsit-balance-reminder.js': /isHoldSuppression\(result\)\) await ContactLedger\.releaseHeldReservation\(smsLedger\)/,
       'services/workflows/balance-reminder.js': /isHoldSuppression\(sendResult\)\) \{[\s\S]{0,400}releaseHeldReservation\(ledgerEntry\)/,
     };

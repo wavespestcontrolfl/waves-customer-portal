@@ -1,7 +1,7 @@
 // Day 90 follow-up ladder (GATE_DUNNING_LADDER_90, dunning unification,
 // owner rulings 2026-09-27): Day 3/10/17/30/60/90 with touches a week or
 // more apart, Day 90 the only final notice, and a finished sequence still
-// owns its invoice so the late-payment checker never picks it up afterwards.
+// owns its invoice (the late-payment checker is deleted).
 // Gate off: the legacy Day 3/7/14/30 ladder, byte-identical.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -200,12 +200,12 @@ describe('when the next touch really fires (liveNextTouchAt)', () => {
 });
 
 describe('runPending under the Day 90 ladder', () => {
-  test('gate off: no revival read, and a Day 7 touch fires as before', async () => {
+  test('gate off: only the reopened-invoice revival read runs before the batch, and a Day 7 touch fires as before', async () => {
     const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
-    const { joined, seqUpdates, transaction } = setupDb({ joinedReads: [[row]] });
+    const { joined, seqUpdates, transaction } = setupDb({ joinedReads: [[], [row]] });
     const result = await runPending();
-    expect(joined).toHaveLength(1);
-    expect(joined[0].wheres).toEqual(expect.arrayContaining([['s.status', 'active']]));
+    expect(joined).toHaveLength(2); // reopened revival + the send batch
+    expect(joined[1].wheres).toEqual(expect.arrayContaining([['s.status', 'active']]));
     expect(seqUpdates).toHaveLength(0);
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ sent: 1, skipped: 0 });
@@ -216,7 +216,7 @@ describe('runPending under the Day 90 ladder', () => {
     jest.setSystemTime(new Date('2026-08-04T14:16:00Z')); // Tue 08-04 10:16 ET
     // Sent Wed 07-29: ladder Day 10 = Sat 08-08, legacy Day 7 = Wed 08-05.
     const ladderRow = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-08') });
-    const { seqUpdates, transaction } = setupDb({ joinedReads: [[ladderRow]] });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [ladderRow]] });
     const result = await runPending();
     expect(seqUpdates).toHaveLength(1);
     expect(seqUpdates[0].wheres).toEqual([
@@ -232,7 +232,7 @@ describe('runPending under the Day 90 ladder', () => {
   test('gate off: a ladder touch whose legacy day is today is moved back and sent in the same run', async () => {
     // NOW Wed 08-05; sent Wed 07-29: legacy Day 7 = today 10:00.
     const ladderRow = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-08') });
-    const { seqUpdates, transaction } = setupDb({ joinedReads: [[ladderRow]] });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [ladderRow]] });
     const result = await runPending();
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
     expect(transaction).toHaveBeenCalledTimes(1);
@@ -245,7 +245,7 @@ describe('runPending under the Day 90 ladder', () => {
     const late = seqRow({ id: 'seq-2', step_index: 1, invoice_sent_at: tenAmET('2026-07-27'), next_touch_at: tenAmET('2026-08-06') });
     // A legacy-scheduled row not yet due (Day 14 = Wed 08-12) is not a ladder time.
     const legacy = seqRow({ id: 'seq-3', step_index: 2, next_touch_at: tenAmET('2026-08-07') });
-    const { seqUpdates, transaction } = setupDb({ joinedReads: [[late, legacy]] });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [late, legacy]] });
     const result = await runPending();
     expect(seqUpdates).toHaveLength(0);
     expect(transaction).not.toHaveBeenCalled();
@@ -276,7 +276,7 @@ describe('runPending under the Day 90 ladder', () => {
   test('a touch stored on the legacy Day 7 waits for its Day 10, without sending', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
-    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [row]] });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [], [row]] });
     const result = await runPending();
     expect(transaction).not.toHaveBeenCalled();
     expect(result).toEqual({ sent: 0, skipped: 1 });
@@ -309,7 +309,7 @@ describe('runPending under the Day 90 ladder', () => {
     jest.setSystemTime(new Date('2026-08-11T14:16:00Z')); // Tue 08-11 10:16 ET
     // Sent Sat 08-01: legacy Day 7 = Sat 08-08 (first fire Tue 08-11), Day 10 = Tue 08-11.
     const row = seqRow({ step_index: 1, invoice_sent_at: tenAmET('2026-08-01'), next_touch_at: tenAmET('2026-08-08') });
-    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [row]] });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [], [row]] });
     const result = await runPending();
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-11'));
     expect(transaction).toHaveBeenCalledTimes(1);
@@ -320,7 +320,7 @@ describe('runPending under the Day 90 ladder', () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     jest.setSystemTime(new Date('2026-08-11T14:16:00Z'));
     const row = seqRow({ step_index: 1, invoice_sent_at: tenAmET('2026-08-01'), next_touch_at: tenAmET('2026-08-08') });
-    const { transaction } = setupDb({ joinedReads: [[], [row]], seqUpdateResult: 0 });
+    const { transaction } = setupDb({ joinedReads: [[], [], [row]], seqUpdateResult: 0 });
     const result = await runPending();
     expect(transaction).not.toHaveBeenCalled();
     expect(result).toEqual({ sent: 0, skipped: 1 });
@@ -330,7 +330,7 @@ describe('runPending under the Day 90 ladder', () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     // Day 3 is the same in both cadences.
     const row = seqRow({ step_index: 0, invoice_sent_at: tenAmET('2026-08-02'), next_touch_at: tenAmET('2026-08-05') });
-    const { transaction } = setupDb({ joinedReads: [[], [row]] });
+    const { transaction } = setupDb({ joinedReads: [[], [], [row]] });
     const result = await runPending();
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ sent: 1, skipped: 0 });
