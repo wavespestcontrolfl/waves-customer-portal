@@ -12747,6 +12747,11 @@ const CallRecordingProcessor = {
       // path; enrichment keys on the webhook's pre-linked customer if any.
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
 
+      // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
+      // number, no service ask) ends on this path too; the step skips spam and
+      // every non-applicant call itself, and is fenced like the main path.
+      await fileApplicantCareersRowStep({ call, callSid, extracted, v2Result, procGeneration });
+
       // Service-request voicemail that the workable-lead gate declined
       // (existing customer, or non-lead call_type veto): surface a callback
       // bell instead of ending silent. Bell only — never customer comms.

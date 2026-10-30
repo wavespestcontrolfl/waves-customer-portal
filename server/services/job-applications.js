@@ -216,9 +216,13 @@ async function createJobApplicationFromCall({ call = {}, extraction = null, data
     // same): a newer pass that reclaimed or corrected the call owns it now, so
     // this pass's extraction is stale and files nothing. The row lock holds
     // until the insert commits.
+    // The fence also names the AUDIO this pass heard (as upsertCommitments does):
+    // an adopted or replaced recording swaps recording_sid without moving the
+    // generation, so a pass still on the superseded audio files nothing.
     if (procGeneration != null) {
-      const live = await trx('call_log').where({ id: call.id }).forUpdate().first('processing_generation');
-      if (!live || Number(live.processing_generation) !== Number(procGeneration)) {
+      const live = await trx('call_log').where({ id: call.id }).forUpdate().first('processing_generation', 'recording_sid');
+      const sameRecording = !call.recording_sid || live?.recording_sid === call.recording_sid;
+      if (!live || Number(live.processing_generation) !== Number(procGeneration) || !sameRecording) {
         return { created: false, id: null, reason: 'superseded' };
       }
     }

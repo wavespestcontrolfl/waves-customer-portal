@@ -230,7 +230,7 @@ describe('4. Careers row', () => {
   const call = { id: 'call-1', direction: 'inbound', from_phone: '+19415550100', to_phone: '+19415550199' };
 
   // A fake knex: a table store, a transaction, advisory-lock raws.
-  function fakeDb({ existing = [], liveGeneration = 1 } = {}) {
+  function fakeDb({ existing = [], liveGeneration = 1, liveRecording = 'RE-live' } = {}) {
     const rows = existing.map((r, i) => ({ id: r.id || `app-${i}`, ...r }));
     const log = { raws: [], inserts: [], tables: [] };
     function table(name) {
@@ -239,7 +239,7 @@ describe('4. Careers row', () => {
         const callQ = {
           where() { return callQ; },
           forUpdate() { log.lockedCall = true; return callQ; },
-          async first() { return liveGeneration == null ? undefined : { processing_generation: liveGeneration }; },
+          async first() { return liveGeneration == null ? undefined : { processing_generation: liveGeneration, recording_sid: liveRecording }; },
         };
         return callQ;
       }
@@ -318,6 +318,15 @@ describe('4. Careers row', () => {
     const ok = await createJobApplicationFromCall({ call, extraction: extraction(), database: owner.database, procGeneration: 2 });
     expect(ok.created).toBe(true);
     expect(owner.log.lockedCall).toBe(true);
+  });
+
+  test('recording fence: a pass on audio an operator replaced files nothing, even with the same generation', async () => {
+    const swapped = fakeDb({ liveGeneration: 2, liveRecording: 'RE-new' });
+    const out = await createJobApplicationFromCall({ call: { ...call, recording_sid: 'RE-old' }, extraction: extraction(), database: swapped.database, procGeneration: 2 });
+    expect(out).toEqual({ created: false, id: null, reason: 'superseded' });
+    expect(swapped.log.inserts).toHaveLength(0);
+    const same = fakeDb({ liveGeneration: 2, liveRecording: 'RE-old' });
+    expect((await createJobApplicationFromCall({ call: { ...call, recording_sid: 'RE-old' }, extraction: extraction(), database: same.database, procGeneration: 2 })).created).toBe(true);
   });
 
   test('an outbound call uses the number we dialed, for every outbound variant', async () => {
@@ -421,8 +430,9 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(thirdPartyCallMakesNoServiceAsk(vendorCallback)).toBe(false);
     expect(thirdPartyCallMakesNoServiceAsk(applicantCancels)).toBe(false);
   });
-  test('the Careers step runs once, after the commitments step, in the main path', () => {
-    expect(src.match(/await fileApplicantCareersRowStep\(/g).length).toBe(1);
+  test('the Careers step runs on the main path (after commitments) and on the voicemail exit path', () => {
+    expect(src.match(/await fileApplicantCareersRowStep\(/g).length).toBe(2);
+    expect(src.match(/await fileApplicantCareersRowStep\(\{ call, callSid, extracted, v2Result, procGeneration \}\)/g).length).toBe(2);
   });
 
   describe('fileApplicantCareersRowStep', () => {
