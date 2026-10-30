@@ -52,6 +52,11 @@ postgres('misting portal reader against PostgreSQL', () => {
         property_id uuid NULL REFERENCES public.customer_properties(id) ON DELETE CASCADE,
         installed_on date NOT NULL,
         mist_times text[] NOT NULL,
+        installed_address_line1 text NULL,
+        installed_address_line2 text NULL,
+        installed_city text NULL,
+        installed_state text NULL,
+        installed_zip text NULL,
         voided_at timestamptz NULL,
         created_at timestamptz NOT NULL DEFAULT now()
       )`, [schema]);
@@ -237,6 +242,21 @@ postgres('misting portal reader against PostgreSQL', () => {
     await trx('misting_calibrations').where({ property_id: retired.id }).update({ created_at: new Date('2026-12-01T00:00:00Z') });
     await calibration({ property_id: home.id, mist_times: ['07:00'] });
     expect((await read(OPEN_SCOPE())).mistTimes).toEqual(['07:00']);
+  });
+
+  test('after a move, the new system never shows the old house\'s refill; a recalibration at the same address keeps it', async () => {
+    await trx('customer_properties').where({ id: home.id }).update({ address_line1: '100 Old Lane' });
+    const old = await calibration({ installed_address_line1: '100 Old Lane' });
+    await refill(old, { refilled_on: '2026-10-01' });
+    await visit();
+    expect(await read()).toMatchObject({ lastRefillOn: '2026-10-01' });
+    // A recalibration at the same address keeps the refill history.
+    await calibration({ installed_address_line1: '100 Old Ln' });
+    expect(await read()).toMatchObject({ lastRefillOn: '2026-10-01' });
+    // The customer moves (same property row, new address) and a system is calibrated there: no refill yet.
+    await trx('customer_properties').where({ id: home.id }).update({ address_line1: '9 New Road' });
+    await calibration({ installed_address_line1: '9 New Road', installed_on: '2026-10-20' });
+    expect(await read()).toMatchObject({ installedOn: '2026-10-20', lastRefillOn: null });
   });
 
   test('a refill is matched to the current calibration\'s exact property', async () => {

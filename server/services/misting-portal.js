@@ -20,7 +20,7 @@
  */
 const db = require('../models/db');
 const { applyPropertyPredicate } = require('./account-properties');
-const { currentCalibration, currentCalibrationForCustomer } = require('./misting-records');
+const { currentCalibration, currentCalibrationForCustomer, sameInstallPremise } = require('./misting-records');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, UNREVIEWED_VOICE_MOVED_SQL } = require('./call-booking-source-actions');
 const { MISTING_SERVICE_CATALOG_KEY } = require('../utils/mosquito-misting-system');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -92,13 +92,19 @@ async function getPortalMistingSystem({ customerId, scope, now = new Date(), kne
     .first();
   if (!nextCheck) return null;
 
-  const refill = await knex('misting_refills')
-    .where({ customer_id: customerId })
-    .whereNull('voided_at')
-    .where({ property_id: calibration.property_id })
-    .select(knex.raw('refilled_on::text as refilled_on'))
-    .orderBy([{ column: 'refilled_on', order: 'desc' }, { column: 'created_at', order: 'desc' }])
-    .first();
+  // The last refill of THIS system: a refill at this property whose calibration was installed at the same
+  // premise. A move reuses the property row, so the old house's refills never show on the new system; a
+  // recalibration at the same address keeps its refill history.
+  const refills = await knex('misting_refills as r')
+    .join('misting_calibrations as rc', 'rc.id', 'r.calibration_id')
+    .where({ 'r.customer_id': customerId, 'r.property_id': current.property_id })
+    .whereNull('r.voided_at')
+    .select(
+      knex.raw('r.refilled_on::text as refilled_on'),
+      'rc.installed_address_line1', 'rc.installed_address_line2', 'rc.installed_city', 'rc.installed_zip',
+    )
+    .orderBy([{ column: 'r.refilled_on', order: 'desc' }, { column: 'r.created_at', order: 'desc' }]);
+  const refill = refills.find((row) => sameInstallPremise(row, current));
 
   const mistTimes = Array.isArray(calibration.mist_times) ? calibration.mist_times : [];
   const nextMist = nextMistInstant(mistTimes, now);

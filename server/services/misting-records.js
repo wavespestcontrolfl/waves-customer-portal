@@ -312,6 +312,10 @@ const homeStamp = (row) => ({
   service_address_zip: row.home_zip,
 });
 
+// Two calibrations describe the same installed system's premise (a recalibration at the same address),
+// by the same rule: the customer-app card keeps refill history across recalibrations, not across a move.
+const sameInstallPremise = (a, b) => !premiseStampConflicts(installStamp(a), installStamp(b));
+
 // The current row of each property (newest first), optionally for one property.
 async function currentRows(knex, customerId, propertyId = null) {
   const query = candidateQuery(knex, customerId);
@@ -634,5 +638,6 @@ module.exports = {
   toCalibration,
   toRefill,
   knownProduct,
+  sameInstallPremise,
   _test: { lockKey },
 };
