@@ -399,16 +399,16 @@ describe('adjustBudgets: live', () => {
     }));
   });
 
-  test("'spent' frozen at the stop amount goes to 'stop' with no push, logged as not pushed", async () => {
+  test("'spent' at the stop amount going to 'stop' still pushes: the local amount is never taken as Google's", async () => {
     campaignRows = [campaign({ budget_mode: 'spent', daily_budget_current: '0.05' })];
     stopRows = stopsEveryDay(9);
     const out = await BudgetManager.adjustBudgets();
-    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.05);
     expect(mockCampaignUpdate).toHaveBeenCalledWith({ budget_mode: 'stop', daily_budget_current: 0.05, updated_at: expect.any(Date) });
     expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({
       new_mode: 'stop',
-      google_ads_updated: false,
-      reason: expect.stringContaining('no push needed'),
+      google_ads_updated: true,
+      reason: expect.stringMatching(/^Gap rule: /),
     }));
     expect(out.changed).toBe(1);
   });

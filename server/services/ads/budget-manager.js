@@ -161,12 +161,6 @@ function holdLogReason(hold) {
   return `Hold: ${hold.mode} until ${hold.until} (set in the portal)`;
 }
 
-function budgetCentsEqual(current, target) {
-  const a = Math.round(parseFloat(current) * 100);
-  const b = Math.round(parseFloat(target) * 100);
-  return Number.isFinite(a) && Number.isFinite(b) && a === b;
-}
-
 // Weekday of an ET calendar-date string (0 = Sunday). Noon UTC keeps the
 // date's own weekday whatever the zone or DST.
 function etDateWeekday(dateStr) {
@@ -313,10 +307,6 @@ class BudgetManager {
 
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
-          // Live gap rule only: a mode change that leaves the budget unchanged
-          // to the cent (a 'spent' campaign frozen at the stop amount going to
-          // 'stop') is recorded locally with no Google call.
-          const noPushNeeded = Boolean(gap) && budgetCentsEqual(campaign.daily_budget_current, newBudget);
 
           // Push to Google FIRST, then commit locally — daily_budget_current
           // must never record a budget Google isn't actually running. On a
@@ -328,7 +318,7 @@ class BudgetManager {
           // budget. Once sync backfills (or the owner sets) the base, the
           // reconcile branch below converges Google onto the recorded mode.
           let pushedLive = false;
-          if (!noPushNeeded && isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+          if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
@@ -353,7 +343,7 @@ class BudgetManager {
             previous_budget: campaign.daily_budget_current,
             new_budget: newBudget,
             reason: transitionReason != null
-              ? boundReason(`${transitionReason}${noPushNeeded ? ' — no push needed, budget already the same' : ''}`)
+              ? boundReason(transitionReason)
               : `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}${pushedLive ? ' — pushed to Google Ads' : ''}`,
             trigger: 'auto',
             capacity_pct: pct,
