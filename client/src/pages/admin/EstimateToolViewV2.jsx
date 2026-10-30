@@ -795,6 +795,19 @@ export function nextFormForOfferTiers(form, estimate) {
   }
   return form;
 }
+// The linked member's current services this quote moves up a tier
+// (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B). Each fresh result
+// replaces the pick: every offered service starts ticked, except one staff
+// unticked on an earlier result for the SAME customer. No list = no pick, and
+// the save then sends none (the server keeps its automatic plan). The pick
+// lives in the form so a reopened draft saves the same choice.
+export function nextFormForTierExtension(form, estimate, customerId) {
+  const offered = (estimate?.currentServiceTierOffer?.services || []).map((svc) => svc.key);
+  if (!offered.length || !customerId) return form.tierExtensionPick ? { ...form, tierExtensionPick: null } : form;
+  const prior = form.tierExtensionPick?.customerId === customerId ? form.tierExtensionPick : null;
+  const unticked = (key) => !!prior && prior.offered.includes(key) && !prior.ticked.includes(key);
+  return { ...form, tierExtensionPick: { customerId, offered, ticked: offered.filter((key) => !unticked(key)) } };
+}
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
 // Dead Rodent Removal & Odor Treatment access choices. The values are the engine's tiers
 // (reachable | attic | in_wall); the empty value is the placeholder, never a default tier.
@@ -1817,6 +1830,7 @@ export default function EstimateToolViewV2({
     billByInvoice: false,
     offerTiers: false,
     _offerTiersDeclined: false,
+    tierExtensionPick: null,
   });
 
   function clearedPropertyFields() {
@@ -4749,7 +4763,7 @@ export default function EstimateToolViewV2({
         );
       }
       setEstimate(result);
-      setForm((f) => nextFormForOfferTiers(f, result));
+      setForm((f) => nextFormForTierExtension(nextFormForOfferTiers(f, result), result, options.existingCustomerId));
       setSavedId(null);
       setSavedViewUrl(null);
       setPriceRecomputeNotice(null);
@@ -4826,6 +4840,12 @@ export default function EstimateToolViewV2({
         // parked row's mark unless this is true.
         offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
+        // The current services staff ticked for the new tier
+        // (GATE_WAVEGUARD_EXTEND_PICK). Absent = the server's automatic plan.
+        ...(savingInputs.tierExtensionPick
+          && savingInputs.tierExtensionPick.customerId === (form.customerId || existingCustomerMatch?.id)
+          ? { tierExtensionKeys: savingInputs.tierExtensionPick.ticked }
+          : {}),
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this
         // request field).
@@ -5074,6 +5094,7 @@ export default function EstimateToolViewV2({
       // Good / Better / Best is decided per estimate, never carried.
       offerTiers: false,
       _offerTiersDeclined: false,
+      tierExtensionPick: null,
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was
@@ -8476,6 +8497,40 @@ export default function EstimateToolViewV2({
                       <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-22 font-medium u-nums">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
                       <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-22 font-medium u-nums">{fmt(E.oneTime?.total || 0)}</dd></div>
                     </dl>
+                  )}
+                  {!presentQuoteRequired && Number(E.recurring?.discount) > 0 && Number(E.recurring?.savings) > 0 && (
+                    <p className="text-14 text-zinc-900 mb-4">
+                      WaveGuard {E.recurring.waveGuardTier || E.recurring.tier} discount: {Math.round(E.recurring.discount * 100)}% off, saving{" "}
+                      <span className="u-nums">{fmt(Math.round((E.recurring.savings / 12) * 100) / 100)}</span>/mo
+                    </p>
+                  )}
+                  {E.currentServiceTierOffer?.services?.length > 0 && form.tierExtensionPick && (
+                    <fieldset className="mb-4 border-hairline border-zinc-300 rounded-sm p-3">
+                      <legend className="px-1 text-14 font-medium text-zinc-900">
+                        Also give {E.currentServiceTierOffer.tierLabel} to current services
+                      </legend>
+                      <p className="text-14 text-zinc-600 mb-2">
+                        Ticked services show on the estimate at the {E.currentServiceTierOffer.tierLabel} price and change when the customer accepts.
+                      </p>
+                      {E.currentServiceTierOffer.services.map((svc) => (
+                        <div key={svc.key} className="mb-1">
+                          <Checkbox
+                            id={`estimate-tier-extension-${svc.key}`}
+                            checked={form.tierExtensionPick.ticked.includes(svc.key)}
+                            onChange={() => setForm((f) => (f.tierExtensionPick ? {
+                              ...f,
+                              tierExtensionPick: {
+                                ...f.tierExtensionPick,
+                                ticked: f.tierExtensionPick.ticked.includes(svc.key)
+                                  ? f.tierExtensionPick.ticked.filter((key) => key !== svc.key)
+                                  : [...f.tierExtensionPick.ticked, svc.key],
+                              },
+                            } : f))}
+                            label={`${svc.label}: ${fmt(svc.currentPerVisit)} → ${fmt(svc.newPerVisit)} / application${svc.marginPct != null ? ` · est. margin ${svc.marginPct}%` : ""}`}
+                          />
+                        </div>
+                      ))}
+                    </fieldset>
                   )}
                   <p className="text-14 text-zinc-600 mb-4">Service cadence, per-application amounts and payment choices appear in the saved customer preview.</p>
                   <div>

@@ -195,17 +195,31 @@ describe('resolveCalculateQualifyingEvidence (codex #3591 r16 P1 → r34 P1)', (
     expect(await resolveCalculateQualifyingEvidence({}, resolver)).toEqual(empty);
     expect(resolver).not.toHaveBeenCalled();
     expect(await resolveCalculateQualifyingEvidence({ existingCustomerId: 'c1', priorQualifyingServices: ['pest_control'] }, resolver))
-      .toEqual({ priorQualifyingServices: ['lawn_care', 'rodent_bait'], setupWaiverPriorQualifyingServices: ['lawn_care', 'rodent_bait', 'pest_control'] });
+      .toEqual({
+        priorQualifyingServices: ['lawn_care', 'rodent_bait'],
+        setupWaiverPriorQualifyingServices: ['lawn_care', 'rodent_bait', 'pest_control'],
+        groupedEstimate: false,
+        perPropertyStreetScope: null,
+      });
     expect(resolver).toHaveBeenCalledWith('c1', { address: null, groupedEstimate: false });
   });
   test('the quoted address and group anchor reach the resolver exactly as the save body carries them (tier per property, waiver account-wide)', async () => {
-    const resolver = jest.fn(async () => ({ tierKeys: [], setupWaiverKeys: ['pest_control'] }));
+    const streetScope = { estimateStreet: '12 second st', customerPrimaryStreet: '4 first st' };
+    const resolver = jest.fn(async () => ({
+      tierKeys: [], setupWaiverKeys: ['pest_control'], groupedEstimate: true, perPropertyStreetScope: streetScope,
+    }));
     const out = await resolveCalculateQualifyingEvidence({
       existingCustomerId: 'c1', address: ' 12 Second St, Parrish, FL 34219 ', groupWithEstimateId: 'est-anchor',
     }, resolver);
     expect(resolver).toHaveBeenCalledWith('c1', { address: '12 Second St, Parrish, FL 34219', groupedEstimate: true });
-    // Property-scoped tier evidence empty, account-wide waiver evidence kept.
-    expect(out).toEqual({ priorQualifyingServices: [], setupWaiverPriorQualifyingServices: ['pest_control'] });
+    // Property-scoped tier evidence empty, account-wide waiver evidence kept;
+    // the property scope rides along so the tick list scopes like the save.
+    expect(out).toEqual({
+      priorQualifyingServices: [],
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+      groupedEstimate: true,
+      perPropertyStreetScope: streetScope,
+    });
   });
   test('a failing lookup throws (the route refuses retryably instead of previewing a different result than the save)', async () => {
     await expect(resolveCalculateQualifyingEvidence({ existingCustomerId: 'c1' }, async () => { throw new Error('db down'); }))

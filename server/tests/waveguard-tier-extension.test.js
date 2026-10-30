@@ -326,6 +326,25 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  test('a current service staff left unticked keeps its price without an office review line (GATE_WAVEGUARD_EXTEND_PICK)', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1', scheduled_date: '2099-10-28' }),
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const estimateData = frozenSnapshotData();
+    estimateData.membershipSnapshot.extensionKeptKeys = ['lawn_care'];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1', estimateData, activatedTier: 'Silver',
+      priorQualifyingKeys: ['pest_control', 'lawn_care', 'tree_shrub'],
+    });
+    expect(summary.applied).toBe(true);
+    expect(updates).toHaveLength(2);
+    // Lawn was unticked on purpose; tree & shrub was never offered, so it
+    // still asks the office.
+    expect(summary.reviewFamilies).toEqual(['tree_shrub']);
+  });
+
   test('a drifted contracted price parks for review — never a write the customer did not see', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [

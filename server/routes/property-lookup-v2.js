@@ -6301,6 +6301,10 @@ async function resolveCalculateQualifyingEvidence(options = {}, resolver = null)
   return {
     priorQualifyingServices: clean(evidence?.tierKeys),
     setupWaiverPriorQualifyingServices: clean(evidence?.setupWaiverKeys),
+    // The property scope the save's membership snapshot uses — the tick
+    // list below must list exactly the rows a save would freeze.
+    groupedEstimate: evidence?.groupedEstimate === true,
+    perPropertyStreetScope: evidence?.perPropertyStreetScope || null,
   };
 }
 
@@ -6331,8 +6335,9 @@ router.post('/calculate-estimate', async (req, res) => {
     // (codex #3591 r34 P1) — so the preview prices exactly as the save-time
     // recompute will. A lookup failure refuses (retryable) rather than
     // previewing a different result than the save persists.
+    let evidence;
     try {
-      const evidence = await resolveCalculateQualifyingEvidence(options || {});
+      evidence = await resolveCalculateQualifyingEvidence(options || {});
       v1Input.priorQualifyingServices = evidence.priorQualifyingServices;
       v1Input.setupWaiverPriorQualifyingServices = evidence.setupWaiverPriorQualifyingServices;
     } catch (lookupErr) {
@@ -6367,6 +6372,21 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // The linked member's current services at the tier this quote moves
+    // them to, for staff to tick (GATE_WAVEGUARD_EXTEND_PICK, owner
+    // 2026-10-30 option B). Read-only; a failure only leaves the list off.
+    if (options?.existingCustomerId) {
+      try {
+        const { currentServiceTierOffer } = require('../services/estimate-membership-context');
+        const offer = await currentServiceTierOffer(require('../models/db'), {
+          customerId: String(options.existingCustomerId),
+          estData: { result: mapped },
+          groupedEstimate: evidence.groupedEstimate,
+          perPropertyStreetScope: evidence.perPropertyStreetScope,
+        });
+        if (offer) mapped.currentServiceTierOffer = offer;
+      } catch (_) { /* the list is a convenience; the quote stands */ }
+    }
     res.json(mapped);
   } catch (err) {
     console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);

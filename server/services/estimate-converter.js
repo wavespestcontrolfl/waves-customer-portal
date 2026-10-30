@@ -1205,7 +1205,10 @@ async function applyFrozenExistingServiceExtension({
     return summary;
   }
   const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
-  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key));
+  // A current service staff left unticked (GATE_WAVEGUARD_EXTEND_PICK) keeps
+  // its contracted price by that choice — not a family for office review.
+  const keptKeys = new Set(Array.isArray(snapshot?.extensionKeptKeys) ? snapshot.extensionKeptKeys : []);
+  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key) && !keptKeys.has(key));
 
   // Monthly-lane members bill customers.monthly_rate — row writes and
   // prepaid credits would not deliver the displayed reduction (codex #3338

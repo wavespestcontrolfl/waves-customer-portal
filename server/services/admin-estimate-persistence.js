@@ -30,7 +30,7 @@ const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { findCustomersAtAddress } = require('./customer-address-match');
-const { computeMembershipContext } = require('./estimate-membership-context');
+const { computeMembershipContext, membershipScopeArgs } = require('./estimate-membership-context');
 const { autoFillSoldBy } = require('./estimate-sold-by');
 
 function errorWithStatus(message, statusCode) {
@@ -2166,6 +2166,11 @@ async function resolveEstimateWritePayload({
       trustedEstimateData.inputs.isRecurringCustomer = 'YES';
     }
   }
+  // The estimate tool's tick list (current prices, estimated margins) is a
+  // staff-only preview: never stored on the estimate.
+  if (trustedEstimateData.result && typeof trustedEstimateData.result === 'object') {
+    delete trustedEstimateData.result.currentServiceTierOffer;
+  }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
   // exactly what was priced/charged and never re-derives from mutable service
@@ -2186,20 +2191,18 @@ async function resolveEstimateWritePayload({
         // PLAN is still bounded to the quoted street (codex #3338 r8): a
         // multi-property customer's other-property series must never be
         // frozen (or later repriced) by a primary-address estimate.
-        ...(groupedEstimate
-          ? (perPropertyStreetScope
-            ? { streetScope: perPropertyStreetScope }
-            : { excludeExistingRows: true })
-          : (perPropertyStreetScope
-            ? { extensionStreetScope: perPropertyStreetScope }
-            : {})),
         // This lane resolves property scope, so it may freeze an
         // existing-service extension plan — but only when the quoted street
         // actually resolved (no parsed street = no way to bound the plan =
         // review-bell fallback, fail closed). Agent lanes (IB estimate
         // tools, estimator engine) pass no scope and deliberately stay
         // plan-less (codex #3338 r7).
-        freezeExtensionPlan: !!perPropertyStreetScope,
+        ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
+        // The current services staff ticked in the estimate tool
+        // (GATE_WAVEGUARD_EXTEND_PICK); absent = the automatic plan.
+        extensionPick: Array.isArray(body.tierExtensionKeys)
+          ? body.tierExtensionKeys.filter((key) => typeof key === 'string')
+          : null,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;

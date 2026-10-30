@@ -17,6 +17,12 @@ jest.mock('../services/waveguard-existing-services', () => {
 });
 const mockQualifyingLookup = require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
 const actualQualifyingLookup = jest.requireActual('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
+// Pass-through: every test keeps the real snapshot; the staff-pick test reads its arguments.
+jest.mock('../services/estimate-membership-context', () => {
+  const actual = jest.requireActual('../services/estimate-membership-context');
+  return { ...actual, computeMembershipContext: jest.fn(actual.computeMembershipContext) };
+});
+const mockComputeMembershipContext = require('../services/estimate-membership-context').computeMembershipContext;
 
 const {
   buildEstimatePersistenceFields,
@@ -1078,6 +1084,56 @@ describe('admin estimate persistence', () => {
     // The replay shapes never carry a client-claimable copy.
     expect(stored.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
     mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
+  });
+
+  test('the current services staff ticked reach the membership snapshot, and the tick list is never stored (GATE_WAVEGUARD_EXTEND_PICK)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver', address_line1: '100 Main St', city: 'Parrish', zip: '34219' },
+    });
+    mockQualifyingLookup.mockImplementation(async () => ['pest_control']);
+    mockComputeMembershipContext.mockClear();
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        address: '100 Main St, Parrish, FL 34219',
+        tierExtensionKeys: ['pest_control', 42],
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { rodentBait: { frequency: 'quarterly' } } },
+          inputs: { homeSqFt: 2000 },
+          result: { total: 89, currentServiceTierOffer: { tierLabel: 'Gold', services: [{ key: 'pest_control', marginPct: 52.9 }] } },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+    expect(mockComputeMembershipContext).toHaveBeenCalledWith(database, expect.objectContaining({
+      customerId: 'cust-member', extensionPick: ['pest_control'],
+    }));
+    mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
+    // A client-priced save keeps the posted result, so the tick list (current
+    // prices, estimated margins) is removed from it before it is stored.
+    const fixture = makeDatabase({});
+    await createOrReuseAdminEstimate({
+      database: fixture.database,
+      body: {
+        ...baseBody,
+        leadId: null,
+        estimateData: {
+          inputs: { address: '123 Palm Ave' },
+          result: { total: 125, currentServiceTierOffer: { tierLabel: 'Gold', services: [{ key: 'pest_control', marginPct: 52.9 }] } },
+        },
+      },
+      technicianId: 'qa-admin',
+      recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    const stored = JSON.parse(fixture.inserts.find((e) => e.table === 'estimates').row.estimate_data);
+    expect(stored.result.total).toBe(125);
+    expect(stored.result).not.toHaveProperty('currentServiceTierOffer');
   });
 
   test('P1-2: a verified active-plan member with NO qualifying priors keeps recurring status on the STORED replay', async () => {
