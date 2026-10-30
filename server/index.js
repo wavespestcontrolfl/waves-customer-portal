@@ -78,6 +78,7 @@ const bouncieRoutes = require('./routes/bouncie');
 const lawnHealthRoutes = require('./routes/lawn-health');
 const feedRoutes = require('./routes/feed');
 const satisfactionRoutes = require('./routes/satisfaction');
+const mistingSystemRoutes = require('./routes/misting-system');
 const propertyRoutes = require('./routes/property');
 const customerPricingAiRoutes = require('./routes/customer-pricing-ai');
 const referralRoutes = require('./routes/referrals-v2');
@@ -729,6 +730,8 @@ app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/satisfaction', satisfactionRoutes);
+// Misting system card on Home — dark behind GATE_MOSQUITO_MISTING (request-time read).
+app.use('/api/misting-system', mistingSystemRoutes);
 app.use('/api/property', propertyRoutes);
 // Unified Property Score — dark behind GATE_PROPERTY_SCORE (request-time read).
 app.use('/api/property-score', require('./routes/property-score'));
