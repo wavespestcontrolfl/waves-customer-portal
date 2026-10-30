@@ -93,6 +93,8 @@ const REFUSALS = {
   already_accepted: 'Someone already accepted this estimate. Nothing was accepted.',
   changed_since_check: 'The estimate or the booked visit changed while this was being accepted. Nothing was accepted. Try again.',
   preview_changed: 'The estimate, the price or the visit changed since this card was shown. Reload to see the new terms. Nothing was accepted.',
+  choice_changed: 'The call no longer shows the caller choosing annual prepay (it was re-read). Nothing was accepted.',
+  call_reprocessing: 'The call is being re-read right now. Try again in a minute.',
   accept_failed: 'The accept did not go through. Nothing was accepted.',
 };
 const refusal = (reason, extra = {}) => ({ ok: false, reason, message: REFUSALS[reason] || REFUSALS.not_eligible, ...extra });
@@ -201,8 +203,25 @@ async function termOverlap(conn, customerId, termStart) {
  * Can this call's visit(s) and the customer's estimate be accepted as annual prepay right now?
  * @returns {{ok:true, estimate, rows, amount, coverage, termStart, bookedIds}|{ok:false, reason, message}}
  */
+// Whether the call STILL shows the caller choosing annual prepay, read the way the sweep files on it: a settled
+// valid extraction of a real two-party call with billing_choice annual_prepay. A reprocess that re-read the plan
+// (per application, none) or failed the extraction makes the card obsolete ('choice_changed', moot); a pass
+// still running is only a wait ('call_reprocessing'), so the card stays.
+async function callChoiceState(conn, callLogId) {
+  const { parseExtraction, isRealConversation } = require('./call-held-visits');
+  const call = await conn('call_log').where({ id: callLogId })
+    .first('id', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched');
+  if (!call) return 'choice_changed';
+  if (!call.processing_status || call.processing_status === 'processing') return 'call_reprocessing';
+  const extraction = call.v2_extraction_status === 'valid' ? parseExtraction(call.ai_extraction_enriched) : null;
+  const still = !!extraction && isRealConversation(call, extraction) && billingChoiceOf(extraction) === 'annual_prepay';
+  return still ? 'ok' : 'choice_changed';
+}
+
 async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, conn = db, now = new Date() }) {
   if (!customerId) return refusal('no_customer');
+  const choice = await callChoiceState(conn, callLogId);
+  if (choice !== 'ok') return refusal(choice);
   const rows = await liveVisitsOfCall(conn, callLogId, customerId);
   if (!rows.length) return refusal('no_booked_visit');
   let estimate;
@@ -299,7 +318,7 @@ async function fileCard({ call, extraction, evaluation }) {
 // Closes an OPEN card that stopped being true: the estimate was accepted or lapsed, or the visit is gone.
 // Dismissed, not resolved (nobody acted on it). A card that is merely ineligible right now stays: the
 // office sees the reason on it.
-const MOOT_REASONS = new Set(['estimate_not_open', 'no_booked_visit', 'visit_already_linked', 'estimate_other_customer', 'no_customer']);
+const MOOT_REASONS = new Set(['estimate_not_open', 'no_booked_visit', 'visit_already_linked', 'estimate_other_customer', 'no_customer', 'choice_changed']);
 async function closeMootCards({ now }) {
   const open = await db('triage_items as t')
     .join('call_log as c', 'c.id', 't.call_log_id')
@@ -324,7 +343,7 @@ async function closeMootCards({ now }) {
       const stamp = new Date();
       const n = await trx('triage_items').where({ id: card.id, status: 'open' }).update({
         status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE,
-        resolution_note: 'No longer applies: the estimate was accepted or closed, or the visit is gone.',
+        resolution_note: 'No longer applies: the estimate was accepted or closed, the visit is gone, or the call no longer shows the choice.',
         resolved_at: stamp, updated_at: stamp,
       });
       if (n) {

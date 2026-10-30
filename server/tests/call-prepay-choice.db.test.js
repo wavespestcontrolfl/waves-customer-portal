@@ -365,6 +365,22 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect((await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: fresh })).status).toBe(200);
     });
 
+    test('a call re-read to another plan is refused and the sweep closes its card; a pass still running only waits', async () => {
+      const { callLogId, card, token } = await filed();
+      await trx('call_log').where({ id: callLogId }).update({ processing_status: 'processing' });
+      const waiting = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
+      expect(waiting.body).toMatchObject({ code: 'call_reprocessing' });
+      await runCallPrepayChoiceSweep();
+      expect((await trx('triage_items').where({ id: card.id }).first()).status).toBe('open');
+      await trx('call_log').where({ id: callLogId }).update({ processing_status: 'processed', ai_extraction_enriched: JSON.stringify(extractionWith('per_application')) });
+      const changed = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
+      expect(changed.status).toBe(409);
+      expect(changed.body).toMatchObject({ code: 'choice_changed' });
+      expect(acceptSpy).not.toHaveBeenCalled();
+      await runCallPrepayChoiceSweep();
+      expect(await trx('triage_items').where({ id: card.id }).first()).toMatchObject({ status: 'dismissed', resolution_source: 'auto' });
+    });
+
     test('a record that changed inside the accept (preview_changed) is a plain refusal; the card stays open', async () => {
       const { card, token } = await filed();
       acceptSpy.mockRejectedValueOnce(Object.assign(new Error('changed'), { statusCode: 409, code: 'preview_changed' }));
