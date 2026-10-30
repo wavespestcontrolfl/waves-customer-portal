@@ -6375,7 +6375,9 @@ router.post('/calculate-estimate', async (req, res) => {
     // The linked member's current services at the tier this quote moves
     // them to, for staff to tick (GATE_WAVEGUARD_EXTEND_PICK, owner
     // 2026-10-30 option B). Read-only; a failure only leaves the list off.
-    if (options?.existingCustomerId) {
+    // ADMIN ONLY, like /api/admin/estimates/customer-spend: the list carries
+    // contracted prices and margins, and this router also admits technicians.
+    if (options?.existingCustomerId && req.techRole === 'admin') {
       try {
         const { currentServiceTierOffer } = require('../services/estimate-membership-context');
         const offer = await currentServiceTierOffer(require('../models/db'), {

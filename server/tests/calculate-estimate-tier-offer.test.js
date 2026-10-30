@@ -42,7 +42,7 @@ const OFFER = {
   services: [{ key: 'pest_control', label: 'Pest Control', currentPerVisit: 120, newPerVisit: 113.33, marginPct: 52.9 }],
 };
 
-function invoke(body) {
+function invoke(body, techRole = 'admin') {
   const layer = router.stack.find((l) => l.route?.path === '/calculate-estimate' && l.route.methods.post);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   return new Promise((resolve) => {
@@ -51,7 +51,7 @@ function invoke(body) {
       status(code) { this.statusCode = code; return this; },
       json(payload) { resolve({ status: this.statusCode, payload }); },
     };
-    handler({ body, techRole: 'admin' }, res);
+    handler({ body, techRole }, res);
   });
 }
 
@@ -72,6 +72,14 @@ test('a linked member gets the tick list, built from this quote under the save\'
   expect(args).toMatchObject({ customerId: 'cust-1', groupedEstimate: false, perPropertyStreetScope: mockStreetScope });
   // The offer is computed from this very quote's priced services.
   expect(args.estData.result.recurring.services.map((svc) => svc.service)).toContain('mosquito');
+});
+
+test('a technician gets no tick list: it carries contracted prices and margins (admin only, like customer-spend)', async () => {
+  currentServiceTierOffer.mockResolvedValue(OFFER);
+  const { status, payload } = await invoke(quote({ existingCustomerId: 'cust-1' }), 'technician');
+  expect(status).toBe(200);
+  expect(payload).not.toHaveProperty('currentServiceTierOffer');
+  expect(currentServiceTierOffer).not.toHaveBeenCalled();
 });
 
 test('a lead gets no tick list, and a failed list still returns the quote', async () => {
