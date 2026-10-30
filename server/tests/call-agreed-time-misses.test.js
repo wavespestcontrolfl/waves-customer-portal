@@ -6,7 +6,7 @@
 // All names, numbers and addresses are synthetic.
 const { buildExtractionPrompt, PROMPT_VERSION, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const {
-  bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE,
+  bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE,
 } = require('../services/prompts/appointment-confirmed-rules');
 const { canAutoRoute } = require('../services/call-triage-flags');
 const { callTimeETString } = require('../services/call-recording-processor')._test;
@@ -27,18 +27,18 @@ const PROMPT = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-10-05', 
 
 describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
-    expect(PROMPT_VERSION).toBe('v31');
-    expect(PROMPT_HASH).toMatch(/^v31-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v32');
+    expect(PROMPT_HASH).toMatch(/^v32-[a-f0-9]{12}$/);
   });
 });
 
 describe('shared confirmation rules (also graded by the call self-audit)', () => {
   test('the V2 prompt renders each shared rule verbatim, bare-time rule with its own date reference', () => {
     expect(PROMPT).toContain(bareTimeNoDayRule('2026-10-05'));
-    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(PROMPT).toContain(rule);
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE]) expect(PROMPT).toContain(rule);
     const { system } = require('../services/prompts/call-extraction-v1').buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-10-05', { callTimeET: '1:12 PM' });
     expect(system).toContain(bareTimeNoDayRule('the "Call date in Eastern Time" given in the user message'));
-    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(system).toContain(rule);
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE]) expect(system).toContain(rule);
   });
 });
 
@@ -177,6 +177,93 @@ describe('case: the caller proposes the time, staff accept and close (call 07c4b
       caller_accepted_slot: true,
     }), { addressValidation: AV_CLEAN }).allowed).toBe(true);
     expect(canAutoRoute(extraction({ status: 'ambiguous', confirmed_start_at: null }, { triage_flags: ['ambiguous_scheduling'] }), { addressValidation: AV_CLEAN }).allowed).toBe(false);
+  });
+});
+
+// Prompt v32 (2026-10-29 call audit): staff and the caller settled Thursday the 5th at 10, staff's
+// closing line said Monday, the caller answered only "Okay. See you next week."; the extraction
+// answered "ambiguous" and nothing was booked.
+describe('case: the day/time conflict rule (staff closing slip, v32)', () => {
+  const fixture = require('../fixtures/call-extraction-eval/synthetic-day-conflict-and-billing-choice.json');
+  const byId = (id) => fixture.cases.find((c) => c.id === id);
+  const { buildExtractionPromptParts } = require('../services/prompts/call-extraction-v1');
+  const { auditAppointmentContract } = require('../services/prompts/appointment-confirmed-rules');
+
+  test('the prompt says the caller-accepted slot stands over a later staff-only day or time', () => {
+    expect(PROMPT).toContain('DAY/TIME CONFLICT');
+    expect(PROMPT).toContain('the agreed slot is the day and time the CALLER accepted in the caller\'s own words and staff committed to. This is NOT a last-said rule.');
+    expect(PROMPT).toContain('LATER ONLY by staff');
+    expect(PROMPT).toContain('that the caller did not accept in the caller\'s own words does NOT replace that slot');
+    expect(PROMPT).toContain('"okay", "see you next week" or "thanks" has not accepted it');
+    expect(PROMPT).toContain('write the later staff slip into scheduling_notes_raw');
+  });
+
+  test('the prompt lets a caller-accepted later slot supersede, and keeps two accepted slots ambiguous', () => {
+    expect(PROMPT).toContain('A later slot the CALLER explicitly accepted');
+    expect(PROMPT).toContain('DOES supersede the earlier one');
+    expect(PROMPT).toContain('caller_accepted_slot is false when the caller later changed the slot');
+    expect(PROMPT).toContain('When two different slots are both still caller-accepted at hangup and neither was withdrawn, the status is "ambiguous" and confirmed_start_at is null');
+  });
+
+  test('a calendar date whose weekday disagrees is contested: ambiguous, no confirmed time', () => {
+    expect(PROMPT).toContain('When a stated calendar date and its weekday disagree ("Thursday the 6th" when the 6th is a Friday');
+    expect(PROMPT).toContain('the day is contested: status "ambiguous", confirmed_start_at null, because a wrong booking is worse than none');
+  });
+
+  test('no new triage flag, and CORRECTIONS / FINAL OUTCOME point at the paragraph', () => {
+    expect(PROMPT).toContain('Do not add a triage flag for any of this.');
+    expect(PROMPT).toMatch(/CORRECTIONS:[^\n]*only a change the CALLER made or accepted counts; see the DAY\/TIME CONFLICT paragraph in SCHEDULING STATUS/);
+    expect(PROMPT).toMatch(/FINAL OUTCOME WINS:[^\n]*said only by staff and not accepted by the caller is not a change: see the DAY\/TIME CONFLICT paragraph/);
+    expect(PROMPT.match(/DAY\/TIME CONFLICT/g).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('the rule sits in the scheduling rules, before the existing-appointment line, in both layouts', () => {
+    const { system } = buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-10-05', { callTimeET: '1:12 PM' });
+    for (const text of [PROMPT, system]) {
+      expect(text.indexOf(DAY_TIME_CONFLICT_RULE)).toBeGreaterThan(text.indexOf(CALLER_PROPOSED_TIME_RULE));
+      expect(text.indexOf(DAY_TIME_CONFLICT_RULE)).toBeLessThan(text.indexOf('EXISTING APPOINTMENT:'));
+    }
+  });
+
+  test('the self-audit grades V2 answers by the same text, and V1 answers by none of it', () => {
+    expect(auditAppointmentContract('2026-10-29')).toContain(DAY_TIME_CONFLICT_RULE);
+    expect(auditAppointmentContract('2026-10-29', { v2OnlyRules: false })).not.toContain(DAY_TIME_CONFLICT_RULE);
+  });
+
+  test('the synthetic fixture carries the 10-29 shape with invented names only', () => {
+    const slip = byId('day-conflict-closing-slip');
+    expect(slip.transcript).toContain('I\'ll punch you in for 10 o\'clock on Thursday the 5th');
+    expect(slip.transcript).toContain('We\'ll see you at 10 a.m. on Monday.');
+    expect(slip.transcript.trim().split('\n').pop()).toBe('Caller: Okay. See you next week.');
+    for (const c of fixture.cases) {
+      expect(c.transcript).not.toMatch(/\d{3}[-. ]\d{3}[-. ]\d{4}/);
+      expect(c.transcript.match(/Pat Example|Sam|100 Example Lane/)).not.toBeNull();
+    }
+  });
+
+  test('the fixture weekdays match their dates (Nov 5 and Nov 2 2026 are Thursday and Monday, Nov 6 is Friday)', () => {
+    const weekday = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
+    expect(weekday(byId('day-conflict-closing-slip').expect.confirmed_start_at)).toBe('Thursday');
+    expect(weekday(byId('day-conflict-caller-accepted-change').expect.confirmed_start_at)).toBe('Monday');
+    expect(weekday('2026-11-06')).toBe('Friday');
+    expect(weekday(fixture.cases[0].call_date_et)).toBe('Thursday');
+  });
+
+  test('routing books the closing-slip extraction at Thursday 10 and holds the ambiguous ones', () => {
+    const slip = byId('day-conflict-closing-slip').expect;
+    expect(canAutoRoute(extraction({
+      status: slip.scheduling_status,
+      confirmed_start_at: slip.confirmed_start_at,
+      agreed_slot_words: slip.agreed_slot_words,
+      caller_accepted_slot: slip.caller_accepted_slot,
+      agent_committed_booking: slip.agent_committed_booking,
+    }, { triage_flags: slip.triage_flags_added }), { addressValidation: AV_CLEAN }).allowed).toBe(true);
+    for (const id of ['day-conflict-two-slots-both-accepted', 'day-conflict-weekday-date-mismatch']) {
+      const e = byId(id).expect;
+      expect(e.scheduling_status).toBe('ambiguous');
+      expect(e.confirmed_start_at).toBeNull();
+      expect(canAutoRoute(extraction({ status: e.scheduling_status, confirmed_start_at: e.confirmed_start_at }), { addressValidation: AV_CLEAN }).allowed).toBe(false);
+    }
   });
 });
 

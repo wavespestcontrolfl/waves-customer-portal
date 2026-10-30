@@ -980,6 +980,18 @@
           ],
           "description": "1.24.0, additive/optional (never `required`): the extraction's judgement over the WHOLE call of whether any price came up. false ONLY when neither the caller nor the agent mentioned any price, amount, cost, fee, estimate, quote, discount or payment (\"it's a free assessment\", \"no charge\", and a call that never touches money, are false). true when either side mentioned any of them, in any form, including a BARE amount with no currency word from EITHER side (\"Could you do one forty-nine?\", \"it'll be 149\", \"is that around a hundred?\"), a competitor's number, a range, or a question about cost. null when unsure. The call pipeline's no-price assessment booking requires exactly false; any other value sends the call to the priced path or the office."
         },
+        "billing_choice": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "annual_prepay",
+            "per_application",
+            null
+          ],
+          "description": "1.29.0, additive/optional (never `required`): the billing plan the CALLER chose for a RECURRING plan, judged over the WHOLE call in the caller's own words: \"annual_prepay\" when the caller chose to pay for the year up front (\"we'll prepay for the year\", \"let's do the annual\", \"I'll pay it all at once\"); \"per_application\" when the caller chose to be billed each application or visit (\"just bill each application\", \"I'll pay as we go\"). Staff explaining, offering or recommending the options is NOT a choice, and neither is a caller question about them (\"what does prepay cost?\"). A caller who chose and later changed their mind takes the FINAL choice. null when no choice was made, it is unclear, or no recurring plan was discussed. When non-null, pin the caller's own choice sentence to /service_request/billing_choice with speaker \"caller\". The pipeline only verifies that quote; it never reads this field as consent to be charged."
+        },
         "quote_requested": {
           "type": [
             "boolean",
@@ -1548,7 +1560,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: scheduling.callback_window_start / _end when set (the stated callback time, and the AGENT-spoken acceptance of the callback), address, urgency, on_site_authorization, hoa_common_area_service, property.whole_building_occupancy=true (CALLER-spoken quote), sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: scheduling.callback_window_start / _end when set (the stated callback time, and the AGENT-spoken acceptance of the callback), address, urgency, on_site_authorization, hoa_common_area_service, property.whole_building_occupancy=true (CALLER-spoken quote), sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression), service_request.billing_choice when non-null (CALLER-spoken quote).",
       "items": {
         "type": "object",
         "additionalProperties": false,

@@ -18,12 +18,12 @@ const { recordDecisions } = require('../services/typed-decisions/shadow-recorder
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
-// Each sampled call is asked call_judge.v4 and call_gate_checks.v1; these
+// Each sampled call is asked call_judge.v5 and call_gate_checks.v1; these
 // read one package's asks, records and tally.
 const asksFor = (id) => askPackage.mock.calls.filter((c) => c[0] === id);
 const recordsFor = (id) => recordDecisions.mock.calls.filter(([a]) => a.pkg.id === id);
-const judgeAsks = () => asksFor('call_judge.v4');
-const judgeRecords = () => recordsFor('call_judge.v4');
+const judgeAsks = () => asksFor('call_judge.v5');
+const judgeRecords = () => recordsFor('call_judge.v5');
 const judgeTally = ({ gateChecks, ...rest }) => rest;
 
 const SAMPLE = (over = {}) => ({
@@ -31,7 +31,7 @@ const SAMPLE = (over = {}) => ({
   transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(8),
   ai_extraction: JSON.stringify({ is_lead: true, v2_primary_adopted: true }), disposition: null,
   // The adoption stamp plus a valid V2 extraction with a decisive status: the V2 extractor wrote the
-  // baseline, so the call is graded by the V2 contract (call_judge.v4).
+  // baseline, so the call is graded by the V2 contract (call_judge.v5).
   v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling: { status: 'none' } }), ...over,
 });
 
@@ -201,7 +201,7 @@ describe('Jev shadow', () => {
     expect(judgeTally(res.jev)).toEqual({ asked: 0, recorded: 0, failed: 0 });
   });
 
-  test('gate on: asks call_judge.v4 with the transcript and direction, records both baselines and the transcript digest', async () => {
+  test('gate on: asks call_judge.v5 with the transcript and direction, records both baselines and the transcript digest', async () => {
     typedDecisionsLive.mockReturnValue(true);
     const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false, v2_primary_adopted: true }) });
     mockDb({ calls: [prodCall] });
@@ -209,7 +209,7 @@ describe('Jev shadow', () => {
 
     expect(judgeAsks()).toHaveLength(1);
     const [packageId, state] = judgeAsks()[0];
-    expect(packageId).toBe('call_judge.v4');
+    expect(packageId).toBe('call_judge.v5');
     expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
@@ -219,7 +219,7 @@ describe('Jev shadow', () => {
     const args = judgeRecords()[0][0];
     expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
     expect(args).not.toHaveProperty('outcomeEvidence');
-    expect(args.pkg.id).toBe('call_judge.v4');
+    expect(args.pkg.id).toBe('call_judge.v5');
     // production and deep judge side by side for the five shared fields
     expect(args.baselines.appointment_agreed).toEqual({ production: false, deep_judge: true });
     expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: true });
@@ -287,7 +287,7 @@ describe('Clef shadow leg (second provider)', () => {
     mockDb({ calls: [SAMPLE()] });
     const res = await runSelfAudit({ createMessage: OK_DEEP });
     expect(judgeAsks()).toHaveLength(2);
-    expect(judgeAsks()[0][0]).toBe('call_judge.v4');
+    expect(judgeAsks()[0][0]).toBe('call_judge.v5');
     expect(judgeAsks()[0][1]).toEqual(judgeAsks()[1][1]); // identical state
     expect(judgeAsks()[1][2]).toEqual({ provider: 'cloudflare' });
     expect(judgeRecords()).toHaveLength(2);
@@ -368,7 +368,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [long] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
     expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
-    expect(asksFor('call_judge.v4')).toHaveLength(1); // call_judge unchanged
+    expect(asksFor('call_judge.v5')).toHaveLength(1); // call_judge unchanged
     expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
   });
 
@@ -644,7 +644,7 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
 // Codex #6294 r2, r3, r4: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
 describe('the contract follows the extractor that wrote the stored answer', () => {
   const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
-  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE, DAY_TIME_CONFLICT_RULE } = require('../services/prompts/appointment-confirmed-rules');
   const v2With = (scheduling) => JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling });
   const confirmedV2 = v2With({ status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' });
   const noneV2 = v2With({ status: 'none' });
@@ -704,8 +704,10 @@ describe('the contract follows the extractor that wrote the stored answer', () =
     expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(DAY_TIME_CONFLICT_RULE);
     const v1 = row({ ai_extraction: '{}' });
     expect(AUDIT_PROMPT).toContain(CALLER_PROPOSED_TIME_RULE);
+    expect(AUDIT_PROMPT).toContain(DAY_TIME_CONFLICT_RULE);
     const v2 = valid(noneV2, {});
     expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
     expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
@@ -726,40 +728,47 @@ describe('AUDIT_PROMPT appointment definition', () => {
   const { AUDIT_PROMPT } = require('../services/call-self-audit');
   const {
     auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE,
-    bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE,
+    bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE,
   } = require('../services/prompts/appointment-confirmed-rules');
   const { PACKAGES } = require('../services/typed-decisions/packages');
   test('carries the production appointment_confirmed rules verbatim', () => {
     expect(AUDIT_PROMPT).toContain(auditAppointmentContract('the date the call took place'));
   });
-  test('the typed judge asks the same contract (call_judge.v4)', () => {
-    // v4 is a frozen snapshot. If this fails, the production rules changed:
-    // publish call_judge.v5 with a new snapshot and point the self-audit at it.
-    expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions)
+  test('the typed judge asks the same contract (call_judge.v5)', () => {
+    // v5 is a frozen snapshot. If this fails, the production rules changed:
+    // publish call_judge.v6 with a new snapshot and point the self-audit at it.
+    expect(PACKAGES['call_judge.v5'].questions.appointment_agreed.instructions)
       .toContain(auditAppointmentContract('the date the call took place'));
   });
-  test('v4 snapshot is the audit contract with the three clock-free V2-only rules; v3 stays frozen without them', () => {
+  test('v5 snapshot is the audit contract with the four clock-free V2-only rules; v4 and v3 stay frozen without the later ones', () => {
     const fs = require('fs');
     const path = require('path');
     const dir = path.join(__dirname, '..', 'services', 'typed-decisions');
     const v3 = fs.readFileSync(path.join(dir, 'call-judge-v3-appointment-contract.txt'), 'utf8');
     const v4 = fs.readFileSync(path.join(dir, 'call-judge-v4-appointment-contract.txt'), 'utf8');
-    expect(v4).toBe(auditAppointmentContract('the date the call took place'));
+    const v5 = fs.readFileSync(path.join(dir, 'call-judge-v5-appointment-contract.txt'), 'utf8');
+    expect(v5).toBe(auditAppointmentContract('the date the call took place'));
     for (const heading of ['A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR', 'STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING', 'CALLER-PROPOSED TIME THAT STAFF ACCEPTED']) {
+      expect(v5).toContain(heading);
       expect(v4).toContain(heading);
       expect(v3).not.toContain(heading);
     }
-    // The bare-time rule needs the call's clock, which no judge is given: it is in neither.
-    expect(v4).not.toContain('BARE TIME WITH NO DAY');
-    expect(v3).not.toContain('BARE TIME WITH NO DAY');
+    // v5 adds the day/time conflict rule (prompt v32); v4 and v3 never had it.
+    expect(v5).toContain('DAY/TIME CONFLICT');
+    expect(v4).not.toContain('DAY/TIME CONFLICT');
+    expect(v3).not.toContain('DAY/TIME CONFLICT');
+    // The bare-time rule needs the call's clock, which no judge is given: it is in none.
+    for (const snapshot of [v3, v4, v5]) expect(snapshot).not.toContain('BARE TIME WITH NO DAY');
     expect(PACKAGES['call_judge.v4'].stateShape).toEqual(PACKAGES['call_judge.v3'].stateShape);
+    expect(PACKAGES['call_judge.v5'].stateShape).toEqual(PACKAGES['call_judge.v3'].stateShape);
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).toContain(v3);
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).not.toContain('CALLER-PROPOSED TIME');
     expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions).toContain(v4);
+    expect(PACKAGES['call_judge.v5'].questions.appointment_agreed.instructions).toContain(v5);
   });
-  test('the audit prompt carries the three clock-free V2-only rules, and not the bare-time rule', () => {
+  test('the audit prompt carries the four clock-free V2-only rules, and not the bare-time rule', () => {
     expect(AUDIT_PROMPT).not.toContain(bareTimeNoDayRule('the date the call took place'));
-    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(AUDIT_PROMPT).toContain(rule);
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE, DAY_TIME_CONFLICT_RULE]) expect(AUDIT_PROMPT).toContain(rule);
   });
   test('the extractor renders the shared rules, not its own copy', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
