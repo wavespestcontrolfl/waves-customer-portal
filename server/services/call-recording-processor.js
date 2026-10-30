@@ -118,7 +118,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -10556,8 +10556,10 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
         historicalReplay,
-        // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises.
-        thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result),
+        // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises
+        // when the call asks no service of its own; a mixed-purpose call keeps its real service promises.
+        thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)
+          && v2Result?.status === 'valid' && thirdPartyCallMakesNoServiceAsk(v2Result.extraction),
       });
       logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
       // The pipeline ignores the summary; the commitments backfill reads it to

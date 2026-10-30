@@ -3557,6 +3557,7 @@ module.exports = {
   callEndedWithNothingToDo,
   noActionCallCards,
   thirdPartyCustomerOnlyCards,
+  thirdPartyCallMakesNoServiceAsk,
   isThirdPartyCallNature,
   THIRD_PARTY_CUSTOMER_ONLY_CARDS,
   CALLBACK_SPAM_MOOT_CODES,

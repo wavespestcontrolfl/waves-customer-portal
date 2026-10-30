@@ -377,8 +377,18 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
   test('the three card sites strip the customer-only cards behind the gate', () => {
     expect(src.match(/thirdPartyCustomerOnlyCards\(/g).length).toBe(3); // enforce, shadow bridge, enforce-mode email branch
   });
-  test('the commitments step passes thirdPartyCall from gate + nature', () => {
-    expect(src).toContain('thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result),');
+  test('the commitments step passes thirdPartyCall from gate + nature + no service ask', () => {
+    expect(src).toContain('thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)');
+    expect(src).toContain("&& v2Result?.status === 'valid' && thirdPartyCallMakesNoServiceAsk(v2Result.extraction),");
+  });
+  test('a mixed-purpose applicant call (asks for service) keeps customer promises', () => {
+    const { thirdPartyCallMakesNoServiceAsk } = require('../services/call-triage-flags');
+    const applicantOnly = { call_nature: 'job_applicant', scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_requested: false } };
+    const applicantAsksQuote = { call_nature: 'job_applicant', scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_requested: true } };
+    const vendorBooks = { call_nature: 'vendor_or_partner', scheduling: { status: 'confirmed' }, service_request: { service_intent: 'quote_only' } };
+    expect(thirdPartyCallMakesNoServiceAsk(applicantOnly)).toBe(true);
+    expect(thirdPartyCallMakesNoServiceAsk(applicantAsksQuote)).toBe(false);
+    expect(thirdPartyCallMakesNoServiceAsk(vendorBooks)).toBe(false);
   });
   test('the Careers step runs once, after the commitments step, in the main path', () => {
     expect(src.match(/await fileApplicantCareersRowStep\(/g).length).toBe(1);
