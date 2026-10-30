@@ -14,6 +14,7 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
+const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
 const { isEnabled } = require('../config/feature-gates');
 const { scrubMapsKeysDeep } = require('../services/estimate-map-image');
 const { signedMapImagePathFromStaticUrl } = require('../services/signed-map-image');
@@ -371,6 +372,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     // form didn't ask, so nothing is guessed.
     const timeline = normalizeTimeline(req.body?.timeline);
     const declaredUrgency = urgencyForTimeline(timeline);
+    // Optional self-reported "How did you hear about us?" — the intake (this
+    // request) is where the wizard asks it, so a visitor who leaves before
+    // /calculate still counts. Fixed allowlist; unknown values dropped.
+    const wizardHeardAbout = heardAboutFromBody(req.body);
 
     const startedStage = {
       stage: 'property_lookup_started',
@@ -416,6 +421,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             ...(serviceInterest ? { service_interest: serviceInterest } : {}),
             ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
             ...(anonId ? { anon_id: anonId } : {}),
+            // Fills an EMPTY answer only; a recorded one is never replaced.
+            ...heardAboutFillIfEmpty(db, wizardHeardAbout),
             // A lead the office parked as 'unresponsive' just responded — the
             // admin UI buckets that status as closed, so reopen it or the
             // re-engaged prospect stays hidden. Other statuses are untouched.
@@ -458,6 +465,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
+        heard_about: wizardHeardAbout.heardAbout,
+        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
         service_interest: serviceInterest || null,
         ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
         extracted_data: JSON.stringify(startedStage),
