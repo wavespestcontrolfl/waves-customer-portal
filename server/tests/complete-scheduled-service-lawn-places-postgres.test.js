@@ -161,14 +161,20 @@ postgres('closeout: the place of a spot treatment', () => {
     } finally { await cleanup(f); }
   });
 
-  test('a 3rd Celsius spot of the year at the SAME place is recorded and flagged for the office (the closeout never refuses)', async () => {
+  test('a 3rd Celsius spot of the year at the SAME place is recorded and flagged for the office (the preflight and the closeout never refuse; the office gets one bell)', async () => {
     const f = await seedLawnVisit();
     try {
       await priorCelsius(f, 'front');
+      // The /complete places check lets the row through (a yearly limit warns on the sheet, owner 2026-10-30).
+      const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      expect(await require('../services/lawn-trouble-areas').preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toBeNull();
       const out = await complete(f, { products: [spot(f, { areaPlace: 'front' })] });
       expect(out.status).toBe(200);
       expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Celsius WG is over its yearly application limit\.$/)]);
       expect(await ledgerOf(f, (await recordOf(f)).id)).toMatchObject({ treated_place: 'front' });
+      // The office alert (complete-scheduled-service.js notifyOfficeOfLimitFindings), one per record, product and limit type.
+      const bells = await mockPg('notifications').whereRaw("metadata->>'customerId' = ?", [f.customerId]).whereRaw("metadata->>'code' = 'application_limit_exceeded'");
+      expect(bells.length).toBeGreaterThanOrEqual(1);
     } finally { await cleanup(f); }
   });
 
@@ -291,7 +297,8 @@ postgres('closeout: the place of a spot treatment', () => {
         // The context block exists, and the closed place is judged on the resolved property (the front is at its count, the back is not).
         const block = await areas.buildContextBlock({ knex: mockPg, svc, seed: { products: [{ id: f.celsius.id, name: 'Celsius WG' }], rows: new Map() }, readFailures: new Set() });
         expect(Object.keys(block.troubleAreas.blocked[f.celsius.id])).toEqual(['front']);
-        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        // A limit never refuses (owner 2026-10-30); the closed place is still read as closed for the sheet's warning (blocked above).
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toBeNull();
         expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'back' })] })).toBeNull();
         const out = await complete(f, { products: [spot(f, { areaPlace: 'back' }), { productId: granular.id, rate: 1, rateUnit: 'lb', totalAmount: 1, amountUnit: 'lb', applicationMethod: 'granular_broadcast', areaValue: 500, areaUnit: 'sqft' }] });
         expect(out.status).toBe(200);

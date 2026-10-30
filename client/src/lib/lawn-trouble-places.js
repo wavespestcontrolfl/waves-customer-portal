@@ -95,6 +95,15 @@ function problemAt(placeId, row, { areas, weedMix, chinch, weedRows, takeAllPlac
   return mapProblemAt(placeId, row, areas);
 }
 
+// Where the row is HELD, not just warned about (owner 2026-10-30: a yearly limit is a warning, never a block). Only the take-all
+// mapping holds a place: a take-all card row on an unmapped place, or what /complete refused as unmapped (`areas.refusedCard`).
+// Every other reason in placeProblems is a yearly limit's own words and rides the footer as a warning.
+function heldAt(placeId, row, { areas, takeAllPlaces }) {
+  const id = String(row.productId).toLowerCase();
+  const unmapped = areas.refused?.[id]?.[placeId] && areas.refusedCard?.[id]?.[placeId] && row.troubleSource === 'guide_card';
+  return !!unmapped || unmappedTakeAll(row, placeId, takeAllPlaces);
+}
+
 function weedProblemAt(placeId, row, { areas, weedMix, weedRows }) {
   if (uncapped(row, weedMix)) return null;
   if (weedMix.byPlace[placeId]?.amountBlocked && doseMoved(areas, row.weedGroup ? weedRows : [row])) return null;
@@ -149,7 +158,8 @@ function unreadableAt(placeId, row, { weedMix, chinch }) {
 
 /**
  * The place a row starts on when the tech has not tapped one: the lawn's single known trouble area of the row's type
- * whose place is open for the row. Two or more known places of that type, or none, leave the choice to the tech.
+ * whose place is not held for the row (`problems` = the holds; a yearly limit is a warning, never a hold). Two or more
+ * known places of that type, or none, leave the choice to the tech.
  */
 export function defaultPlaceFor(row, { areas, problems }) {
   const type = troubleTypeOfRow(row);
@@ -177,19 +187,24 @@ export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeA
 
 function placed(row, { areas, chosen, weedMix, chinch, weedRows, takeAllPlaces }) {
   const problems = placeProblems(row, { areas, weedMix, chinch, weedRows, takeAllPlaces });
+  // The holds are the problems that are not a yearly limit; they alone close a chip and hold Complete.
+  const holds = Object.fromEntries(Object.entries(problems).map(([id, reason]) => [id, reason && heldAt(id, row, { areas, takeAllPlaces }) ? reason : null]));
   const picked = chosen && areas.places.some((place) => place.id === chosen) ? chosen : '';
-  const place = picked || defaultPlaceFor(row, { areas, problems });
+  const place = picked || defaultPlaceFor(row, { areas, problems: holds });
   return {
     ...row,
     placeRule: true,
     placeLabels: Object.fromEntries(areas.places.map((choice) => [choice.id, choice.label])),
     place,
     placeProblems: problems,
+    placeHolds: holds,
     placeDefaulted: !picked && !!place,
     // The reason a row may not go where it is (or anywhere), for the hold under the Complete button.
-    placeBlock: place && problems[place] ? problems[place] : null,
+    placeBlock: place && holds[place] ? holds[place] : null,
+    // The yearly limit's own words at the row's place: a warning (the visit can still be completed and the office is told).
+    placeWarning: place && problems[place] && !holds[place] ? problems[place] : null,
     placeUnreadable: !!place && !problems[place] && unreadableAt(place, row, { weedMix, chinch }),
-    placeNowhere: Object.values(problems).every(Boolean) ? Object.values(problems)[0] : null,
+    placeNowhere: Object.values(holds).every(Boolean) ? Object.values(holds)[0] : null,
   };
 }
 
