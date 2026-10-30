@@ -8,7 +8,13 @@ jest.mock('../models/db', () => {
     const q = {};
     q.where = (match) => { q.match = match; return q; };
     q.first = async () => { if (db.failing) throw new Error('db down'); return rows.get(q.match.key); };
-    q.insert = (row) => ({ onConflict: () => ({ merge: async (patch) => { if (db.failing) throw new Error('db down'); rows.set(row.key, rows.has(row.key) ? { ...rows.get(row.key), ...patch } : row); } }) });
+    // The upsert writes over a stored row only when its checkedAt is newer, as the SQL does (the Postgres suite runs it).
+    q.insert = (row) => ({ onConflict: () => ({ merge: (patch) => ({ whereRaw: async (sql, [checkedAt]) => {
+      if (db.failing) throw new Error('db down');
+      const old = rows.get(row.key);
+      if (!old) rows.set(row.key, row);
+      else if (JSON.parse(old.value).checkedAt < checkedAt) rows.set(row.key, { ...old, ...patch });
+    } }) }) });
     return q;
   });
   db.rows = rows;
