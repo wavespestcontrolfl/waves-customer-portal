@@ -170,20 +170,29 @@ function lastTenDigits(value) {
  *
  * @returns {Promise<{ created: boolean, id: string|null, reason: string }>}
  */
-async function createJobApplicationFromCall({ call = {}, extraction = null, database }) {
-  if (!call.id) return { created: false, id: null, reason: 'no_call' };
-  if (extraction?.call_nature !== 'job_applicant') return { created: false, id: null, reason: 'not_job_applicant' };
+function callerName(caller) {
+  const fullName = cleanText(caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' '));
+  return fullName ? properCase(fullName) : '';
+}
+
+// The caller's own spoken number first, else the number that called us (the
+// number we dialed, on an outbound call).
+function callerPhone(call, caller) {
+  const ani = String(call.direction || '').toLowerCase() === 'outbound' ? call.to_phone : call.from_phone;
+  return normalizeNanpPhone(caller.phone_e164) || normalizeNanpPhone(ani);
+}
+
+// The row's fields from the call, or { reason } when the call cannot file one.
+function callApplicationFields(call, extraction) {
+  if (!call.id) return { reason: 'no_call' };
+  if (extraction?.call_nature !== 'job_applicant') return { reason: 'not_job_applicant' };
   const caller = extraction.caller || {};
 
-  const fullName = cleanText(caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' '));
-  const name = fullName ? properCase(fullName) : '';
-  if (!name || name.length < 2 || name.length > 80) return { created: false, id: null, reason: 'no_name' };
+  const name = callerName(caller);
+  if (!name || name.length < 2 || name.length > 80) return { reason: 'no_name' };
 
-  // The caller's own spoken number first, else the number that called us (the
-  // number we dialed, on an outbound call).
-  const ani = String(call.direction || '').toLowerCase() === 'outbound' ? call.to_phone : call.from_phone;
-  const phone = normalizeNanpPhone(caller.phone_e164) || normalizeNanpPhone(ani);
-  if (!phone) return { created: false, id: null, reason: 'no_phone' };
+  const phone = callerPhone(call, caller);
+  if (!phone) return { reason: 'no_phone' };
 
   const emailRaw = cleanValidEmailOrNull(caller.email);
   const email = emailRaw && emailRaw.length <= 254 ? emailRaw : null;
@@ -194,8 +203,13 @@ async function createJobApplicationFromCall({ call = {}, extraction = null, data
     organization_name: cleanText(caller.organization_name || '').slice(0, MAX_SOURCE_CHARS) || null,
     call_summary: cleanText(extraction.meta?.call_summary || '').slice(0, CALL_SUMMARY_MAX_CHARS) || null,
   };
+  return { name, phone, email, source, phoneKey: lastTenDigits(phone) };
+}
 
-  const phoneKey = lastTenDigits(phone);
+async function createJobApplicationFromCall({ call = {}, extraction = null, database }) {
+  const fields = callApplicationFields(call, extraction);
+  if (fields.reason) return { created: false, id: null, reason: fields.reason };
+  const { name, phone, email, source, phoneKey } = fields;
   return database.transaction(async (trx) => {
     // One writer at a time per call and per phone: two passes of the same call
     // (or two calls from one number) cannot both pass the checks below.
