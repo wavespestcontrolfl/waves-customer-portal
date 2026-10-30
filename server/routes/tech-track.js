@@ -732,9 +732,12 @@ router.post('/:id/rain-out', async (req, res, next) => {
       // commit() merges this into the rebooker's options.expect (technician_id
       // is part of the atomic UPDATE predicate), so a dispatch reassignment
       // landing between that read and the write makes the write miss and 409
-      // with nothing sent. It also keeps this caller off the unfenced series
-      // branch (same contract as the admin-dispatch twin).
+      // with nothing sent. A recurring date move still shifts its series
+      // (GATE_COLLECTIVE_SERIES_ANCHOR, owner ruling 2026-10-28); that series
+      // write is fenced to the same technician through expectAnchor, so the
+      // reassignment race is closed on both paths.
       requireAssignedTechnicianId: req.technicianId,
+      allowSeriesForAssignedTechnician: true,
       // Authenticated tech quick-move tap — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,

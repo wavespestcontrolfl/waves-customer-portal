@@ -3077,7 +3077,13 @@ class SmartRebooker {
         // Presence-based for the window: a pinned NULL start (windowless
         // anchor at planning time) must fail the fence if a window was
         // added meanwhile, exactly like a pinned start that changed.
+        // Presence-based assignment pin: a technician-initiated move pins the
+        // anchor to the technician whose request it is, judged on the LOCKED
+        // read — a reassignment that landed after the caller's ownership
+        // check refuses the series move like any other concurrent change.
+        const expTech = has('technician_id') ? String(options.expectAnchor.technician_id || '') : undefined;
         if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
+          || (expTech !== undefined && String(anchorRow.technician_id || '') !== expTech)
           || (has('window_start') && hm(anchorRow.window_start) !== expStart)
           || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
           || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {

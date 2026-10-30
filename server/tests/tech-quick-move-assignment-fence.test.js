@@ -30,8 +30,11 @@ jest.mock('../middleware/admin-auth', () => {
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/rebooker', () => ({
   reschedule: jest.fn(),
-  rescheduleSeries: jest.fn().mockResolvedValue({ rescheduledOccurrences: [] }),
+  rescheduleSeries: jest.fn(),
   findRescheduleOptions: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('../routes/admin-dispatch', () => ({
+  applySeriesMoveEffects: jest.fn().mockResolvedValue({ notificationSent: false, notificationError: null, conflicts: [], seriesMoveId: 'sm-1' }),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n-1' }) }));
 jest.mock('../services/appointment-reminders', () => ({
@@ -68,6 +71,7 @@ const AppointmentReminders = require('../services/appointment-reminders');
 const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const techTrackRouter = require('../routes/tech-track');
+const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
 
 const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const tomorrow = (() => { const d = new Date(`${etToday}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
@@ -112,6 +116,18 @@ beforeEach(() => {
     }
     return { id, success: true, visitMove: null };
   });
+  // The series writer's own anchor predicate (rebooker assertAnchorPin),
+  // judged on the live row.
+  SmartRebooker.rescheduleSeries.mockImplementation(async (id, date, window, _reason, _by, options = {}) => {
+    const expected = options.expectAnchor && options.expectAnchor.technician_id;
+    if (expected && String(expected) !== String(liveTechnicianId)) {
+      throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, code: 'SLOT_TAKEN', isOperational: true });
+    }
+    return { rescheduledOccurrences: [
+      { id, date, windowStart: window.start },
+      { id: 'sib-1', date: '2026-09-12', windowStart: '09:00' },
+    ] };
+  });
 });
 
 let server; let baseUrl;
@@ -125,9 +141,9 @@ beforeAll(() => new Promise((resolve) => {
 afterAll(() => new Promise((r) => server.close(r)));
 
 const body = { reasonCode: 'weather_rain', scope: 'job', target: { date: tomorrow, window: { start: '13:00', end: '14:00' } }, notifyCustomer: true };
-async function moveVisit() {
+async function moveVisit(overrides = {}) {
   const res = await fetch(`${baseUrl}/api/tech/services/svc-1/rain-out`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, ...overrides }),
   });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
@@ -171,17 +187,41 @@ describe('technician Quick Move assignment fence', () => {
     expect(flushDispatchQualityDates).not.toHaveBeenCalled();
   });
 
-  test('recurring visit with the series gate on: the technician call never takes the (unfenced) series branch', async () => {
-    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-    try {
-      const rec = { ...ROW, is_recurring: true, recurring_parent_id: 'parent-1' };
-      wireReads(rec, rec);
-      const r = await moveVisit();
+  describe('recurring visit, GATE_COLLECTIVE_SERIES_ANCHOR on (series shift stays reachable for the technician)', () => {
+    const REC = { ...ROW, is_recurring: true, recurring_parent_id: 'parent-1' };
+    beforeEach(() => { process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true'; });
+    afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+    test('own visit: the series still shifts, fenced to the technician through expectAnchor; the series effects own the board broadcast', async () => {
+      wireReads(REC, REC);
+      const r = await moveVisit({ notifyCustomer: false });
+
       expect(r.status).toBe(200);
-      expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
-      expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({ technician_id: 'tech-1' });
-    } finally {
-      delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
-    }
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].expectAnchor).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      // Series-handled stop: the route does not double-emit.
+      expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+    });
+
+    test('reassigned between the ownership read and the series write: refused with 409, series untouched, nothing sent', async () => {
+      wireReads(REC, { ...REC, technician_id: 'tech-2' });
+      liveTechnicianId = 'tech-2';
+
+      const r = await moveVisit();
+
+      expect(r.status).toBe(409);
+      expect(r.body.error).toMatch(/changed concurrently/i);
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5].expectAnchor).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      // The single-visit fallback keeps its own fence and refuses as well.
+      expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual(expect.objectContaining({ technician_id: 'tech-1' }));
+      expect(applySeriesMoveEffects).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+      expect(AppointmentReminders.markRescheduleNoticeSent).not.toHaveBeenCalled();
+      expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+      expect(flushDispatchQualityDates).not.toHaveBeenCalled();
+    });
   });
 });

@@ -2252,7 +2252,7 @@ async function prepareNoteRungSms({ serviceId, service, target, note, reasonCode
   return { ok: true, prebuiltSms };
 }
 
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null, allowSeriesForAssignedTechnician = false }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2509,14 +2509,20 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // check believing no series-widening is possible while THIS read
     // disagrees, reaching the series branch with no ownership enforcement
     // at all (requireAssignedTechnicianId only fenced the single-job
-    // fallback). A restricted (technician) caller can never take the
-    // series-shift branch here, full stop, regardless of any race — every
-    // technician request is forced onto the single-job path below, which
-    // is unconditionally fenced by requireAssignedTechnicianId's CAS.
+    // fallback). So a restricted (technician) caller can never take the
+    // series-shift branch by default: it is forced onto the single-job path
+    // below, which is fenced by requireAssignedTechnicianId's CAS.
+    //
+    // The tech-portal Quick Move is the one exception (owner ruling
+    // 2026-10-28: technicians move visits from their own app, and a recurring
+    // date move shifts its series): it passes allowSeriesForAssignedTechnician,
+    // and the series call is fenced to the same technician through
+    // expectAnchor.technician_id (rebooker assertAnchorPin, judged on the
+    // locked read), so no series write happens without the ownership check.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
       && String(target.date) !== jobDateStr
-      && !requireAssignedTechnicianId;
+      && (!requireAssignedTechnicianId || allowSeriesForAssignedTechnician === true);
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
@@ -2564,7 +2570,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             notifyRequested: notifyCustomer === true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
-            expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
+            expectAnchor: {
+              scheduled_date: job.scheduled_date,
+              window_start: job.window_start,
+              ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+            },
           });
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
