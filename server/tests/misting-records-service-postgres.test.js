@@ -257,6 +257,27 @@ postgres('misting records service (PostgreSQL)', () => {
     expect((await create()).propertyId).toBe(homeId);
   });
 
+  test('a current calibration past the 200-row history limit is still listed, as current', async () => {
+    const second = await addProperty({ label: 'Lake house' });
+    const keep = await create({ propertyId: homeId });
+    const template = await app('misting_calibrations').where({ id: keep.id }).first();
+    const base = new Date(template.created_at).getTime() + 1000;
+    // 200 newer (voided) rows at another property push the current one past the history limit.
+    await app('misting_calibrations').insert(Array.from({ length: 200 }, (_, n) => ({
+      ...template,
+      id: randomUUID(),
+      property_id: second,
+      created_at: new Date(base + n * 1000),
+      updated_at: new Date(base + n * 1000),
+      voided_at: new Date(base + n * 1000),
+      voided_by: null,
+      void_reason: 'Synthetic history',
+    })));
+    const { calibrations } = await svc.listCustomerRecords(customerId, { knex: app });
+    expect(calibrations).toHaveLength(201);
+    expect(calibrations.find((c) => c.id === keep.id)).toMatchObject({ isCurrent: true });
+  });
+
   test('two writers at once keep a strict order: the later call is the newer record', async () => {
     const [x, y] = await Promise.all([create({ notes: 'x' }), create({ notes: 'y' })]);
     const { calibrations } = await svc.listCustomerRecords(customerId, { knex: app });
