@@ -221,8 +221,9 @@ function scrollToPaymentSection() {
 }
 
 // Primary booking CTA — same navy treatment as the add-service button;
-// jumps the customer straight to the scheduling section.
-function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, microText = null }) {
+// jumps the customer straight to the scheduling section. onPickTime is the
+// page's no-time-yet handler (scroll + "pick a visit time" banner).
+function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, microText = null, onPickTime = scrollToBookingSection }) {
   const glass = glassCopyActive();
   // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
   // action reads as confirming THAT visit rather than restarting the flow.
@@ -233,7 +234,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
-        onClick={slotMeta ? scrollToPaymentSection : scrollToBookingSection}
+        onClick={slotMeta ? scrollToPaymentSection : onPickTime}
         style={{
           minHeight: 44,
           minWidth: 220,
@@ -1753,7 +1754,8 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
       <button
         type="button"
         disabled={disabled}
-        onClick={() => onChange('recurring')}
+        // The active option is a no-op: a mode change clears the picked visit time.
+        onClick={() => { if (mode !== 'recurring') onChange('recurring'); }}
         style={{
           ...pillBase,
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
@@ -1763,7 +1765,7 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
       <button
         type="button"
         disabled={disabled}
-        onClick={() => onChange('one_time')}
+        onClick={() => { if (mode !== 'one_time') onChange('one_time'); }}
         style={{
           ...pillBase,
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
@@ -4678,13 +4680,24 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   // may still be offering it and the correct options stay hidden (codex r10
   // P2). Its own copy, because neither "expired" nor "taken" is true.
   const staleHold = kind === 'stale_hold';
+  // 'pick_time': an approve tap with no visit time picked. The approve step
+  // needs a time, and a bare scroll back to the times read as the page
+  // starting over (a customer gave up and phoned in).
+  const pickTime = kind === 'pick_time';
   return (
-    <div style={{
+    <div role="status" style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {staleHold
+        {pickTime ? (
+          <>
+            <strong>Pick a visit time below to approve your plan.</strong>{' '}
+            Starting later? Use &ldquo;Can&apos;t find a date?&rdquo; under the times, or call{' '}
+            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.navy, fontWeight: 600 }}>{WAVES_PHONE_DISPLAY}</a>
+            {' '}and we&apos;ll set it up.
+          </>
+        ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
@@ -5399,6 +5412,7 @@ export function ServiceSection({
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
+  onPickTime,
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
   termiteComparison = null,
@@ -5863,6 +5877,7 @@ export function ServiceSection({
           <GetServiceTodayCta
             showGuaranteeMicro
             slotMeta={ctaSlotMeta}
+            onPickTime={onPickTime}
             // Synthetic unsplit-bundle sections resolve their terms from the
             // member services; a lone unresolvable key stays terms-neutral.
             microText={glassCtaMicroForKeys(
@@ -6025,6 +6040,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
   // 9:00 AM") — SlotPicker reports it alongside the id; cleared with it.
   const [selectedSlotMeta, setSelectedSlotMeta] = useState(null);
+  // An approve tap with no visit time picked can't open the payment step: it
+  // scrolls to the times and the booking section shows the pick_time banner.
+  // A counter, so each tap remounts the banner and it is announced again.
+  // Picking a time answers it; a later slot reset never re-raises it.
+  const [pickTimePrompt, setPickTimePrompt] = useState(0);
+  useEffect(() => { if (selectedSlotId) setPickTimePrompt(0); }, [selectedSlotId]);
+  const promptPickTime = useCallback(() => {
+    if (!selectedSlotId) setPickTimePrompt((n) => n + 1);
+    scrollToBookingSection();
+  }, [selectedSlotId]);
   // Curated Google-review pool for the glass hero proof strip (PR C) —
   // fetched only when the glass copy is active.
   const featuredReviews = useFeaturedReviews(glassCopyActive(), 12);
@@ -7746,7 +7771,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
-    reserveAttemptRef.current += 1;
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
     // INDEPENDENT — only the changed section moves (so sections sharing a tier
     // key, e.g. lawn + tree both having "standard", don't move together). But
@@ -7762,6 +7786,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         section.key === sectionKey
         || section.frequencies?.some((item) => item.key === nextFrequency)
       ));
+    // Re-tapping the cadence already chosen changes nothing, so it keeps the
+    // picked visit time and add-ons (it used to clear both and refetch slots).
+    if (affectedSections.every((section) => selected[section.key] === nextFrequency)) return;
+    reserveAttemptRef.current += 1;
     setSelected((prev) => affectedSections.reduce((next, section) => ({
       ...next,
       [section.key]: nextFrequency,
@@ -7782,7 +7810,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, [services, comboAxisKeys, comboModeActive]);
+  }, [services, comboAxisKeys, comboModeActive, selected]);
 
   // contactGaps is booleans-only (server never sends the linked customer's
   // real name/email) — lastName is REQUIRED (Accept stays disabled and shows
@@ -9447,6 +9475,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
+                onPickTime={promptPickTime}
                 selectedFrequencyKey={selected[section.key]}
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
@@ -9697,7 +9726,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             />
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} onPickTime={promptPickTime} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             // Tier-aware fee state on the plan-level card too (codex r24 P2):
@@ -9778,7 +9807,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               noGuarantee={pageGuaranteeScope !== 'all'}
             />
           )}
-        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
+        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} onPickTime={promptPickTime} /> : null}
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
@@ -10452,6 +10481,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
             <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
+            {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
+              ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
             {canShowSlotPicker ? (
               // SlotPicker takes no disabled prop, so freeze it from out here
               // while a reserve/accept is in flight (ctaPhase 'submitting'
@@ -10743,7 +10774,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 showYourWork={data.showYourWork || null}
                 mistingLayout={data.mistingLayout || null}
                 lockInCta={canShowSlotPicker
-                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
+                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}
               />
               {/* GBP proof directly after the review quotes. The report
@@ -10796,7 +10827,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <GlassStickyBookBar
           show={stickyBarPriced}
           slotMeta={selectedSlotMeta}
-          onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
+          onApprove={selectedSlotMeta ? scrollToPaymentSection : promptPickTime}
         />
       ) : null}
     </Page>
