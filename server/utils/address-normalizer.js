@@ -789,17 +789,38 @@ function unitOnlySegment(segment) {
   return UNIT_DESIGNATORS.has(first) && Boolean(value) && !isStateZipPair(first, value);
 }
 
-// Whether a one-line address ends in a locality: after the street and any unit
-// segments that follow it (parseRawAddress keeps those on the street line), one
-// or two segments ("City, ST ZIP") and no unit. "123 Main St, Apt 12345" has no
-// locality: a five-digit unit is not a ZIP, and no unit is ever dropped.
-function endsInLocality(raw) {
+// The comma segments after the street and the unit segments right behind it
+// (parseRawAddress keeps those on the street line), with a trailing "USA" dropped.
+function segmentsAfterStreetUnits(raw) {
   const segments = raw.split(',').map(cleanString).filter(Boolean).slice(1);
   if (/^(usa|united states)$/i.test(segments[segments.length - 1] || '')) segments.pop();
   let start = 0;
   while (start < segments.length && unitOnlySegment(segments[start])) start += 1;
-  const locality = segments.slice(start);
+  return segments.slice(start);
+}
+
+// Whether a one-line address ends in a locality: one or two segments after the
+// street and its units ("City, ST ZIP") and no unit among them. "123 Main St,
+// Apt 12345" has no locality: a five-digit unit is not a ZIP, and no unit is
+// ever dropped.
+function endsInLocality(raw) {
+  const locality = segmentsAfterStreetUnits(raw);
   return locality.length > 0 && locality.length <= 2 && !locality.some(unitOnlySegment);
+}
+
+// Whether a saved street line also holds its locality. Such a line keys as a
+// different house than the same address saved in parts, so a merge keeps both
+// copies (owner 2026-10-30). After the street and its units: a state, a ZIP or
+// the row's own city ("6618 Sample Ct, Bradenton, FL 34203", "13524 Sample Ct
+// Parrish, 34219", "123 Royal Palm Ct, Venice"). A comma-free line counts when
+// it ends in the state ("17394 Sample Creek Trl Parrish FL 34219"). A unit or a
+// street-name word after a comma ("324 48th Street, Court West") does not.
+function streetLineHoldsLocality({ address_line1, city } = {}) {
+  const line = cleanString(address_line1);
+  if (!line.includes(',')) return /\s(fl|florida)\.?(\s+\d{5}(-\d{4})?)?$/i.test(line);
+  const tail = segmentsAfterStreetUnits(line).join(' ').toLowerCase();
+  const rowCity = cleanString(city).toLowerCase();
+  return /\b(fl|florida)\b|\b\d{5}\b/.test(tail) || Boolean(rowCity && tail.startsWith(rowCity));
 }
 
 // A lead's service address as customer fields. leads.address holds one free-text line, and the
@@ -841,6 +862,7 @@ function formatAddress(parts = {}) {
 module.exports = {
   normalizeLeadAddress,
   leadAddressFields,
+  streetLineHoldsLocality,
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,
