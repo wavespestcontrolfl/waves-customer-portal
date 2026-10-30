@@ -201,9 +201,7 @@ function roundStepForPlan(row) {
 }
 
 // The weed and spot products of the v13 recipe: the Celsius weed mix (Celsius, Certainty, the nonionic surfactant), Blindside in its
-// place and Dismiss for sedge. Their window rows hold the seasonal rules (February Celsius alone, Blindside November to March, Dismiss
-// November to March), so on a rounds visit they come from the REAL date's month window while every other product comes from the
-// round's step window. Matched by name because the rows carry no weed flag; a bermuda removal row (gates.bermudaRemoval) is not one.
+// place and Dismiss for sedge. Matched by name because the rows carry no weed flag; a bermuda removal row (gates.bermudaRemoval) is not one.
 const WEED_SPOT_NAME = /^(celsius|certainty|blindside|dismiss)\b|nonionic surfactant/i;
 const isWeedSpotName = (name) => WEED_SPOT_NAME.test(String(name || '').replace(/[^A-Za-z0-9/.]+/g, ' ').trim());
 function isWeedSpotRow(row) {
@@ -211,8 +209,20 @@ function isWeedSpotRow(row) {
   return isWeedSpotName(row.product_name) || isWeedSpotName(row.catalog_product_name);
 }
 
+// The as-needed rows of a v13 window: every spot product (weed, fungicide, insecticide, wetting agent: role `*_spot`), the curative grub
+// and mole cricket granule (`insect_curative`) and the optional fire ant add-on (`insecticide_optional_addon`). Each is applied only where
+// its trigger is found, and its window holds the seasonal rules (February Celsius alone, Blindside and Dismiss November to March, the
+// take-all, large patch, chinch bug and caterpillar months), so on a rounds visit they come from the spot month's window (the REAL date's,
+// with the St. Augustine green-up exception: lawn-rounds.js roundSpotMonth) while every other row comes from the round's step window: the
+// whole-lawn products, a trouble swap's replacement bag (the December 0-0-24), a sold area add-on. A bermuda removal row is not one.
+const AS_NEEDED_ROLES = new Set(['insect_curative', 'insecticide_optional_addon']);
+function isAsNeededRow(row) {
+  if (!row || row.gates?.bermudaRemoval) return false;
+  const role = String(row.role || '');
+  return role.endsWith('_spot') || AS_NEEDED_ROLES.has(role) || isWeedSpotRow(row);
+}
+
 const recipeLines = (text) => String(text || '').split('\n').filter((line) => line.trim());
-const lineProductName = (line) => line.split(' — ')[0].trim();
 
 // The step visit a rounds visit reads: the round's step with its rounds-only variant applied (round 2: April's cadenceVariants["9"];
 // round 3: February's roundVariants.lawn_rounds_9), so the plan, the tank sheet, the brief and the completion actions state the same
@@ -230,13 +240,13 @@ function visitForRound(visit, roundStep) {
   };
 }
 
-// The round's step with the weed and spot LINES of the real date's step: the step's own weed lines come out and the real month's go in
-// (the lines other than weed ones, the disease and insect spots, stay the round step's). The same visit back when the two steps are
+// The round's step with the as-needed LINES of the spot month's step: every `secondary` line (the weed, disease and insect spots, the
+// wetting agent, the curative granule, the fire ant add-on) is the spot month's, so the season decides them as it does for a 12x visit.
+// The planned treatment (`primary`, the notes, the round's variant) stays the round step's. The same visit back when the two steps are
 // the same month or the lines already agree.
 function visitWithSpotLines(stepVisit, spotVisit) {
   if (!stepVisit || !spotVisit || stepVisit === spotVisit) return stepVisit;
-  const isWeed = (line) => isWeedSpotName(lineProductName(line));
-  const secondary = [...recipeLines(stepVisit.secondary).filter((line) => !isWeed(line)), ...recipeLines(spotVisit.secondary).filter(isWeed)].join('\n');
+  const secondary = recipeLines(spotVisit.secondary).join('\n');
   return secondary === String(stepVisit.secondary || '') ? stepVisit : { ...stepVisit, secondary };
 }
 
@@ -249,4 +259,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning, roundStepForPlan, isWeedSpotName, isWeedSpotRow, visitForRound, visitWithSpotLines };
+module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning, roundStepForPlan, isWeedSpotName, isWeedSpotRow, isAsNeededRow, visitForRound, visitWithSpotLines };
