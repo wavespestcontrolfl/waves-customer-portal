@@ -6,6 +6,7 @@ const {
   MISSING_AMPM_RULE,
   STAFF_HEDGE_RULE,
   CALLER_PROPOSED_TIME_RULE,
+  DAY_TIME_CONFLICT_RULE,
 } = require('./appointment-confirmed-rules');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
@@ -172,7 +173,21 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // time STAFF offered; its "caller hedged" exclusion is about the caller's
 // answer to that offer, not the caller's own softened proposal. New
 // instruction: a new cohort.
-const PROMPT_VERSION = 'v31';
+// v32: DAY/TIME CONFLICT rule + service_request.billing_choice (schema 1.29.0). 2026-10-29: staff
+// and a caller settled "10 o'clock on Thursday the 5th" (the caller said "Yep. Okay." to Thursday
+// and answered "10 a.m.?" to the hour; staff repeated both twice), then staff's closing line said
+// "on Monday" and the caller answered only "Okay. See you next week." The extraction answered
+// "ambiguous" and nothing was booked; the shadow day judge read the call correctly. CORRECTIONS and
+// FINAL OUTCOME are a last-said rule, and the owner's 2026-09-10 ruling rejected last-said after it
+// double-booked a visit. The slot the CALLER accepted in the caller's own words and staff committed
+// to is the agreed slot; a later slot only staff said, which the caller did not accept, does not
+// replace it; a later slot the caller accepted does; two slots both caller-accepted at hangup, or a
+// date and weekday that disagree, stay "ambiguous" with confirmed_start_at null. No triage flag
+// (scheduling_notes_raw records the slip). The same rule is in appointment-confirmed-rules.js so the
+// self-audit grades by it. billing_choice: the plan the CALLER chose for a recurring plan
+// (annual_prepay or per_application), judged over the whole call, pinned with the caller's own words;
+// no consumer in this change. New instructions and field: a new cohort.
+const PROMPT_VERSION = 'v32';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -289,6 +304,7 @@ ${bareTimeNoDayRule(todayRef)}
 ${MISSING_AMPM_RULE}
 ${STAFF_HEDGE_RULE}
 ${CALLER_PROPOSED_TIME_RULE}
+${DAY_TIME_CONFLICT_RULE}
 ${EXISTING_APPOINTMENT_RULE}
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
@@ -409,6 +425,7 @@ SERVICE REQUEST:
 - price_accepted_by_caller: true ONLY when the CALLER, after that offer, accepted THAT price in their own words ("yes, that works", "okay, $150 is fine"). false when the caller objected, negotiated, asked a question instead, agreed to something else, or took the agreement back. Pin the caller's acceptance to /service_request/price_accepted_by_caller with speaker "caller". null when no price was discussed.
 - price_is_final: true ONLY when the accepted amount was the LAST price staff stated for this service on the call, with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing ("actually, correction, it's $250", "plus ten dollars for the garage", "that's before the trip fee", "it will be a bit more with the second building"). false when the price changed or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed.
 - price_discussed: judge over the WHOLE call, both speakers: false ONLY when NEITHER the caller NOR the agent mentioned any price, amount, cost, fee, estimate, quote, discount or payment. true when either side did, in any form, including a BARE amount with no currency word and a number said as words ("Could you do one forty-nine?" -> true; "it'll be 149" -> true; "is that around a hundred?" -> true; "what would that run me?" -> true; "we got a quote from another company" -> true). "It's a free assessment" or "no charge" alone is false, and so is a call that never touches money. Numbers that are plainly not money (an address, a zip, a house or square-foot size, a time of day, a date, a count of rooms) do not make it true. null when you genuinely cannot tell; PREFER true over null when any amount-like number was spoken that you cannot place.
+- billing_choice: the billing plan the CALLER chose for a RECURRING plan, judged over the WHOLE call in the caller's OWN words: "annual_prepay" when the caller chose to pay for the year up front ("we'll prepay for the year", "let's do the annual", "I'll pay it all at once"); "per_application" when the caller chose to be billed each application or visit ("just bill each application", "I'll pay as we go"). Staff explaining, offering or recommending the options is NOT a choice, and a caller question about them ("what does prepay cost?") is not a choice. An "okay", or going ahead with booking, right after the caller asked what a plan costs is not a choice either: the caller must name or plainly pick the plan. When the caller chose and later changed their mind, take the FINAL choice. null when no choice was made, it is unclear, or no recurring plan was discussed. When non-null, pin the caller's own choice sentence to /service_request/billing_choice with speaker "caller".
 - price: The PRIMARY price stated on the call — a copy of prices[0] below (see the prices rule for how the primary is chosen and ordered). Capture ANY price stated on the call by EITHER party — the agent's quote, or a number the CALLER speaks (a competitor's quote, a price seen online; record who said it in stated_by) — whether or not the caller accepted it — this is broader than quoted_price_usd above, which stays accepted-total-only and unaffected by this field. Never invent a number; leave a subfield null when the call did not say it.
   - amount_usd / amount_max_usd: the stated number. A single price -> amount_usd only, amount_max_usd null. A RANGE ("$90 to 100 per quarter") -> amount_usd is the LOW end (90), amount_max_usd is the HIGH end (100). A muddled or corrected number ("300... no wait, 75, or was it 76") -> use the LAST clearly stated value per the corrections rule below; if it truly never resolves, null rather than guess.
   - unit: the billing unit AS SPOKEN — one_time, per_application, per_month, per_quarter, per_year. "unknown" when a price was stated but no unit was said (e.g. a bare "$300" with no "per" anything). null only when no price was stated at all.
@@ -428,8 +445,8 @@ SERVICE REQUEST:
 - waveguard_tier_mentioned: Only set if the caller explicitly names a WaveGuard tier they saw on the site or an ad. Do NOT infer.
 
 TRANSCRIPT RELIABILITY — the transcript is evidence, not truth:
-- CORRECTIONS: when the caller corrects themselves ("it's 555-2091 — sorry, no, 555-2901"), the LAST clearly confirmed value wins. Apply to every field: phone, address, date, time, email, service.
-- FINAL OUTCOME WINS: in a long call the plan can change ("Tuesday... actually let's do Wednesday", cancel → reschedule). Extract the FINAL agreed state at hangup, not an earlier abandoned one.
+- CORRECTIONS: when the caller corrects themselves ("it's 555-2091 — sorry, no, 555-2901"), the LAST clearly confirmed value wins. Apply to every field: phone, address, date, time, email, service. For a day or time of an appointment, only a change the CALLER made or accepted counts; see the DAY/TIME CONFLICT paragraph in SCHEDULING STATUS.
+- FINAL OUTCOME WINS: in a long call the plan can change ("Tuesday... actually let's do Wednesday", cancel → reschedule). Extract the FINAL agreed state at hangup, not an earlier abandoned one. A different day or time said only by staff and not accepted by the caller is not a change: see the DAY/TIME CONFLICT paragraph in SCHEDULING STATUS.
 - NEGATION: read carefully around "not/don't/never" — "I do NOT want to cancel" is not a cancellation_request. A missed negation reverses the meaning; when a negation makes intent unclear, choose the conservative value and lower the relevant confidence.
 - WHO SAID IT: only the CALLER's words establish agreement, consent, or a request. An agent reading a script ("you can cancel any time"), suggesting, or summarizing is not the caller agreeing. "Yeah, that sounds fine" only confirms what the caller was directly responding to — pin the evidence quote accordingly.
 - SIMILAR-SOUNDING VALUES: fifteen/fifty, "two oh five"/"205", B/D/P/T/V letters — when a number or spelled letter is genuinely ambiguous and not confirmed elsewhere in the call, return null rather than guess, and lower the relevant confidence to 0.6 or below.
@@ -508,6 +525,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 - service_request.price_offered_by_staff (when true — the agent's price sentence; speaker must be "agent") and service_request.price_accepted_by_caller (when true — the caller's acceptance; speaker must be "caller")
 - scheduling.staff_accepted_proposed_slot (when true — the ENTIRE agent reply turn; speaker must be "agent") and scheduling.selected_day_words (when set — the caller turn holding the selected day; speaker must be "caller")
+- service_request.billing_choice (when non-null — the CALLER's own sentence choosing that plan; speaker must be "caller")
 - service_request.price / service_request.prices[] (when amount_usd or amount_max_usd is set — each entry's own evidence_quote field above already carries this; no separate top-level evidence entry is required)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 

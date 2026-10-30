@@ -50,6 +50,7 @@ const {
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { createPickerBudget } = require('../services/scheduling/hint-road-times');
+const { trackRoadLimit, roadLimitOf } = require('../services/scheduling/picker-road-limit-notice');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
@@ -246,7 +247,9 @@ router.get('/ui', (req, res) => {
   res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
 });
 
-router.post('/', async (req, res) => {
+// GATE_PICKER_ROAD_LIMIT_NOTICE: scopes this request so a refused Google
+// purchase (a spending limit) is noted for the answer's `road_limit`.
+router.post('/', trackRoadLimit, async (req, res) => {
   try {
     const {
       customerId, address, lat, lng,
@@ -522,6 +525,9 @@ router.post('/', async (req, res) => {
       paidRoads, roadSpender: req.technicianId,
     });
     const pickedOut = built.picked;
+    // GATE_PICKER_ROAD_LIMIT_NOTICE: the staff line for a stopped spending
+    // limit. Gate off (or nothing refused): no field.
+    const roadLimit = roadLimitOf(req);
 
     res.json({
       ...engineResult,
@@ -530,6 +536,7 @@ router.post('/', async (req, res) => {
       ...(pickedByTech ? { pickedByTech } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
       summary: built.summary,
+      ...(roadLimit ? { road_limit: roadLimit } : {}),
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });

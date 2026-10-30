@@ -48,7 +48,7 @@ beforeEach(() => {
               : url.endsWith("/advisor")
                 ? { report: null }
                 : url.endsWith("/capacity-heatmap")
-                  ? { heatmap: {} }
+                  ? { heatmap: { all: { days: [] } }, campaigns: [], recentChanges: [] }
                   : null;
       if (!data) throw new Error(`Unexpected fixture request: ${url}`);
       return { ok: true, json: async () => data };

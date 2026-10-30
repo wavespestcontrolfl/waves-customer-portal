@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "call-extraction-synthetic-transcripts.v1",
+  "description": "Synthetic, de-identified transcripts for the call extraction prompt v32 rules: the DAY/TIME CONFLICT rule and service_request.billing_choice. Every name, phone and address is invented (Pat Example, Sam, 100 Example Lane, Sampleton); no real call or customer is stored. The cases are the model's judgement to make, so tests pin the contract the model is given and what routing does with each expected extraction. Use them as replay inputs for a model bake-off.",
+  "cases": [
+    {
+      "id": "day-conflict-closing-slip",
+      "why": "Staff and the caller settled Thursday the 5th at 10 a.m.; staff's closing line said Monday and the caller answered only 'Okay. See you next week.' The caller-accepted slot stands (prompt v32).",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam. How can I help you?\nCaller: Hi, this is Pat Example. I need the quarterly pest service at 100 Example Lane in Sampleton.\nAgent: Sure. I can get you in next week. Thursday?\nCaller: Yep. Okay.\nAgent: How is 10 o'clock?\nCaller: 10 a.m.?\nAgent: 10 o'clock is okay. I'll punch you in for 10 o'clock on Thursday the 5th.\nCaller: Great.\nAgent: So that is Thursday at 10, and we will text you the day before.\nCaller: Thursday at 10, perfect.\nAgent: Thursday the 5th at 10 o'clock.\nCaller: Yes.\nAgent: We'll see you at 10 a.m. on Monday.\nCaller: Okay. See you next week.",
+      "expect": {
+        "scheduling_status": "confirmed",
+        "confirmed_start_at": "2026-11-05T10:00:00-05:00",
+        "agreed_slot_words": {
+          "day": "Thursday",
+          "hour": "10",
+          "period": null
+        },
+        "caller_accepted_slot": true,
+        "agent_committed_booking": true,
+        "triage_flags_added": [],
+        "scheduling_notes_raw_mentions": "Monday"
+      }
+    },
+    {
+      "id": "day-conflict-caller-accepted-change",
+      "why": "Staff offer Monday as a change and the caller accepts it in their own words: the later caller-accepted slot supersedes the earlier one.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I need a pest visit at 100 Example Lane in Sampleton.\nAgent: I can do Thursday at 10 o'clock.\nCaller: Thursday at 10 works.\nAgent: We'll see you Thursday at 10. Actually, our tech is out Thursday. Can we move you to Monday at 10 o'clock instead?\nCaller: Yes, Monday at 10 works better for me.\nAgent: Great, we'll see you Monday at 10.",
+      "expect": {
+        "scheduling_status": "confirmed",
+        "confirmed_start_at": "2026-11-02T10:00:00-05:00",
+        "agreed_slot_words": {
+          "day": "Monday",
+          "hour": "10",
+          "period": null
+        },
+        "caller_accepted_slot": true,
+        "agent_committed_booking": true,
+        "triage_flags_added": []
+      }
+    },
+    {
+      "id": "day-conflict-two-slots-both-accepted",
+      "why": "The caller accepted two different slots and withdrew neither: status stays ambiguous with no confirmed time.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I need a pest visit at 100 Example Lane in Sampleton.\nAgent: I can do Thursday at 10 o'clock.\nCaller: Thursday at 10 works.\nAgent: I can also do Monday at 2 o'clock.\nCaller: Monday at 2 works too.\nAgent: Okay, we have you down.\nCaller: Thanks.",
+      "expect": {
+        "scheduling_status": "ambiguous",
+        "confirmed_start_at": null,
+        "triage_flags_added": []
+      }
+    },
+    {
+      "id": "day-conflict-weekday-date-mismatch",
+      "why": "'Thursday the 6th' when November 6, 2026 is a Friday: the day is contested, so status is ambiguous and nothing is booked.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I need a pest visit at 100 Example Lane in Sampleton.\nAgent: I can do Thursday the 6th at 10 o'clock.\nCaller: Thursday the 6th at 10 works.\nAgent: Great, we'll see you then.",
+      "expect": {
+        "scheduling_status": "ambiguous",
+        "confirmed_start_at": null,
+        "triage_flags_added": []
+      }
+    },
+    {
+      "id": "billing-choice-annual-prepay",
+      "why": "The caller chooses to prepay for the year in their own words: billing_choice annual_prepay, pinned to the caller's sentence.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I want the quarterly pest plan at 100 Example Lane in Sampleton.\nAgent: You can pay for the whole year up front, or we can bill each application.\nCaller: We'll prepay for the year.",
+      "expect": {
+        "billing_choice": "annual_prepay",
+        "billing_choice_evidence": {
+          "field_path": "/service_request/billing_choice",
+          "speaker": "caller",
+          "quote": "We'll prepay for the year."
+        }
+      }
+    },
+    {
+      "id": "billing-choice-per-application",
+      "why": "The caller chooses to be billed each application: billing_choice per_application.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I want the quarterly pest plan at 100 Example Lane in Sampleton.\nAgent: You can pay for the whole year up front, or we can bill each application.\nCaller: Just bill each application.",
+      "expect": {
+        "billing_choice": "per_application",
+        "billing_choice_evidence": {
+          "field_path": "/service_request/billing_choice",
+          "speaker": "caller",
+          "quote": "Just bill each application."
+        }
+      }
+    },
+    {
+      "id": "billing-choice-staff-explains-only",
+      "why": "Staff explain both options and the caller only asks a question: no choice, billing_choice null, no evidence entry.",
+      "call_date_et": "2026-10-29",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here, I want the quarterly pest plan at 100 Example Lane in Sampleton.\nAgent: You can pay for the whole year up front, or we can bill each application.\nCaller: What does paying up front cost? I will think about it.",
+      "expect": {
+        "billing_choice": null
+      }
+    }
+  ]
+}
