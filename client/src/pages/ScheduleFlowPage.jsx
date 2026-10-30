@@ -1850,7 +1850,16 @@ export default function ScheduleFlowPage({ flow }) {
     // move, a gate set while the page was open). Reload, as Confirm does, so
     // the page shows the text-or-call card and not a stale picker.
     // SCOPE_CHANGED: the visit changed while the search ran (same reload).
-    if (body.code === 'MOVE_LIMIT' || (flow === 'reschedule' && body.code === 'SCOPE_CHANGED')) {
+    // SELF_SERVE_NOTICE: the visit slid inside the move-notice window while
+    // the page was open. find-slots answers 409 with reason 'self_serve_notice'
+    // and no code, so match the reason too; the reload drops the stale times,
+    // as Confirm's SELF_SERVE_NOTICE handling does.
+    if (body.code === 'MOVE_LIMIT'
+      || (flow === 'reschedule' && (
+        body.code === 'SCOPE_CHANGED'
+        || body.code === 'SELF_SERVE_NOTICE'
+        || (res.status === 409 && body.reason === 'self_serve_notice')
+      ))) {
       await load();
       return { summary: null };
     }

@@ -1479,6 +1479,9 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+          // GATE_ROUTE_WARNING_DETAIL: the warning names the stop, window and minutes (no customer
+          // name, so a technician's row reads the same).
+          ...require('./scheduling/route-warning-detail').detailOption(),
           // The pickers' Google road times are staff-only: a technician's
           // check stays on the model. Counted against the admin who asked
           // (picker-road-spend.js).

@@ -896,7 +896,9 @@ async function flagMissingGeo(service) {
       action: await audit.namedVisitAction(service.customer_id,
         [(who) => `fix the address pin for ${who}'s visit`, (who) => `fix ${who}'s address pin`],
         'fix the address pin on a visit'),
-      why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
+      why: service.routeOnly === true
+        ? `The ${shortDateET(`${date}T12:00:00Z`)} visit has no map pin, so its route cannot be checked until its address pin is fixed.`
+        : `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,
       subject: { type: 'visit', id: String(service.id) },
@@ -982,8 +984,9 @@ function stillLiveOn(row, date) {
   return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
     && row.customer_active !== false && !row.customer_deleted_at
     // Locked, excluded or customer-confirmed after pass 1: eligibility denies
-    // it outright, so it is no longer skipped for its pin (r21, r24 P2).
-    && !heldOutOfAutoDispatch(row);
+    // it outright, so it is no longer skipped for its pin (r21, r24 P2). A visit that is not a
+    // recurring child (GATE_ROUTE_WARNING_DETAIL) keeps its notice: the pin serves its route check.
+    && !(require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row) ? null : heldOutOfAutoDispatch(row));
 }
 
 async function stillMissingPin(run, picked) {
@@ -1004,6 +1007,16 @@ async function stillMissingPin(run, picked) {
 }
 
 async function raiseMissingGeoNotices(run) {
+  // GATE_ROUTE_WARNING_DETAIL: visits in the next week the run never loads (one-time, rodent, project,
+  // locked or confirmed) join the same lane when they have no pin. Read failure = the lane as before.
+  if (require('../scheduling/route-warning-detail').routeWarningDetailLive()) {
+    try {
+      const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
+      run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
+    }
+  }
   if (!run.missingGeoWanted.length) return;
   try {
     // Re-read every wanted visit BEFORE the budget picks, so a visit fixed
@@ -1361,13 +1374,12 @@ async function applyPlannedMove(pm, run, attempt) {
   const checked = await moveCheck.checkMove({ service: pm.service, best: fresh.best, run });
   // A model call takes up to two minutes: the customer's stored day, time and
   // blackout preferences are hard rules, so they are read again after it,
-  // whatever the verdict. Changed: the visit stays, no person is told about a
-  // proposal scored on the old ones, and the next run scores it on the new
-  // ones. (The write reads them once more on its own transaction: apply.js.)
+  // whatever the verdict. Changed: the visit stays, and the next run scores
+  // it on the new ones. (The write reads them once more on its own
+  // transaction: apply.js.)
   // The check itself did not work: never a green run, whatever follows.
   if (checked && checked.broke) run.guardReadDegraded = true;
   if (checked && await preferencesChanged(pm)) {
-    moveCheck.dropNotice(run.proofreader, pm.service);
     noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
     return audit.logDecision(runId, {
       action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked', ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
@@ -1644,11 +1656,10 @@ async function runAutoDispatch(opts = {}) {
   await needsPerson.raiseNotices(run.needsPerson, {
     nowDate: run.nowDate, clearedIds: run.clearedIds, scanComplete: !runError && run.conflictScanComplete === true,
   });
-  await moveCheck.raiseNotices(run.proofreader);
   // Every check of the night broke: one notice that the tool is stopped, and
   // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
   await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
-  runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
+  runStatus = moveCheck.statusAfterNotices(runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
