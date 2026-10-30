@@ -569,6 +569,39 @@ postgres('Charge now vs a stamped membership-dues invoice (B08)', () => {
       expect(StripeService.chargeOneTime).toHaveBeenCalledTimes(1);
     } finally { await cleanup(f); }
   });
+
+  test("an earlier month picked: charged under that month's stamp and key, and that month's spent failed attempt stops counting as owed", async () => {
+    const f = await seedMember({ autopay: true });
+    try {
+      const month = monthOf(previousMonthDay());
+      const failedId = randomUUID();
+      // Its retries ran out (next_retry_at null), so the retry sweep never visits it again.
+      await mockPg('payments').insert({ id: failedId, customer_id: f.customerId, amount: 49, status: 'failed', retry_count: 2,
+        next_retry_at: null, stripe_payment_intent_id: `pi_${failedId.slice(0, 8)}`, payment_date: previousMonthDay(),
+        description: 'Silver WaveGuard Monthly — Fixture DuesMember — FAILED',
+        metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: month }) });
+      const newId = randomUUID();
+      StripeService.charge.mockImplementation(async (customerId, amount, description, metadata) => {
+        await mockPg('payments').insert({ id: newId, customer_id: customerId, amount, status: 'paid', payment_date: etDateString(),
+          description, metadata: JSON.stringify(metadata) });
+        return { id: newId, status: 'paid', amount: String(amount), metadata: null };
+      });
+
+      const res = await chargeNow(f, { billedMonth: month });
+      expect(res.status).toBe(200);
+      expect(StripeService.charge).toHaveBeenCalledWith(f.customerId, 49, expect.stringMatching(/ dues$/),
+        expect.objectContaining({ billed_month: month }), `autopay_monthly_${f.customerId}_${etDateString()}_${month}`, expect.anything());
+      expect(await mockPg('payments').where({ id: failedId }).first())
+        .toMatchObject({ status: 'failed', superseded_by_payment_id: newId, next_retry_at: null });
+      // the same event the retry sweep writes when it resolves a row
+      const resolvedEvent = await mockPg('autopay_log').where({ customer_id: f.customerId, event_type: 'skipped_already_paid', payment_id: failedId }).first();
+      expect(resolvedEvent?.details).toMatchObject({ source: 'manual_charge', collected_by_payment_id: newId, billed_month: month, ladder_stopped: true });
+      // the month now reads as collected: a second click refuses
+      const again = await chargeNow(f, { billedMonth: month });
+      expect(again.status).toBe(409);
+      expect(StripeService.charge).toHaveBeenCalledTimes(1);
+    } finally { await cleanup(f); }
+  });
 });
 
 // The stamp's lifetime after the mint: it can be kept or removed, never

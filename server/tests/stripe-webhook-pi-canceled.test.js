@@ -266,11 +266,11 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(spec.why).toBe('The October 2026 $55.30 dues payment was canceled at Stripe before it cleared; the month is unpaid.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'autopay-canceled:cust-1:pi_dues_1' });
     expect(opts.detail).toMatch(/No message was sent to the customer\./);
-    // Charge now (Customer 360) is the one office action that stamps the month as paid, so it is the
-    // advice while the month lasts; after it, a hand-made invoice leaves the month open to a re-bill.
+    // Charge now (Customer 360) with the month picked is the one office action that stamps the month
+    // as paid; a hand-made invoice leaves the month open to a re-bill.
     expect(spec.link).toBe('/admin/customers?customerId=cust-1');
-    expect(opts.detail).toMatch(/While it is still October 2026, Charge now on the customer's page collects it and records October 2026 as paid\./);
-    expect(opts.detail).toMatch(/an invoice made by hand does not mark October 2026 as paid \(a plan visit in October 2026 completed later could bill it again\)/);
+    expect(opts.detail).toMatch(/To collect it, pick October 2026 in the month list beside Charge now on the customer's page: that charge records October 2026 as paid\./);
+    expect(opts.detail).toMatch(/An invoice made by hand does not mark October 2026 as paid \(a plan visit in October 2026 completed later could bill it again\)/);
     // Done is not a waiver: nothing records one, so the alert never calls it that.
     expect(opts.detail).toMatch(/Marking this done only closes this alert: it records nothing on the account\./);
     expect(opts.detail).not.toMatch(/waive/i);

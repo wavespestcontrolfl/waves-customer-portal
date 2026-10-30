@@ -84,7 +84,7 @@ import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import MistingRecordsPanel from "./MistingRecordsPanel";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
-import { formatETDateOnly } from "../../lib/timezone";
+import { etParts, formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
@@ -3350,6 +3350,19 @@ function AdminAutopayPanelV2({
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  // The dues month Charge now collects: this ET month (the default) or one of
+  // the 2 before it, e.g. a month whose bank payment was canceled (owner
+  // 2026-10-30). Keep the window in step with PAST_DUES_MONTHS in
+  // server/routes/admin-billing-health.js, which refuses any other month. The
+  // month posted, and named in the confirm, is the one shown, so a click just
+  // after midnight on the 1st still charges it.
+  const monthLabel = (value) => formatETDateOnly(`${value}-15`, { month: "long", year: "numeric" });
+  const { year: etYear, month: etMonth } = etParts();
+  const duesMonths = [0, 1, 2].map((back) => {
+    const value = new Date(Date.UTC(etYear, etMonth - 1 - back, 1)).toISOString().slice(0, 7);
+    return { value, label: monthLabel(value) };
+  });
+  const [duesMonth, setDuesMonth] = useState(duesMonths[0].value);
   const outcomeRef = useRef(null);
   useEffect(() => {
     if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
@@ -3385,6 +3398,7 @@ function AdminAutopayPanelV2({
     currentCustomerRef.current = customerId;
     setState(null);
     setLoadError(false);
+    setDuesMonth(duesMonths[0].value);
     load();
   }, [customerId]);
 
@@ -3398,21 +3412,22 @@ function AdminAutopayPanelV2({
     // the confirm says so, and an unknown hold state needs its own explicit
     // yes rather than reading as "no hold".
     const holdStatus = collectionHold?.status;
+    const forMonth = ` for ${monthLabel(duesMonth)} dues`;
     if (collectionHold && holdStatus !== "ready" && holdStatus !== "idle") {
       if (
         !window.confirm(
-          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)} anyway?`,
+          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)}${forMonth} anyway?`,
         )
       )
         return;
     } else if (collectionHold?.dispute) {
       if (
         !window.confirm(
-          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)} anyway?`,
+          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)}${forMonth} anyway?`,
         )
       )
         return;
-    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
+    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)}${forMonth} now?`))
       return;
     setCharging(true);
     setErr("");
@@ -3420,7 +3435,7 @@ function AdminAutopayPanelV2({
     try {
       const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ billedMonth: duesMonth }),
       });
       const payment = result?.payment;
       const collected = Number.parseFloat(payment?.amount);
@@ -3511,11 +3526,27 @@ function AdminAutopayPanelV2({
             )}
           </div>
           {canCharge && (
-            <Button onClick={chargeNow} disabled={charging} size="md">
-              {charging
-                ? "Charging…"
-                : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ""}`}
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="w-40">
+                <Select
+                  aria-label="Dues month"
+                  value={duesMonth}
+                  disabled={charging}
+                  onChange={(e) => setDuesMonth(e.target.value)}
+                >
+                  {duesMonths.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <Button onClick={chargeNow} disabled={charging} size="md">
+                {charging
+                  ? "Charging…"
+                  : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ""}`}
+              </Button>
+            </div>
           )}
         </div>
         {canCharge && (

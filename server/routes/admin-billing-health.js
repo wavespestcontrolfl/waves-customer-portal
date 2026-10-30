@@ -148,14 +148,40 @@ async function buildChargeFailureResponse(err, { customerId, chargeAmount, techn
 
 /**
  * POST /api/admin/customers/:id/charge-now
- * Body: { amount?: number, description?: string }
+ * Body: { amount?: number, description?: string, billedMonth?: 'YYYY-MM' }
  * If amount omitted, charges customer.monthly_rate — ONLY for a customer the
  * lane resolver puts on the monthly lane. Any other lane 400s (fail closed).
+ * billedMonth (amount omitted only): the month of dues this collects — this
+ * ET month (the default) or one of the previous PAST_DUES_MONTHS, e.g. a
+ * month whose bank payment was canceled (owner 2026-10-30). Every monthly
+ * guard below reads that month, and the payment carries it as billed_month,
+ * the stamp the cron, the retry sweep and plan-visit completion all trust.
  */
+const PAST_DUES_MONTHS = 2;
 router.post('/customers/:id/charge-now', async (req, res, next) => {
   try {
     const customerId = req.params.id;
-    const { amount, description } = req.body || {};
+    const { amount, description, billedMonth } = req.body || {};
+
+    // The months the list may name: this ET month and the previous PAST_DUES_MONTHS (Customer
+    // 360's month list shows the same window). One clock read for the request, so the month
+    // checked here is the month charged below, even across midnight on the 1st.
+    const today = etParts(new Date());
+    const thisMonth = `${today.year}-${String(today.month).padStart(2, '0')}`;
+    let obligationMonth = null;
+    if (billedMonth != null) {
+      const allowed = Array.from({ length: PAST_DUES_MONTHS + 1 }, (_, back) => (
+        new Date(Date.UTC(today.year, today.month - 1 - back, 1)).toISOString().slice(0, 7)
+      ));
+      if (amount != null) {
+        return res.status(400).json({ error: 'A month applies only to the monthly dues charge: leave the amount empty to charge a month.' });
+      }
+      if (!allowed.includes(billedMonth)) {
+        return res.status(400).json({ error: `Pick this month or one of the previous ${PAST_DUES_MONTHS}: ${allowed.join(', ')}.` });
+      }
+      // This month picked = the plain button, unchanged.
+      obligationMonth = billedMonth === thisMonth ? null : billedMonth;
+    }
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -186,7 +212,11 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     }
 
     const service = await require('../services/stripe');
-    const desc = description || `Manual charge — WaveGuard ${customer.waveguard_tier || ''}`.trim();
+    // An earlier month's charge names its month, so the payment history and the receipt say which dues it paid.
+    const monthLabel = obligationMonth
+      ? ` — ${new Date(`${obligationMonth}-15T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })} dues`
+      : '';
+    const desc = description || `Manual charge — WaveGuard ${customer.waveguard_tier || ''}`.trim() + monthLabel;
 
     // No explicit amount = "collect this month's monthly rate now" (the
     // Customer 360 button always posts {}). Stamp the month of obligation
@@ -221,8 +251,8 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     let payment;
     if (isMonthlyCollection) {
       const lockOutcome = await withCustomerBillingLock(customerId, async () => {
-        const { year, month } = etParts(new Date());
-        const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+        const monthKey = obligationMonth || thisMonth;
+        const [year, month] = monthKey.split('-').map(Number);
         const monthStart = `${monthKey}-01`;
         const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
         const monthEnd = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
@@ -282,6 +312,24 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
+        // An earlier month can sit inside an annual prepay term that has since ended: the prepay
+        // paid it, and today's lane check above cannot see that. The retry sweep's coverage read,
+        // on the day the cron bills that month (billing_day, clamped to the month), where the
+        // sweep reads a failed row's own date; an unreadable coverage table refuses the charge.
+        if (obligationMonth) {
+          const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
+          const dueDay = String(Math.min(customer.billing_day || 1, lastDay)).padStart(2, '0');
+          const covered = await getActivelyCoveredCustomerIds(`${monthKey}-${dueDay}`, db, { throwOnError: true });
+          if (covered.has(String(customerId))) {
+            return {
+              response: {
+                status: 409,
+                body: { error: `${monthKey} was covered by this customer's annual prepay, so nothing is owed for the month.`, prepay_covered: true },
+              },
+            };
+          }
+        }
+
         // Codex round-2 P0: a SIBLING attempt for this SAME obligation (the
         // cron, or an earlier charge-now click) left an unresolved Stripe
         // outcome — Stripe accepted a charge but the ledger write failed
@@ -301,6 +349,32 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
+        // A month whose attempt is parked for bank or card authentication (B16) can still hold a
+        // live PaymentIntent: an ACH micro-deposit check the customer can still finish, or one the
+        // park could not cancel. Charging the month beside it collects twice, so refuse until
+        // Stripe shows it inert (the pay page's read-only check; an unreadable intent refuses).
+        const parked = await db('payments')
+          .where({ customer_id: customerId, status: 'failed' })
+          .whereNull('superseded_by_payment_id')
+          .whereRaw("metadata->>'billed_month' = ? AND COALESCE(metadata->>'requires_action', '') = 'true'", [monthKey])
+          .orderBy('created_at', 'desc')
+          .first('stripe_payment_intent_id');
+        if (parked) {
+          const { neutralizeOpenPaymentIntent } = require('../services/prepaid-pi-guard');
+          const intent = await neutralizeOpenPaymentIntent(parked.stripe_payment_intent_id, { inspectOnly: true });
+          if (!intent.ok) {
+            return {
+              response: {
+                status: 409,
+                body: {
+                  error: `${monthKey} has an earlier charge still waiting on the customer's bank or card approval at Stripe (${parked.stripe_payment_intent_id}). Check it in Stripe before charging the month again.`,
+                  live_payment_intent: parked.stripe_payment_intent_id,
+                },
+              },
+            };
+          }
+        }
+
         // Attempt-scoped idempotency key (Codex round-1 P1): shared with
         // chargeMonthly()'s own key derivation (retry-collectibility.js)
         // so charge-now and the daily cron always agree on the SAME key
@@ -311,20 +385,44 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         // description/metadata, which Stripe would reject as a mismatch.
         const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customerId, monthKey, db);
 
+        let chargedPayment;
         try {
           // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
           // Now is not the customer's own action — the PI's ACH lifecycle
           // notices stay behind the 8AM-8PM send window.
-          const chargedPayment = await service.charge(customerId, chargeAmount, desc, {
+          chargedPayment = await service.charge(customerId, chargeAmount, desc, {
             type: 'manual_charge',
             tier: customer.waveguard_tier || '',
             billed_month: monthKey,
             initiated_by: 'machine',
           }, idempotencyKey, { operatorOverride: true, overrideTrail: chargeNowOverrideTrail(req) }); // staff-ordered: exempt from the collections dispute-hold guard
-          return { payment: chargedPayment };
         } catch (err) {
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
         }
+        // The month is collected, so its failed attempts stop counting as owed: the retry sweep's
+        // already-collected resolution and its per-row event, done here because an attempt whose
+        // retries ran out is never swept again. A failed write leaves the charge standing.
+        try {
+          const resolved = await db('payments')
+            .where({ customer_id: customerId, status: 'failed' })
+            .whereNull('superseded_by_payment_id')
+            .whereRaw("metadata->>'billed_month' = ?", [monthKey])
+            .whereNot({ id: chargedPayment.id })
+            .update({
+              next_retry_at: null,
+              superseded_by_payment_id: chargedPayment.id,
+              failure_reason: db.raw("COALESCE(failure_reason, '') || ?", [` — resolved: ${monthKey} collected by Charge now (payment ${chargedPayment.id})`]),
+            }, ['id']);
+          for (const row of resolved) {
+            await logAutopay(customerId, 'skipped_already_paid', {
+              paymentId: row.id,
+              details: { source: 'manual_charge', collected_by_payment_id: chargedPayment.id, billed_month: monthKey, ladder_stopped: true, admin_id: req.technicianId || null },
+            }).catch(() => {});
+          }
+        } catch (resolveErr) {
+          logger.error(`[admin-billing] could not resolve ${monthKey} failed attempts for customer ${customerId} after payment ${chargedPayment?.id}: ${resolveErr.message}`);
+        }
+        return { payment: chargedPayment };
       }).catch((err) => {
         // The cross-process layer (utils/customer-billing-lock.js) found a
         // genuine other-process claim on this SAME customer — a Railway

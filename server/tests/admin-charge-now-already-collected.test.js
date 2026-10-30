@@ -181,19 +181,17 @@ describe('charge-now already-collected guard', () => {
   });
 
   test('a prior failed attempt today (e.g. a cron decline) gets a fresh attempt-scoped key and still succeeds', async () => {
-    // .first() calls on 'payments', in order: (0) the already-collected
-    // check — no paid/processing row; (1) the sibling-unresolved-outcome
-    // check — no ambiguous sibling; (2) the latest-failed-attempt lookup
-    // for key derivation — simulating a decline recorded earlier today (by
-    // the cron or a prior click) whose OWN idempotency key was the bare
-    // autopay_monthly_<cid>_<date> one.
-    let call = 0;
+    // .first() lookups on 'payments' find nothing (no paid/processing row,
+    // no ambiguous or parked sibling) except key derivation's latest-keyed-
+    // attempt lookup, the one that selects 'metadata' — simulating a decline
+    // recorded earlier today (by the cron or a prior click) whose OWN
+    // idempotency key was the bare autopay_monthly_<cid>_<date> one.
     const priorFailedRow = {
       id: 'pay-failed-1',
       status: 'failed',
       metadata: JSON.stringify({ idempotency_key: 'autopay_monthly_cust-1_2026-09-23', billed_month: '2026-09' }),
     };
-    paymentsQB.first = jest.fn(() => Promise.resolve(call++ === 2 ? priorFailedRow : null));
+    paymentsQB.first = jest.fn((column) => Promise.resolve(column === 'metadata' ? priorFailedRow : null));
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -208,13 +206,12 @@ describe('charge-now already-collected guard', () => {
   });
 
   test('a second same-day failed attempt advances the key suffix to r2', async () => {
-    let call = 0;
     const priorFailedRow = {
       id: 'pay-failed-2',
       status: 'failed',
       metadata: JSON.stringify({ idempotency_key: 'autopay_monthly_cust-1_2026-09-23_r1', billed_month: '2026-09' }),
     };
-    paymentsQB.first = jest.fn(() => Promise.resolve(call++ === 2 ? priorFailedRow : null));
+    paymentsQB.first = jest.fn((column) => Promise.resolve(column === 'metadata' ? priorFailedRow : null));
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
