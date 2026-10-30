@@ -18,7 +18,7 @@ const CSR_SCORE_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 
   : 180000;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
-// The 15-point rubric below is a SALES call rubric (greeting → close →
+// The rubric below is a SALES call rubric (greeting → close →
 // upsell). Applying it to every transcribed call (2026-09-23 audit: 61 rows,
 // avg 2.7/15, fifteen zeros) scored billing questions, tech ETA/coordination
 // calls, existing-customer service calls and vendor calls as botched sales
@@ -277,15 +277,20 @@ function normalizeFollowUpTask(task) {
   return { ...task, type, recommended_action: action, deadline_hours: hours };
 }
 
-// The rubric's fifteen 0/1 points. All ten core points always apply, so each
+// The rubric's sixteen 0/1 points. All eleven core points always apply, so each
 // must be present; rescue points only count "when the situation arose", so
 // an absent one is 0. `point_details: {}` beside core_score: 10 used to be
 // stored, and the weekly insight reads a missing point as missed (Codex r15
 // on #4884), so a missing core point rejects the answer. The scores are summed
 // from these points, never trusted from the model. Returns the normalized
 // details (0/1 numbers, known keys only) or null.
-const CSR_CORE_POINTS = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+// source_question ("How did you hear about us?") joined the core on 2026-10-30
+// (owner: "we should include this in it"); rows scored before then have no
+// key for it.
+const CSR_CORE_POINTS = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'source_question', 'set_expectations', 'strong_close'];
 const CSR_RESCUE_POINTS = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
+const CSR_MAX_SCORE = CSR_CORE_POINTS.length + CSR_RESCUE_POINTS.length;
+const CSR_MAX_SCORE_BEFORE_SOURCE_QUESTION = 15;
 function csrPoint(v) {
   if (v === 1 || v === true || v === '1') return 1;
   if (v === 0 || v === false || v === '0') return 0;
@@ -315,6 +320,18 @@ function normalizePointDetails(raw) {
 
 const sumPoints = (details, keys) => keys.reduce((n, key) => n + details[key], 0);
 
+function storedPointDetails(row) {
+  return (typeof row.point_details === 'string' ? JSON.parse(row.point_details) : row.point_details) || {};
+}
+
+// A row scored before source_question existed was out of 15. Averages put each
+// row on the current scale by its own maximum, so a CSR with more older calls
+// is not ranked down for a point those calls could not earn.
+function totalOnCurrentScale(row) {
+  const rowMax = storedPointDetails(row).source_question === undefined ? CSR_MAX_SCORE_BEFORE_SOURCE_QUESTION : CSR_MAX_SCORE;
+  return row.total_score * CSR_MAX_SCORE / rowMax;
+}
+
 function normalizeCsrScore(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const score = { ...raw };
@@ -327,7 +344,7 @@ function normalizeCsrScore(raw) {
   if (!score.call_outcome) return null;
   score.point_details = normalizePointDetails(raw.point_details);
   if (!score.point_details) return null;
-  // The rubric's 15-point total IS the 10-point core plus the 5-point rescue
+  // The rubric's total IS the core points plus the rescue points
   // (Codex r14 on #4884); summed here from the points, so it cannot disagree.
   score.core_score = sumPoints(score.point_details, CSR_CORE_POINTS);
   score.rescue_score = sumPoints(score.point_details, CSR_RESCUE_POINTS);
@@ -351,7 +368,7 @@ function isUsableCsrScore(score) {
   return normalizeCsrScore(score) !== null;
 }
 
-// Structured-output contract (llm/call.js jsonSchema): all 15 points are
+// Structured-output contract (llm/call.js jsonSchema): all 16 points are
 // required 0/1 so a reply cannot omit one. Numeric ranges are outside the
 // provider subset (Anthropic 400s on minimum/maximum), so the ranges are
 // enforced by normalizeCsrScore. core_score / rescue_score / total_score are
@@ -460,7 +477,7 @@ class CSRCoach {
       // "undefined/15 (undefined)" on every call (2026-09-20 audit).
       const score = scoreResult?.total_score;
       const outcome = scoreResult?.call_outcome;
-      logger.info(`[call-proc] CSR scored: ${score}/15 (${outcome})`);
+      logger.info(`[call-proc] CSR scored: ${score}/${CSR_MAX_SCORE} (${outcome})`);
       return { applicable: true, scored: true, score, outcome };
     } catch (err) {
       logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
@@ -490,9 +507,9 @@ class CSRCoach {
       timeoutMs: CSR_SCORE_TIMEOUT_MS,
       system: `You score customer service calls for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
-SCORING — 15 POINTS TOTAL:
+SCORING — 16 POINTS TOTAL:
 
-CORE 10 POINTS (1 point each, must be clearly present):
+CORE 11 POINTS (1 point each, must be clearly present):
 1. greeting: Answered with name + company ("Thanks for calling Waves, this is [name]")
 2. empathy: Acknowledged the customer's concern before jumping to solutions
 3. problem_capture: Asked what specific pest/issue and where in the home/yard
@@ -501,15 +518,16 @@ CORE 10 POINTS (1 point each, must be clearly present):
 6. fee_confirmation: Stated the price and got verbal agreement BEFORE scheduling
 7. name_confirmation: Confirmed the customer's name spelling
 8. callback_number: Confirmed or captured a callback number
-9. set_expectations: Explained what happens next (confirmation text, tech on-the-way text, etc.)
-10. strong_close: Ended with confidence and next steps ("We'll get you taken care of")
+9. source_question: Asked how the caller heard about Waves ("How did you hear about us?"). Also 1 when the caller already named the source unasked (a neighbor, Google, our truck, ChatGPT). 0 when the call never says where they found us
+10. set_expectations: Explained what happens next (confirmation text, tech on-the-way text, etc.)
+11. strong_close: Ended with confidence and next steps ("We'll get you taken care of")
 
 RESCUE 5 POINTS (1 each, when applicable — only score if the situation arose):
-11. objection_save: Customer raised a pricing or timing objection and CSR addressed it effectively
-12. upsell_attempt: CSR mentioned WaveGuard membership, recurring service, or related service
-13. urgency_creation: CSR created urgency ("I have a spot tomorrow" / "This time of year it only gets worse")
-14. referral_mention: CSR mentioned the referral program
-15. follow_up_offer: For non-bookings, offered to follow up / send info / call back
+12. objection_save: Customer raised a pricing or timing objection and CSR addressed it effectively
+13. upsell_attempt: CSR mentioned WaveGuard membership, recurring service, or related service
+14. urgency_creation: CSR created urgency ("I have a spot tomorrow" / "This time of year it only gets worse")
+15. referral_mention: CSR mentioned the referral program
+16. follow_up_offer: For non-bookings, offered to follow up / send info / call back
 
 SKILL DIMENSIONS (rate each 1-5):
 - control: Did CSR guide the conversation or did customer lead?
@@ -542,7 +560,7 @@ Generate a specific follow-up with script and deadline.
 
 Return JSON:
 {
-  "point_details": { all 15 points above, each 0 or 1 },
+  "point_details": { all 16 points above, each 0 or 1 },
   "control_score": 1-5,
   "warmth_score": 1-5,
   "clarity_score": 1-5,
@@ -663,7 +681,7 @@ Return JSON:
     score._callScoreId = callScore.id;
     score._isFirstCall = isFirstCall;
 
-    logger.info(`CSR score: ${csrName} — ${score.total_score}/15 (lead: ${score.lead_quality_score}/10, outcome: ${score.call_outcome})`);
+    logger.info(`CSR score: ${csrName} — ${score.total_score}/${CSR_MAX_SCORE} (lead: ${score.lead_quality_score}/10, outcome: ${score.call_outcome})`);
     return score;
   }
 
@@ -750,7 +768,7 @@ Return JSON:
         byCSR[name].firstCalls++;
         if (s.call_outcome === 'booked') byCSR[name].firstCallBooked++;
       }
-      if (s.total_score != null) { byCSR[name].totalScore += s.total_score; byCSR[name].scored++; }
+      if (s.total_score != null) { byCSR[name].totalScore += totalOnCurrentScale(s); byCSR[name].scored++; }
     }
 
     // Follow-up rates
@@ -791,6 +809,7 @@ Return JSON:
     // Revenue impact of fixable losses
     const fixableLosses = scores.filter(s => s.loss_reason === 'csr_missed_script' && s.estimated_job_value);
     const fixableRevenue = fixableLosses.reduce((sum, s) => sum + parseFloat(s.estimated_job_value || 0), 0);
+    const totaled = scores.filter(s => s.total_score != null);
 
     return {
       csrStats,
@@ -798,7 +817,7 @@ Return JSON:
         calls: scores.length,
         booked: scores.filter(s => s.call_outcome === 'booked').length,
         bookingRate: scores.length > 0 ? Math.round(scores.filter(s => s.call_outcome === 'booked').length / scores.length * 100) : 0,
-        avgScore: scores.filter(s => s.total_score != null).length > 0 ? Math.round(scores.reduce((s, r) => s + (r.total_score || 0), 0) / scores.filter(s => s.total_score != null).length * 10) / 10 : 0,
+        avgScore: totaled.length > 0 ? Math.round(totaled.reduce((sum, r) => sum + totalOnCurrentScale(r), 0) / totaled.length * 10) / 10 : 0,
       },
       lossReasons: Object.entries(lossReasons).map(([reason, count]) => ({
         reason, count, pct: Math.round(count / totalLosses * 100),
@@ -826,20 +845,18 @@ Return JSON:
     let bestImpact = 0;
 
     for (const point of pointNames) {
-      const withPoint = allScores.filter(s => {
-        const details = typeof s.point_details === 'string' ? JSON.parse(s.point_details) : (s.point_details || {});
-        return (details[point] || 0) >= 1;
-      });
-      const withoutPoint = allScores.filter(s => {
-        const details = typeof s.point_details === 'string' ? JSON.parse(s.point_details) : (s.point_details || {});
-        return (details[point] || 0) < 1;
-      });
+      // A row scored before this point joined the rubric (source_question,
+      // 2026-10-30) has no key for it: it says nothing about the point, so it
+      // is left out here rather than counted as a miss.
+      const rated = allScores.filter(s => storedPointDetails(s)[point] !== undefined);
+      const withPoint = rated.filter(s => (storedPointDetails(s)[point] || 0) >= 1);
+      const withoutPoint = rated.filter(s => (storedPointDetails(s)[point] || 0) < 1);
 
       if (withPoint.length < 2 || withoutPoint.length < 2) continue;
 
       const rateWith = withPoint.filter(s => s.call_outcome === 'booked').length / withPoint.length;
       const rateWithout = withoutPoint.filter(s => s.call_outcome === 'booked').length / withoutPoint.length;
-      const missRate = withoutPoint.length / allScores.length;
+      const missRate = withoutPoint.length / rated.length;
       const impact = (rateWith - rateWithout) * missRate;
 
       if (impact > bestImpact) {
@@ -864,6 +881,7 @@ Return JSON:
       fee_confirmation: "This week: state the fee and get agreement BEFORE scheduling. \"The service is $149 and that includes the full treatment. Does that sound okay?\"",
       name_confirmation: "This week: confirm the customer's name. \"And I want to make sure I have your name right — it's [name], correct?\"",
       callback_number: "This week: always capture or confirm a callback number. \"What's the best number to reach you at if we need to?\"",
+      source_question: "This week: ask every new caller how they found us. \"Before I let you go, how did you hear about us?\"",
       set_expectations: "This week: explain what happens next. \"You'll get a text confirmation, then a reminder the morning of. The tech will text when they're on the way.\"",
       strong_close: "This week: end with a confident close. \"We'll get you taken care of. You should get a text confirmation shortly. Anything else I can help with?\"",
     };
@@ -902,7 +920,7 @@ Return JSON:
       periodLabel: `${parseETDateTime(periodStart + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} – ${parseETDateTime(periodEnd + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
       categories: [
         { category: 'Best Booking Rate', winner: bestBooking?.name, value: `${bestBooking?.firstCallBookingRate || 0}%`, bonus: 50 },
-        { category: 'Best Script Score', winner: bestScore?.name, value: `${bestScore?.avgScore || 0}/15`, bonus: 50 },
+        { category: 'Best Script Score', winner: bestScore?.name, value: `${bestScore?.avgScore || 0}/${CSR_MAX_SCORE}`, bonus: 50 },
         { category: 'Best Follow-Up Rate', winner: bestFollowUp?.name, value: `${bestFollowUp?.followUpRate || 0}%`, bonus: 50 },
       ],
       csrs,
