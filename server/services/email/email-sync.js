@@ -7,11 +7,19 @@ const { isInternalEmailRecipient } = require('../../utils/internal-email-recipie
 // Prevent concurrent syncs from racing on email_sync_state counters.
 let SYNC_IN_FLIGHT = null;
 
-// Consecutive failed incremental runs (2 minutes apart) per Gmail message id.
-// This process only: a restart starts the count again, which only adds
-// retries. Cleared on success, on 404, and when the message is passed.
+// Consecutive failed incremental runs (2 minutes apart) per Gmail message id,
+// and the failing messages already passed (their alert stands). This process
+// only: a restart starts the count again, which only adds retries. Both are
+// kept until the message succeeds, answers 404, or the cursor moves past it:
+// a passed message stays passed while another one holds the cursor, so two
+// failing messages can never take turns holding it.
 const MESSAGE_RETRY_RUNS = 15;
 const messageFailures = new Map();
+const passedMessages = new Set();
+function forgetMessage(gmailId) {
+  messageFailures.delete(gmailId);
+  passedMessages.delete(gmailId);
+}
 
 // A failed message (not a 404, not a Zelle notice): true while it holds the
 // cursor for a retry next run. After MESSAGE_RETRY_RUNS runs it is passed,
@@ -21,12 +29,11 @@ const messageFailures = new Map();
 // is passed, and the held window replays once the fault is fixed.
 async function holdForRetry(gmailId, othersStored) {
   const runs = (messageFailures.get(gmailId) || 0) + 1;
-  if (othersStored && runs >= MESSAGE_RETRY_RUNS && await alertSkippedMessage(gmailId)) {
-    messageFailures.delete(gmailId);
-    return false;
-  }
   messageFailures.set(gmailId, runs);
-  return true;
+  if (!passedMessages.has(gmailId) && othersStored && runs >= MESSAGE_RETRY_RUNS && await alertSkippedMessage(gmailId)) {
+    passedMessages.add(gmailId);
+  }
+  return !passedMessages.has(gmailId);
 }
 
 // The record of a message the incremental sync passes after
@@ -243,11 +250,11 @@ async function incrementalSync(state) {
         // that arrived during this loop.
         const parsed = await gmailClient.getMessage(msgId);
         const inserted = await upsertEmail(parsed);
-        messageFailures.delete(msgId);
+        forgetMessage(msgId);
         if (inserted) newEmails++;
       } catch (err) {
         if (err.code === 404 || err.response?.status === 404) {
-          messageFailures.delete(msgId);
+          forgetMessage(msgId);
           await db('emails').where('gmail_id', msgId).update({
             is_archived: true,
             updated_at: new Date(),
@@ -268,6 +275,8 @@ async function incrementalSync(state) {
       last_sync_at: new Date(),
       errors: held ? `incremental sync incomplete: ${held} message(s) failed — cursor withheld, retrying next run` : null,
     });
+    // The cursor moved past every failed message: none is listed again.
+    if (!held) failed.forEach(forgetMessage);
     if (newEmails > 0) {
       await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
       logger.info(`[email-sync] Incremental sync: ${newEmails} new, ${messageIds.size} checked`);

@@ -197,6 +197,26 @@ describe('C01: a failed message holds the incremental cursor', () => {
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  test('two failing messages that started a run apart cannot take turns holding the cursor', async () => {
+    const a = gmailId;
+    const b = `${gmailId}-b`;
+    gmail.getMessage.mockImplementation(async (msgId) => {
+      if (msgId === a || msgId === b) throw new Error('synthetic permanent failure');
+      return parsed({ gmail_id: msgId });
+    });
+    let runs = 0;
+    while (state().last_history_id === '100' && runs < 4 * MESSAGE_RETRY_RUNS) {
+      runs += 1;
+      if (runs === 2) listed = [...listed, b];
+      newMailArrives(); // other mail stores every run
+      await syncEmails();
+    }
+    // A passes on run 15 and stays passed; B passes on run 16; the cursor moves.
+    expect(runs).toBe(MESSAGE_RETRY_RUNS + 1);
+    expect(state()).toMatchObject({ last_history_id: '200', errors: null });
+    expect(notifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey)).toEqual([`email-sync-skip:${a}`, `email-sync-skip:${b}`]);
+  });
+
   test('when every message fails (an outage or a broken deploy), nothing is passed however long it lasts', async () => {
     listed = [gmailId, `${gmailId}-b`];
     gmail.getMessage.mockRejectedValue(new Error('synthetic insert path down'));
