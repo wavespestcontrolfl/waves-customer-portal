@@ -1473,8 +1473,11 @@ function CommercialProposalEditor() {
       )}
 
       <div className="flex flex-col lg:flex-row gap-5 items-start">
-        {/* Main column */}
-        <div className="flex-1 min-w-0 w-full space-y-5">
+        {/* Main column. Read-only while a send or a Mark won runs: each ends in a reload that replaces the form and
+            clears Unsaved changes, so an edit typed meanwhile would be lost without a trace (pipeline audit 10-30,
+            item 3). A disabled fieldset turns off every field, picker and row button inside it at once. Preflight is
+            off in this app, so the fieldset's browser border, padding and margin are reset here. */}
+        <fieldset disabled={sending || markingWon} className="flex-1 min-w-0 w-full space-y-5 m-0 p-0 border-0">
           {!locked && (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
@@ -2219,7 +2222,7 @@ function CommercialProposalEditor() {
               onChange={(e) => { setTerms(e.target.value); touch(); }}
             />
           </FoldCard>
-        </div>
+        </fieldset>
 
         {/* Sidebar: totals + actions */}
         <div className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 space-y-4">
