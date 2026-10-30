@@ -477,7 +477,9 @@ export default function SocialMediaPage() {
         onDismiss={async () => {
           loadGen.current += 1;
           try {
-            await adminFetch("/admin/social-media/alerts", { method: "DELETE" });
+            await adminFetch("/admin/social-media/alerts", {
+              method: "DELETE",
+            });
           } catch (e) {
             showToast(`Failed to dismiss alert: ${e.message}`);
             return;
