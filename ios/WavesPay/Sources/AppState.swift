@@ -113,6 +113,14 @@ final class AppState: ObservableObject {
         report(.failed, message: message)
     }
 
+    // The payment screen could not open: end the payment now, so the page
+    // does not wait on a sheet nobody can see.
+    func abandon(_ message: String) {
+        report(.failed, message: message)
+        PendingHandoff.jti = nil
+        flow = .idle
+    }
+
     // Cancel on the amount screen, Done/Back after a result, or the sheet
     // swiped away. Reports "canceled" only when no result went out yet.
     func close() {

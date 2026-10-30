@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import WebKit
 
@@ -9,7 +10,8 @@ import WebKit
 // where deepLink is the wavespay://collect?t=<jwt> link that
 // POST /api/stripe/terminal/handoff returned.
 //
-// App → page: each request gets exactly one answer,
+// App → page: each request gets exactly one answer, in the page that asked
+// (the main view or a portal popup),
 //   window.dispatchEvent(new CustomEvent('wavesadmin:taptopay', { detail }))
 // detail = { requestId, status: 'succeeded' | 'failed' | 'canceled',
 //            invoiceId?, paymentIntentId?, message? }
@@ -85,23 +87,32 @@ struct PortalView: UIViewRepresentable {
 }
 
 @MainActor
-final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
+final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler,
+    WKDownloadDelegate, UIAdaptivePresentationControllerDelegate {
     let app: AppState
     weak var webView: WKWebView?
+    // The web view whose page asked for the open payment; it gets the answer.
+    private weak var requester: WKWebView?
+    private var paymentController: UIViewController?
     private weak var popup: UIViewController?
     private var offlineView: UIView?
     private var downloads: [ObjectIdentifier: URL] = [:]
+    private var flowWatch: AnyCancellable?
 
     init(app: AppState) {
         self.app = app
+        super.init()
+        flowWatch = app.$flow
+            .receive(on: RunLoop.main)
+            .sink { [weak self] flow in self?.showPayment(for: flow) }
     }
 
     // MARK: - Tap to Pay bridge
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        // Only the portal's own top page in the main view may start a payment,
-        // so the answer goes back to the page that asked.
-        guard message.webView === webView,
+        // Only a portal page's top frame may start a payment: the main view or
+        // a portal popup, which shares the bridge.
+        guard let sender = message.webView,
               message.frameInfo.isMainFrame,
               message.frameInfo.securityOrigin.protocol == Portal.origin.scheme,
               message.frameInfo.securityOrigin.host == Portal.origin.host,
@@ -109,25 +120,69 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
               body["type"] as? String == "tapToPay"
         else { return }
         let requestId = body["requestId"] as? String
+        if app.flow.isActive {
+            // One payment at a time: answer this page, keep the open payment.
+            deliver(TapToPayResult(
+                requestId: requestId, status: .failed,
+                message: "Another payment is already open in Waves Admin."
+            ), to: sender)
+            return
+        }
         guard let link = body["deepLink"] as? String, let url = URL(string: link) else {
             deliver(TapToPayResult(
                 requestId: requestId, status: .failed,
                 message: "The payment link is missing. Tap Tap to Pay again."
-            ))
+            ), to: sender)
             return
         }
+        requester = sender
         app.startCollect(from: url, requestId: requestId)
     }
 
     func deliver(_ result: TapToPayResult) {
-        guard let webView, let url = webView.url, Portal.isPortal(url) else { return }
-        webView.callAsyncJavaScript(
+        deliver(result, to: requester ?? webView)
+    }
+
+    private func deliver(_ result: TapToPayResult, to target: WKWebView?) {
+        guard let target, let url = target.url, Portal.isPortal(url) else { return }
+        target.callAsyncJavaScript(
             "window.dispatchEvent(new CustomEvent(name, { detail }));",
             arguments: ["name": Portal.resultEvent, "detail": result.detail],
             in: nil,
             in: .page,
             completionHandler: nil
         )
+    }
+
+    // MARK: - Payment sheet
+
+    // Shown over whatever is on top (the portal, or a portal popup) while a
+    // payment is open; it cannot be swiped away during a server check or a tap.
+    private func showPayment(for flow: AppState.Flow) {
+        if !flow.isActive {
+            paymentController?.dismiss(animated: true)
+            paymentController = nil
+            return
+        }
+        if let paymentController {
+            paymentController.isModalInPresentation = flow.isBusy
+            return
+        }
+        let controller = UIHostingController(rootView: PaymentSheet().environmentObject(app))
+        controller.isModalInPresentation = flow.isBusy
+        controller.presentationController?.delegate = self
+        guard present(controller) else {
+            app.abandon("Waves Admin could not open the payment screen. Tap Tap to Pay again.")
+            return
+        }
+        paymentController = controller
+    }
+
+    // The sheet was swiped away (only possible on the amount, success and
+    // failure screens).
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        paymentController = nil
+        app.close()
     }
 
     // MARK: - Navigation
@@ -137,6 +192,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         guard let url = action.request.url else { return decisionHandler(.cancel) }
         if url.scheme == "wavespay" {
             // A page that still uses the app-switch link: take the payment here.
+            if !app.flow.isActive { requester = webView }
             app.handleIncomingURL(url)
             return decisionHandler(.cancel)
         }
@@ -280,9 +336,11 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
 
     // MARK: - Helpers
 
-    private func present(_ controller: UIViewController) {
-        guard let top = TopViewController.current(), !top.isBeingDismissed else { return }
+    @discardableResult
+    private func present(_ controller: UIViewController) -> Bool {
+        guard let top = TopViewController.current(), !top.isBeingDismissed else { return false }
         top.present(controller, animated: true)
+        return true
     }
 
     private func showOffline(on webView: WKWebView) {

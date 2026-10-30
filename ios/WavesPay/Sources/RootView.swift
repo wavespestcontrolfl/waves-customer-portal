@@ -1,28 +1,13 @@
 import SwiftUI
 
 // Waves Admin: the staff portal pages fill the screen, and Tap to Pay runs in
-// a sheet over them, so taking a card never leaves the app.
+// a sheet over them, so taking a card never leaves the app. PortalCoordinator
+// presents PaymentSheet over whatever is on top, a portal popup included.
 struct RootView: View {
-    @EnvironmentObject var app: AppState
-
     var body: some View {
         PortalView()
             .ignoresSafeArea()
-            .sheet(isPresented: paymentSheetShown) {
-                PaymentSheet()
-                    .environmentObject(app)
-                    .interactiveDismissDisabled(app.flow.isBusy)
-            }
             .onAppear { TerminalManager.shared.configure() }
-    }
-
-    // The sheet shows while a payment is open. Swiping it away closes the
-    // payment, which tells the page it was canceled.
-    private var paymentSheetShown: Binding<Bool> {
-        Binding(
-            get: { app.flow.isActive },
-            set: { shown in if !shown { app.close() } }
-        )
     }
 }
 
