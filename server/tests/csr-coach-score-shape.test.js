@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { isUsableCsrScore, normalizeCsrScore } = require('../services/csr/csr-coach');
 
-const CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+const CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'source_question', 'set_expectations', 'strong_close'];
 const RESCUE = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
 // point_details whose 0/1 points add up to the given core / rescue scores.
 const pointsFor = (core, rescue) => ({
