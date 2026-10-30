@@ -690,9 +690,9 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // commercialRecurringEstimate classifier in estimate-public.js keys
     // "Approve & pay monthly" off these commercial_* service keys, and
     // acceptance invoices the first MONTH. A generated per-application
-    // program is a different billing promise whose win would invoice the
-    // first application instead (e.g. $1,200/yr at 8 apps bills $150, not
-    // the $100 month) — only an explicit billedPerApplication flag proves
+    // program is a different billing promise whose visits bill per
+    // application instead (e.g. $1,200/yr at 8 apps bills $150, not the
+    // $100 month) — only an explicit billedPerApplication flag proves
     // the row genuinely bills per application (codex 1A-ii r11).
     if (/commercial_(lawn|tree|pest|mosquito|termite|rodent)/.test(String(row.service || row.name || '').toLowerCase())
       && row.billedPerApplication !== true) {

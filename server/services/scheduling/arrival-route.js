@@ -198,6 +198,10 @@ async function loadArrivalRouteContext({
   // route under way starts from the stop the tech is at or driving to
   // (resolvePlacementOrigin) instead of reading as unverified.
   fromActiveStop = false,
+  // A caller outside any transaction that must not geocode (a staff save's
+  // road purchase, buySaveRoads): read the geocoder's cache only, as the
+  // save's own locked read does.
+  cacheLocation = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -228,7 +232,7 @@ async function loadArrivalRouteContext({
       city: target.service_address_city || customer?.city,
       state: target.service_address_state || customer?.state, zip: target.service_address_zip || customer?.zip });
   }
-  const location = await resolveServiceLocation(target, undefined, { cacheOnly: conn.isTransaction === true });
+  const location = await resolveServiceLocation(target, undefined, { cacheOnly: conn.isTransaction === true || cacheLocation === true });
   target.lat = location.lat;
   target.lng = location.lng;
   if (dateOnly(stored.scheduled_date) !== date || (stored.technician_id || null) !== (techId || null)) {
@@ -538,10 +542,11 @@ function buildCandidateOrders(context, capacity, groupedPending, target, allowIn
 /** True when a stop after the placed visit arrives less than `margin` minutes
  *  before its window closes. Stops ahead of the visit drive as before, and a
  *  stop with no promise has no window to keep. */
-function laterStopTooTight(simulation, order, targetId, rangeForStop, margin) {
+function laterStopTooTight(simulation, order, targetId, rangeForStop, margin, skipIds = null) {
   const at = order.findIndex(row => row.id === targetId);
   return at >= 0 && simulation.arrivals.some((arrival, index) => {
-    const range = index > at ? rangeForStop(order[index]) : null;
+    // `skipIds` (GATE_ROUTE_CHECK_LATE_DAYS): a stop already late without the new visit has no margin to protect.
+    const range = index > at && !skipIds?.has(arrival.id) ? rangeForStop(order[index]) : null;
     return range != null && range.endMin - arrival.arrivalMin < margin;
   });
 }
@@ -553,7 +558,7 @@ function laterStopTooTight(simulation, order, targetId, rangeForStop, margin) {
  *  with `marginMinutes`, any order that leaves a later stop less than that
  *  before its window closes (tooTight). */
 function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
-  marginMinutes = 0, rangeForStop }) {
+  marginMinutes = 0, rangeForStop, marginSkipIds = null }) {
   let winner = null;
   let returnTooLate = false;
   let tooTight = false;
@@ -592,7 +597,7 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
       return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
     }));
     if (hitsFixed) continue;
-    if (marginMinutes > 0 && laterStopTooTight(simulation, order, target.id, rangeForStop, marginMinutes)) {
+    if (marginMinutes > 0 && laterStopTooTight(simulation, order, target.id, rangeForStop, marginMinutes, marginSkipIds)) {
       tooTight = true;
       continue;
     }
@@ -633,11 +638,22 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
  *  - dayEndExceeded: at some position the route runs past the day end. */
 const EXPLAIN_MAX_STOPS = 30;
 
+// The stops that arrive after their promised window in `order` (day end ignored) with how late each is,
+// as a Map of id -> lateMinutes, or null when the order cannot be simulated.
+function lateStopMinutes(simulate, order) {
+  const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
+  return simulation ? new Map(simulation.arrivals.filter(arrival => arrival.lateMinutes > 0)
+    .map(arrival => [arrival.id, arrival.lateMinutes])) : null;
+}
+
+// The ids alone: the stops that arrive after their promised window in `order`, or null when it cannot be simulated.
+function lateStopIds(simulate, order) {
+  const late = lateStopMinutes(simulate, order);
+  return late ? [...late.keys()] : null;
+}
+
 function explainLateness({ sequencers, groupedPending, simulate, target }) {
-  const lateIds = (order) => {
-    const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
-    return simulation ? simulation.arrivals.filter(arrival => arrival.lateMinutes > 0).map(arrival => arrival.id) : null;
-  };
+  const lateIds = (order) => lateStopIds(simulate, order);
   const baselines = sequencers.map(sequence => sequence(groupedPending));
   const baselineLate = new Set(baselines.flatMap(baseline => lateIds(baseline) || []));
   const orders = baselines.flatMap(baseline => (baseline.length > EXPLAIN_MAX_STOPS ? []
@@ -662,6 +678,46 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
   return { targetLate: orders.length > 0 && viable === 0,
     newlyLateStopIds: viable > 0 && !unconfirmed ? [...crowded] : [],
     baselineLateStopIds: [...baselineLate], dayEndExceeded };
+}
+
+/** GATE_ROUTE_CHECK_LATE_DAYS (staff arrival-window lists): a day whose EXISTING stops already
+ *  arrive after their window (every order tried, without the new visit) must not read "full".
+ *  Re-selects a winner among the same candidate orders and the same blockers, but lets a stop
+ *  that is already late stay late. Same definition of late as explainLateness (the 2-hour
+ *  arrival promise, baselineLate = stops late without the new visit): an order wins only when
+ *  the new visit keeps its OWN window, no stop that is on time without it becomes late, and no
+ *  stop that is already late arrives more than INSERTION_MARGIN_MINUTES (15) later than it does
+ *  without the new visit. A stop counts as already late only when it is late in EVERY baseline
+ *  tried (stored order and clock order under stale numbering), and its cap is its smallest
+ *  lateness across them; a stop that is on time in any baseline may not become late. A late stop
+ *  after the new visit is not held to the insertion margin. Null = no stop is late in every
+ *  baseline (not an already-late day), or no order qualifies: the refusal stands. */
+function lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive, ...selectArgs }) {
+  const baselineLists = sequencers.map(sequence => lateStopMinutes(simulate, sequence(groupedPending)));
+  if (baselineLists.some(list => !list)) return null;
+  // A stop is "already late" only when it is late in EVERY baseline tried (stored order and clock order when
+  // the numbering is stale); its allowance is its smallest lateness across them. A stop that is on time in any
+  // baseline gets none: it may not become late. No stop late in every baseline: not an already-late day.
+  const baselineLate = new Map([...baselineLists[0]].filter(([id]) => baselineLists.every(list => list.has(id)))
+    .map(([id]) => [id, Math.min(...baselineLists.map(list => list.get(id)))]));
+  if (!baselineLate.size) return null;
+  const tolerantSimulate = (order, usedLegs, extra = {}) => {
+    const simulation = simulate(order, usedLegs, { ...extra, reportLate: true });
+    return simulation && simulation.arrivals.every(arrival => !(arrival.lateMinutes > 0)
+      || (baselineLate.has(arrival.id) && arrival.lateMinutes <= baselineLate.get(arrival.id) + INSERTION_MARGIN_MINUTES))
+      ? simulation : null;
+  };
+  // The detour is measured against the baseline drive, which the first pass took from the model when the
+  // already-late baseline could not be simulated: re-take it from the same travel source with lateness allowed.
+  const drives = new Map();
+  const lateOrders = orders.map((entry) => {
+    const baseline = entry.order.filter(row => row.id !== selectArgs.target.id);
+    const key = baseline.map(row => row.id).join('|');
+    if (!drives.has(key)) drives.set(key, baselineDrive(baseline));
+    const drive = drives.get(key);
+    return drive == null ? entry : { ...entry, baselineDrive: drive };
+  });
+  return selectWinningOrder(lateOrders, { ...selectArgs, simulate: tolerantSimulate, marginSkipIds: new Set(baselineLate.keys()) }).winner;
 }
 
 // ---- Staff warning detail (GATE_ROUTE_WARNING_DETAIL, route-warning-detail.js) ----
@@ -861,6 +917,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // Optional diagnostics (customer route check): on an `arrival_window` failure, add `lateness`
   // (see explainLateness). Unset: no extra work and the result is exactly what it was.
   explain = false,
+  // GATE_ROUTE_CHECK_LATE_DAYS (find-time.js findArrivalWindowSlots, staff lists only): see lateDayWinner.
+  // Unset: nothing below runs and the result is exactly what it was.
+  lateDays,
   // A staff save's own check: a failure carries `diagnostics` for the save's log line, and with
   // GATE_ROUTE_WARNING_DETAIL on it is worded with the stop, its window, the predicted arrival and
   // the minutes. Never changes whether the placement fits.
@@ -992,6 +1051,22 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     return detailed({ ...fail, reason: 'arrival_margin',
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
     words(() => describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES })));
+  }
+  // Late days are an arrival-window rule: capacity mode never offers them (findCapacitySlots), so no
+  // capacity-mode caller (picked hour, save) may certify one (pre-push audit, PR #7041).
+  if (!winner && lateDays && !capacity) {
+    const lateBaselineDrive = (baseline) => {
+      const legs = [];
+      const simulation = simulate(baseline, legs, { reportLate: true });
+      if (collectLegs) collectLegs.push(...legs);
+      return simulation ? simulation.travelMin : null;
+    };
+    const lateWinner = lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive: lateBaselineDrive, collectLegs, returnByMin,
+      rows, capacity, target, startMin, marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
+    if (lateWinner) {
+      return { ...buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner: lateWinner, origin,
+        home: context.home || RouteOptimizer.HQ, roadTravel: !!context.travel }), dayAlreadyLate: true };
+    }
   }
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
@@ -1172,36 +1247,56 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  under way, a missing location, a shared stop) also stays as it was.
  *  Callers hold the tech-day fence; a busy one leaves the numbers to the
  *  writer holding it. A staff save (`staffSave`, GATE_SAVE_ROAD_TIMES)
- *  numbers a road day on the road times its check read. Returns the order
+ *  numbers a road day on the road times its check read. A staff save also
+ *  passes `lateDays`: under GATE_ROUTE_CHECK_LATE_DAYS it certifies a day whose
+ *  existing stops are already late by the same bounded rule the picker listed
+ *  the hour under, and numbers the day in that order. Returns the order
  *  written, or null. */
-async function placeMovedVisit(conn, { serviceId, source, staffSave = false } = {}) {
+async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false } = {}) {
   if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
-    return await conn.transaction(async (sp) => {
-      const row = await sp('scheduled_services').where({ id: serviceId })
-        .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
-      const date = row ? dateOnly(row.scheduled_date) : '';
-      if (!row?.technician_id || !row.window_start || !date) return null;
-      if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return null;
-      // From the office, like every commit-time check (tech-start-point.js):
-      // the save probe certified this day from there, so the same order wins.
-      const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
-      if (!context || context.grouped) return null;
-      if (staffSave === true) context.travel = staffSaveTravel(date);
-      const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
-        windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true });
-      if (!fit.feasible || !fit.routeOrder) return null;
-      const order = await writeRouteOrder(sp, fit, serviceId);
-      await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
-        resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
-        metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
-      return order;
-    });
+    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }));
   } catch (error) {
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
     return null;
   }
+}
+
+// One line for every refusal past the gate checks (Route Check Everywhere,
+// step 0): the reason a visit kept no stop number. Log only, no data write.
+function refusePlacement(serviceId, source, reason, date) {
+  logger.info(`[arrival-route] route order not placed: service=${String(serviceId).slice(0, 8)} source=${source || '-'} reason=${reason} date=${date || '-'}`);
+  return null;
+}
+
+async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) {
+  const row = await sp('scheduled_services').where({ id: serviceId })
+    .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
+  const date = row ? dateOnly(row.scheduled_date) : '';
+  const refuse = reason => refusePlacement(serviceId, source, reason, date);
+  if (!row) return refuse('no_context');
+  if (!row.technician_id) return refuse('unassigned');
+  if (!row.window_start || !date) return refuse('untimed');
+  if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
+  // From the office, like every commit-time check (tech-start-point.js):
+  // the save probe certified this day from there, so the same order wins.
+  const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  if (!context) return refuse('no_context');
+  if (context.grouped) return refuse('grouped');
+  if (staffSave === true) context.travel = staffSaveTravel(date);
+  // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS, the staff saves' callers only): the save numbers the day in
+  // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
+  const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
+    windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
+    ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
+  if (!fit.feasible) return refuse(fit.reason || 'no_order');
+  if (!fit.routeOrder) return refuse('no_order');
+  const order = await writeRouteOrder(sp, fit, serviceId);
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
+    resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
+    metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
+  return order;
 }
 
 // Conversion expands a certified combined anchor without changing its route position.
@@ -1292,6 +1387,26 @@ function routeCheckAutoSavesLive() {
   return gateEnvValue('GATE_ROUTE_CHECK_AUTO_SAVES') && arrivalWindowRoutingEnabled();
 }
 
+// GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, "ok go", Route Check
+// Everywhere follow-up item 1): an accepted estimate's visit gets its stop
+// number in the accept's own save. A held slot that graduates
+// (slot-reservation.js commitReservation, also a one-tap booking) and the
+// converter's same-trip standalone parent are numbered (placeMovedVisit,
+// source 'estimate_accept'). Stop numbers only: no message, no notification,
+// no Google call. Needs the arrival-window route check itself.
+function routeCheckAcceptSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_ACCEPT_SAVES') && arrivalWindowRoutingEnabled();
+}
+
+// GATE_ROUTE_CHECK_ASSIGN_SAVES (same follow-up, item 1): an office board
+// assign (PUT /api/admin/dispatch/jobs/:id/assign) numbers the visit on its
+// new technician's day (placeMovedVisit, source 'dispatch_assign') instead of
+// leaving it unnumbered after the assign cleared the old number. Stop numbers
+// only; the assign itself is unchanged. Needs the arrival-window route check.
+function routeCheckAssignSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_ASSIGN_SAVES') && arrivalWindowRoutingEnabled();
+}
+
 // A staff save's travel for `date`: on a road day, the road times the pickers
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
@@ -1300,12 +1415,96 @@ function staffSaveTravel(date) {
     ? roadTimes.createPickerTravel({ cacheOnly: true }) : null;
 }
 
+// GATE_SAVE_ROAD_BUY (owner 2026-10-28 design, "ok go" 2026-10-29): before an
+// ADMIN staff save opens its transaction, buy the Google road times its own
+// check and route number will read, for the legs no picker bought. The save
+// then reads them from the cache (GATE_SAVE_ROAD_TIMES), so the New
+// Appointment save, the Edit save and the Edit dialog's slot check agree.
+// Needs the save road times and the pickers' road check.
+function saveRoadBuyLive() {
+  return gateEnvValue('GATE_SAVE_ROAD_BUY') && saveRoadTimesLive() && arrivalWindowRoutingEnabled();
+}
+
+// One save buys at most this many lookups (about 15 cents) and waits at most
+// this long: a slow Google never stalls a save.
+const SAVE_BUY_MAX_LOOKUPS = 15;
+const SAVE_BUY_TIMEOUT_MS = 2000;
+
+/** Buys the road times one staff save will read (GATE_SAVE_ROAD_BUY). Call it
+ *  BEFORE the save's transaction, scheduling lock and row lock: it refuses to
+ *  run on a transaction. Admin callers only (`spender` = the staff user, the
+ *  one the lookups count against; a technician or an automatic writer passes
+ *  none). `serviceId` + `changes` describe a visit being moved or edited;
+ *  `prospective` ({ lat, lng, estimated_duration_minutes, service_type })
+ *  describes a visit about to be created. It evaluates the save's two reads:
+ *  the advisory arrival check, then the route number's placement (`place`),
+ *  (`check: false` leaves out the first, for a move that runs none), and asks
+ *  Google only for the legs still missing, inside the pickers' spend
+ *  ceilings (picker-road-spend.js). Never throws, never blocks: a refused,
+ *  failed or slow purchase leaves the save on the cache and the model, as
+ *  before. Returns { lookups, skipped?, refused?, timedOut? }. */
+async function buySaveRoads({
+  spender = null, serviceId = null, prospective = null, changes = {}, date, technicianId,
+  windowStart, windowEnd, excludeServiceIds = [], conn = db, check = true,
+  maxLookups = SAVE_BUY_MAX_LOOKUPS, timeoutMs = SAVE_BUY_TIMEOUT_MS,
+} = {}) {
+  const roadTimes = require('./hint-road-times');
+  const day = dateOnly(date);
+  // The first refusal that applies, in order; a purchase runs only when none does.
+  const [, skipped] = [
+    [!saveRoadBuyLive(), 'gate'],
+    [conn?.isTransaction, 'in_transaction'],
+    [!spender, 'no_spender'],
+    [!(day && technicianId && windowStart && (serviceId || prospective)), 'no_placement'],
+    [!roadTimes.onRoads(day, etDateString(new Date())), 'not_road_day'],
+  ].find(([refused]) => refused) || [];
+  if (skipped) return { lookups: 0, skipped };
+  const controller = new AbortController();
+  const budget = roadTimes.createPickerBudget({ signal: controller.signal, maxLookups });
+  const [start, end] = [windowStart, windowEnd].map((value) => String(value ?? '').slice(0, 5) || undefined);
+  const work = async () => {
+    const load = (extra) => loadArrivalRouteContext({
+      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true, ...extra,
+    });
+    const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
+    // The route number is read from a context with no exclusions and no active
+    // stop (placeMovedVisit); reuse the check's when it is the same one.
+    const placeContext = staffRouteInsertionLive() && !capacityEnabled()
+      && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
+    const travel = roadTimes.createPickerTravel({ spender, budget });
+    // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
+    const reads = [[check && checkContext, { allowInsertion: false }], [placeContext, { place: true }]]
+      .filter(([context]) => context);
+    reads.forEach(([context]) => { context.travel = travel; });
+    // Three passes, as checkArrivalPlacement: a re-timed leg is asked again.
+    for (let pass = 0; pass < 3 && !budget.refused && !controller.signal.aborted; pass++) {
+      const before = budget.traffic + budget.plain;
+      const legs = [];
+      reads.forEach(([context, mode]) => evaluateArrivalPlacement(context, { windowStart: start, windowEnd: end, ...mode, collectLegs: legs }));
+      await travel.preload(legs);
+      if (budget.traffic + budget.plain === before) break;
+    }
+  };
+  let timer;
+  // Never throws, never waits past the limit: any failure is an outcome, not an error.
+  const outcome = await Promise.race([
+    work().then(() => 'done', (error) => { logger.warn(`[arrival-route] save road purchase skipped: ${error.message}`); return 'error'; }),
+    new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve('timeout'); }, timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  const lookups = budget.traffic + budget.plain;
+  logger.info(`[arrival-route] save road purchase: ${lookups} lookups, ${outcome}, refused: ${budget.refused || 'no'}`);
+  return { lookups, refused: budget.refused || undefined, timedOut: outcome === 'timeout' };
+}
+
 async function checkArrivalPlacement({
-  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, ...options
+  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
-  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
+  // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS): only the staff picked-hour verdict asks for it, so an hour the
+  // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
+  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
   const roadTimes = require('./hint-road-times');
   // A staff save reads the road times its picker bought; it never buys.
   if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);
@@ -1324,7 +1523,7 @@ async function checkArrivalPlacement({
 
 
 module.exports = {
-  arrivalWindowRoutingEnabled, pickerRoadCheckLive, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
+  arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   routeCheckStaffListsLive,
   groupRouteStops, workDuration,
@@ -1334,3 +1533,5 @@ module.exports = {
 };
 module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
 module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;
+module.exports.routeCheckAcceptSavesLive = routeCheckAcceptSavesLive;
+module.exports.routeCheckAssignSavesLive = routeCheckAssignSavesLive;

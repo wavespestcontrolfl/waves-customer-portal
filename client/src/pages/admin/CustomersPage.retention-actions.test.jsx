@@ -91,6 +91,17 @@ describe("CustomerIntelligenceTab retention actions", () => {
     expect(writesFor("/upsell-one")).toHaveLength(1);
   });
 
+  it("renders every Opportunities text and action at 14px or larger", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response(summary())));
+    await openTab();
+    const small = [...document.querySelectorAll("[style*='font-size']")]
+      .map((el) => [el.textContent.trim().slice(0, 30), parseFloat(el.style.fontSize)])
+      .filter(([, size]) => size < 14);
+    expect(small).toEqual([]);
+    expect(screen.getByRole("button", { name: "Yes Approve & Send" })).toHaveStyle({ fontSize: "14px" });
+    expect(screen.getByText(/Synthetic SMS draft/)).toHaveStyle({ fontSize: "14px" });
+  });
+
   it.each([
     ["sms", "sent", "Yes Approve & Send", "Retention SMS sent."],
     ["sms", "blocked", "Yes Approve & Send", "Retention SMS was blocked and was not sent."],

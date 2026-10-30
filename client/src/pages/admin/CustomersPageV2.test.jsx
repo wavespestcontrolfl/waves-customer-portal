@@ -726,6 +726,52 @@ describe('CustomersPageV2 workflow state', () => {
     expect(await screen.findByRole('button', { name: 'Customers saved views' })).toBeInTheDocument();
   });
 
+  it('shows every row the server returned for Last visited, even after 8 PM Eastern', async () => {
+    // 10 PM EDT on Oct 29 is already Oct 30 in UTC. A visit on Sep 29 is 30
+    // calendar days back (inside "30 days" for the server) but 31 elapsed UTC
+    // days, which the old browser re-filter used to drop.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-30T02:00:00Z'));
+    try {
+      const requests = [];
+      vi.stubGlobal('fetch', vi.fn((url) => {
+        const parsed = new URL(String(url), 'http://fixture.invalid');
+        if (parsed.pathname !== '/api/admin/customers') return response({});
+        requests.push(parsed.searchParams);
+        const row = { ...list.customers[0], lastServiceDate: '2026-09-29', balanceOwed: 0, cardsOnFile: 0 };
+        return response({ ...list, customers: [row], total: 1, totalPages: 1 });
+      }));
+      render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+      await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+      fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Filter customers' })).getByRole('button', { name: '≤ 30 days' }));
+      await waitFor(() => expect(requests.at(-1).get('lastVisited')).toBe('30'));
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Filter customers' })).getByRole('button', { name: 'Done' }));
+      expect(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+      expect(screen.queryByText('No customers found')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hide server-returned rows the old client re-filter rejected (balance and card filters)', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      const row = { ...list.customers[0], balanceOwed: 0, cardsOnFile: 0 };
+      return response({ ...list, customers: [row], total: 1, totalPages: 1 });
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Has card' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('cards=has'))).toBe(true));
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+    expect(screen.queryByText('No customers found')).not.toBeInTheDocument();
+  });
+
   it('keeps legacy Directory page labels aligned with rows after returning from Map', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
@@ -740,7 +786,8 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
     await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
     fireEvent.click(screen.getByRole('button', { name: 'Map', exact: true }));
-    await waitFor(() => expect(requests.at(-1).get('page')).toBe('1'));
+    // The Map starts at page one and then reads the remaining 500-row pages.
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('3'));
     fireEvent.click(screen.getByRole('button', { name: 'Directory', exact: true }));
     await screen.findByText('Page 1 of 3 (1100 total)');
     expect(screen.getByRole('button', { name: 'Open Page 1 Customer customer profile' })).toBeInTheDocument();

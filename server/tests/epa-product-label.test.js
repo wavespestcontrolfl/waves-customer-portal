@@ -1,5 +1,6 @@
 const { PDFDocument } = require('pdf-lib');
-const { findEpaLabel, selectEpaSource, downloadEpaLabel, currentEpaSourceStatus, findEpaRegistrationByName } = require('../services/epa-product-label');
+const { findEpaLabel, selectEpaSource, downloadEpaLabel, checkEpaSource, findEpaRegistrationByName } = require('../services/epa-product-label');
+const statusOf = async (source, options) => (await checkEpaSource(source, options)).status;
 const row = () => ({ eparegno: '123-456', productname: 'Synthetic product', product_status: 'Active', cancel_flag: 'No', pdffiles: [
   { epa_reg_num: '123-456', pdffile: '000123-00456-20250101.pdf' },
   { epa_reg_num: '123-456', pdffile: '000123-00456-20260101.pdf' },
@@ -83,10 +84,10 @@ test('a successful forced source check replaces cached unavailability immediatel
   const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };
   jest.spyOn(Date, 'now').mockReturnValue(4000000);
   const fetched = jest.spyOn(global, 'fetch').mockRejectedValue(new TypeError('network unavailable'));
-  expect(await currentEpaSourceStatus(source)).toBe('unavailable');
+  expect(await statusOf(source)).toBe('unavailable');
   fetched.mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
-  expect(await currentEpaSourceStatus(source, { refresh: true })).toBe('current');
-  expect(await currentEpaSourceStatus(source)).toBe('current');
+  expect(await statusOf(source, { refresh: true })).toBe('current');
+  expect(await statusOf(source)).toBe('current');
   expect(fetched).toHaveBeenCalledTimes(3);
 });
 
@@ -96,11 +97,11 @@ test('source checks coalesce, then invalidate a superseded label after at most 6
   let latest = row();
   const clock = jest.spyOn(Date, 'now').mockReturnValue(2000000);
   const fetched = jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [latest] }) : bytes));
-  expect(await Promise.all([currentEpaSourceStatus(source), currentEpaSourceStatus(source)])).toEqual(['current', 'current']);
+  expect(await Promise.all([statusOf(source), statusOf(source)])).toEqual(['current', 'current']);
   expect(fetched).toHaveBeenCalledTimes(2);
   latest = { ...row(), pdffiles: [{ epa_reg_num: '123-456', pdffile: '000123-00456-20260202.pdf' }] };
   clock.mockReturnValue(2060001);
-  expect(await currentEpaSourceStatus(source)).toBe('superseded');
+  expect(await statusOf(source)).toBe('superseded');
   expect(fetched).toHaveBeenCalledTimes(3);
 });
 
@@ -109,9 +110,33 @@ test('a changed PDF checksum and an unavailable EPA lookup never count as curren
   const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: 'older-pdf-bytes' };
   const clock = jest.spyOn(Date, 'now').mockReturnValue(3000000);
   const fetched = jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
-  expect(await currentEpaSourceStatus(source)).toBe('superseded');
+  expect(await statusOf(source)).toBe('superseded');
   clock.mockReturnValue(3060001); fetched.mockRejectedValue(new Error('EPA unavailable'));
-  expect(await currentEpaSourceStatus(source)).toBe('unavailable');
+  expect(await statusOf(source)).toBe('unavailable');
+});
+
+test('a cached answer keeps the time EPA gave it', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(6000000);
+  jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
+  expect(await checkEpaSource(source)).toEqual({ status: 'current', checkedAt: 6000000 });
+  clock.mockReturnValue(6050000);
+  expect(await checkEpaSource(source)).toEqual({ status: 'current', checkedAt: 6000000 });
+  expect(await statusOf(source)).toBe('current');
+});
+
+test('EPA\'s own record of a cancelled registration or a removed label is "inactive"; an empty answer is an outage', async () => {
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: 'synthetic-pdf-bytes' };
+  let answer;
+  jest.spyOn(Date, 'now').mockReturnValue(5000000);
+  jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify(answer)));
+  const check = (items) => { answer = { items }; return statusOf(source, { refresh: true }); };
+  expect(await check([{ ...row(), cancel_flag: 'Yes' }])).toBe('inactive');
+  expect(await check([{ ...row(), product_status: 'Cancelled' }])).toBe('inactive');
+  expect(await check([{ ...row(), pdffiles: [] }])).toBe('inactive');
+  expect(await check([])).toBe('unavailable');
+  expect(await check([row(), row()])).toBe('unavailable');
 });
 
 describe('findEpaRegistrationByName — exact brand-name proof, never containment', () => {

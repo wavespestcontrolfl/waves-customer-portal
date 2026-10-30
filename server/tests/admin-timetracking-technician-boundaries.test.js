@@ -172,12 +172,15 @@ describe('admin timetracking technician data/auth boundaries', () => {
     db.mockReturnValueOnce(makeChain({ rows: [] })); // capability summary read
     const tech = await invoke(listTechnicians, {
       technician: { id: 'tech-2', role: 'technician' },
+      technicianId: 'tech-2',
     });
     expect(tech.body.technicians[0]).toMatchObject({
       id: 'tech-1',
       name: 'Casey Tech',
-      email: 'casey@example.com',
     });
+    // A coworker's phone and email are office-only (owner 2026-10-30).
+    expect(tech.body.technicians[0]).not.toHaveProperty('email');
+    expect(tech.body.technicians[0]).not.toHaveProperty('phone');
     expect(tech.body.technicians[0]).not.toHaveProperty('pay_rate');
     expect(tech.body.technicians[0]).not.toHaveProperty('ssn_last4');
     for (const field of sensitiveFields) {

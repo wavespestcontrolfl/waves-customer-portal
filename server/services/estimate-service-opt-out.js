@@ -145,7 +145,7 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
 // stored proposal verbatim whenever it carries buildings/programs/
 // correctiveWork, so a scaffold with enabled:false and $0 program lines
 // still overrides the engine rows on every renderer, in the margin audit,
-// and in buildProposalFirstInvoice, which BILLS from it at mark-won.
+// and in buildProposalFirstInvoice, which the win reads to flag a taxable customer.
 // Deliberately stricter than PUT /:token/interior-service, which checks
 // enabled and would let that scaffold through. One guard for removals,
 // RESTORES and the /data add-back projection — a row that gains an

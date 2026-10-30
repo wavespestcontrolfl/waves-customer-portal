@@ -349,6 +349,25 @@ describe('bookFirstVisit', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
+  // A visit booked from another tab after bookingContext's read: the guard refuses the duplicate, and the answer
+  // carries the visit that won, the same shape as bookingContext's own already_booked (pipeline audit 10-30, item 5).
+  test('the commit loses the race to another booking: already_booked carries the booked visit', async () => {
+    mockBooking.createSelfBooking.mockResolvedValue({ ok: false, status: 409, code: 'ALREADY_BOOKED', error: 'x' });
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    const date = etDateString(addETDays(new Date(), 1));
+    // bookingContext reads no visit; the guard's refusal then finds the one the other tab booked.
+    let reads = 0;
+    rows.scheduled_services = () => (++reads === 1 ? undefined
+      : { id: VISIT_ID, scheduled_date: date, window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+    const result = await firstVisit.bookFirstVisit(proposalEstimate(), { date, time: '09:00', openFor });
+    expect(result).toEqual({
+      ok: false, status: 409, code: 'already_booked', error: 'Your first visit is already booked.',
+      visit: { date, windowStart: '13:00', windowEnd: '14:00' },
+    });
+    expect(mockAccept).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
   // Pre-push audit P1: a refused accept seeds no series (a year of visits at terms the accept could not confirm).
   test('an accept refusal leaves the visit booked, seeds no series, and the alert asks for the win and the series', async () => {
     mockAccept.mockRejectedValue(Object.assign(new Error('changed'), { statusCode: 409 }));

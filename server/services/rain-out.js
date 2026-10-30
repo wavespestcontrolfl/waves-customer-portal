@@ -1576,6 +1576,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       display: `${opt.displayDate}, ${displayWindow(window)}`,
       ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
+      ...(opt.dayAlreadyLate === true ? { dayAlreadyLate: true } : {}),
     };
   });
 
@@ -2255,7 +2256,7 @@ async function prepareNoteRungSms({ serviceId, service, target, note, reasonCode
   return { ok: true, prebuiltSms };
 }
 
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null, allowSeriesForAssignedTechnician = false, roadSpender = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2512,14 +2513,20 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // check believing no series-widening is possible while THIS read
     // disagrees, reaching the series branch with no ownership enforcement
     // at all (requireAssignedTechnicianId only fenced the single-job
-    // fallback). A restricted (technician) caller can never take the
-    // series-shift branch here, full stop, regardless of any race — every
-    // technician request is forced onto the single-job path below, which
-    // is unconditionally fenced by requireAssignedTechnicianId's CAS.
+    // fallback). So a restricted (technician) caller can never take the
+    // series-shift branch by default: it is forced onto the single-job path
+    // below, which is fenced by requireAssignedTechnicianId's CAS.
+    //
+    // The tech-portal Quick Move is the one exception (owner ruling
+    // 2026-10-28: technicians move visits from their own app, and a recurring
+    // date move shifts its series): it passes allowSeriesForAssignedTechnician,
+    // and the series call is fenced to the same technician through
+    // expectAnchor.technician_id (rebooker assertAnchorPin, judged on the
+    // locked read), so no series write happens without the ownership check.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
       && String(target.date) !== jobDateStr
-      && !requireAssignedTechnicianId;
+      && (!requireAssignedTechnicianId || allowSeriesForAssignedTechnician === true);
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
@@ -2557,6 +2564,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // The day options came from the staff arrival check, so the move
             // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
             placeInRoute: true,
+            // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
+            // the series transaction (the dispatch route passes none for a technician).
+            ...(roadSpender ? { roadSpender } : {}),
             sourceSurface: 'quick_move',
             qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
@@ -2567,7 +2577,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             notifyRequested: notifyCustomer === true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
-            expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
+            expectAnchor: {
+              scheduled_date: job.scheduled_date,
+              window_start: job.window_start,
+              ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+            },
           });
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
@@ -2617,6 +2631,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           overlapAdvisory: true,
           // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
           placeInRoute: true,
+          ...(roadSpender ? { roadSpender } : {}),
           excludeServiceIds: [job.id],
           qualityDates: rebookerQualityDates,
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_
@@ -2849,6 +2864,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
+      // applySeriesMoveEffects already broadcast this stop's board update; a
+      // caller that emits one per moved stop must skip it (no double emit).
+      ...(shiftedOccurrences ? { boardBroadcastBySeriesEffects: true } : {}),
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
       // The repair the alert names must match the actual failure (codex
       // #3609 r34): a parent-retarget failure has ZERO stragglers — every

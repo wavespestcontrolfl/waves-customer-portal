@@ -155,9 +155,29 @@ describe('visitForPlan gives each round its step', () => {
     expect(engine.parseVisitNutrientTargets(visit.notes).targetNPer1000).toBe(1);
   });
 
-  test('rounds 6 and 7 are the August and September steps as written (potassium included)', async () => {
-    expect((await forRound('2027-07-20')).visit).toBe(liveStep('st_augustine', 8));
+  test('rounds 6 and 7 are the August and September steps as written (potassium included); a July visit has July\'s as-needed lines', async () => {
+    const july = (await forRound('2027-07-20')).visit;
+    expect(july.primary).toBe(liveStep('st_augustine', 8).primary);
+    expect(july.notes).toBe(liveStep('st_augustine', 8).notes);
+    expect(july.secondary).toBe(liveStep('st_augustine', 7).secondary);
     expect((await forRound('2027-09-05')).visit).toBe(liveStep('st_augustine', 9));
+  });
+
+  // The approved plan: the round sets the planned treatment, the real date sets the spot treatments (weed, disease and insect alike).
+  test('the as-needed lines follow the real date: round 3 on Mar 20 has March\'s take-all line, round 2 on Feb 10 none of April\'s', async () => {
+    const three = (await forRound('2027-03-20')).visit;
+    expect(three.secondary).toBe(liveStep('st_augustine', 3).secondary);
+    expect(lineNames(three.secondary)).toContain('Artavia 2 SC (Azoxy)');
+    const two = (await forRound('2027-02-10')).visit;
+    expect(two.secondary).toBe(liveStep('st_augustine', 2).secondary);
+    expect(lineNames(two.secondary)).not.toEqual(expect.arrayContaining(['Headway Fungicide']));
+    expect(lineNames(two.secondary)).not.toContain('Arena 50 WDG');
+    // Round 4 in late April: May's Tetrino is the planned treatment; the chinch and take-all spots are April's, May's dry-spot line is not offered.
+    const four = (await forRound('2027-04-28')).visit;
+    expect(four.primary).toBe(liveStep('st_augustine', 5).primary);
+    expect(four.secondary).toBe(liveStep('st_augustine', 4).secondary);
+    expect(lineNames(four.secondary)).toEqual(expect.arrayContaining(['Headway Fungicide', 'Arena 50 WDG']));
+    expect(lineNames(four.secondary)).not.toContain('Dispatch Sprayable Wetting Agent');
   });
 
   test('round 2 is round 2 whatever the track: the 9x April bag on all three', async () => {
@@ -241,6 +261,7 @@ const NAMES = {
   DIM: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer',
   CEL: 'Celsius WG', CER: 'Certainty Turf Herbicide', NIS: 'LESCO 90/10 Nonionic Surfactant', BLI: 'Blindside Herbicide',
   ART: 'Artavia 2 SC (Azoxy)', NT: 'LESCO Nutra-TECH T&O Micronutrient Package', K20: 'LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer',
+  VEL: 'Velista', DYL: 'Dylox 6.2 G Granular Insecticide', K24: 'LESCO Black Out 0-0-24 AM Spar-TECH',
 };
 const CATALOG = [
   { id: 'p-f24', name: NAMES.F24, category: 'fertilizer', analysis_n: 24, analysis_p: 0, analysis_k: 11, formulation: 'Granular', default_rate_per_1000: 4.17, rate_unit: 'lb', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'lb' },
@@ -251,6 +272,9 @@ const CATALOG = [
   { id: 'p-bli', name: NAMES.BLI, category: 'herbicide', default_rate_per_1000: 0.149, rate_unit: 'oz', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'oz' },
   { id: 'p-art', name: NAMES.ART, category: 'fungicide', default_rate_per_1000: null, rate_unit: 'label_rate', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'fl oz' },
   { id: 'p-nt', name: NAMES.NT, category: 'fertilizer', analysis_n: 0, analysis_p: 0, analysis_k: 0, default_rate_per_1000: 6, rate_unit: 'fl oz', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'fl oz' },
+  { id: 'p-vel', name: NAMES.VEL, category: 'fungicide', default_rate_per_1000: null, rate_unit: 'label_rate', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'oz' },
+  { id: 'p-dyl', name: NAMES.DYL, category: 'insecticide', default_rate_per_1000: null, rate_unit: 'label_rate', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'lb' },
+  { id: 'p-k24', name: NAMES.K24, category: 'fertilizer', analysis_n: 0, analysis_p: 0, analysis_k: 24, default_rate_per_1000: 4.125, rate_unit: 'lb', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'lb' },
   { id: 'p-k20', name: NAMES.K20, category: 'fertilizer', analysis_n: 0, analysis_p: 0, analysis_k: 20, default_rate_per_1000: 5, rate_unit: 'fl oz', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'fl oz' },
 ];
 const CAT = Object.fromEntries(CATALOG.map((p) => [p.name, p]));
@@ -322,24 +346,59 @@ describe('getProtocolWindowContext with a rounds step', () => {
     expect(context.products.find((p) => p.product_name === NAMES.F24).gates.targetN).toBe('0.75 lb N/1000');
   });
 
-  test('round 2 on Mar 10, St. Augustine: April\'s program rows with FEBRUARY\'s weed rows (Celsius alone)', async () => {
+  test('round 2 on Mar 10, St. Augustine: April\'s program rows with FEBRUARY\'s as-needed rows (Celsius alone; April\'s take-all row leaves)', async () => {
     const context = await read(data('st_augustine'), { date: '2027-03-10', rest: { roundStep: { round: 2, month: 4 } } });
     expect(context.window.window_key).toBe(WINDOW_KEYS[4]);
     expect(context.spotWindow.window_key).toBe(WINDOW_KEYS[2]);
-    expect(productNames(context)).toEqual([NAMES.DIM, NAMES.ART, NAMES.CEL]);
+    expect(productNames(context)).toEqual([NAMES.DIM, NAMES.CEL]);
   });
 
   test('round 2 on Mar 10, bermuda or zoysia: the exception is St. Augustine\'s, so March\'s weed rows', async () => {
     for (const track of ['bermuda', 'zoysia']) {
       const context = await read(data(track), { date: '2027-03-10', rest: { roundStep: { round: 2, month: 4 } } });
       expect(context.spotWindow.window_key).toBe(WINDOW_KEYS[3]);
-      expect(productNames(context)).toEqual([NAMES.DIM, NAMES.ART, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
+      expect(productNames(context)).toEqual([NAMES.DIM, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
     }
   });
 
-  test('round 2 on Feb 10: February\'s weed rows by the plain real-date rule', async () => {
+  test('round 2 on Feb 10: February\'s as-needed rows by the plain real-date rule', async () => {
     const context = await read(data(), { date: '2027-02-10', rest: { roundStep: { round: 2, month: 4 } } });
-    expect(productNames(context)).toEqual([NAMES.DIM, NAMES.ART, NAMES.CEL]);
+    expect(productNames(context)).toEqual([NAMES.DIM, NAMES.CEL]);
+  });
+
+  // The disease and insect spots follow the real date like the weed spots; the planned rows (a trouble swap's bag included) stay the round's.
+  // The fake database returns rows as listed, so the fixture lists them in sort_order as the real read does.
+  const withRows = (track, extra) => {
+    const tables = protocolTables(track);
+    return { ...tables, lawn_protocol_products: [...tables.lawn_protocol_products, ...extra].sort((a, b) => a.sort_order - b.sort_order) };
+  };
+  const asNeeded = (month, name, role, gates = {}) => ({
+    id: `row-${month}-${name}`, lawn_protocol_window_id: `w-${WINDOW_KEYS[month]}`, product_id: CAT[name].id, product_name: name, role, application_mode: 'spot',
+    rate_per_1000: null, rate_unit: 'label_rate', carrier_gal_per_1000: 2, default_in_plan: false, gates, annual_counter: {}, mixing: {}, report_copy: {}, sort_order: 10,
+  });
+  const marchTakeAll = asNeeded(3, NAMES.ART, 'fungicide_spot', { trigger: 'mapped_take_all_spring_1' });
+
+  test('round 3 on Mar 20: March\'s take-all row joins February\'s bag (the round\'s step window has no spot rows of its own)', async () => {
+    const context = await read(withRows('st_augustine', [marchTakeAll]), { date: '2027-03-20', rest: { roundStep: { round: 3, month: 2 } } });
+    expect(productNames(context)).toEqual([NAMES.F24, NAMES.ART, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
+    expect(context.products.find((p) => p.product_name === NAMES.ART).gates.trigger).toBe('mapped_take_all_spring_1');
+  });
+
+  test('round 8 on Nov 5: October\'s grub granule leaves and November\'s large patch spot comes; October\'s bag stays', async () => {
+    const tables = withRows('st_augustine', [
+      { ...asNeeded(10, NAMES.DYL, 'insect_curative', { trigger: 'grubs_or_mole_crickets', spreaderVisitOnly: true }), application_mode: 'broadcast' },
+      asNeeded(11, NAMES.VEL, 'fungicide_spot', { trigger: 'mapped_large_patch' }),
+    ]);
+    expect(productNames(await read(tables, { date: '2027-10-20', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.DIM, NAMES.DYL, NAMES.CEL]);
+    expect(productNames(await read(tables, { date: '2027-11-05', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.DIM, NAMES.VEL, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
+  });
+
+  test('round 9 on Nov 20: December\'s micronutrients and its large patch potassium bag stay; the spots are November\'s', async () => {
+    const swapBag = { ...asNeeded(12, NAMES.K24, 'nutrition', { trigger: 'active_large_patch_mapped' }), application_mode: 'broadcast', sort_order: 2 };
+    const tables = withRows('st_augustine', [swapBag, asNeeded(11, NAMES.VEL, 'fungicide_spot', { trigger: 'mapped_large_patch' })]);
+    const context = await read(tables, { date: '2027-11-20', rest: { roundStep: { round: 9, month: 12 } } });
+    expect(context.window.window_key).toBe(WINDOW_KEYS[12]);
+    expect(productNames(context)).toEqual([NAMES.NT, NAMES.K24, NAMES.VEL, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
   });
 
   test('round 8 on Nov 5: October\'s program rows with November\'s weed rows (Blindside joins)', async () => {
@@ -377,17 +436,31 @@ describe('getProtocolWindowContext with a rounds step', () => {
     for (const name of [NAMES.F24, NAMES.DIM, NAMES.ART, 'Velista', 'Tetrino Insecticide', 'Recognition Post Emergent Herbicide']) expect(program.isWeedSpotRow({ product_name: name })).toBe(false);
     expect(program.isWeedSpotRow({ product_name: NAMES.NIS, gates: { bermudaRemoval: true } })).toBe(false);
   });
+
+  test('as-needed rows are classified by role: every spot, the curative granule and the fire ant add-on; never a planned row', () => {
+    for (const role of ['fungicide_spot', 'insecticide_spot', 'wetting_agent_spot', 'post_emergent_spot', 'adjuvant_spot', 'insect_curative', 'insecticide_optional_addon']) {
+      expect(program.isAsNeededRow({ product_name: 'Any', role })).toBe(true);
+    }
+    for (const role of ['nutrition', 'pre_emergent', 'fall_pre_emergent_nutrition', 'micronutrients', 'insecticide', 'potassium', 'potassium_nutrition', 'area_addon']) {
+      expect(program.isAsNeededRow({ product_name: 'Any', role, default_in_plan: false })).toBe(false);
+    }
+    expect(program.isAsNeededRow({ product_name: NAMES.CEL, role: 'x' })).toBe(true);
+    expect(program.isAsNeededRow({ product_name: NAMES.ART, role: 'fungicide_spot', gates: { bermudaRemoval: true } })).toBe(false);
+  });
 });
 
 // ── The weed lines ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 describe('visitWithSpotLines', () => {
   const apr = stepOf('st_augustine', 4);
-  test('the round step keeps its disease and insect lines; the weed lines are the real month\'s', () => {
-    const merged = program.visitWithSpotLines(apr, stepOf('st_augustine', 3));
-    const names = lineNames(merged.secondary);
-    expect(names).toEqual(expect.arrayContaining(['Headway Fungicide', 'Arena 50 WDG', 'Velista', 'Gravex 20 EW', 'Topchoice Granular Insecticide']));
-    expect(names.slice(-4)).toEqual(['Celsius WG', 'Certainty Turf Herbicide', 'LESCO 90/10 Nonionic Surfactant', 'Blindside Herbicide']);
+  test('every as-needed line (weed, disease, insect) is the spot month\'s; the planned treatment stays the round step\'s', () => {
+    const mar = stepOf('st_augustine', 3);
+    const merged = program.visitWithSpotLines(apr, mar);
+    expect(lineNames(merged.secondary)).toEqual(lineNames(mar.secondary));
+    expect(lineNames(merged.secondary)).toContain('Artavia 2 SC (Azoxy)');
+    expect(lineNames(merged.secondary)).not.toEqual(expect.arrayContaining(['Headway Fungicide']));
+    expect(lineNames(merged.secondary)).not.toContain('Arena 50 WDG');
     expect(merged.primary).toBe(apr.primary);
+    expect(merged.notes).toBe(apr.notes);
   });
   test('February\'s weed lines are Celsius alone (the green-up rule)', () => {
     const merged = program.visitWithSpotLines(apr, stepOf('st_augustine', 2));
@@ -461,8 +534,8 @@ describe('buildPlanForService on a rounds visit', () => {
     expect(greenUp.protocol.structured.window.key).toBe(WINDOW_KEYS[4]);
     const weedGreenUp = lineNamesOf(greenUp).filter((n) => [NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI].includes(n));
     expect(weedGreenUp).toEqual([NAMES.CEL]);
-    // The Celsius row is the February window's own, and no Certainty or Blindside row is offered.
-    expect(greenUp.protocol.structured.products.map((p) => p.protocolProductName)).toEqual([NAMES.DIM, NAMES.ART, NAMES.CEL]);
+    // The Celsius row is the February window's own; no Certainty or Blindside row is offered, and April's take-all row is not either.
+    expect(greenUp.protocol.structured.products.map((p) => p.protocolProductName)).toEqual([NAMES.DIM, NAMES.CEL]);
   });
 
   test('round 2 on Mar 10 for a bermuda lawn: March\'s weed mix (the green-up exception is St. Augustine\'s)', async () => {

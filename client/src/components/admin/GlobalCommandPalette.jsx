@@ -9,7 +9,8 @@ import { useIntelligenceBarPageData, useIntelligenceBarActions } from '../../hoo
  *          is attached.
  *
  * Auto-detects which page you're on and loads the right context/tools.
- * Recent prompts (last 5) surfaced at the top on mobile for fast re-run.
+ * Recent prompts (last 5, per staff account) surfaced at the top on mobile
+ * for fast re-run.
  */
 
 import {
@@ -20,7 +21,7 @@ import {
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
@@ -34,11 +35,11 @@ import ToolActivityList from "./ToolActivityList";
 import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
+import { ASK_RECENTS_KEY } from "../../lib/adminAuth";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 import AdminPageFinder from "./AdminPageFinder";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const RECENTS_KEY = "admin_ib_recents";
 // Thread id the operator dismissed with "New chat" — a reload must not
 // resume it (it stays on the server for history/retention, just not as the
 // auto-resumed conversation). Keyed per admin account so staff sharing a
@@ -91,7 +92,7 @@ const D = {
 // Roughly 6 lines before a composer stops growing and scrolls internally.
 const COMPOSER_MAX_HEIGHT = {
   desktop: 132, // ~6 lines @ 15px in the main composer
-  followUp: 112, // ~6 lines @ 13px in the follow-up composer
+  followUp: 120, // ~6 lines @ 14px in the follow-up composer
   mobile: () => Math.min(148, window.innerHeight * 0.4), // ~6 lines @ 16px, capped to ~40% viewport
 };
 
@@ -216,30 +217,32 @@ function detectContext(rawPathname, search = "", hash = "", user) {
   return ROUTE_CONTEXT_MAP["/admin"];
 }
 
-function loadRecents() {
+// Recent prompts are kept per verified staff account, so a shared phone or
+// desk never shows one login's questions to the next, and are deleted when a
+// staff session ends (lib/adminAuth clearStaffDeviceData). No account, none.
+function loadRecents(userId) {
+  if (!userId) return [];
+  const key = `${ASK_RECENTS_KEY}:${userId}`;
   try {
-    const raw = localStorage.getItem(RECENTS_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const list = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(list) ? list : [];
   } catch {
     return [];
   }
 }
 
-function saveRecent(prompt) {
-  if (!prompt || !prompt.trim()) return;
+function saveRecent(userId, prompt) {
+  if (!userId || !prompt || !prompt.trim()) return;
   const t = prompt.trim();
-  const list = loadRecents().filter((p) => p !== t);
+  const list = loadRecents(userId).filter((p) => p !== t);
   list.unshift(t);
   try {
-    localStorage.setItem(
-      RECENTS_KEY,
-      JSON.stringify(list.slice(0, RECENTS_MAX)),
-    );
+    localStorage.setItem(`${ASK_RECENTS_KEY}:${userId}`, JSON.stringify(list.slice(0, RECENTS_MAX)));
   } catch {}
 }
 
 // ─── Markdown renderer ──────────────────────────────────────────
-function renderMarkdown(text) {
+function renderMarkdown(text, onNavigate) {
   if (!text) return null;
   const lines = text.split("\n");
   const elements = [];
@@ -286,7 +289,7 @@ function renderMarkdown(text) {
           style={{ display: "flex", gap: 8, paddingLeft: 4, marginBottom: 3 }}
         >
           <span style={{ color: D.teal, fontSize: 11, marginTop: 5 }}>●</span>
-          <span>{renderInline(line.replace(/^[-•*]\s/, ""))}</span>
+          <span>{renderInline(line.replace(/^[-•*]\s/, ""), onNavigate)}</span>
         </div>,
       );
       continue;
@@ -301,7 +304,7 @@ function renderMarkdown(text) {
           <span
             style={{
               color: D.teal,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 700,
               fontFamily: "JetBrains Mono, monospace",
               minWidth: 18,
@@ -309,7 +312,7 @@ function renderMarkdown(text) {
           >
             {num}.
           </span>
-          <span>{renderInline(line.replace(/^\d+\.\s/, ""))}</span>
+          <span>{renderInline(line.replace(/^\d+\.\s/, ""), onNavigate)}</span>
         </div>,
       );
       continue;
@@ -320,22 +323,59 @@ function renderMarkdown(text) {
     }
     elements.push(
       <div key={key++} style={{ marginBottom: 4 }}>
-        {renderInline(line)}
+        {renderInline(line, onNavigate)}
       </div>,
     );
   }
   return elements;
 }
 
-function renderInline(text) {
-  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
-    if (part.startsWith("**") && part.endsWith("**"))
+// Bold and Markdown links, [label](target). The server asks the model to lead
+// with a record link: an /admin path opens in the app and closes the bar; an
+// https link opens in a new tab. Any other target (http:, javascript:, data:,
+// mailto:, //host, a backslash) stays as the literal text, and so does a link
+// whose label names any other web address (an answer can quote
+// customer-written text).
+const INLINE_TOKEN_RE = /(\[[^\]\n]+\]\([^)\s]+\)|\*\*[^*]+\*\*)/g;
+const LINK_TOKEN_RE = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/;
+const HOST_TOKEN_RE = /(?:[a-z0-9-]+\.)+[a-z]{2,}/gi;
+
+function answerLinkTarget(label, target) {
+  if (target.includes("\\")) return null;
+  if (/^\/admin(?:[/?#]|$)/i.test(target)) return { to: target };
+  let url;
+  try { url = new URL(target); } catch { return null; }
+  if (url.protocol !== "https:") return null;
+  if ((label.match(HOST_TOKEN_RE) || []).some((host) => host.toLowerCase() !== url.hostname)) return null;
+  return { href: url.href };
+}
+
+function renderInline(text, onNavigate) {
+  return text.split(INLINE_TOKEN_RE).map((part, i) => {
+    if (i % 2 === 0) return part;
+    const link = part.match(LINK_TOKEN_RE);
+    if (!link)
       return (
         <strong key={i} style={{ color: "#0F172A", fontWeight: 500 }}>
-          {part.slice(2, -2)}
+          {renderInline(part.slice(2, -2), onNavigate)}
         </strong>
       );
-    return part;
+    const target = answerLinkTarget(link[1], link[2]);
+    if (!target) return part;
+    const style = { color: "inherit", textDecoration: "underline" };
+    return target.to ? (
+      <Link key={i} to={target.to} style={style}
+        onClick={(event) => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+          onNavigate?.();
+        }}>
+        {renderInline(link[1])}
+      </Link>
+    ) : (
+      <a key={i} href={target.href} target="_blank" rel="noopener noreferrer" style={style}>
+        {renderInline(link[1])}
+      </a>
+    );
   });
 }
 
@@ -410,10 +450,19 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [showThreads, setShowThreads] = useState(false);
   const [threads, setThreads] = useState([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
+  // A History read that failed is not an empty history: the last lists loaded
+  // stay on screen with a retry, and a conversation that did not open says so.
+  // historyFailed names the list that failed: { threads, tasks }.
+  const [historyFailed, setHistoryFailed] = useState({});
+  const [threadOpenError, setThreadOpenError] = useState(null);
+  const historyLoadRef = useRef(0);
   const [quickActions, setQuickActions] = useState([]);
-  const [recents, setRecents] = useState(() => loadRecents());
+  const userId = user?.id;
+  const [recents, setRecents] = useState(() => loadRecents(userId));
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  // Why picked files did not attach (unreadable, or past the photo limit).
+  const [attachmentNotice, setAttachmentNotice] = useState(null);
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
@@ -465,11 +514,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
+        // Cmd/Ctrl+K is the page finder for every login. Before the staff
+        // session is verified there is no destination list, so it does
+        // nothing; the assistant opens from its own button.
+        if (!canFindPages) return;
         rememberOpener();
-        if (canFindPages) {
-          setOpen(false);
-          setNavigationOpen((prev) => !prev);
-        } else setOpen((prev) => !prev);
+        setOpen(false);
+        setNavigationOpen((prev) => !prev);
       }
       // useModalFocus owns Escape for real key events (it stops the shared
       // modal stack from handing it to an underlying record drawer); this
@@ -484,11 +535,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // Focus input when opening + refresh recents
   useEffect(() => {
     if (open) {
-      setRecents(loadRecents());
+      setRecents(loadRecents(userId));
       setDragY(0);
       setTimeout(() => inputRef.current?.focus(), 80);
     }
-  }, [open]);
+  }, [open, userId]);
 
   // Load context-specific quick actions when context changes
   useEffect(() => {
@@ -506,6 +557,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const resetAttachments = useCallback(() => {
     attachmentConversionRef.current += 1;
     setAttachments([]);
+    setAttachmentNotice(null);
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
 
@@ -599,20 +651,32 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     return true;
   }, [holdThread]);
 
-  // Picker: fetch the actor's recent threads (server-side actor-bound).
+  // Picker: fetch the actor's recent threads (server-side actor-bound) and
+  // this session's saved requests. 404/403 means the list is off for this
+  // login (an empty list); any other failure keeps the last list and is shown.
   const loadThreads = useCallback(() => {
+    const load = ++historyLoadRef.current;
+    const current = () => historyLoadRef.current === load;
+    const failed = (list, clear) => (err) => {
+      if (!current()) return;
+      if (err?.status === 404 || err?.status === 403) clear();
+      else setHistoryFailed((was) => ({ ...was, [list]: true }));
+    };
     setThreadsLoading(true);
+    setHistoryFailed({});
     adminFetch("/admin/intelligence-bar/threads?limit=20")
-      .then((data) => setThreads(Array.isArray(data?.threads) ? data.threads : []))
-      .catch(() => setThreads([]))
-      .finally(() => setThreadsLoading(false));
+      .then((data) => { if (current()) setThreads(Array.isArray(data?.threads) ? data.threads : []); })
+      .catch(failed("threads", () => setThreads([])))
+      .finally(() => { if (current()) setThreadsLoading(false); });
     adminFetch(`/admin/intelligence-bar/tasks?session_id=${encodeURIComponent(sessionIdRef.current)}`)
-      .then(data => setSavedTasks(data.tasks || [])).catch(() => setSavedTasks([]));
+      .then(data => { if (current()) setSavedTasks(data.tasks || []); })
+      .catch(failed("tasks", () => setSavedTasks([])));
   }, []);
 
   const toggleThreads = () => {
     const next = !showThreads;
     setShowThreads(next);
+    setThreadOpenError(null);
     if (next) loadThreads();
   };
 
@@ -622,14 +686,26 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const openThread = (id) => {
     threadEpochRef.current += 1;
     const epoch = threadEpochRef.current;
+    let reloading = false;
     setThreadsLoading(true);
+    setThreadOpenError(null);
     adminFetch(`/admin/intelligence-bar/threads/${encodeURIComponent(id)}`)
       .then((data) => {
         if (threadEpochRef.current !== epoch) return;
         if (hydrateThread(data?.thread, { deliberate: true })) setShowThreads(false);
+        else setThreadOpenError("That conversation has no saved messages.");
       })
-      .catch(() => { /* thread gone or not ours — stay where we are */ })
-      .finally(() => setThreadsLoading(false));
+      .catch((err) => {
+        // Stay on the list either way. 404: gone (retention) or not this
+        // login's, so the list is reloaded without it.
+        if (threadEpochRef.current !== epoch) return;
+        if (err?.status === 404) {
+          setThreadOpenError("That conversation is no longer available.");
+          reloading = true;
+          loadThreads();
+        } else setThreadOpenError("That conversation did not open. Try again.");
+      })
+      .finally(() => { if (!reloading) setThreadsLoading(false); });
   };
 
   // THE one place that starts a new conversation locally: New chat and a reply
@@ -753,8 +829,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setChoices(null);
       setToolActivity([]);
       knowledgeGaps.reset();
-      saveRecent(q);
-      setRecents(loadRecents());
+      saveRecent(userId, q);
+      setRecents(loadRecents(userId));
 
       // The request key outlives a dropped response: the same request
       // resubmitted replays the saved task instead of running it again.
@@ -806,7 +882,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments],
+    [prompt, loading, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments, userId],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -871,7 +947,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const taskHistory = savedTasks.length > 0 && <div style={{ marginBottom: 12 }}>
     <div style={{ fontSize: 14, marginBottom: 8 }}>Saved requests — clearing a chat does not cancel actions</div>
     {savedTasks.map(task => <button key={task.id} type="button" onClick={() => refreshTask(task.id)}
-      style={{ display: 'block', width: '100%', minHeight: 44, padding: 8, textAlign: 'left' }}>
+      style={{ display: 'block', width: '100%', minHeight: 44, padding: 8, textAlign: 'left', fontSize: 14 }}>
       {task.target?.target?.label || 'Platform request'} · {task.state.replaceAll('_', ' ')}
     </button>)}
   </div>;
@@ -888,10 +964,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       const conversionId = attachmentConversionRef.current + 1;
       attachmentConversionRef.current = conversionId;
       setAttachmentBusy(true);
+      setAttachmentNotice(null);
       try {
-        const parts = await filesToImageParts(files, attachments.length);
-        if (attachmentConversionRef.current === conversionId && parts.length)
-          setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+        const { parts, failed, skipped } = await filesToImageParts(files, attachments.length);
+        if (attachmentConversionRef.current === conversionId) {
+          if (parts.length) setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+          setAttachmentNotice(attachmentProblem(failed, skipped));
+        }
       } finally {
         if (attachmentConversionRef.current === conversionId) {
           setAttachmentBusy(false);
@@ -1018,12 +1097,16 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         toggleThreads={toggleThreads}
         threads={threads}
         threadsLoading={threadsLoading}
+        historyFailed={historyFailed}
+        threadOpenError={threadOpenError}
+        retryHistory={loadThreads}
         openThread={openThread}
         accentColor={accentColor}
         appendTranscript={appendTranscript}
         dictationContext={dictationContext}
         attachments={attachments}
         attachmentsLoading={attachmentsLoading}
+        attachmentNotice={attachmentNotice}
         addAttachments={addAttachments}
         removeAttachment={removeAttachment}
       />
@@ -1138,33 +1221,35 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                   palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
                 />
               )}
-              {loading || attachmentsLoading ? (
+              {loading ? (
                 <div
                   style={{
                     padding: "5px 10px",
                     borderRadius: 6,
                     background: `${accentColor}22`,
                     color: accentColor,
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 500,
                     fontFamily: "JetBrains Mono, monospace",
                     animation: "pulse 1.5s ease infinite",
                   }}
                 >
-                  {loading ? "thinking..." : "attaching..."}
+                  thinking...
                 </div>
               ) : prompt.trim() ? (
                 <button
                   onClick={() => submit()}
+                  disabled={attachmentsLoading}
                   style={{
                     padding: "5px 12px",
                     borderRadius: 6,
                     background: accentColor,
                     color: D.white,
                     border: "none",
-                    fontSize: 12,
+                    fontSize: 14,
                     fontWeight: 700,
-                    cursor: "pointer",
+                    cursor: attachmentsLoading ? "not-allowed" : "pointer",
+                    opacity: attachmentsLoading ? 0.45 : 1,
                   }}
                 >
                   Go
@@ -1176,7 +1261,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                     borderRadius: 4,
                     background: D.bg,
                     border: `1px solid ${D.border}`,
-                    fontSize: 11,
+                    fontSize: 14,
                     color: D.muted,
                     fontFamily: "JetBrains Mono, monospace",
                   }}
@@ -1193,7 +1278,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               background: `${accentColor}15`,
               border: `1px solid ${accentColor}33`,
               color: accentColor,
-              fontSize: 11,
+              fontSize: 14,
               fontWeight: 500,
               whiteSpace: "nowrap",
             }}
@@ -1212,6 +1297,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             e.target.value = "";
           }}
         />
+        {/* Under the composer, not beside its buttons: at 14px the status
+            would cover typed text. */}
+        {attachmentsLoading && (
+          <div role="status" style={{ padding: "8px 18px 0", fontSize: 14, color: D.muted }}>
+            Attaching…
+          </div>
+        )}
         {attachments.length > 0 && (
           <AttachmentStrip
             attachments={attachments}
@@ -1219,11 +1311,16 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             border={D.border}
           />
         )}
+        {attachmentNotice && (
+          <div role="status" style={{ padding: "8px 18px", fontSize: 14, color: D.text }}>
+            {attachmentNotice}
+          </div>
+        )}
         {showThreads && !loading && (
           <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 14px" }}>
             <div
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 color: D.muted,
                 letterSpacing: "0.06em",
@@ -1234,7 +1331,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               Previous conversations
             </div>
             {taskHistory}
-            <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="dark" />
+            <ThreadList threads={threads} loading={threadsLoading} failed={historyFailed} openError={threadOpenError}
+              onRetry={loadThreads} onOpen={openThread} variant="dark" />
           </div>
         )}
         {!response && pendingActions.length === 0 && !loading && !showThreads && quickActions.length > 0 && (
@@ -1263,7 +1361,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                   background: "#FFFFFF",
                   border: `1px solid ${D.border}`,
                   color: "#000",
-                  fontSize: 12,
+                  fontSize: 14,
                   fontWeight: 500,
                   fontFamily: "'Roboto', system-ui, sans-serif",
                   cursor: "pointer",
@@ -1276,7 +1374,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                   e.target.style.borderColor = D.border;
                 }}
               >
-                {a.icon && <span style={{ fontSize: 13 }}>{a.icon}</span>}
+                {a.icon && <span style={{ fontSize: 14 }}>{a.icon}</span>}
                 {a.label}
               </button>
             ))}
@@ -1304,7 +1402,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }} aria-live="polite">
             {taskCard}
             {" "}
-            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
+            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" onNavigate={close} />
             <ChoiceButtons choices={shownChoices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
@@ -1337,7 +1435,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 border: `1px solid ${D.border}`,
                 borderRadius: 8,
                 color: D.text,
-                fontSize: 13,
+                fontSize: 14,
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
                 boxSizing: "border-box",
@@ -1353,7 +1451,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 color: D.white,
                 border: "none",
                 borderRadius: 8,
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 700,
                 cursor: "pointer",
                 opacity: prompt.trim() ? 1 : 0.4,
@@ -1369,7 +1467,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 border: `1px solid ${D.border}`,
                 borderRadius: 8,
                 color: D.muted,
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
               }}
@@ -1388,7 +1486,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           }}
         >
           {" "}
-          <span style={{ fontSize: 11, color: D.muted }}>
+          <span style={{ fontSize: 14, color: D.muted }}>
             {/* UI audit F0086: was 10px in the border colour — invisible */}
             Intelligence Bar — context: {contextLabel}
           </span>{" "}
@@ -1401,7 +1499,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 border: `1px solid ${showThreads ? accentColor + "55" : D.border}`,
                 borderRadius: 6,
                 color: showThreads ? accentColor : D.muted,
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
               }}
@@ -1411,7 +1509,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           )}
           <span
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.muted,
               fontFamily: "JetBrains Mono, monospace",
             }}
@@ -1468,12 +1566,16 @@ function MobileSheet({
   toggleThreads,
   threads,
   threadsLoading,
+  historyFailed,
+  threadOpenError,
+  retryHistory,
   openThread,
   accentColor,
   appendTranscript,
   dictationContext,
   attachments,
   attachmentsLoading,
+  attachmentNotice,
   addAttachments,
   removeAttachment,
 }) {
@@ -1558,7 +1660,7 @@ function MobileSheet({
             </div>{" "}
             <div
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: "#71717A",
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
@@ -1674,6 +1776,11 @@ function MobileSheet({
               padded={false}
             />
           )}{" "}
+          {attachmentNotice && (
+            <div role="status" style={{ paddingTop: 8, fontSize: 14, color: "#27272A" }}>
+              {attachmentNotice}
+            </div>
+          )}
           {(prompt.trim() || loading || attachmentsLoading) && <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             {" "}
             <button
@@ -1733,7 +1840,7 @@ function MobileSheet({
             taskCard
           )}
           {response && !loading && !showThreads && (
-            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
+            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" onNavigate={close} />
           )}
           {response && !loading && !showThreads && (
             <ChoiceButtons choices={choices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="light" />
@@ -1748,7 +1855,8 @@ function MobileSheet({
           {showThreads && !loading && (
             <Section label="Previous conversations">
               {taskHistory}
-              <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="light" />
+              <ThreadList threads={threads} loading={threadsLoading} failed={historyFailed} openError={threadOpenError}
+                onRetry={retryHistory} onOpen={openThread} variant="light" />
             </Section>
           )}
 
@@ -1800,7 +1908,7 @@ function MobileSheet({
                 style={{
                   padding: "32px 16px",
                   textAlign: "center",
-                  fontSize: 13,
+                  fontSize: 14,
                   color: "#71717A",
                 }}
               >
@@ -1817,12 +1925,12 @@ function MobileSheet({
 }
 
 // Attach (photo) control — square icon button sized to match DictationButton.
-function IntelligenceResponse({ response, activity, task, variant }) {
+function IntelligenceResponse({ response, activity, task, variant, onNavigate }) {
   const hasActions = task && (task.pendingActions?.length || task.receipts?.length);
   // "dark" is the Tier-2 D palette of the desktop modal; "light" is the
   // zinc shell used by the shared bar (ToolActivityList reads it the same way).
   const light = variant === "light";
-  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: light ? '#27272A' : D.text }}>{renderMarkdown(response)}</div>;
+  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: light ? '#27272A' : D.text }}>{renderMarkdown(response, onNavigate)}</div>;
   return <>
     {!hasActions && prose}
     {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: light ? '#52525B' : D.muted }}>
@@ -1912,6 +2020,21 @@ function AttachButton({ onClick, color, size = 30, disabled = false }) {
   );
 }
 
+// What to tell the operator about picked files that did not attach; null
+// when every file attached.
+function attachmentProblem(failed, skipped) {
+  const notes = [];
+  if (failed.length === 1) {
+    notes.push(`${failed[0]} could not be attached because it is not a readable image. Attach a JPG or PNG, or a screenshot of it.`);
+  } else if (failed.length) {
+    notes.push(`${failed.length} files could not be attached because they are not readable images. Attach JPGs or PNGs, or screenshots of them.`);
+  }
+  if (skipped) {
+    notes.push(`A question can carry ${MAX_ATTACHMENTS} photos; ${skipped} ${skipped === 1 ? "was" : "were"} not added.`);
+  }
+  return notes.length ? notes.join(" ") : null;
+}
+
 // Thumbnail strip for attached photos, with per-item remove.
 function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
   return (
@@ -1974,25 +2097,65 @@ function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
 
 // Previous-conversations picker rows. "dark" = desktop D-palette modal,
 // "light" = mobile sheet (rendered inside a Section card).
-function ThreadList({ threads, loading, onOpen, variant }) {
+// A failed list read (failed: { threads, tasks }) or open (openError) is said
+// above the rows and never shown as an empty history.
+function ThreadList({ threads, loading, failed, openError, onRetry, onOpen, variant }) {
   const light = variant === "light";
   const textColor = light ? "#18181B" : D.text;
   const mutedColor = light ? "#71717A" : D.muted;
+  const padding = light ? "14px 16px" : "8px 0";
+  const failedText = failed.threads && failed.tasks ? "History is temporarily unavailable."
+    : failed.threads ? "Previous conversations are temporarily unavailable."
+      : failed.tasks ? "Saved requests are temporarily unavailable." : null;
+  const notice = (failedText || openError) && (
+    <div role="status" style={{ padding, fontSize: 14, color: textColor }}>
+      {openError && <div>{openError}</div>}
+      {failedText && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+          <span>{failedText}{failed.threads && threads.length ? " This list may be out of date." : ""}</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{
+              minHeight: 44,
+              padding: "8px 12px",
+              background: "transparent",
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              color: textColor,
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+    </div>
+  );
   if (loading && threads.length === 0) {
     return (
-      <div style={{ padding: light ? "14px 16px" : "8px 0", fontSize: 13, color: mutedColor }}>
-        Loading…
-      </div>
+      <>
+        {notice}
+        <div style={{ padding, fontSize: 14, color: mutedColor }}>
+          Loading…
+        </div>
+      </>
     );
   }
   if (threads.length === 0) {
     return (
-      <div style={{ padding: light ? "14px 16px" : "8px 0", fontSize: 13, color: mutedColor }}>
-        No previous conversations yet.
-      </div>
+      <>
+        {notice}
+        {!failed.threads && (
+          <div style={{ padding, fontSize: 14, color: mutedColor }}>
+            No previous conversations yet.
+          </div>
+        )}
+      </>
     );
   }
-  return threads.map((t) => {
+  return <>{notice}{threads.map((t) => {
     const when = t.last_active_at
       ? formatETDateTime(t.last_active_at, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
       : "";
@@ -2027,18 +2190,18 @@ function ThreadList({ threads, loading, onOpen, variant }) {
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            fontSize: light ? 14 : 13,
+            fontSize: 14,
             color: textColor,
           }}
         >
           {t.title || "Conversation"}
         </span>
-        <span style={{ fontSize: light ? 12 : 11, color: mutedColor, whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 14, color: mutedColor, whiteSpace: "nowrap" }}>
           {where}{where && when ? " · " : ""}{when}
         </span>
       </button>
     );
-  });
+  })}</>;
 }
 
 function Section({ label, children }) {
@@ -2047,7 +2210,7 @@ function Section({ label, children }) {
       {" "}
       <div
         style={{
-          fontSize: 11,
+          fontSize: 14,
           fontWeight: 500,
           color: "#71717A",
           letterSpacing: "0.06em",

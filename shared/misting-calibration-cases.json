@@ -1,0 +1,559 @@
+{
+  "note": "Worked cases for the misting spray-rate math. Read by server/tests/misting-calibration-math.test.js and client/src/lib/mistingCalibrationMath.test.js so the two copies of the math cannot drift. productKey picks the product in shared/misting-products.json (null = an unknown product). refillCases: a refill's mix against a calibration already at its daily cap (47.5 fl oz); capFlOz is the cap at the refill's mix and mixInLabelRange is true when a known product's refill mix is inside its label range with 2% slack (always true for an unknown product).",
+  "cases": [
+    {
+      "name": "Sector at the label mix (64 in 55 gal): typical system, well under the limit",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 40,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 6000,
+        "treatedHeightFt": 8,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 44,
+        "treatedVolumeCuFt": 48000.0,
+        "outputFlOzPerCycle": 33.0,
+        "dailyOutputFlOz": 99.0,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 456.0,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "Sector at the strongest label mix (128 in 55 gal): the daily limit halves",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 40,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 6000,
+        "treatedHeightFt": 8,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 128,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 44,
+        "treatedVolumeCuFt": 48000.0,
+        "outputFlOzPerCycle": 33.0,
+        "dailyOutputFlOz": 99.0,
+        "strengthFactor": 2.0,
+        "labelDailyCapFlOz": 228.0,
+        "mixFlOzPerGal": 2.327,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "Sector at 96 in 55 gal: the daily limit is divided by 1.5",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 40,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 6000,
+        "treatedHeightFt": 8,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 96,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 44,
+        "treatedVolumeCuFt": 48000.0,
+        "outputFlOzPerCycle": 33.0,
+        "dailyOutputFlOz": 99.0,
+        "strengthFactor": 1.5,
+        "labelDailyCapFlOz": 304.0,
+        "mixFlOzPerGal": 1.745,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "Sector on a 10 gal tank at 11.6 fl oz: a weaker mix never raises the limit",
+      "input": {
+        "tankGallons": 10,
+        "nozzleCount": 40,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 6000,
+        "treatedHeightFt": 8,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 11.6,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 44,
+        "treatedVolumeCuFt": 48000.0,
+        "outputFlOzPerCycle": 33.0,
+        "dailyOutputFlOz": 99.0,
+        "strengthFactor": 0.9969,
+        "labelDailyCapFlOz": 456.0,
+        "mixFlOzPerGal": 1.16,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "over the label: 61.9 fl oz a day against 47.5",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 16,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.375,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 20,
+        "treatedVolumeCuFt": 5000.0,
+        "outputFlOzPerCycle": 20.625,
+        "dailyOutputFlOz": 61.875,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 47.5,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": false
+      }
+    },
+    {
+      "name": "boundary: exactly at the daily limit is allowed",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 19,
+        "treatedVolumeCuFt": 5000.0,
+        "outputFlOzPerCycle": 47.5,
+        "dailyOutputFlOz": 47.5,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 47.5,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "boundary: a hair over the daily limit is not allowed",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.501,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 19,
+        "treatedVolumeCuFt": 5000.0,
+        "outputFlOzPerCycle": 47.519,
+        "dailyOutputFlOz": 47.519,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 47.5,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": false
+      }
+    },
+    {
+      "name": "boundary at a stronger mix: 128 in 55 gal, 23.75 fl oz a day against 23.75",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.25,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 128,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 19,
+        "treatedVolumeCuFt": 5000.0,
+        "outputFlOzPerCycle": 23.75,
+        "dailyOutputFlOz": 23.75,
+        "strengthFactor": 2.0,
+        "labelDailyCapFlOz": 23.75,
+        "mixFlOzPerGal": 2.327,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "rounding: one-decimal volume, three-decimal outputs, daily taken before rounding the cycle",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 7,
+        "riserCount": 0,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 50,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 1234.5,
+        "treatedHeightFt": 7.5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 7,
+        "treatedVolumeCuFt": 9258.8,
+        "outputFlOzPerCycle": 5.833,
+        "dailyOutputFlOz": 17.5,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 87.959,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "large property, six short cycles",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 60,
+        "riserCount": 20,
+        "nozzleFlowFlOzPerMin": 0.5,
+        "cycleSeconds": 30,
+        "mistTimes": [
+          "05:30",
+          "08:00",
+          "11:00",
+          "15:00",
+          "19:00",
+          "22:00"
+        ],
+        "treatedAreaSqFt": 12000,
+        "treatedHeightFt": 10,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "expected": {
+        "emitters": 80,
+        "treatedVolumeCuFt": 120000.0,
+        "outputFlOzPerCycle": 20.0,
+        "dailyOutputFlOz": 120.0,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 1140.0,
+        "mixFlOzPerGal": 1.164,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "another product on a 15 gallon tank: no strength factor, the entered limit is used",
+      "input": {
+        "tankGallons": 15,
+        "nozzleCount": 12,
+        "riserCount": 0,
+        "nozzleFlowFlOzPerMin": 0.8,
+        "cycleSeconds": 20,
+        "mistTimes": [
+          "07:00",
+          "20:00"
+        ],
+        "treatedAreaSqFt": 2500,
+        "treatedHeightFt": 6,
+        "labelMaxFlOzPer1000CuFtDay": 4,
+        "concentrateFlOzPerTank": 17.45,
+        "productKey": null
+      },
+      "expected": {
+        "emitters": 12,
+        "treatedVolumeCuFt": 15000.0,
+        "outputFlOzPerCycle": 3.2,
+        "dailyOutputFlOz": 6.4,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 60.0,
+        "mixFlOzPerGal": 1.163,
+        "withinLabel": true
+      }
+    },
+    {
+      "name": "another product at a strong mix: still no strength factor",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 40,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 1.0,
+        "cycleSeconds": 45,
+        "mistTimes": [
+          "06:30",
+          "19:30",
+          "22:30"
+        ],
+        "treatedAreaSqFt": 6000,
+        "treatedHeightFt": 8,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 200,
+        "productKey": null
+      },
+      "expected": {
+        "emitters": 44,
+        "treatedVolumeCuFt": 48000.0,
+        "outputFlOzPerCycle": 33.0,
+        "dailyOutputFlOz": 99.0,
+        "strengthFactor": 1.0,
+        "labelDailyCapFlOz": 456.0,
+        "mixFlOzPerGal": 3.636,
+        "withinLabel": true
+      }
+    }
+  ],
+  "refillCases": [
+    {
+      "name": "at the cap, same mix as the calibration: allowed",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 64,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.1636,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "at the cap, stronger refill (70 in 55 gal): refused, the cap drops",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 70,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.2727,
+        "capFlOz": 43.429,
+        "withinLimit": false,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "at the cap, weaker refill (63 in 55 gal): allowed, the cap is not raised",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 63,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.1455,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "unknown product at the cap, stronger refill: refused",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": null
+      },
+      "refill": {
+        "concentrateFlOzAdded": 70,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.2727,
+        "capFlOz": 43.429,
+        "withinLimit": false,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "unknown product at the cap, weaker refill: allowed, the cap is not raised",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": null
+      },
+      "refill": {
+        "concentrateFlOzAdded": 50,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 0.9091,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "Sector refill below the label range (60 in 55 gal): outside the range",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 60,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.0909,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": false
+      }
+    },
+    {
+      "name": "Sector refill above the label range (135 in 55 gal): outside the range and over the cap",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 135,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 2.4545,
+        "capFlOz": 22.519,
+        "withinLimit": false,
+        "mixInLabelRange": false
+      }
+    }
+  ]
+}

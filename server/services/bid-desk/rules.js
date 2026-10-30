@@ -122,6 +122,37 @@ function daysLeft(dueAt, now = new Date()) {
   return Math.round((toUtcDay(dueAt) - toUtcDay(now)) / DAY_MS);
 }
 
+// ---------- work we do not do ----------
+
+// GATE_BID_DESK_NOT_OUR_WORK (owner 2026-10-29): "we are a lawn care, as in herbicide, micronutrients, fertilizer, lawn pest
+// control, we dont mow". Waves never bids grounds upkeep. A title that names upkeep and none of our work is not our work;
+// a title that names neither is filed as always.
+const UPKEEP_WORDS = new RegExp(`\\b(?:${[
+  'mow(?:s|ing|ed|ers?)?', 'edg(?:e|es|ing)', 'trim(?:s|ming|med|mers?)?', 'weed[\\s-]*eat(?:ing|er|ers)?', 'blow(?:ing)?',
+  'litter(?:\\s+(?:pick[\\s-]*up|removal))?', 'debris\\s+removal', 'pressure[\\s-]*wash(?:ing)?', 'prun(?:e|es|ing)', 'mulch(?:ing)?',
+  'sod', 'planting', 'hedges?', 'tree\\s+(?:trim\\w*|removal|work|services?)', 'grounds[\\s-]*maintenance', 'grounds[\\s-]*keeping',
+  'groundskeeping', 'landscap(?:e|ing)\\s+maintenance', 'lawn\\s+maintenance', 'lot\\s+(?:maintenance|clearing)',
+  'right[\\s-]*of[\\s-]*way\\s+maintenance', 'row\\s+maintenance', 'janitorial', 'irrigation\\s+(?:repair|maintenance)',
+].join('|')})\\b`, 'i');
+// Two-word names allow a space or a hyphen ("Weed-Control", "Fire-Ant"): a hyphenated name of our work must keep the bid.
+const OUR_WORK_WORDS = new RegExp(`\\b(?:${[
+  'herbicides?', 'pesticides?', 'insecticides?', 'fungicides?', 'weed[\\s-]+control', 'weed[\\s-]+spraying', 'spray(?:ing)?', 'chemical',
+  'fertiliz\\w*', 'micro[\\s-]*nutrients?', 'nutrients?', 'pests?', 'pest[\\s-]+control', 'termites?', 'mosquito(?:es)?', 'rodents?', 'rats?',
+  'exterminat\\w*', 'fumigat\\w*', 'insects?', 'fire[\\s-]+ants?', 'chinch', 'grubs?', 'mole[\\s-]+crickets?', 'ipm', 'integrated[\\s-]+pest',
+  'vegetation[\\s-]+control', 'aquatic[\\s-]+weed', 'turf[\\s-]+treatment', 'lawn[\\s-]+treatment',
+].join('|')})\\b`, 'i');
+const NOT_OUR_WORK_NOTE = 'Not our work: mowing, edging or trimming (owner 2026-10-29).';
+
+/**
+ * True when the title names grounds-upkeep work and none of our work. Pure; empty or non-string input is false.
+ * The caller checks GATE_BID_DESK_NOT_OUR_WORK and never applies it to a bid a person marked by hand.
+ */
+function notOurWork(title) {
+  const t = typeof title === 'string' ? title : '';
+  return UPKEEP_WORDS.test(t) && !OUR_WORK_WORDS.test(t);
+}
+
 module.exports = {
   attachPatch, reminderDue, datesDue, daysLeft, lapsedBid, OPEN_STATUSES, FILL_FIELDS, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS,
+  notOurWork, NOT_OUR_WORK_NOTE,
 };

@@ -20,14 +20,14 @@ const SAVED = [
   { service_category: 'lawn', home_technician_id: 'tech-adam', gap_technician_id: null },
 ];
 
-function setup({ enabled = true, role = 'admin' } = {}) {
+function setup({ enabled = true, role = 'admin', mode = 'shadow' } = {}) {
   localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
   const calls = [];
   const showToast = vi.fn();
   vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
     calls.push({ url: String(url), method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
     if (String(url).endsWith('/service-lines')) {
-      return Promise.resolve({ ok: true, json: async () => ({ mode: 'shadow', lines: SAVED, success: true }) });
+      return Promise.resolve({ ok: true, json: async () => ({ mode, lines: SAVED, success: true }) });
     }
     return Promise.resolve({
       ok: true,
@@ -91,5 +91,16 @@ describe('TeamTab service lines', () => {
     expect(put.body.lines.find((l) => l.service_category === 'general')).toEqual({
       service_category: 'general', home_technician_id: 'tech-new', gap_technician_id: 'tech-adam',
     });
+  });
+
+  it('says what the map does: records only in shadow, places new bookings in live', async () => {
+    setup();
+    const shadowCard = await screen.findByRole('region', { name: 'Service lines' });
+    await waitFor(() => expect(within(shadowCard).getByText(/changes no booking/)).toBeInTheDocument());
+    cleanup();
+    setup({ mode: 'live' });
+    const liveCard = await screen.findByRole('region', { name: 'Service lines' });
+    await waitFor(() => expect(within(liveCard).getByText(/go to its home technician, else its gap technician/)).toBeInTheDocument());
+    expect(within(liveCard).queryByText(/changes no booking/)).not.toBeInTheDocument();
   });
 });

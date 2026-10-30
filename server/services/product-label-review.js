@@ -10,7 +10,8 @@ const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { recordAuditEvent } = require('./audit-log');
-const { findEpaLabel, currentEpaSourceStatus, labelError } = require('./epa-product-label');
+const { findEpaLabel, labelError } = require('./epa-product-label');
+const { freshEpaSourceStatus } = require('./epa-label-check-keep');
 const { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct, reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
 const {
   RATE_FACTS_SCHEMA, RATE_SYSTEM, rateProductSnapshot, sameRateProduct, rateFactsError, rateGateOn, reviewedRates, checkReviewedRateSources,
@@ -204,8 +205,9 @@ async function decideLabelReview(productId, actorId, { candidateId, decision, id
   const product = await productById(productId);
   const draft = currentDraft(product, candidateId, decision, spec);
   if (decision === 'approve') {
-    const sourceStatus = await currentEpaSourceStatus(draft.source, { refresh: true });
+    const sourceStatus = await freshEpaSourceStatus(draft.source);
     if (sourceStatus === 'unavailable') throw labelError('EPA source is unavailable. Try again later.', 502);
+    if (sourceStatus === 'inactive') throw labelError('EPA lists this registration as cancelled or its label as removed. Check the product before approval.', 409);
     if (sourceStatus !== 'current') throw labelError('The source document changed. Extract it again before approval.', 409);
   }
   return db.transaction(async (trx) => {

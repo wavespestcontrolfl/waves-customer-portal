@@ -4,14 +4,15 @@
  * whose lines name it for a tank spray, on one odds table (caution above 60%). Owner 2026-10-29 ("i just want
  * to warn techs"): nothing holds; a reading past the 80% tier or a wind / temperature limit is a caution that
  * names it, and the dose always shows. Without rainRules the check is today's (job-card-service.test.js covers
- * that path).
+ * that path). Owner 2026-10-30 (A, A, A): label wind lines at each label's own number, and the fertilizer
+ * heavy-rain and Green Flo heat lines, are cautions too.
  */
 const jobCard = require('../services/job-card');
-const { LABEL_RAIN_RULES, labelRainRuleFor } = require('../config/label-rain-rules');
+const { LABEL_RAIN_RULES, NAMED_RULES, labelRainRuleFor } = require('../config/label-rain-rules');
 const { recordSprayRainShadow, _test: shadowTest } = require('../services/spray-rain-rule-shadow');
 
 const { buildSprayCheck } = jobCard;
-const { weatherIssue, wavesRainRule } = jobCard._test;
+const { weatherIssue, wavesRainRule, rainRulesFor } = jobCard._test;
 
 // A 2:00 pm ET start (18:00Z). Hours are the NWS hourly rows the card reads.
 const NOW = new Date('2026-09-04T18:00:00Z');
@@ -25,18 +26,20 @@ const alpine = { id: 'a', name: 'Alpine WSG', category: 'insecticide', epa_reg_n
 const celsius = { id: 'c', name: 'Celsius WG', category: 'herbicide', epa_reg_number: '101563-141', rainfast_minutes: 180, label_verified_at: '2026-05-28' };
 const PEST = 'Quarterly Pest Control Service';
 // The rain rules as the card builds them: each product's Waves rule from the services whose lines name it.
-const rulesOn = (products, ...services) => ({ waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(services)])) });
+const rulesOn = (products, ...services) => rainRulesFor(products, () => services);
 const check = (products, pops, services = [PEST]) => buildSprayCheck({ products, hourly: hours(pops), now: NOW, rainRules: rulesOn(products, ...services) });
 const verdict = (product, pops, services) => check([product], pops, services).verdicts[0];
 
 describe('label rain rules config', () => {
   test('every rule carries its label file and page, and quotes the label', () => {
-    for (const [reg, entry] of Object.entries(LABEL_RAIN_RULES)) {
-      expect(reg).toMatch(/^\d+-\d+(-\d+)?$/);
+    for (const reg of Object.keys(LABEL_RAIN_RULES)) expect(reg).toMatch(/^\d+-\d+(-\d+)?$/);
+    // A product with no EPA number (a fertilizer) is matched by a name pattern, never a stateful /g one.
+    for (const { name } of NAMED_RULES) expect(name.global).toBe(false);
+    for (const entry of [...Object.values(LABEL_RAIN_RULES), ...NAMED_RULES.map((named) => named.rule)]) {
       // The EPA PPLS file, or the company's current label URL with the day it was read.
       if (/^https:\/\//.test(entry.label)) expect(entry.read).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       else expect(entry.label).toMatch(/^\d{6}-\d{5}-\d{8}\.pdf$/);
-      const rules = ['duringRain', 'dryBeforeRain', 'waterIn', 'heat'].filter((k) => entry[k]);
+      const rules = ['duringRain', 'dryBeforeRain', 'waterIn', 'heat', 'wind', 'heavyRain'].filter((k) => entry[k]);
       expect(rules.length).toBeGreaterThan(0);
       for (const k of rules) {
         expect(Number.isInteger(entry[k].page)).toBe(true);
@@ -48,6 +51,10 @@ describe('label rain rules config', () => {
         expect(entry.heat.text.length).toBeGreaterThan(5);
         expect(entry.heat.action.length).toBeGreaterThan(10);
       }
+      if (entry.wind) {
+        expect(entry.wind.mph).toBeGreaterThan(0);
+        expect(entry.wind.services?.global ?? false).toBe(false);
+      }
     }
   });
 
@@ -55,6 +62,11 @@ describe('label rain rules config', () => {
     expect(labelRainRuleFor({ epa_reg_number: ' 91234-145 ' }).duringRain.quote).toBe('Do not make applications during rain.');
     expect(labelRainRuleFor({ epa_reg_number: '499-561' })).toBeNull();
     expect(labelRainRuleFor({})).toBeNull();
+    // No EPA number ('N/A' in the catalog): the fertilizer's name; a registered product never matches by name.
+    expect(labelRainRuleFor({ epa_reg_number: 'N/A', name: 'LESCO Green Flo Phyte Plus 0-0-26 + Micros Liquid Fertilizer' }).heavyRain.page).toBe(1);
+    expect(labelRainRuleFor({ epa_reg_number: null, name: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer' }).product).toBe('LESCO High Manganese Combo');
+    expect(labelRainRuleFor({ epa_reg_number: 'N/A', name: 'LESCO Green Flo 6-0-0 10% Ca' })).toBeNull();
+    expect(labelRainRuleFor({ epa_reg_number: '499-561', name: 'Green Flo Phyte Plus' })).toBeNull();
   });
 });
 
@@ -94,11 +106,25 @@ describe('buildSprayCheck with rain rules', () => {
     expect(verdict(deltaDust, [65, 0, 0])).toMatchObject({ verdict: 'caution', source: 'label' });
   });
 
-  test('a label dry-before-rain advice is a caution only, and a gap in it is not "unknown"', () => {
-    expect(verdict(sedgehammer, [0, 0, 0, 95, 0]).verdict).toBe('caution');
-    expect(verdict(sedgehammer, [0, 0, 0, 95, 0]).reason).toBe('rain 95% within 4 h — label advises 4 h to dry');
+  test('a label dry-before-rain advice is a caution, the Warning level above 80%, and a gap in it is not "unknown"', () => {
+    expect(verdict(sedgehammer, [0, 0, 0, 65, 0])).toMatchObject({ verdict: 'caution', source: 'label advice', reason: 'rain 65% within 4 h — label advises 4 h to dry', action: 'Spray it first.' });
+    expect(verdict(sedgehammer, [0, 0, 0, 65, 0])).not.toHaveProperty('level');
+    // Label audit 2026-10-30: the label's own dry time warns like the Waves rule does.
+    expect(verdict(sedgehammer, [0, 0, 0, 95, 0])).toMatchObject({ verdict: 'caution', level: 'warning', reason: 'rain 95% within 4 h — label advises 4 h to dry', action: 'Skip it today and note why, or plan a re-treat.' });
     expect(verdict(sedgehammer, [0, 0, 0, 0, 95]).verdict).toBe('ok');
     expect(verdict(sedgehammer, [0, null, 0, 0]).verdict).toBe('ok');
+  });
+
+  test('label audit 2026-10-30: Merit 2F waters in; a mosquito dunk tablet and a surfactant get no Waves dry time', () => {
+    const merit = { id: 'm', name: 'Merit 2F', category: 'insecticide', formulation: 'flowable', rate_unit: 'fl_oz', epa_reg_number: '101563-60', label_verified_at: '2026-01-01' };
+    expect(verdict(merit, [95, 95, 95, 95, 95], ['Every 6 Weeks Lawn Care Service'])).toEqual({ productId: 'm', verdict: 'ok', reason: null });
+    const dunks = { id: 'k', name: 'Summit Mosquito Dunk Tablets', category: 'mosquito', formulation: 'tablet', application_method: 'spot_treatment', epa_reg_number: '6218-87', label_verified_at: '2026-01-01' };
+    expect(verdict(dunks, [95, 95, 95], ['Mosquito Barrier Treatment']).verdict).toBe('ok');
+    const nis = { id: 'n', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', formulation: 'liquid adjuvant', epa_reg_number: 'N/A', label_verified_at: '2026-01-01' };
+    expect(verdict(nis, [95, 95, 95], [PEST]).verdict).toBe('ok');
+    expect(verdict(nis, [95, 95, 95, 95, 95], ['Monthly Lawn Care Service']).verdict).toBe('ok');
+    // A real spray beside them still gets its Waves dry time.
+    expect(verdict(alpine, [0, 95], [PEST])).toMatchObject({ verdict: 'caution', level: 'warning', source: 'Waves rule' });
   });
 
   test('a water-in product and a non-spray get no rain check', () => {
@@ -180,6 +206,56 @@ describe('buildSprayCheck with rain rules', () => {
     expect(buildSprayCheck({ products: [hotCelsius], hourly: hours([0, 0, 0, 0], { temperatureF: 92 }), now: NOW }).verdicts[0].verdict).toBe('ok');
   });
 
+  test('label wind lines (owner 2026-10-30): each label\'s own number, at the start hour and the next one', () => {
+    const WIND_ACTION = 'Check the wind at the nozzle. Do not spray if it drifts onto beds.';
+    const windAt = (product, winds, services) => buildSprayCheck({
+      products: [product], hourly: hours([0, 0, 0, 0, 0]).map((h, i) => ({ ...h, windMph: winds[i] ?? 5 })), now: NOW, rainRules: rulesOn([product], ...services),
+    }).verdicts[0];
+    const LAWN = ['Every 6 Weeks Lawn Care Service'];
+    const artavia = { id: 'v', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', epa_reg_number: '91234-74' };
+    expect(windAt(artavia, [15, 15], LAWN).verdict).toBe('ok');
+    expect(windAt(artavia, [12, 16], LAWN)).toEqual({
+      productId: 'v', verdict: 'caution', reason: 'wind 16 mph at 3 pm — label: no spraying above 15 mph', kind: 'wind', source: 'label', at: null, action: WIND_ACTION,
+    });
+    // 4 pm is past the tech's two hours on site.
+    expect(windAt(artavia, [5, 5, 25], LAWN).verdict).toBe('ok');
+    // Scion's line is "15 mph or greater".
+    const scion = { id: 'n', name: 'Scion Insecticide', category: 'insecticide', formulation: 'CS', epa_reg_number: '101563-363' };
+    expect(windAt(scion, [15], ['Mosquito Barrier Treatment'])).toMatchObject({ verdict: 'caution', reason: 'wind 15 mph at 2 pm — label: no broadcast spraying at 15 mph or more' });
+    // Cyper TC's 10 mph line is for on-grade termite sprays: none on a pest visit, a caution on a termite visit.
+    const cyper = { id: 'y', name: 'Cyper TC', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-92' };
+    expect(windAt(cyper, [14, 14], [PEST]).verdict).toBe('ok');
+    expect(windAt(cyper, [14, 14], ['Termite Treatment'])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 14 mph at 2 pm — label: no on-grade spraying above 10 mph' });
+    // A catalog wind limit as well: one line, the label's.
+    const bifen = { id: 'b', name: 'Bifen XTS', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-189', max_wind_mph: 15, label_verified_at: '2026-05-28' };
+    expect(windAt(bifen, [18], [PEST]).reason).toBe('wind 18 mph at 2 pm — label: no spraying above 10 mph');
+  });
+
+  test('fertilizer lines (owner 2026-10-30): heavy rain is the start hour\'s storm words on the same odds tiers; Green Flo heat', () => {
+    const STORM = 'Apply it after the storm passes, or on another day.';
+    const LAWN = ['Every 6 Weeks Lawn Care Service'];
+    const greenFlo = { id: 'g', name: 'LESCO Green Flo Phyte Plus 0-0-26 + Micros Liquid Fertilizer', category: 'fertilizer', formulation: 'liquid', epa_reg_number: 'N/A', label_verified_at: '2026-01-01' };
+    const dimension = { id: 'd', name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', category: 'herbicide', formulation: 'granular', epa_reg_number: '10404-87' };
+    const storm = (product, pop, words) => buildSprayCheck({
+      products: [product], hourly: hours([pop, 0, 0, 0, 0]).map((h, i) => (i === 0 ? { ...h, shortForecast: words } : h)), now: NOW, rainRules: rulesOn([product], ...LAWN),
+    }).verdicts[0];
+    expect(storm(greenFlo, 70, 'Showers And Thunderstorms Likely')).toEqual({
+      productId: 'g', verdict: 'caution', reason: 'rain 70% at 2 pm, showers and thunderstorms likely — label: do not apply if heavy rain is expected', kind: 'rain', source: 'label', at: '2 pm', action: STORM,
+    });
+    expect(storm(greenFlo, 85, 'Thunderstorms')).toMatchObject({ verdict: 'caution', level: 'warning', source: 'label', action: STORM });
+    expect(storm(greenFlo, 60, 'Chance Showers And Thunderstorms').verdict).toBe('ok');
+    // Showers with no storm word are not heavy rain: the lawn Waves rule says it instead.
+    expect(storm(greenFlo, 70, 'Rain Showers Likely')).toMatchObject({ verdict: 'caution', source: 'Waves rule' });
+    // A water-in granule gets this line only. The backup forecast has no words: no line, and not "unknown".
+    expect(storm(dimension, 70, 'Heavy Rain')).toMatchObject({ verdict: 'caution', source: 'label', action: STORM });
+    expect(storm(dimension, 95, null)).toEqual({ productId: 'd', verdict: 'ok', reason: null });
+    // Green Flo's label: not on foliage above 90°F.
+    const hot = buildSprayCheck({ products: [greenFlo], hourly: hours([0, 0, 0, 0, 0]).map((h, i) => ({ ...h, temperatureF: i === 1 ? 92 : 88 })), now: NOW, rainRules: rulesOn([greenFlo], ...LAWN) }).verdicts[0];
+    expect(hot).toEqual({
+      productId: 'g', verdict: 'caution', reason: '92°F at 3 pm — label: no spraying on leaves above 90°F', kind: 'temperature', source: 'label', at: null, action: 'Spray it in a cooler hour, or on another day.',
+    });
+  });
+
   test('a reviewed label with only conditional restrictions stays unknown when nothing else applies', () => {
     // An approved review (GATE_LABEL_PIPELINE) whose four facts are conditional: no numeric limit, unresolved.
     const conditional = { status: 'conditional', value: null, quote: 'Do not apply if rain is expected (sites vary).', page: 3, note: 'Site-specific.' };
@@ -223,11 +299,13 @@ describe('the Dispatch weather chip', () => {
     expect(chip([talak], [65, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm' });
     expect(chip([alpine], [0, 85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
     expect(chip([alpine], [0, 65])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
-    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
+    expect(chip([sedgehammer], [0, 0, 70])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
     expect(chip([celsius], [0, 85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
     // The product goes on the chip, and a Warning beats an earlier product's caution.
-    const names = new Map([['a', 'Alpine WSG'], ['s', 'Sedgehammer Plus']]);
-    expect(weatherIssue(check([sedgehammer, alpine], [0, 85, 95]), true, names)).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Alpine WSG' });
+    const names = new Map([['t', 'Atticus Talak 7.9 F'], ['s', 'Sedgehammer Plus']]);
+    // Talak: 65% at the start (a caution); Sedgehammer: 85% at 5 pm, inside its 4 h (a Warning).
+    expect(weatherIssue(check([talak, sedgehammer], [65, 0, 0, 85]), true, names)).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Sedgehammer Plus' });
     const windy = { ...celsius, max_wind_mph: 10 };
     const hot = { ...celsius, max_temp_f: 95 };
     expect(weatherIssue(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }), true))
@@ -241,7 +319,7 @@ describe('the Dispatch weather chip', () => {
 
   test('a caution comes before "Weather unknown" (a missing forecast), and other days wait', () => {
     // Talak has no start-hour reading (unknown); Sedgehammer's rain is still said.
-    expect(chip([talak, sedgehammer], [null, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([talak, sedgehammer], [null, 0, 70])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
     expect(chip([talak], [null])).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
     expect(chip([talak], [10], false)).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
   });
@@ -300,6 +378,16 @@ describe('the tank search follows the same rule', () => {
     // Named by both, the stricter rule judges it.
     protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' };
     expect((await search()).sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule', level: 'warning', action: SKIP });
+  });
+
+  test('a label line for one kind of job reads the visit\'s services, as on the card (Cyper TC: termite only)', async () => {
+    process.env.GATE_SPRAY_RAIN_RULES = 'true';
+    const cyper = { id: 'p3', name: 'Cyper TC', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-92', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    tables.products_catalog = [cyper];
+    const windy = async () => (await jobCard.mixForProduct('p3', 2, { serviceId: 'svc1', dbh, deps: { getHourly: async () => hours([0, 0, 0, 0], { windMph: 14 }) }, now: NOW })).sprayCheck;
+    expect(await windy()).toEqual({ verdict: 'ok', reason: null });
+    tables.scheduled_services = [{ ...visit, service_type: 'Termite Treatment' }];
+    expect(await windy()).toEqual({ verdict: 'caution', reason: 'wind 14 mph at 2 pm — label: no on-grade spraying above 10 mph', action: 'Check the wind at the nozzle. Do not spray if it drifts onto beds.' });
   });
 });
 

@@ -121,3 +121,22 @@ test('a failed day-count read keeps the labeled slots', async () => {
   expect(out.slots[0].day_label).toBe('Wed Oct 28');
   expect(out.days[0].stops_booked).toBeNull();
 });
+
+test('a day listed through GATE_ROUTE_CHECK_LATE_DAYS says already_late; a clean day gets no flag and no note', async () => {
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      { rank: 1, date: '2026-10-28', start_time: '13:00', detour_minutes: 4, day_already_late: true },
+      { rank: 2, date: '2026-10-29', start_time: '10:00', detour_minutes: 9 },
+    ],
+    searched_dates: ['2026-10-24', '2026-10-28', '2026-10-29'],
+    total_feasible: 2,
+  });
+  const out = await search({ date_from: '2026-10-24', date_to: '2026-10-29' });
+  const byDate = Object.fromEntries(out.days.map((d) => [d.date, d]));
+  expect(byDate['2026-10-28']).toMatchObject({ feasible_slots: 1, already_late: true });
+  expect(byDate['2026-10-28'].note).toMatch(/already booked.*arrive after their windows.*no new late stop/);
+  expect(byDate['2026-10-29']).not.toHaveProperty('already_late');
+  expect(byDate['2026-10-29']).not.toHaveProperty('note');
+  expect(byDate['2026-10-24']).not.toHaveProperty('already_late');
+  expect(out.slots[0]).toMatchObject({ day_already_late: true });
+});

@@ -10922,8 +10922,11 @@ const InvoiceService = {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
+    // An invoice with no service date falls back to the Eastern day it was
+    // created (the date presets send Eastern from/to bounds); a bare
+    // created_at::date is the UTC day, so a 9 PM ET invoice read as tomorrow.
     const dateColumn =
-      "COALESCE(invoices.service_date, invoices.created_at::date)";
+      "COALESCE(invoices.service_date, (invoices.created_at AT TIME ZONE 'America/New_York')::date)";
     const invoiceDate = database.raw(dateColumn);
     const validDate = (value) =>
       typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);

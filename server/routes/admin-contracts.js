@@ -377,6 +377,14 @@ async function createShareLink(contractId, req) {
       error = { status: 400, message: `Cannot create a signing link for a ${contract.status} contract.` };
       return;
     }
+    // The public sign handler's eligibility, read from the locked rows (the
+    // customer row is held above): a link the customer could never sign is
+    // refused, not handed to staff as a fresh link and stamped sent.
+    const unsignable = await unsignableContractReason(contract, trx);
+    if (unsignable) {
+      error = { status: 409, message: unsignable };
+      return;
+    }
     expiresAt = await shareLinkExpiresAt(trx, contract);
     const now = new Date();
     const updated = await trx('customer_contracts')
@@ -407,10 +415,11 @@ const NOT_LIVE = 'This contract signing link is no longer live — remove it and
 // The public /:token/sign handler's own eligibility (GH Codex #3851 r2 P2):
 // an Auto Pay authorization whose payment method is gone answers 409 there,
 // a contract on an inactive customer 410 — a signing link the page cannot
-// complete is never texted. Read at the composer's seam AND again from the
-// locked rows at activation (r3 P2: a method deleted between the two waits
-// on the customer lock this activation then takes). Returns the refusal
-// message or null.
+// complete is never texted or minted. Read at the composer's seam, again
+// from the locked rows at activation (r3 P2: a method deleted between the
+// two waits on the customer lock this activation then takes), and by the
+// Link action's createShareLink under its locks. Returns the refusal
+// message (worded for both the composer and the Link action) or null.
 async function unsignableContractReason(contract, conn = db) {
   if (contract.contract_type === 'autopay_authorization') {
     const method = contract.payment_method_id
@@ -419,10 +428,10 @@ async function unsignableContractReason(contract, conn = db) {
         .whereNotNull('stripe_payment_method_id')
         .first('id')
       : null;
-    if (!method) return 'The payment method on this Auto Pay authorization is no longer available — remove the signing link and pick a method on the Contracts page first.';
+    if (!method) return 'The payment method on this Auto Pay authorization is no longer available — pick a method on the Contracts page and create a new authorization.';
   }
   const customer = await conn('customers').where({ id: contract.customer_id }).whereNull('deleted_at').first('id', 'active');
-  if (!customer || customer.active === false) return 'This contract belongs to an inactive customer — remove the signing link before sending.';
+  if (!customer || customer.active === false) return 'This contract belongs to an inactive customer, so it cannot be signed.';
   return null;
 }
 

@@ -57,6 +57,10 @@ function escapeLike(text) {
   return String(text).replace(/[\\%_]/g, (m) => `\\${m}`);
 }
 
+// GATE_LAWN_WIKI_PAUSE (owner 2026-10-30): no automatic AI page writes. Read
+// at call time; a partial feature-gates mock without the reader reads as off.
+const lawnWikiPaused = () => require('../config/feature-gates').lawnWikiPauseLive?.() === true;
+
 // Assessment-pairing recency windows. An unbounded pre/post lookup can pair
 // a treatment with an assessment from a different program season, producing
 // meaningless deltas. Bounds are generous on purpose — the lawn program runs
@@ -749,6 +753,12 @@ const AgronomicWiki = {
         // link; a transient failure leaves the columns null and the
         // early-return path above retries on the next link attempt.
         await backfillOutcomeWeather(outcome, post, treatmentDate, sr.created_at);
+        // Paused: flag the pages this outcome feeds instead of writing them,
+        // so the weekly refresh after a resume rewrites them.
+        if (lawnWikiPaused()) {
+          await AgronomicWiki.markOutcomePagesStale(outcome);
+          return;
+        }
         try {
           // Update product pages
           for (const p of productsApplied) {
@@ -1626,10 +1636,15 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
         .where({ stale_flag: false })
         .update({ stale_flag: true });
 
+      // GATE_LAWN_WIKI_PAUSE: steps 0-1 above still run (database only), so
+      // the stale flags stay current; steps 2-3 write no page while paused.
+      // The weekly marker keeps the cadence.
+      const paused = lawnWikiPaused();
+
       // 2. Refresh stale pages (up to 10 per run to control API costs).
       // Only categories with a refresh path — anything else would sit in the
       // stale list forever, permanently occupying refresh slots.
-      const stalePages = await db('knowledge_entries')
+      const stalePages = paused ? [] : await db('knowledge_entries')
         .where({ stale_flag: true })
         .whereIn('category', ['product', 'track', 'seasonal', 'condition'])
         .orderBy('last_data_update', 'asc')
@@ -1684,12 +1699,14 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
       // generation here withholds the marker like any stale-loop failure
       // (no_data is normal early in a month with no outcomes yet).
       const currentMonth = new Date().getMonth() + 1;
-      try {
-        const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
-        if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
-      } catch (err) {
-        failed++;
-        logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+      if (!paused) {
+        try {
+          const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
+          if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
+        } catch (err) {
+          failed++;
+          logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+        }
       }
 
       if (failed > 0 || reconcileFailed > 0) {
@@ -1704,6 +1721,14 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
           triggerType: 'weekly_cron_error',
         });
         return { refreshed, failed, reconcileFailed, staleFound: stalePages.length, error };
+      }
+
+      if (paused) {
+        await logUpdate('lint', null, 'Weekly refresh paused (GATE_LAWN_WIKI_PAUSE): stale flags updated, no pages written', {
+          triggerType: 'weekly_cron',
+        });
+        logger.info('[agronomic-wiki] Weekly refresh paused: no pages written');
+        return { refreshed: 0, staleFound: 0, paused: true };
       }
 
       await logUpdate('lint', null, `Weekly refresh: ${refreshed} stale pages refreshed, seasonal page updated for month ${currentMonth}`, {

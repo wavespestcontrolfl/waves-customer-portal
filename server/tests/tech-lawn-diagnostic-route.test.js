@@ -282,6 +282,16 @@ describe('tech lawn diagnostic analyze route', () => {
     expect(deriveOverallScore({ diagnosis: { findings: [{ severity: 'severe' }] } }, 100)).toBeLessThanOrEqual(39);
   });
 
+  test('deriveOverallScore with no posted score uses the worst finding, never 0', () => {
+    const moderate = { diagnosis: { findings: [{ severity: 'moderate' }, { severity: 'mild' }] } };
+    for (const none of [null, undefined, '', '  ']) expect(deriveOverallScore(moderate, none)).toBe(55);
+    expect(deriveOverallScore({ diagnosis: { findings: [{ severity: 'mild' }] } }, null)).toBe(85);
+    expect(deriveOverallScore({ diagnosis: { findings: [{ severity: 'severe' }] } }, null)).toBe(25);
+    // A real posted 0 still counts, and a posted score only lowers the ceiling.
+    expect(deriveOverallScore(moderate, 0)).toBe(0);
+    expect(deriveOverallScore(moderate, '40')).toBe(40);
+  });
+
   test('vision-fallback fungal finding is capped at low confidence so egress downgrades it', () => {
     const findings = buildFindingsFromVision({
       composite: { fungal_activity: 'moderate', observations: 'patchy browning' },

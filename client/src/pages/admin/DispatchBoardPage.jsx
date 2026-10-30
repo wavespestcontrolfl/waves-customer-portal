@@ -58,6 +58,7 @@ export default function DispatchBoardPage() {
     loading,
     error,
     refreshTechs,
+    boardStatus,
   } = useDispatchBoard();
 
   // Stable callback so memoized <TechCard>doesn't see a new prop on
@@ -190,6 +191,16 @@ export default function DispatchBoardPage() {
 
   return (
     <>
+      {(boardStatus === "reconnecting" || boardStatus === "stale") && (
+        <div
+          role="status"
+          className="bg-surface-page text-ink-secondary text-14 px-4 py-2 border-b border-zinc-200"
+        >
+          {boardStatus === "reconnecting"
+            ? "Reconnecting… The board may be out of date."
+            : "Updating the board…"}
+        </div>
+      )}
       {assignNotice && (
         <div
           role="status"

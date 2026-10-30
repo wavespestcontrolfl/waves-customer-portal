@@ -133,6 +133,55 @@ const KANBAN_STAGES = [
 ];
 const LEAD_SOURCES = LEAD_SOURCE_OPTIONS;
 
+// The Map plots every row matching the directory's current search and
+// filters, in 500-row server pages, up to MAP_MAX_PAGES pages. Pages load one
+// after another on the caller's AbortController signal; `isCurrent` lets a
+// superseded load stop between pages. `fetchPage` runs one list request with
+// the caller's signal. If page one fails the whole load fails (Retry card). If
+// a later page fails, the pages already read stay on the map with an error
+// notice and Retry, never a silently partial map.
+const MAP_PAGE_SIZE = 500;
+const MAP_MAX_PAGES = 10;
+
+function appendNewRows(rows, seen, incoming) {
+  for (const row of incoming) {
+    if (row?.id != null && seen.has(row.id)) continue;
+    if (row?.id != null) seen.add(row.id);
+    rows.push(row);
+  }
+}
+
+async function fetchMapPages(fetchPage, baseParams, isCurrent) {
+  const rows = [];
+  const seen = new Set();
+  let total = 0;
+  let totalPages = 1;
+  for (let pageNumber = 1; pageNumber <= Math.min(totalPages, MAP_MAX_PAGES); pageNumber += 1) {
+    const params = new URLSearchParams(baseParams);
+    params.set("page", String(pageNumber));
+    params.set("limit", String(MAP_PAGE_SIZE));
+    let data;
+    try {
+      data = await fetchPage(params);
+    } catch (e) {
+      // Page one failing, a superseded load or an abort is a whole-load
+      // failure (Retry card / silent stop). A later page failing keeps the
+      // pages already read and hands the error back for a notice with Retry.
+      if (pageNumber === 1 || e?.name === "AbortError" || !isCurrent()) throw e;
+      return { customers: rows, total, totalPages, partialError: e };
+    }
+    if (!isCurrent()) return { customers: [], total: 0, totalPages: 1 };
+    appendNewRows(rows, seen, Array.isArray(data) ? data : data?.customers || []);
+    total = Number(data?.total) || rows.length;
+    totalPages = Math.max(1, Number(data?.totalPages) || 1);
+  }
+  return { customers: rows, total, totalPages };
+}
+
+function loadCustomerPages(isMapLoad, fetchPage, params, isCurrent) {
+  return isMapLoad ? fetchMapPages(fetchPage, params, isCurrent) : fetchPage(params);
+}
+
 function LegacyCustomersPanel({ exportName, props = {} }) {
   const [Component, setComponent] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -1530,6 +1579,9 @@ function CustomerMapView({
   error,
   loadCustomers,
   customers,
+  totalCustomers,
+  loading,
+  partialError,
   openCustomerProfile,
 }) {
   return (
@@ -1554,10 +1606,33 @@ function CustomerMapView({
             </CardBody>
           </Card>
         ) : (
-          <LegacyCustomersPanel
-            exportName="CustomerMap"
-            props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
-          />
+          <>
+            {partialError && (
+              <div
+                role="alert"
+                className="mb-3 flex flex-wrap items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white p-3 text-ui-body text-alert-fg"
+              >
+                <span>
+                  {isRateLimitError(partialError)
+                    ? "Too many requests, so some customers did not load."
+                    : `Some customers did not load: ${partialError?.message || String(partialError)}`}{" "}
+                  Showing {customers.length} of {totalCustomers}.
+                </span>
+                <Button variant="primary" onClick={() => loadCustomers()}>
+                  Retry
+                </Button>
+              </div>
+            )}
+            <LegacyCustomersPanel
+              exportName="CustomerMap"
+              props={{
+                customers,
+                total: totalCustomers,
+                loading,
+                onSelect: (c) => openCustomerProfile(c.id),
+              }}
+            />
+          </>
         )}
       </div>
     )
@@ -1966,6 +2041,8 @@ export default function CustomersPageV2() {
   const [pipelineError, setPipelineError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Map only: a page after the first failed; the rows read so far stay shown.
+  const [mapPartialError, setMapPartialError] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const feedbackEnabled = searchParams.get("feedback") === "1";
   // Default is Directory on both mobile and desktop (list-first).
@@ -2330,6 +2407,7 @@ export default function CustomersPageV2() {
     loadAbortRef.current = ctrl;
     setLoading(true);
     setError(null);
+    setMapPartialError(null);
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
     if (filterStage !== "all") params.set("stage", filterStage);
@@ -2349,9 +2427,19 @@ export default function CustomersPageV2() {
     // Legacy, Map and overlay mode keep the single-scroll limit=500 contract.
     // The workspace Directory uses the selected size (server max: 500).
     params.set("limit", String(pageSize));
+    const isMapLoad = view === "map";
     // Ask for "Did you mean" rows: this page marks them (server gate decides).
-    params.set("suggest", "1");
-    adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
+    // The Map plots only rows that match, so it never asks for suggestions.
+    if (!isMapLoad) params.set("suggest", "1");
+    // One list request on this load's signal; the Map calls it once per page.
+    const request = loadCustomerPages(
+      isMapLoad,
+      (params) =>
+        adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal }),
+      params,
+      () => seq === loadSeqRef.current,
+    );
+    request
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
         const responseTotalPages = Math.max(1, Number(data?.totalPages) || 1);
@@ -2361,6 +2449,7 @@ export default function CustomersPageV2() {
         }
         hasLoadedRef.current = true;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
+        setMapPartialError(data.partialError || null);
         setTotalCustomers(data.total || 0);
         setApproximateCount(Number(data.approximateCount) || 0);
         setTotalPages(responseTotalPages);
@@ -2531,27 +2620,9 @@ export default function CustomersPageV2() {
       });
   const sorted = [...sortedExact, ...approximateCustomers];
 
-  const daysSince = (iso) => {
-    if (!iso) return null;
-    const ms = Date.now() - new Date(iso).getTime();
-    if (Number.isNaN(ms)) return null;
-    return Math.floor(ms / 86400000);
-  };
-  const filteredSorted = sorted.filter((c) => {
-    if (filterHasBalance && !((c.balanceOwed || 0) > 0)) return false;
-    if (filterCards === "has" && !((c.cardsOnFile || 0) > 0)) return false;
-    if (filterCards === "none" && (c.cardsOnFile || 0) > 0) return false;
-    if (filterLastVisited !== "all") {
-      const d = daysSince(c.lastServiceDate);
-      if (filterLastVisited === "never") {
-        if (d !== null) return false;
-      } else {
-        const max = parseInt(filterLastVisited, 10);
-        if (d === null || d > max) return false;
-      }
-    }
-    return true;
-  });
+  // The server applies every filter (balance, cards, last visited) before it
+  // counts and pages, so the sorted page is exactly what the count describes.
+  const filteredSorted = sorted;
 
   // Pipeline groups (for rendering V1 PipelineColumn)
   const pipelineGroups = {};
@@ -2806,6 +2877,9 @@ export default function CustomersPageV2() {
         error={error}
         loadCustomers={loadCustomers}
         customers={customers}
+        totalCustomers={totalCustomers}
+        loading={loading}
+        partialError={mapPartialError}
         openCustomerProfile={guardedOpenCustomerProfile}
       />
 

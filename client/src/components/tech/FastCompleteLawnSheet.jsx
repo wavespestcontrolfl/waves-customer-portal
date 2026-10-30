@@ -36,10 +36,10 @@
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
 //     With the context's `spotRules` (GATE_LAWN_SPOT_RULES, owner 2026-10-08) a
-//     spot-treatment row takes its area from the tech instead: quick sizes
-//     (100 / 250 / 500 / 1,000 sq ft) or a typed number, which figures the
-//     amount the same way, goes to /complete as areaValue (sqft), and is
-//     required (or a typed amount) before Complete. The weed products the
+//     spot-treatment row asks for the amount used (owner 2026-10-30) and takes
+//     an optional typed area, which figures the amount the same way when none
+//     is typed, goes to /complete as areaValue (sqft), and one of the two is
+//     required before Complete. The weed products the
 //     protocol ties together are ONE "Weed spots" entry (the context's
 //     `plannedProducts.weedMix`, decided on the server: the yearly cap, the
 //     surfactant by temperature) whose rows share one area control.
@@ -48,7 +48,7 @@
 //     the area; the Weed spots and Chinch entries take the place in the same tap that adds
 //     them, and a lawn's single known trouble area of the row's type is the default place).
 //     A place the yearly limits close for the row is off with the limit's words; Complete
-//     waits for a place the way it waits for an area, and goes to /complete as areaPlace.
+//     waits for a place the way it waits for an area, and goes to /complete as areaPlaces (a list: one spray on the Front and the Back is one row).
 //     A "Known trouble areas" line above the guide cards shows the lawn's areas, each with
 //     Clear and one confirm. Lib: lib/lawn-trouble-places.js; parts: LawnSpotPlace.jsx.
 //     With the context's `treatmentGuide` (GATE_LAWN_TREATMENT_GUIDE, owner 2026-10-08),
@@ -268,6 +268,7 @@ const chinchByPlace = (chinch) => {
     unreadableIds: Array.isArray(decision?.unreadableIds) ? decision.unreadableIds : [],
     ...(Array.isArray(decision?.blockedIds) ? { blockedIds: decision.blockedIds } : {}),
     ...(Array.isArray(decision?.limitedIds) ? { limitedIds: decision.limitedIds } : {}),
+    ...(decision?.limitMessages && typeof decision.limitMessages === 'object' && !Array.isArray(decision.limitMessages) ? { limitMessages: decision.limitMessages } : {}),
     ...(decision?.amountBlocked === true ? { amountBlocked: true } : {}),
   }]));
 };
@@ -275,12 +276,14 @@ const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
   const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
   const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
-  // The rungs a limit that was READ kept out, and of those the ones whose own limit forbids them (readForbiddenIds).
+  // The rungs a limit that was READ closed, and of those the ones whose own limit closes them (limitClosedIds).
   const blockedIds = Array.isArray(chinch?.blockedIds) ? chinch.blockedIds : [];
   const limited = Array.isArray(chinch?.limitedIds) ? { limitedIds: chinch.limitedIds } : {};
   const byPlace = chinchByPlace(chinch);
   const chinchOnlyIds = Array.isArray(chinch?.chinchOnlyIds) ? chinch.chinchOnlyIds : null;
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...limited, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
+  // Each limited rung's own words (an interval says how long to wait), for its warning when the guide's answer is not there.
+  const messages = chinch?.limitMessages && typeof chinch.limitMessages === 'object' && !Array.isArray(chinch.limitMessages) ? { limitMessages: chinch.limitMessages } : {};
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...limited, ...messages, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -443,6 +446,11 @@ const searchedIdsQuery = (refreshKey, idsRef, lead) => (refreshKey && idsRef?.cu
 // GATE_LAWN_TROUBLE_AREAS: what the guide's read found closed at each place, `{ [productId]: { [place]: message } }` (an empty entry =
 // open everywhere), or undefined when the answer carries none (then the context's map stands).
 const freshPlaceTypes = (data) => (data.placeBlockedTypes && typeof data.placeBlockedTypes === 'object' && !Array.isArray(data.placeBlockedTypes) ? data.placeBlockedTypes : undefined);
+// The products a yearly limit that was READ closes, `{ [lowercase productId]: the limit's own words }`: a warning, never a block
+// (owner 2026-10-30). An older server sends none.
+const freshLimitWarned = (data) => (data.limitWarned && typeof data.limitWarned === 'object' && !Array.isArray(data.limitWarned)
+  ? Object.fromEntries(Object.entries(data.limitWarned).filter(([, message]) => typeof message === 'string').map(([id, message]) => [id.toLowerCase(), message]))
+  : {});
 const freshPlaceBlocked = (data) => (data.placeBlocked && typeof data.placeBlocked === 'object' && !Array.isArray(data.placeBlocked) ? data.placeBlocked : undefined);
 
 // The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
@@ -486,7 +494,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', plan: planKey, guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+          setState({ for: assessmentId, status: 'answered', plan: planKey, guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], limitWarned: freshLimitWarned(data), unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
         } else failed();
       })
       .catch(() => { if (active) failed(); });
@@ -535,7 +543,8 @@ function cardOwnedIds(guide, checks) {
 // a product that belongs to a guide-governed kind (the weed group, the chinch rungs, and the month's
 // fungicide, caterpillar and dry-spot picks) may be ON the sheet only if the latest decision offers
 // it. The entry or card the latest decision offers adds the program's own row; the search adds a plain
-// row of any governed product a limit that was READ does not forbid (owner 2026-10-09). The latest
+// row of any governed product that is not blocked (owner 2026-10-09). A yearly limit is a warning, never a block
+// (owner 2026-10-30): a product at a limit is offered, kept on the sheet, and carries `limitWarned` words. The latest
 // decision is the fresh guide answer, or, when the read failed, the context's own decisions.
 //   governed  every such product            offered  what the latest decision lets onto the sheet
 //   hidden    kept out of the add-ons list (every governed product that is not released to the
@@ -545,12 +554,12 @@ function cardOwnedIds(guide, checks) {
 //             them held with CONFIRM_FIRST (no tap), so the tech sees the product and waits for the guide
 // A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
 // it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
-// card he dismissed. A blocked pick (a limit or a city hold that was READ) never is.
+// card he dismissed. A blocked pick (a city hold or the Group 11 hold) never is; a pick at a limit is.
 // A product whose limit read FAILED is UNREADABLE, not blocked: its entry or card offers nothing (we
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', limitWarned: new Map(), weedOffered: new Set(), chinchOffered: new Set() };
 
 // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
 function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
@@ -577,11 +586,10 @@ function hiddenIds({ governed, searchOnly, free, unreadable, owned }) {
   return governed.filter((id) => !searchOnly.includes(id) && ((!free.includes(id) && !unreadable.includes(id)) || owned.includes(id)));
 }
 
-// The products of one decision (the weed mix, the chinch ladder) whose OWN limit was READ as forbidding:
-// `key` names the decision's list of them. With places (GATE_LAWN_TROUBLE_AREAS) the limits are judged at
-// each place, so a product is forbidden only when every place forbids it: one open place keeps it in
-// the search, and the row's own place control and /complete judge the place.
-function ownForbiddenIds(decision, key) {
+// The products of one decision (the weed mix, the chinch ladder) whose OWN limit was READ: `key` names the decision's list of them.
+// With places (GATE_LAWN_TROUBLE_AREAS) the limits are judged at each place, so a product is limit-closed only when every place
+// closes it: one open place keeps it unwarned, and the row's own place control and /complete judge the place.
+function ownLimitIds(decision, key) {
   if (!decision) return [];
   const places = Object.values(decision.byPlace || {});
   if (!places.length) return lowerIds(decision[key]);
@@ -589,27 +597,45 @@ function ownForbiddenIds(decision, key) {
   return lists[0].filter((id) => lists.every((list) => list.includes(id)));
 }
 
-// The weed-group and chinch products the search leaves out: the ones their own read limit forbids (the
-// weed decision's blockedIds; the chinch decision's limitedIds, or blockedIds from a server that sends
-// none). A product an entry merely does not add (a member beside the replacement, the surfactant in the
-// heat, a clean rung behind a held one) is not forbidden, and neither is one whose limit could not be read.
-function readForbiddenIds({ weedMix, chinch }) {
+// A yearly limit is a WARNING, never a block (owner 2026-10-30, and the 09-28 ruling for every product_limits row): the weed-group
+// and chinch products whose own limit was read (the weed decision's blockedIds; the chinch decision's limitedIds, or blockedIds from a
+// server that sends none) stay in the search and on the sheet, with the limit's words. A product an entry merely does not add (a member
+// beside the replacement, the surfactant in the heat, a clean rung behind a held one) is not limit-closed, and neither is one whose
+// limit could not be read.
+const LIMIT_WARNING_FALLBACK = 'A yearly limit is reached for this product.';
+function limitClosedIds({ weedMix, chinch }) {
   const unreadable = lowerIds([
     ...(weedMix?.unreadableIds || []), ...(chinch?.unreadableIds || []),
     ...Object.values(chinch?.byPlace || {}).flatMap((place) => place?.unreadableIds || []),
   ]);
   const chinchKey = chinch && (Array.isArray(chinch.limitedIds) || Object.values(chinch.byPlace || {}).some((place) => Array.isArray(place?.limitedIds))) ? 'limitedIds' : 'blockedIds';
-  return [...ownForbiddenIds(weedMix, 'blockedIds'), ...ownForbiddenIds(chinch, chinchKey)].filter((id) => !unreadable.includes(id));
+  return [...ownLimitIds(weedMix, 'blockedIds'), ...ownLimitIds(chinch, chinchKey)].filter((id) => !unreadable.includes(id));
 }
 
-// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches
-// every governed product a limit that was READ does not forbid, whether or not an entry or a card also
-// offers it. The row it opens is a plain row; the entry and the card still add the program's own rows.
-// A weed or chinch product is judged by its own decision (readForbiddenIds); a pick by the answer's
-// blocked list. A product a check-only card holds (take-all found: check, do not treat) stays out as well.
-function searchReach({ governed, settled, blockedPicks, cardHeld, weedMix, chinch }) {
+// What the sheet says about a product a limit closes, `Map<lowercase id, words>`: the fresh answer's own words first, else the line above.
+// The decisions' own words (limitMessages) stand in when there is no answer, so the guide being off still warns.
+function limitWarnings({ guide, weedMix, chinch }) {
+  const words = new Map(Object.entries(guide?.limitWarned || {}).map(([id, message]) => [id.toLowerCase(), message]));
+  const decided = new Map(Object.entries({ ...(weedMix?.limitMessages || {}), ...(chinch?.limitMessages || {}) }).map(([id, message]) => [id.toLowerCase(), message]));
+  for (const id of limitClosedIds({ weedMix, chinch })) if (!words.has(id)) words.set(id, decided.get(id) || LIMIT_WARNING_FALLBACK);
+  return words;
+}
+
+// The line under a row of a product a yearly limit closes. The sheet still completes; the closeout tells the office.
+const LIMIT_WARNING_TAIL = 'You can still complete. The office gets an alert.';
+const limitRowNote = (gov, productId) => {
+  const words = gov.limitWarned.get(String(productId).toLowerCase());
+  return words ? `${words} ${LIMIT_WARNING_TAIL}` : '';
+};
+
+// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches every governed product
+// that is not blocked, whether or not an entry or a card also offers it. A limit never blocks (owner 2026-10-30): a product at a
+// limit is listed, and its row carries the limit's words. The row it opens is a plain row; the entry and the card still add the
+// program's own rows. A blocked pick (a city hold, the Group 11 hold) and a product a check-only card holds (take-all found:
+// check, do not treat) stay out.
+function searchReach({ governed, settled, blockedPicks, cardHeld }) {
   if (!settled) return [];
-  const forbidden = [...blockedPicks, ...readForbiddenIds({ weedMix, chinch }), ...cardHeld];
+  const forbidden = [...blockedPicks, ...cardHeld];
   return governed.filter((id) => !forbidden.includes(id));
 }
 
@@ -617,7 +643,10 @@ function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) {
     // The guide is off: no cards, no decision. The Group 11 rows the plan passed over are still held (out of the list and the search).
     const held = new Set(lowerIds(ctx.group11HeldProductIds));
-    return held.size ? { ...NO_GOVERNANCE, governed: held, hidden: held } : NO_GOVERNANCE;
+    // A capped weed or chinch product is in the search with the guide off too; the context's own decisions give its warning.
+    const limitWarned = limitWarnings({ guide: null, weedMix: ctx.weedMix, chinch: ctx.chinch });
+    if (!held.size && !limitWarned.size) return NO_GOVERNANCE;
+    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held } : {}) };
   }
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
@@ -652,7 +681,7 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // The answer's blocked list judges the picks only: for the weed group and the chinch rungs it follows one place and the entry's mode.
   const entryIds = [...weedGroup, ...lowerIds(chinch?.rungIds)];
   const blockedPicks = blocked.filter((id) => !entryIds.includes(id));
-  const searchable = [...searchReach({ governed, settled, blockedPicks, cardHeld, weedMix, chinch }), ...searchOnly];
+  const searchable = [...searchReach({ governed, settled, blockedPicks, cardHeld }), ...searchOnly];
   return {
     enabled: true,
     locked: !settled,
@@ -667,6 +696,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
     takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
+    // Closed only by a yearly limit that was read: a warning. Offered, never removed, never a hold on Complete.
+    limitWarned: limitWarnings({ guide: fresh, weedMix, chinch }),
     weedOffered: new Set(weedOffered),
     chinchOffered: new Set([...chinchItem, ...chinchCardIds]),
   };
@@ -677,8 +708,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
 function staleGuideRows(rows, gov) {
   return rows.filter((row) => {
     const id = String(row.productId).toLowerCase();
-    // An unreadable product cannot be called forbidden: its row stays.
-    if (gov.unreadable.has(id)) return false;
+    // An unreadable product cannot be called forbidden: its row stays. A yearly limit is a warning, never a block: so does its row.
+    if (gov.unreadable.has(id) || gov.limitWarned.has(id)) return false;
     return (gov.governed.has(id) && !gov.offered.has(id))
       || (row.guided === 'weeds' && !gov.weedOffered.has(id))
       || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
@@ -745,7 +776,14 @@ function plannedRate(planned) {
 // product has none and starts on its own default method.
 // The guide card or entry that opened a row (weeds, chinch, fungus, caterpillars, dry_spots), or
 // null; and the plan's notes for the product (a watering hold, a distance), which the row shows.
-const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
+// A tapped add-on's list line is short (method and rate); the plan's longer words for it, the
+// substitution and the protocol line, show on the row once it is added (protocolNote).
+const protocolNoteOf = (planned) => [planned?.substituteFor ? `In place of ${planned.substituteFor}` : '', planned?.line || ''].filter(Boolean).join(' · ');
+const guideRowFields = (planned, guided, added = false) => ({
+  guided: guided || null,
+  gateNotes: planned?.gateNotes || [],
+  ...(added && planned ? { protocolNote: protocolNoteOf(planned) } : {}),
+});
 
 function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
   const rawMethod = startMethodFor(product, planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn'));
@@ -766,7 +804,7 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     fromProtocol: added && !!planned,
     // One of the Weed spots entry's rows: they share one area (weedArea).
     weedGroup,
-    ...guideRowFields(planned, guided),
+    ...guideRowFields(planned, guided, added),
     // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
     method,
     dimension: seeded.dimension,
@@ -952,8 +990,7 @@ function derivedAmount(row, lawnSqft) {
   };
 }
 
-// Spot-area quick sizes (sq ft) offered beside the typed box.
-export const SPOT_AREA_SIZES = [100, 250, 500, 1000];
+const SPOT_AREA_LABEL = 'Area sprayed (sq ft), if you know it';
 
 const sameId = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
 const positiveNumber = (value) => (Number(value) > 0 ? Number(value) : null);
@@ -979,15 +1016,15 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
 }
 
 // GATE_LAWN_TROUBLE_AREAS: every spot row (the ones withSpotArea marked) also carries its place: the tech's tap (the weed
-// entry's rows share `weedPlace`), else the lawn's single known trouble area of its type, with the places the yearly limits
+// entry's rows share `weedPlaces`), else the lawn's single known trouble area of its type, with the places the yearly limits
 // close for it. See lib/lawn-trouble-places.js.
 // The places a take-all row from the guide card may go on: the card's own mapped places, else the lawn's known take-all areas.
 const takeAllPlacesOf = (guide, areas) => new Set(((guide?.cards || []).find((card) => Array.isArray(card.allowedPlaces))?.allowedPlaces) || (areas?.known || []).filter((area) => area.type === 'take_all').map((area) => area.place));
 
-function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll, takeAllPlaces }) {
+function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlaces, takeAll, takeAllPlaces }) {
   const weedRows = rows.filter((row) => row.spotRule && row.weedGroup);
   return rows.map((row) => (row.spotRule
-    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
+    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlaces : row.pickedPlaces, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
     : row));
 }
 
@@ -1062,7 +1099,7 @@ function useProductRows(ctx, catalog) {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
       // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
-      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
+      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, ...(place ? { pickedPlaces: [place] } : {}) },
     ]));
   }, [spotRules]);
   const removeRow = useCallback((productId) => {
@@ -1139,8 +1176,26 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
   return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
 }
 
-// The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
-const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
+// A place of a row (its first by default), in the closed list's own words (the label rides the row's chips; the id is the fallback).
+const areaLabelOf = (row, id = row.place) => row.placeLabels?.[id] || id;
+
+// A yearly limit is a warning, never a block (owner 2026-10-30): one line per product, in the limit's own words (which open with the
+// product's name), above the Complete button. A spray on several places names each place the limit warns at ("Front, Back"); places
+// with different words get a line each. The completion records the application and the office is told.
+function limitWarningsOf(rows) {
+  const lines = [];
+  for (const row of rows.filter((other) => other.placeRule && other.placeWarnings?.length)) {
+    const lead = `${row.name}:`;
+    const byWords = new Map();
+    for (const { place, text } of row.placeWarnings) {
+      const message = String(text).trim();
+      const words = message.startsWith(lead) ? message.slice(lead.length).trim() : message;
+      byWords.set(words, [...(byWords.get(words) || []), row.placeLabels?.[place] || place]);
+    }
+    for (const [words, labels] of byWords) lines.push(`${row.name}, ${labels.join(', ')}: ${words} ${LIMIT_WARNING_TAIL}`);
+  }
+  return [...new Set(lines)];
+}
 
 // GATE_LAWN_NEW_SOD_NOTE: the server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
@@ -1157,9 +1212,10 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
-  // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
+  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
+  // it here; a yearly limit is a warning on the footer (limitWarningsOf).
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
-  const missingPlace = rows.find((row) => row.placeRule && !row.place);
+  const missingPlace = rows.find((row) => row.placeRule && !row.places?.length);
   const [, reason = ''] = [
     // GATE_LAWN_NEW_SOD_NOTE: the rooted tick is being saved, or the holds could not be read again after it.
     [sodWait, sodWait],
@@ -1176,9 +1232,9 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
-    // A spot row needs the area treated or a typed amount (spot rules).
-    [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
-    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
+    // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
+    [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
+    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace, closedPlace.placeBlockPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
@@ -1262,7 +1318,7 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
         // A spot row's area, as the full form sends the plan's treatedSqft (spot rules).
         ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
         // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
-        ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
+        ...(row.placeRule && row.places?.length ? { areaPlaces: row.places, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
         ...targetBodyFields(row, ctx.spotTargets, { chinchTap }),
         // Gallons sprayed in place of an area: the server converts them with the product's staged carrier and records the area.
@@ -1656,7 +1712,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The weed mix's one shared area (spot rules): typed or picked once, it applies to every row of the entry.
   const [weedArea, setWeedArea] = useState('');
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
-  const [weedPlace, setWeedPlace] = useState('');
+  const [weedPlaces, setWeedPlaces] = useState('');
   // GATE_LAWN_MIX_HELP: the shared tank size and the weed entry's gallons sprayed.
   const mix = useMixHelp(sheetCtx.mixHelp, operatorId, submittedVisitArea({ propertyAreas: propertyAreas.data, lawnSqft, ctx }));
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
@@ -1670,10 +1726,10 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const rows = useMemo(
     () => {
       const spotted = products.rows.map((row) => withGallonsArea(withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }), mix));
-      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
+      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlaces, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlace, gov.takeAll, guide],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlaces, gov.takeAll, guide],
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
@@ -1715,18 +1771,16 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
-  // Every lawn product is in the search (owner 2026-10-09). The search leaves out only a governed product
-  // a limit that was READ forbids (the lead at its yearly limit, a chinch rung at its limit) and, before
-  // the guide has answered, every governed product: the taps wait, and so does the search.
+  // Every lawn product is in the search (owner 2026-10-09). The search leaves out only a governed product that
+  // is blocked (a city hold, the Group 11 hold) and, before the guide has answered, every governed product:
+  // the taps wait, and so does the search. A yearly limit only warns (owner 2026-10-30).
   const searchCatalog = useMemo(() => {
-    // With no guide for the visit the weed group follows the context's own decision.
-    const held = gov.enabled ? [] : readForbiddenIds({ weedMix, chinch: null });
     const hidden = (product) => {
       const id = String(product.id).toLowerCase();
-      return (gov.governed.has(id) && !gov.searchable.has(id)) || held.includes(id);
+      return gov.governed.has(id) && !gov.searchable.has(id);
     };
-    return held.length || gov.governed.size ? catalog.filter((product) => !hidden(product)) : catalog;
-  }, [catalog, weedMix, gov]);
+    return gov.governed.size ? catalog.filter((product) => !hidden(product)) : catalog;
+  }, [catalog, gov]);
   // Until the guide has answered, the search still lists the products it governs, held with the add-ons' own
   // line (CONFIRM_FIRST, no tap): the tech sees the product and waits, instead of taking a near match (owner
   // 2026-10-24: Arena 50 WDG was out of the search, so the Arena granules went on three visits).
@@ -1754,6 +1808,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
+  const limitWarnings = limitWarningsOf(rows);
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
@@ -1809,7 +1864,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1863,6 +1918,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
         submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
+        warnings={limitWarnings}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
@@ -1879,7 +1935,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1905,17 +1961,20 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
               row.sodSwap?.reason,
               sodRowNote(newSod, row.productId),
               /\bcelsius\b/i.test(String(row.name || '')) ? ctx.carpetgrassCelsiusWarning : '',
+              // A row on a place takes that place's verdict (a limit there is on the footer, limitWarningsOf); the guide's
+              // lawn-wide words follow one place and are only for a row with no place yet.
+              row.placeRule && row.place ? '' : limitRowNote(gov, row.productId),
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
           >
             <RowMixHelp row={row} mix={mix} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
-            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
+            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(places) => updateRow(row.productId, { pickedPlaces: places })} /> : null}
             <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} chinchTap={chinchTap} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
           </ProductEditor>
           {row === areaHost && (
             <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>
-              {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} /> : null}
+              {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlaces} /> : null}
               <WeedMixHelp mix={mix} rows={rows.filter((other) => other.weedGroup && other.spotRule)} surfactant={surfactantNote} locked={locked} onWeedArea={onWeedArea} />
             </SpotAreaControl>
           )}
@@ -2033,16 +2092,14 @@ function ProtocolAddOns({ newSod = null, addOns, month, weedMix = null, chinch =
   );
 }
 
-// One opt-in product of the month: its name, the protocol's own words for it, and its tap.
+// One opt-in product of the month: its name, how and at what rate it goes down, and its tap.
 function AddOnLine({ item, sod, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
   const look = sodAddLook(sod);
   const why = [
     // GATE_LAWN_NEW_SOD_NOTE: the hold's reason (or the part-of-lawn skip note) leads the line.
     sodWords(sod),
-    item.substituteFor ? `In place of ${item.substituteFor}` : '',
-    item.line || '',
-    ...(item.gateNotes || []),
+    // Short on purpose (owner 2026-10-30): the protocol line, the substitution and the gate notes show on the row once added.
     item.applicationMethod ? methodLabel(item.applicationMethod) : '',
     rate,
     // A product whose limit read failed is never silent: the one wording says what to do.
@@ -2295,18 +2352,14 @@ function ChinchFoundEntry({ newSod, chinch, catalog, places, labels, on, locked,
   );
 }
 
-// The area a spot row went down on: quick sizes and a typed box (owner 2026-10-08).
+// The area a spot row went down on: one optional box (owner 2026-10-30). The tech fills in the
+// amount he used; an area, when he knows it, figures the amount if he left it empty.
 function SpotAreaControl({ title = null, value, locked, onChange, children = null }) {
   const areaId = useId();
   return (
-    <div role="group" aria-label={title || 'Area treated'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
+    <div role="group" aria-label={title || 'Area sprayed'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
       {title && <p className="tech-product-editor-label">{title}</p>}
-      <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>
-      <div className="tech-visit-tile-grid">
-        {SPOT_AREA_SIZES.map((size) => (
-          <Chip disabled={locked} key={size} label={`${size.toLocaleString('en-US')} sq ft`} pressed={Number(value) === size} onClick={() => onChange(String(size))} />
-        ))}
-      </div>
+      <label htmlFor={areaId} className="tech-product-editor-label">{SPOT_AREA_LABEL}</label>
       <Input
         id={areaId}
         className="tech-visit-control tech-product-amount-input"
@@ -2332,6 +2385,15 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
   // is "planned area". Only a method that needs square feet shows one.
   const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : null;
   const areaText = area ? `${area === lawnSqft ? 'Whole lawn' : 'Planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
+  const amountBlock = (
+    <>
+      <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+      {/* A weed-mix row reads the entry's shared area; any other spot row asks for its own, here, after the amount. */}
+      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value, spotGallons: '' })} />}
+      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
+      {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
+    </>
+  );
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
@@ -2339,17 +2401,15 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.fromProtocol ? 'from the protocol' : row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
+      {/* Spot rules: the amount used comes first, right under How; the area is optional. */}
+      {row.spotRule && amountBlock}
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
-      {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
-      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value, spotGallons: '' })} />}
-      {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
       {/* GATE_LAWN_TROUBLE_AREAS: where the spot went (the caller's place control; a weed-mix row reads the entry's shared place). */}
       {children}
+      {row.protocolNote && <p className="tech-visit-muted">{row.protocolNote}</p>}
       {note && <p className="tech-visit-muted" role="status">{note}</p>}
       {(row.gateNotes || []).map((gateNote) => <p key={gateNote} className="tech-visit-muted" role="status">{gateNote}</p>)}
-      <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
-      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
-      {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
+      {!row.spotRule && amountBlock}
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
       </div>

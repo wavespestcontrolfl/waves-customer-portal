@@ -387,6 +387,47 @@ describe('GET /admin/estimates list shape', () => {
     // one batched call_log read for the page (callSideBlocksForEstimates), not one per row
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
   });
+
+  test('bookingLinkEligible mirrors the send-booking-link route\'s row refusals', async () => {
+    const lists = require('../routes/estimate-public').acceptanceServiceLists;
+    const approval = require('../services/estimate-delivery-options').estimateDataHasUnresolvedManagerApproval;
+    // Stand-ins keyed off the fixture: the one-time line the route pre-selects, and an open approval.
+    lists.mockImplementation((data) => ({ oneTimeList: data?.qaOneTime ? [{ name: data.qaOneTime }] : [] }));
+    approval.mockImplementation((data) => !!data?.qaNeedsApproval);
+    const oneTime = { qaOneTime: 'Ant Treatment' };
+    tableDb({
+      estimates: [
+        base('e-recurring'),
+        base('e-bundle', { estimate_data: oneTime }),
+        base('e-onetime', { monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-accepted', { status: 'accepted', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-invoice', { monthly_total: '0', onetime_total: '400', bill_by_invoice: true, estimate_data: oneTime }),
+        base('e-draft', { status: 'draft', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-expired', { status: 'expired', monthly_total: '0', onetime_total: '400', estimate_data: oneTime }),
+        base('e-approval', { monthly_total: '0', onetime_total: '400', estimate_data: { ...oneTime, qaNeedsApproval: true } }),
+      ],
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+        const eligible = Object.fromEntries(estimates.map((e) => [e.id, e.bookingLinkEligible]));
+        expect(eligible).toEqual({
+          // recurring-only offers route through onboarding, never /book
+          'e-recurring': false,
+          'e-bundle': true,
+          'e-onetime': true,
+          'e-accepted': true,
+          'e-invoice': false,
+          'e-draft': false,
+          'e-expired': false,
+          'e-approval': false,
+        });
+      });
+    } finally {
+      lists.mockReset();
+      approval.mockImplementation(() => false);
+    }
+  });
 });
 
 describe('GET /admin/estimates outline summaries', () => {

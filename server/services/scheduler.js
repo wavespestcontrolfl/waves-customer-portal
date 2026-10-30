@@ -3448,6 +3448,12 @@ function initScheduledJobs() {
         const live = await ImpactTracker.sweepNewlyLive({});
         const checked = await ImpactTracker.checkPending({});
         await ImpactTracker.checkAeoVisibility({});
+        // Before-and-after AI citation check (GATE_AI_CHANGE_CHECK, dark). Like
+        // checkAeoVisibility it is NOT gated on: it writes only ai_change_*
+        // columns, which the rollup and paused-lane legs do not read, and a failure here
+        // (it catches its own) must never decide whether the digest runs. It
+        // sits before the digest so a lost-citations alert goes out that morning.
+        try { await ImpactTracker.checkAiChange({}); } catch (err) { logger.warn(`[impact-tracker] checkAiChange failed: ${err.message}`); }
         // Leg 4 — surface what the sweep just found (halted lanes, weekly
         // verdicts). Chained here rather than given its own cron so it always
         // describes POST-sweep state.
@@ -7362,7 +7368,17 @@ function initScheduledJobs() {
     logger.info('Running: ad budget adjustment');
     try {
       const BudgetManager = require('./ads/budget-manager');
-      await BudgetManager.adjustBudgets();
+      // runExclusive records job_health ('ads-budget-adjust') and keeps an
+      // overlapping deploy instance from pushing the same budgets twice. It
+      // never changes which budget is pushed: a run where any campaign's push
+      // or save failed throws so the failed tick shows in job_health.
+      await runExclusive('ads-budget-adjust', async () => {
+        const result = await BudgetManager.adjustBudgets();
+        if (result && result.failed > 0) {
+          throw new Error(`ad budget adjustment: ${result.failed} of ${result.evaluated} campaign(s) failed`);
+        }
+        return result;
+      });
     } catch (err) {
       logger.error(`Ad budget adjustment failed: ${err.message}`);
     }
@@ -8195,6 +8211,11 @@ function initScheduledJobs() {
     logger.info('Running: AI campaign advisor');
     try {
       const CampaignAdvisor = require('./ads/campaign-advisor');
+      // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
+      if (await CampaignAdvisor.hasModelReportToday()) {
+        logger.info('AI campaign advisor: today already has a model-written report, skipping');
+        return;
+      }
       await CampaignAdvisor.generateDailyAdvice();
     } catch (err) {
       logger.error(`AI campaign advisor failed: ${err.message}`);
@@ -9379,6 +9400,22 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[new-caller-bells] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 10 MIN — a call the pipeline BOOKED where the caller chose annual prepay (GATE_CALL_PREPAY_CHOICE, checked
+  // each tick): files ONE admin-only Needs Review card per call whose tap accepts the customer's open estimate as
+  // annual prepay, and closes a card that stopped being true. Never accepts, invoices or texts. See
+  // server/services/call-prepay-choice.js.
+  cron.schedule('7,17,27,37,47,57 * * * *', async () => {
+    if (!require('../config/feature-gates').callPrepayChoiceLive()) return;
+    try {
+      await runExclusive('call-prepay-choice', async () => {
+        const result = await require('./call-prepay-choice').runCallPrepayChoiceSweep();
+        if (result.filed > 0 || result.closed > 0) logger.info(`[call-prepay-choice] scanned=${result.scanned} filed=${result.filed} closed=${result.closed}`);
+      });
+    } catch (err) {
+      logger.error(`[call-prepay-choice] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -1,0 +1,14 @@
+{
+  "products": [
+    {
+      "key": "sector",
+      "name": "Sector Misting Concentrate",
+      "shortName": "Sector",
+      "epaRegNo": "1021-1834",
+      "labelMaxFlOzPer1000CuFtPerDay": 9.5,
+      "labelRateMix": { "concentrateFlOz": 64, "waterGal": 55 },
+      "maxMix": { "concentrateFlOz": 128, "waterGal": 55 },
+      "source": "Sector label (EPA Reg. No. 1021-1834): \"Only use this product in residential misting systems that have been calibrated to apply no more than the maximum application rate of 9.5 fl. oz. of 0.09% synergized permethrin solution per 1,000 cu. ft. per day.\" \"Mix 1/2 gallon (64 fl. oz.) of concentrate in 55 gallons of water to yield a solution of 0.09% ... For high populations of insects or when treating species that are difficult to control, mix up to 1 gallon of concentrate in 55 gallons of water to yield a solution of 0.18% ...\""
+    }
+  ]
+}

@@ -2096,6 +2096,10 @@ async function commitReservation({
       .returning('*');
     await writeAcceptedAreaAddOns(client, updated, serviceProfile);
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
+    // GATE_ROUTE_CHECK_ACCEPT_SAVES: a hold nothing numbered gets its stop
+    // number in this same save (the dispatcher's placement, inside `client`,
+    // a transaction here). Gate off: touches nothing. Never throws.
+    else await require('./scheduling/staff-save-route-check').placeAcceptedVisit(client, { serviceId: scheduledServiceId });
     // Two-treatment package (cockroach / flea): graduating the hold IS the
     // booking, so visit 2 books here for both estimate-accept branches and
     // one-tap — gate-dark, savepoint-isolated, no-op for every other
