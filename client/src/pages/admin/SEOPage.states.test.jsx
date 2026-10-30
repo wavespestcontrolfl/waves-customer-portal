@@ -156,6 +156,36 @@ describe("SEO Actions workflow", () => {
     );
   });
 
+  it("reloads the tab on screen when a mutation finishes after a tab switch", async () => {
+    const autoExecute = deferred();
+    const APPROVED = { ...PENDING, id: "action-2", url: "https://example.test/approved-page", approval_status: "approved" };
+    route([
+      ["/admin/seo/actions/summary", () => respond({ pending_by_tier: {}, done: 0 })],
+      ["/admin/seo/actions/auto-execute", () => autoExecute.promise],
+      ["/admin/seo/actions", (url) => {
+        const status = url.searchParams.get("approval_status");
+        if (status === "pending") return respond([PENDING]);
+        if (status === "approved") return respond([APPROVED]);
+        return respond([]);
+      }],
+    ]);
+    renderPage(ACTIONS);
+    await screen.findByText(PENDING.url);
+    fireEvent.click(screen.getByRole("button", { name: "Progress" }));
+    expect(await screen.findByText(APPROVED.url)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run Auto-Execute" }));
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    expect(await screen.findByText(PENDING.url)).toBeInTheDocument();
+
+    await act(async () => {
+      autoExecute.resolve(reply({ auto_executed: 0, manual_required: 1, failed: 0 }));
+    });
+    expect(await screen.findByText(PENDING.url)).toBeInTheDocument();
+    expect(screen.queryByText(APPROVED.url)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+  });
+
   it("shows an approved draft's status instead of Approve and Reject (SEO-03)", async () => {
     route([
       ["/admin/seo/actions/summary", () => respond({ pending_by_tier: {}, done: 0 })],

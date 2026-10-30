@@ -8328,6 +8328,10 @@ function ActionsTab({ domain }) {
   const [loadError, setLoadError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [actionNotice, setActionNotice] = useState(null);
+  // A mutation can finish after the operator switched tabs, so it reloads
+  // through this key (the effect runs the current tab's loadData), never by
+  // calling the loadData it captured when it started.
+  const [reloadKey, setReloadKey] = useState(0);
   const canAdmin = isAdminUser();
   // Only the newest load may write: a slow Experiments read must not land
   // in Queue after the operator switches back (its ids are not action ids).
@@ -8367,7 +8371,7 @@ function ActionsTab({ domain }) {
       });
   };
 
-  useEffect(loadData, [domain, subTab]);
+  useEffect(loadData, [domain, subTab, reloadKey]);
   function changeSubTab(key) {
     if (key === subTab) return;
     // Clear the old tab's rows in the same render that switches tabs.
@@ -8384,7 +8388,7 @@ function ActionsTab({ domain }) {
       .then((result) => {
         if (result?.error) setActionError(result.error);
         else if (notice) setActionNotice(notice(result));
-        loadData();
+        setReloadKey((n) => n + 1);
       })
       .catch((e) => setActionError(e.message || failure));
   }
