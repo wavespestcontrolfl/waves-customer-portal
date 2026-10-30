@@ -206,6 +206,14 @@ function buildStatusPatchPlan(req) {
     return { error: { code: 400, body: { error: 'Unknown status' } } };
   }
 
+  // The status the operator saw when the stage dialog opened (recruiting
+  // audit R1). Optional, so an admin tab still on the previous client keeps
+  // working; when present, applyStatusTransition refuses a stale decision.
+  const expectedStatus = req.body.expected_status ?? null;
+  if (expectedStatus !== null && !STATUSES.includes(expectedStatus)) {
+    return { error: { code: 400, body: { error: 'Unknown expected status' } } };
+  }
+
   const note = typeof req.body.note === 'string'
     ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
     : '';
@@ -222,7 +230,7 @@ function buildStatusPatchPlan(req) {
 
   return {
     plan: {
-      status, note, resend, notify,
+      status, expectedStatus, note, resend, notify,
       ...overrides,
       wantSms, wantEmail,
     },
@@ -347,6 +355,13 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
   // link alive and sends another invite. Refuse it; the owner re-reads.
   if (plan.resend && row.status !== 'interview') {
     return { row, conflict: `Cannot resend: the application is now '${row.status}', not in Interview` };
+  }
+  // Same rule for every stage decision (recruiting audit R1): a dialog
+  // opened at one stage must not overwrite a newer decision another admin
+  // (or the applicant) made while it was open — e.g. turn a fresh rejection
+  // back into Interview and send the invite. Refuse; the owner re-reads.
+  if (plan.expectedStatus && row.status !== plan.expectedStatus) {
+    return { row, conflict: `Cannot move: the application is now '${row.status}', not '${plan.expectedStatus}'. Nothing was changed or sent.` };
   }
   const { isResendOnly, isNoOp, interviewApplicable, willSend } = classifyStatusTransition(row, plan);
   if (isNoOp) return { row, interviewApplicable: false };

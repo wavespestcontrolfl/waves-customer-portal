@@ -290,7 +290,29 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
       setChangingTime(false);
       setSelectedSlot(null);
     } catch {
-      setBookError('Could not book that time. Check your connection and try again.');
+      // No response: the booking may still have committed (recruiting audit
+      // R5). Re-read the link before saying anything failed. Retrying the
+      // same time is safe — the server answers it as the existing booking.
+      const seq = attemptSeq.current;
+      try {
+        const res = await fetch(`${API_BASE}/public/careers/interview/${encodeURIComponent(token)}`);
+        if (seq !== attemptSeq.current) return;
+        if (res.status === 404) {
+          onInactiveLink();
+          return;
+        }
+        const body = res.ok ? await res.json() : null;
+        if (seq !== attemptSeq.current) return;
+        if (body?.booked && body.booked.mode === mode && body.booked.start === selectedSlot.start) {
+          onDataChange(body);
+          setChangingTime(false);
+          setSelectedSlot(null);
+          return;
+        }
+      } catch {
+        // still offline — fall through to the unconfirmed message
+      }
+      setBookError('We could not confirm that time. Check your connection and try again.');
     } finally {
       setBooking(false);
     }

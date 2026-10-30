@@ -145,6 +145,44 @@ describe('CareersInterviewPage — a slow slot refresh never undoes a booking th
   });
 });
 
+describe('CareersInterviewPage — a lost booking response is re-read, not reported as a failure (audit R5)', () => {
+  async function pickAndConfirm() {
+    renderPage();
+    expect(await screen.findByText(/Hi Jordan/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Phone call/i }));
+    fireEvent.click(screen.getByRole('button', { name: '4:30 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+  }
+
+  it('shows the booking when the re-read finds the time that committed', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))         // initial load
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))     // book committed, response lost
+      .mockResolvedValueOnce(jsonResponse(bookedPayload()));       // re-read: the booking is there
+    vi.stubGlobal('fetch', fetchMock);
+
+    await pickAndConfirm();
+
+    expect(await screen.findByText(/You’re booked|You're booked/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/public/careers/interview/tok-123');
+    expect(screen.queryByText(/could not/i)).not.toBeInTheDocument();
+  });
+
+  it('says the time is unconfirmed when the re-read shows no booking, and keeps Confirm usable for a safe retry', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await pickAndConfirm();
+
+    expect(await screen.findByText(/could not confirm that time/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not book that time/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm interview time' })).toBeEnabled();
+  });
+});
+
 describe('CareersInterviewPage — book returns 404 (application left the Interview stage)', () => {
   it('a 404 from /book is treated as the same inactive-link terminal state as a 409, not a slot conflict', async () => {
     const fetchMock = vi.fn()
