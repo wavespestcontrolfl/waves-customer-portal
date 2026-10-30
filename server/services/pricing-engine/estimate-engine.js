@@ -2162,16 +2162,23 @@ function generateEstimate(input) {
   // the bundled total, with savings tracked in the bundle line item.
   if (!propertyIsCommercial) {
     const trapItem = lineItems.find(i => i.service === 'rodent_trapping');
-    const exclItem = lineItems.find(i => i.service === 'exclusion');
+    // The V2 exclusion pricer emits one 'rodent_exclusion' row per section
+    // (mesh points, linear mesh, bird boxes, job-minimum / urgency / inspect
+    // deltas); the legacy pricer emits one 'exclusion' row. Every priced row
+    // counts toward the bundle. A quote-required or non-finite row neither
+    // qualifies the bundle nor adds dollars.
+    const exclRows = lineItems.filter(i => (i.service === 'rodent_exclusion' || i.service === 'exclusion')
+      && !i.quoteRequired && Number.isFinite(i.price));
+    const exclTotal = exclRows.reduce((sum, i) => sum + i.price, 0);
     const sanItem = lineItems.find(i => i.service === 'rodent_sanitation');
     const bundle = selectRodentBundle({
       hasTrapping: !!trapItem,
-      hasExclusion: !!exclItem,
+      hasExclusion: exclRows.length > 0,
       hasSanitation: !!sanItem,
       sanitationTier: sanItem?.tier,
     });
     if (bundle) {
-      const componentTotal = (trapItem?.price || 0) + (exclItem?.price || 0) + (sanItem?.price || 0);
+      const componentTotal = (trapItem?.price || 0) + exclTotal + (sanItem?.price || 0);
       const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
       if (savings > 0) {
         lineItems.push({
@@ -2569,7 +2576,12 @@ function generateEstimate(input) {
       }
     } else if (item.price) {
       item.priceBeforeDiscount = item.price;
-      item.priceAfterDiscount = applyDiscount(item.price, discount);
+      // The rodent package line is already a negative money amount; the
+      // percentage pass floors a negative at $0, which dropped the package
+      // savings from the one-time total. Carry it through unchanged.
+      item.priceAfterDiscount = item.service === 'rodent_bundle_discount'
+        ? item.price
+        : applyDiscount(item.price, discount);
     } else if (item.total) {
       item.totalBeforeDiscount = item.total;
       item.totalAfterDiscount = applyDiscount(item.total, discount);

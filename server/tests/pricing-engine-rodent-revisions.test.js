@@ -784,3 +784,106 @@ describe('commercial bait setup is never membership-waived (codex #3591 r56 loca
     expect(residential.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeUndefined();
   });
 });
+
+describe('rodent package discount sees the V2 exclusion section rows (owner 2026-10-30)', () => {
+  const v2Exclusion = { pricingVersion: 'v2', standardWireMeshPoints: 10, meshSoftLF: 100 };
+  const bundleOf = (estimate) => estimate.lineItems.filter((i) => i.service === 'rodent_bundle_discount');
+
+  test('trapping + V2 exclusion: one trapExclusion line, $2,500 -> $2,330, in the one-time total', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+    }));
+    // Exclusion is several section rows, all service 'rodent_exclusion'.
+    expect(estimate.lineItems.filter((i) => i.service === 'rodent_exclusion').length).toBeGreaterThan(1);
+    const bundles = bundleOf(estimate);
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]).toMatchObject({
+      bundleKind: 'trapExclusion',
+      floor: 895,
+      componentTotal: 2500,
+      bundledTotal: 2330,
+      price: -170,
+    });
+    expect(estimate.summary.oneTimeTotal).toBe(2330);
+  });
+
+  test('trapping + V2 exclusion + sanitation: fullRemediation 10% at the light floor', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        rodentTrapping: { plan: 'standard' },
+        exclusion: v2Exclusion,
+        sanitation: { affectedSqFt: 300, tier: 'light' },
+      },
+    }));
+    const bundles = bundleOf(estimate);
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]).toMatchObject({
+      bundleKind: 'fullRemediation',
+      floor: 1195,
+      componentTotal: 2895,
+      bundledTotal: 2610,
+    });
+    expect(estimate.summary.oneTimeTotal).toBe(2610);
+  });
+
+  test('the legacy single "exclusion" row still qualifies', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        rodentTrapping: { plan: 'standard' },
+        exclusion: { simple: 10, moderate: 4 },
+      },
+    }));
+    expect(estimate.lineItems.some((i) => i.service === 'exclusion')).toBe(true);
+    expect(bundleOf(estimate)).toHaveLength(1);
+    expect(bundleOf(estimate)[0].bundleKind).toBe('trapExclusion');
+  });
+
+  test('V2 exclusion alone earns no package discount', () => {
+    const estimate = generateEstimate(baseInput({ services: { exclusion: v2Exclusion } }));
+    expect(bundleOf(estimate)).toHaveLength(0);
+  });
+
+  test('trapping + quote-required exclusion rows get no exclusion package and no exclusion dollars', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/pricing-engine/service-pricing', () => {
+        const actual = jest.requireActual('../services/pricing-engine/service-pricing');
+        return {
+          ...actual,
+          priceRodentExclusionV2: (opts) => {
+            const result = actual.priceRodentExclusionV2(opts);
+            return { ...result, lineItems: result.lineItems.map((row) => ({ ...row, quoteRequired: true })) };
+          },
+        };
+      });
+      const isolated = require('../services/pricing-engine');
+      const withSanitation = isolated.generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 2000, tier: 'standard' },
+        },
+      }));
+      // The bad row does not qualify exclusion: trapping + sanitation only.
+      const [bundle] = bundleOf(withSanitation);
+      expect(bundle.bundleKind).toBe('trapSanitation');
+      expect(bundle.componentTotal).toBe(350 + 1070);
+      const exclusionOnly = isolated.generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      }));
+      expect(bundleOf(exclusionOnly)).toHaveLength(0);
+    });
+    jest.dontMock('../services/pricing-engine/service-pricing');
+  });
+
+  test('commercial property gets no rodent package discount', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 5000,
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+    }));
+    expect(bundleOf(commercial)).toHaveLength(0);
+  });
+});
