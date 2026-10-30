@@ -83,6 +83,9 @@ function findInflightPageEdit(runner, { path, targetDomain }) {
   if (!require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
     query.where('bucket', '<>', 'citability_backfill');
   }
+  // Gate-off same_question_refresh rows are unclaimable: a pending one must
+  // not reserve the page either (opportunity-queue releaseDisabledSameQuestionReservations).
+  require('../content/opportunity-queue')._internals.releaseDisabledSameQuestionReservations(query);
   return query.first();
 }
 

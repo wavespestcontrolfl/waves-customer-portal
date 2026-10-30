@@ -33,6 +33,16 @@ const DAY_TIME_CONFLICT_NO_FLAG = 'Do not add a triage flag for any of this.';
 const DAY_TIME_CONFLICT_RULE = `${DAY_TIME_CONFLICT_CORE} ${DAY_TIME_CONFLICT_CALENDAR_CHECK} ${DAY_TIME_CONFLICT_NO_FLAG}`;
 const DAY_TIME_CONFLICT_AUDIT_RULE = `${DAY_TIME_CONFLICT_CORE} ${DAY_TIME_CONFLICT_NO_FLAG}`;
 
+// Extraction only, like the weekday/date check above: it reads the call's clock, which no judge
+// is given (the bare-time precedent, Codex #6294), so the audit contract does not carry it.
+// A said weekday or date decides the day; a bare "tomorrow" on such a call is not guessed (pre-push
+// audit P1, 10-30: "I can't do today; tomorrow at ten works" at 1 AM means the day after). The
+// reschedule grounding (reschedule-date-evidence.js, call-reschedule-agreement.js) reads "tomorrow"
+// as the call date + 1, so a reschedule day that rests only on "tomorrow" stays null on such a call.
+function afterMidnightDayRule(todayRef) {
+  return `  - CALLS AFTER MIDNIGHT (prompt v33, 2026-10-30 call audit; audited call: the call started at 12:52 AM on a Friday, the caller said "I get out of work on Friday at four. Like, which is tomorrow.", staff asked "Okay, so you want to do five o'clock?", the caller said "Yes, I'd appreciate that.", staff closed with "we'll see you tomorrow at five", and the extraction answered "ambiguous" because it read "tomorrow" as Saturday; nothing was booked): when the call time given at the top is from 12:00 AM up to 4:00 AM, the speakers may not have slept since the evening before, so "tomorrow" (alone or with a part of the day or an hour) can name the coming daytime, which is the CALL DATE itself (${todayRef}), or the day after it. A weekday or calendar date said on the call for that day decides. When it names the call date and the call ties "tomorrow" to it ("Friday, which is tomorrow" on a call that started early on a Friday), the two agree: the slot is on the call date and there is no day conflict. When it names the day after the call date ("Saturday, which is tomorrow"), that day governs. When no weekday or calendar date was said for that day ("tomorrow at ten", "I can't do today; tomorrow at ten works"), do not guess: the status is "ambiguous", confirmed_start_at is null, and scheduling_notes_raw records the words, so the office confirms the day. "Today" still means the call date. For a RESCHEDULE on such a call the same test sets confirmed_start_at, proposed_start_at and moved_appointment_date: when only "tomorrow" or "the day after tomorrow" was said for one of them, leave it null and record the words in scheduling_notes_raw. Outside 12:00 AM to 4:00 AM, "tomorrow" is the day after the call date as usual.`;
+}
+
 function appointmentConfirmedRules(callDateET) {
   return `IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
@@ -84,4 +94,5 @@ module.exports = {
   CALLER_PROPOSED_TIME_RULE,
   DAY_TIME_CONFLICT_RULE,
   DAY_TIME_CONFLICT_AUDIT_RULE,
+  afterMidnightDayRule,
 };

@@ -361,24 +361,40 @@ function MergeIntoPanel({ neighborhood, initialTarget = null, busy, error, onSea
 
 const SUGGESTIONS_SHOWN = 5;
 
+const pairKey = (s) => `${s.source.id}|${s.target.id}`;
+
+// A help list whose last read failed. Rows already shown stay, marked as
+// possibly out of date; with none, the panel says the list could not load.
+// Either way it never reads as "nothing to show".
+function HelperListFailed({ rows, onRetry }) {
+  return (
+    <ActionFeedback error onRetry={() => onRetry()}>
+      {rows ? "Could not refresh this list. It may be out of date." : "Could not load this list."}
+    </ActionFeedback>
+  );
+}
+
 // Entries whose names read as one community (server rules: a phase, a
 // spelling, "X at Y"). The office merges one or marks it Not the same; a
 // person always decides (owner ruling 2026-10-25).
 // Empty while the merge switch is off (the page clears the list); hidden on a
-// linked single-neighborhood view.
-function SuggestedMerges({ items, hidden, reviewing, disabled, onReview, onDismiss, renderPanel }) {
+// linked single-neighborhood view. A refused Not the same shows in its row.
+function SuggestedMerges({ items, failed, onRetry, hidden, reviewing, disabled, rowError, onReview, onDismiss, renderPanel }) {
   const [all, setAll] = useState(false);
-  if (hidden || !items.length) return null;
+  if (hidden || (!items.length && !failed)) return null;
   const shown = all ? items : items.slice(0, SUGGESTIONS_SHOWN);
   const side = (n) => `${n.name} · ${plural(n.propertyCount || 0, "property", "properties")}`;
   return (
     <div className="mb-3 grid gap-2 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-3">
-      <div className="text-ui-body font-medium text-zinc-900">{`Possible duplicates (${items.length})`}</div>
-      <div className="text-ui-body text-ink-secondary">
-        These names read as one community. Merge when they share a gate; otherwise mark them Not the same.
-      </div>
+      <div className="text-ui-body font-medium text-zinc-900">{items.length ? `Possible duplicates (${items.length})` : "Possible duplicates"}</div>
+      {failed && <HelperListFailed rows={items.length} onRetry={onRetry} />}
+      {items.length > 0 && (
+        <div className="text-ui-body text-ink-secondary">
+          These names read as one community. Merge when they share a gate; otherwise mark them Not the same.
+        </div>
+      )}
       {shown.map((s) => {
-        const key = `${s.source.id}|${s.target.id}`;
+        const key = pairKey(s);
         return (
           <div key={key} className="grid gap-2 rounded-sm border-hairline border-zinc-200 px-3 py-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -390,6 +406,7 @@ function SuggestedMerges({ items, hidden, reviewing, disabled, onReview, onDismi
                 </div>
               )}
             </div>
+            {rowError?.key === key && <ActionFeedback error>{rowError.message}</ActionFeedback>}
             {reviewing === key && renderPanel(s)}
           </div>
         );
@@ -416,17 +433,22 @@ function unplacedReason(h) {
 
 // Homes the directory cannot place (owner ruling 2026-10-26): no neighborhood,
 // so no shared gate code reaches them. A person links each one; nothing links
-// by itself. Empty while the switch is off (the page clears the list).
-function UnplacedHomes({ items, hidden, disabled, onLink }) {
+// by itself. Empty while the switch is off (the page clears the list). A
+// refused Link shows in the home's own row, beside its button, not under the
+// directory filters a phone screen away.
+function UnplacedHomes({ items, failed, onRetry, hidden, disabled, rowError, onLink }) {
   const [all, setAll] = useState(false);
-  if (hidden || !items.length) return null;
+  if (hidden || (!items.length && !failed)) return null;
   const shown = all ? items : items.slice(0, SUGGESTIONS_SHOWN);
   return (
     <div className="mb-3 grid gap-2 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-3">
-      <div className="text-ui-body font-medium text-zinc-900">{`Homes not placed (${items.length})`}</div>
-      <div className="text-ui-body text-ink-secondary">
-        These homes have no neighborhood, so no shared gate code reaches them. Check the county's community, then link the home.
-      </div>
+      <div className="text-ui-body font-medium text-zinc-900">{items.length ? `Homes not placed (${items.length})` : "Homes not placed"}</div>
+      {failed && <HelperListFailed rows={items.length} onRetry={onRetry} />}
+      {items.length > 0 && (
+        <div className="text-ui-body text-ink-secondary">
+          These homes have no neighborhood, so no shared gate code reaches them. Check the county's community, then link the home.
+        </div>
+      )}
       {shown.map((h) => (
         <div key={h.propertyId} className="grid gap-1 rounded-sm border-hairline border-zinc-200 px-3 py-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -440,6 +462,7 @@ function UnplacedHomes({ items, hidden, disabled, onLink }) {
               <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onLink(h)}>{`Link to ${h.countyLot.community}`}</Button>
             )}
           </div>
+          {rowError?.key === h.propertyId && <ActionFeedback error>{rowError.message}</ActionFeedback>}
           <div className="text-ui-body text-ink-secondary">{unplacedReason(h)}</div>
         </div>
       ))}
@@ -504,8 +527,12 @@ export default function NeighborhoodGateCodesPage() {
   const [mergingFrom, setMergingFrom] = useState("");
   const [mergeEnabled, setMergeEnabled] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
+  const [suggestionsFailed, setSuggestionsFailed] = useState(false);
   const [unplacedEnabled, setUnplacedEnabled] = useState(false);
   const [unplaced, setUnplaced] = useState([]);
+  const [unplacedFailed, setUnplacedFailed] = useState(false);
+  // A refused action started from a help-list row, shown in that row: { key, message }.
+  const [rowError, setRowError] = useState(null);
   const [reviewing, setReviewing] = useState("");
   const [formError, setFormError] = useState("");
 
@@ -618,37 +645,49 @@ export default function NeighborhoodGateCodesPage() {
 
   const closeForms = () => { setEditingId(""); setAddingTo(""); setMergingFrom(""); setReviewing(""); setFormError(""); };
 
+  // The two help lists beside the directory. A failed read keeps the rows
+  // already shown and marks the list failed, so its panel says so with Try
+  // again (HelperListFailed); a panel hides only while its switch is off or
+  // after a read that answered empty. The latest read wins, and a switch that
+  // turns off drops a read still on its way.
+  const suggestionsSeq = useRef(0);
   const loadSuggestions = useCallback(async () => {
+    const seq = ++suggestionsSeq.current;
     try {
       const data = await api("/admin/neighborhood-access/merge-suggestions");
+      if (seq !== suggestionsSeq.current) return;
       setSuggestions(data.suggestions || []);
+      setSuggestionsFailed(false);
     } catch {
-      // The list is a help, not the page: on any failure it is just not shown.
-      setSuggestions([]);
+      if (seq === suggestionsSeq.current) setSuggestionsFailed(true);
     }
   }, []);
   useEffect(() => {
     if (mergeEnabled) loadSuggestions();
-    else setSuggestions([]);
+    else { suggestionsSeq.current += 1; setSuggestions([]); setSuggestionsFailed(false); }
   }, [mergeEnabled, loadSuggestions]);
 
+  const unplacedSeq = useRef(0);
   const loadUnplaced = useCallback(async () => {
+    const seq = ++unplacedSeq.current;
     try {
       const data = await api("/admin/neighborhood-access/unplaced");
+      if (seq !== unplacedSeq.current) return;
       setUnplaced(data.homes || []);
+      setUnplacedFailed(false);
     } catch {
-      // A help list, not the page: on any failure it is just not shown.
-      setUnplaced([]);
+      if (seq === unplacedSeq.current) setUnplacedFailed(true);
     }
   }, []);
   useEffect(() => {
     if (unplacedEnabled) loadUnplaced();
-    else setUnplaced([]);
+    else { unplacedSeq.current += 1; setUnplaced([]); setUnplacedFailed(false); }
   }, [unplacedEnabled, loadUnplaced]);
 
   const mutate = async ({ key, path, method, body, successText, onError }) => {
     setBusyKey(key);
     setActionError("");
+    setRowError(null);
     setToast("");
     try {
       const result = await api(path, { method, body: JSON.stringify(body) });
@@ -730,6 +769,7 @@ export default function NeighborhoodGateCodesPage() {
     method: "POST",
     body: { sourceId: s.source.id, targetId: s.target.id },
     successText: `Marked ${s.source.name} and ${s.target.name} as not the same`,
+    onError: (message) => setRowError({ key: pairKey(s), message }),
   });
   // The office pick on the county's community (the Customer 360 picker's own
   // route): it finds that community under any spelling, or adds it.
@@ -742,6 +782,7 @@ export default function NeighborhoodGateCodesPage() {
       method: "PUT",
       body: { create: { name: community, county } },
       successText: `Linked ${h.address || "the home"} to ${community}`,
+      onError: (message) => setRowError({ key: h.propertyId, message }),
     });
   };
 
@@ -782,16 +823,22 @@ export default function NeighborhoodGateCodesPage() {
         <>
           <UnplacedHomes
             items={unplaced}
+            failed={unplacedFailed}
+            onRetry={loadUnplaced}
             hidden={Boolean(onlyNeighborhood)}
             disabled={busyKey !== ""}
+            rowError={rowError}
             onLink={onLinkUnplaced}
           />
 
           <SuggestedMerges
             items={suggestions}
+            failed={suggestionsFailed}
+            onRetry={loadSuggestions}
             hidden={Boolean(onlyNeighborhood)}
             reviewing={reviewing}
             disabled={busyKey !== ""}
+            rowError={rowError}
             onReview={(key) => { closeForms(); setReviewing(key); }}
             onDismiss={onDismissSuggestion}
             renderPanel={(s) => (

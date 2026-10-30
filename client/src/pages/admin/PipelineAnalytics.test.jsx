@@ -802,3 +802,25 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("$300")).toBeInTheDocument();
   });
 });
+
+// The Drafts tile counts with the list's own classifier (classifyEstimateForPipeline):
+// a draft or a failed send is ready only with a share token and a price, one-time or monthly.
+describe("PipelineAnalytics drafts tile", () => {
+  it("counts a tokenized one-time draft as ready to send", () => {
+    renderAnalytics({ estimates: [estimate({ status: "draft", token: "tok-qa", monthlyTotal: 0, onetimeTotal: 400 })] });
+    expect(screen.getByText("1 ready to send · 0 need pricing")).toBeInTheDocument();
+  });
+
+  it("counts a tokenless recurring draft as needing pricing, as the list does", () => {
+    renderAnalytics({ estimates: [estimate({ status: "draft", token: null, monthlyTotal: 100 })] });
+    expect(screen.getByText("0 ready to send · 1 need pricing")).toBeInTheDocument();
+  });
+
+  it("counts a failed send as an unsent offer: ready when it can be sent again", () => {
+    renderAnalytics({ estimates: [
+      estimate({ id: "failed-ready", status: "send_failed", token: "tok-qa", monthlyTotal: 100 }),
+      estimate({ id: "failed-no-link", status: "send_failed", token: null, monthlyTotal: 100 }),
+    ] });
+    expect(screen.getByText("1 ready to send · 1 need pricing")).toBeInTheDocument();
+  });
+});

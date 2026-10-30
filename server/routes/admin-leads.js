@@ -1171,6 +1171,19 @@ router.put('/:id', async (req, res, next) => {
         updates.email = normalizedEmail;
       }
     }
+    // This PUT can also link a customer or set the assignee, so the convert and assign
+    // routes' rules hold here: a new customer link only to a live customer, and a new
+    // assignee only one the picker offers. A stored value echoed back is not a new write.
+    if (updates.customer_id && String(updates.customer_id) !== String(existingLead.customer_id || '')) {
+      if (Joi.string().uuid().validate(updates.customer_id).error) return res.status(400).json({ error: 'Invalid customer id' });
+      const linkedCustomer = await db('customers').where('id', updates.customer_id).whereNull('deleted_at').first('id');
+      if (!linkedCustomer) return res.status(404).json({ error: 'Customer not found' });
+    }
+    if (updates.assigned_to !== undefined && String(updates.assigned_to || '') !== String(existingLead.assigned_to || '')) {
+      if (updates.assigned_to && Joi.string().uuid().validate(updates.assigned_to).error) return res.status(400).json({ error: 'Invalid technician id' });
+      const assignee = await assertAssignableTechnician(updates.assigned_to || null);
+      updates.assigned_to = assignee ? assignee.id : null;
+    }
     updates.updated_at = new Date();
 
     const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
@@ -1317,7 +1330,14 @@ function whereFunnelMatches(q, expected) {
   q.whereRaw("(SELECT COUNT(*) FROM ad_service_attribution a WHERE a.lead_id = leads.id AND a.id::text || '|' || COALESCE(a.funnel_stage, '') || '|' || COALESCE(a.customer_id::text, '') = ANY (?::text[])) = ?", [keys, keys.length]);
 }
 function withExpectedLead(identity, expected, customerId) {
-  if (!expected) return identity;
+  // The page (no card version): the customer must still be live when the win writes, so a
+  // soft delete that lands after the handler's read converts nothing.
+  if (!expected) {
+    return (q) => {
+      identity(q);
+      q.whereExists(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'));
+    };
+  }
   return (q) => {
     identity(q);
     q.whereNull('converted_at').where('status', expected.status)
@@ -1352,10 +1372,8 @@ const leadConvertHandler = async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    // The bar's card also refuses a deleted customer (req.ibExpectedLead is set only by convertLeadFromBar).
-    let customerQuery = db('customers').where('id', customerId);
-    if (req.ibExpectedLead) customerQuery = customerQuery.whereNull('deleted_at');
-    const customer = await customerQuery.first();
+    // A soft-deleted (or merged-away) customer is never a conversion target, from the page or the bar's card.
+    const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
@@ -1407,20 +1425,25 @@ router.post('/:id/lost', async (req, res, next) => {
 router.post('/:id/assign', async (req, res, next) => {
   try {
     const { technician_id } = req.body;
+    // null or '' unassigns on purpose; a missing key is a request that picked no one.
+    if (technician_id === undefined) return res.status(400).json({ error: 'Pick a technician, or send technician_id: null to unassign' });
+    if (technician_id && Joi.string().uuid().validate(technician_id).error) return res.status(400).json({ error: 'Invalid technician id' });
+    // The tech must exist and take field assignments (the picker's own list), checked before the
+    // lead changes: an unknown id answers 422 TECH_NOT_ASSIGNABLE and leaves the lead as it was.
+    const tech = await assertAssignableTechnician(technician_id || null);
     const [lead] = await db('leads').where('id', req.params.id).whereNull('deleted_at').update({
-      assigned_to: technician_id,
+      assigned_to: tech ? tech.id : null,
       updated_at: new Date(),
     }).returning('*');
 
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const tech = technician_id ? await db('technicians').where('id', technician_id).first() : null;
-
     await db('lead_activities').insert({
       lead_id: req.params.id,
       activity_type: 'assigned',
-      description: `Assigned to ${tech ? tech.first_name + ' ' + (tech.last_name || '') : 'unassigned'}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      // technicians has one `name` column (no first_name / last_name).
+      description: tech ? `Assigned to ${tech.name}` : 'Unassigned',
+      performed_by: req.technician.name,
     });
     res.json({ lead });
   } catch (err) { next(err); }
@@ -1777,6 +1800,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // match exists (admin-only, only meaningful with createSeparateAccount).
     const ignorePhoneMatch = isAdmin && req.body.ignorePhoneMatch === true;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
+    // A real YYYY-MM-DD, today or later (ET), before any database work: an impossible or
+    // malformed string never reaches the occupancy reads or the DATE column, and a lead's
+    // appointment is never booked into a day that has already passed. These are the three
+    // checks of datetime-et's validScheduleDate, except that a time tail is refused rather
+    // than dropped, because `date` is written to scheduled_date exactly as sent.
+    if (!isRealCalendarDate(date)) return res.status(400).json({ error: 'Date must be a real calendar date (YYYY-MM-DD)' });
+    if (date < etDateString()) return res.status(400).json({ error: 'That date has passed. Pick today or a later date.' });
     // Appointment windows start on the hour (owner rule 2026-07-27) — reject
     // rather than floor: silently moving the time would book a different slot
     // than the admin confirmed to the customer. This also closes the old

@@ -2277,9 +2277,13 @@ export default function PayPageV2() {
           setData((prev) => {
             if (!prev?.invoice) return prev;
             const total = Number(prev.invoice.total ?? setupAmountDue);
+            // Part payments already received are not credit: leave them out
+            // of the derived credit, or a part-paid invoice reads "Account
+            // credit applied" for money the office recorded by hand.
+            const amountPaid = Math.max(0, Number(prev.invoice.amountPaid) || 0);
             const creditApplied = setup.creditApplied != null
               ? Math.max(0, Number(setup.creditApplied))
-              : Math.max(0, Math.round((total - setupAmountDue) * 100) / 100);
+              : Math.max(0, Math.round((total - amountPaid - setupAmountDue) * 100) / 100);
             // CRITICAL: return the SAME object reference when nothing changed. The
             // setup effect depends on `data`, so handing back a new object every
             // time would re-run it and re-POST /setup forever. Only the first
@@ -2956,7 +2960,8 @@ export default function PayPageV2() {
               const hasAdjustments = invoice.discountAmount > 0
                 || invoice.taxAmount > 0
                 || depositCreditTotal > 0
-                || Number(invoice.creditApplied) > 0;
+                || Number(invoice.creditApplied) > 0
+                || Number(invoice.amountPaid) > 0;
               const combinedPreviewPossible = !!(stripeSetup?.combined || (!stripeSetup && data.previousBalance?.invoices?.length));
               // Only a SINGLE line item states the total on its own; zero
               // items shows no figure at all and multiple items show only
@@ -2977,6 +2982,9 @@ export default function PayPageV2() {
               )}
               {Number(invoice.creditApplied) > 0 && (
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
+              )}
+              {Number(invoice.amountPaid) > 0 && (
+                <SummaryRow label="Paid so far" value={`− ${fmtCurrency(invoice.amountPaid)}`} />
               )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
               {(() => {

@@ -84,7 +84,7 @@ jest.mock('../services/proposal-win', () => ({
   promoteLinkedCustomerForProposalWin: jest.fn(),
   flagProposalCustomerCommercialIfTaxable: jest.fn(),
   recordProposalBuildingUse: jest.fn(),
-  createProposalAcceptanceInvoice: jest.fn(),
+  assertProposalTermsMatchPayer: jest.fn(),
 }));
 
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -1376,7 +1376,7 @@ describe('commercial proposal win paths (#1917)', () => {
     proposalWin.promoteLinkedCustomerForProposalWin.mockReset();
     proposalWin.flagProposalCustomerCommercialIfTaxable.mockReset();
     proposalWin.recordProposalBuildingUse.mockReset();
-    proposalWin.createProposalAcceptanceInvoice.mockReset();
+    proposalWin.assertProposalTermsMatchPayer.mockReset();
   });
 
   const proposalData = {
@@ -1453,7 +1453,7 @@ describe('commercial proposal win paths (#1917)', () => {
 
   test('pre-linked non-invoice-mode win flags the customer commercial for a taxable proposal', async () => {
     // A taxable proposal pre-linked to an existing (e.g. residential/lead)
-    // customer, won WITHOUT invoice mode, skips createProposalAcceptanceInvoice —
+    // customer, won WITHOUT invoice mode, has no billing step at the win —
     // so it must still flag the customer commercial, or later invoices for this
     // taxable commercial work would be forced to $0 tax (underbilling).
     const estimate = baseProposalEstimate({ id: 'prop-prelinked', customer_id: 'cust-existing', bill_by_invoice: false });
@@ -1469,7 +1469,7 @@ describe('commercial proposal win paths (#1917)', () => {
     expect(proposalWin.flagProposalCustomerCommercialIfTaxable).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
     // Every win records the proposal's building use (GATE_BUILDING_USE_TAX reads it on later visits).
     expect(proposalWin.recordProposalBuildingUse).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
-    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled(); // not invoice-mode
+    expect(proposalWin.assertProposalTermsMatchPayer).not.toHaveBeenCalled(); // not invoice-mode
   });
 
   // Auto Pay (GATE_COMMERCIAL_AUTOPAY, owner 2026-10-24): the customer's Auto Pay enrollment collects it after each
@@ -1484,7 +1484,7 @@ describe('commercial proposal win paths (#1917)', () => {
       leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() }, estimateConverter: { convertEstimate: jest.fn() },
     });
     expect(proposalWin.promoteLinkedCustomerForProposalWin).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
-    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+    expect(proposalWin.assertProposalTermsMatchPayer).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -1497,34 +1497,33 @@ describe('commercial proposal win paths (#1917)', () => {
       estimateId: estimate.id, adminUserId: 'admin-1', database,
       leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() }, estimateConverter: { convertEstimate: jest.fn() },
     })).rejects.toThrow(message);
-    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+    expect(proposalWin.assertProposalTermsMatchPayer).not.toHaveBeenCalled();
   });
 
-  test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {
+  // Owner 2026-10-30 (pipeline audit item 1, option A, "Bill after each visit"): the invoice-mode win used to bill the
+  // first application of every program, and completing the first visit then billed it again. It makes no invoice now;
+  // each visit bills once when it is completed. The win still checks the agreement's term against the payer.
+  test('invoice-mode win: no invoice, the payer-term check runs, and the response names no invoice', async () => {
     const estimate = baseProposalEstimate({ id: 'prop-inv', customer_id: 'cust-1', bill_by_invoice: true });
     const { database } = makeDb(estimate);
     const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
     const estimateConverter = { convertEstimate: jest.fn() };
-    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue({
-      id: 7, invoice_number: 'WPC-2026-0007', token: 'tok', total: 2259.7,
-    });
 
     const result = await markEstimateManuallyAccepted({
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     });
 
-    expect(proposalWin.createProposalAcceptanceInvoice).toHaveBeenCalledTimes(1);
-    expect(proposalWin.createProposalAcceptanceInvoice.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1' });
+    expect(proposalWin.assertProposalTermsMatchPayer).toHaveBeenCalledTimes(1);
+    expect(proposalWin.assertProposalTermsMatchPayer.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1' });
     // Pre-linked customer is promoted/reactivated (proposals skip the converter).
     expect(proposalWin.promoteLinkedCustomerForProposalWin)
       .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
     expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
-    expect(result.proposalInvoice).toEqual({
-      id: 7, invoiceNumber: 'WPC-2026-0007', token: 'tok', total: 2259.7,
-    });
+    expect(result).not.toHaveProperty('proposalInvoice');
+    expect(result.estimate.status).toBe('accepted');
   });
 
-  test('lead + invoice-mode: creates the customer then invoices that new customer', async () => {
+  test('lead + invoice-mode: creates the customer, then checks the terms against that new customer', async () => {
     const estimate = baseProposalEstimate({
       id: 'prop-both', customer_id: null, bill_by_invoice: true,
       customer_name: 'Siesta Key HOA', customer_phone: '9415551234',
@@ -1533,17 +1532,25 @@ describe('commercial proposal win paths (#1917)', () => {
     const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
     const estimateConverter = { convertEstimate: jest.fn() };
     proposalWin.ensureCustomerForProposalWin.mockResolvedValue({ customerId: 'new-cust', created: true });
-    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue({
-      id: 8, invoice_number: 'WPC-2026-0008', token: 'tok2', total: 100,
-    });
 
     const result = await markEstimateManuallyAccepted({
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     });
 
-    expect(proposalWin.createProposalAcceptanceInvoice.mock.calls[0][0]).toMatchObject({ customerId: 'new-cust' });
+    expect(proposalWin.assertProposalTermsMatchPayer.mock.calls[0][0]).toMatchObject({ customerId: 'new-cust' });
     expect(result.createdCustomer).toEqual({ id: 'new-cust' });
-    expect(result.proposalInvoice).toMatchObject({ invoiceNumber: 'WPC-2026-0008' });
+  });
+
+  test('invoice-mode win whose term contradicts the payer is refused with the operator message, so the accept rolls back', async () => {
+    const estimate = baseProposalEstimate({ id: 'prop-term', customer_id: 'cust-1', bill_by_invoice: true });
+    const { database } = makeDb(estimate);
+    proposalWin.assertProposalTermsMatchPayer.mockRejectedValue(Object.assign(
+      new Error('This proposal promises net15 payment terms but the customer bills through a payer on net30 terms.'), { statusCode: 409 },
+    ));
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() }, estimateConverter: { convertEstimate: jest.fn() },
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('payer on net30 terms') });
   });
 
   test('non-invoice proposal win records the win without invoice or converter', async () => {
@@ -1556,28 +1563,16 @@ describe('commercial proposal win paths (#1917)', () => {
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     });
 
-    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+    expect(proposalWin.assertProposalTermsMatchPayer).not.toHaveBeenCalled();
     expect(proposalWin.ensureCustomerForProposalWin).not.toHaveBeenCalled();
     // Pre-linked customer is still promoted/reactivated even with no invoice.
     expect(proposalWin.promoteLinkedCustomerForProposalWin)
       .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
     expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
-    expect(result.proposalInvoice).toBeNull();
     expect(result.createdCustomer).toBeNull();
     expect(result.estimate.status).toBe('accepted');
   });
 
-  test('invoice-mode win with no billable lines is rejected so the accept rolls back', async () => {
-    const estimate = baseProposalEstimate({ id: 'prop-empty', customer_id: 'cust-1', bill_by_invoice: true });
-    const { database } = makeDb(estimate);
-    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
-    const estimateConverter = { convertEstimate: jest.fn() };
-    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue(null);
-
-    await expect(markEstimateManuallyAccepted({
-      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
-    })).rejects.toThrow(/no billable line items/i);
-  });
 });
 
 describe('prepay-on-book (one-step annual prepay while booking)', () => {

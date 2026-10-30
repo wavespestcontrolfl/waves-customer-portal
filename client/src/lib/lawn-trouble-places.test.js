@@ -151,6 +151,20 @@ describe('rows that stay on the sheet without the tag of the entry that opened t
     expect(placeProblems(row({ productId: 'C2' }), { areas, chinch })).toEqual({ front: null, back: null });
   });
 
+  // Owner 2026-10-30: a limit is a warning. The ladder stops at an open Arena, so Talak is in no blockedIds, but its own limit was read.
+  test('a later rung at its own limit at a place warns there in its own words, even with an open rung before it', () => {
+    const talakCapped = { rungIds: ['C1', 'C2'], byPlace: {
+      front: { item: { productId: 'C1' }, note: null, unreadableIds: [], blockedIds: [], limitedIds: ['C2'], limitMessages: { c2: 'Talak: 2/2 applications this year — LIMIT REACHED.' } },
+      back: { item: { productId: 'C1' }, note: null, unreadableIds: [], blockedIds: [], limitedIds: ['C2'] },
+    } };
+    expect(placeProblems(row({ productId: 'C2' }), { areas, chinch: talakCapped })).toEqual({
+      front: 'Talak: 2/2 applications this year — LIMIT REACHED.', back: 'A yearly limit is reached for this product at this place.',
+    });
+    expect(withPlace(row({ productId: 'C2' }), { areas, chosen: 'front', chinch: talakCapped })).toMatchObject({ placeBlock: null, placeWarning: 'Talak: 2/2 applications this year — LIMIT REACHED.' });
+    // The open rung is unchanged.
+    expect(placeProblems(row({ productId: 'C1' }), { areas, chinch: talakCapped })).toEqual({ front: null, back: null });
+  });
+
   test('without the blocked ids (an older answer) the place offers its one product', () => {
     const old = { rungIds: ['C1', 'C2'], byPlace: { front: { item: { productId: 'C2' }, note: 'n', unreadableIds: [] }, back: { item: { productId: 'C1' }, note: null, unreadableIds: [] } } };
     expect(placeProblems(row({ productId: 'C1' }), { areas, chinch: old })).toEqual({ front: 'n', back: null });
