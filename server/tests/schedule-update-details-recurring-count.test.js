@@ -1172,9 +1172,16 @@ describe('update-details wiring (source guards)', () => {
     const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return moveReply(200, {', start));
     expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: actor.technicianId, qualityDates })');
     expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
+    // The tech Quick Move seeds ONE Set from commit()'s dates, its per-stop board
+    // updates add to that Set, and it is flushed once after them (dispatch
+    // audit 2026-10-29: tech moves now update other operators' boards).
     const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
-    expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");
-    expect(techSrc.indexOf('flushDispatchQualityDates(new Set(result.qualityDates))')).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+    const seed = techSrc.indexOf('const qualityDates = new Set(Array.isArray(result.qualityDates) ? result.qualityDates : []);');
+    const emit = techSrc.indexOf('emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates })');
+    const flush = techSrc.indexOf('await dispatchAssignment.flushDispatchQualityDates(qualityDates);');
+    expect(seed).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+    expect(emit).toBeGreaterThan(seed);
+    expect(flush).toBeGreaterThan(emit);
   });
 
   test('the edit broadcast waits for every board update before the shared Set is flushed (codex #4295 r5 P2)', () => {
