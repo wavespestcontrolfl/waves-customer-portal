@@ -77,6 +77,12 @@ const prettyJson = (value) => {
   try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
 };
 
+const formatUnitCost = (value, unit) => {
+  const numeric = Number(value);
+  if (value == null || !Number.isFinite(numeric) || !unit) return "—";
+  return `$${numeric.toFixed(numeric >= 10 ? 2 : 4)}/${unit}`;
+};
+
 function StatusBadge({ status }) {
   // Main: pending amber, approved green, rejected red. The kit has no success
   // tone, so approved keeps the emphasis tone and pending gets its amber back.
@@ -101,15 +107,17 @@ function ChangelogTab() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("all");
   const [expandedId, setExpandedId] = useState(null);
+  const [loadError, setLoadError] = useState("");
 
-  useEffect(() => {
+  const loadEntries = useCallback(() => {
     setLoading(true);
     const qs = filter === "all" ? "" : `?category=${encodeURIComponent(filter)}`;
     af(`/admin/pricing-config/changelog${qs}`)
-      .then((data) => setEntries(data.entries || []))
-      .catch(() => setEntries([]))
+      .then((data) => { setEntries(data.entries || []); setLoadError(""); })
+      .catch((error) => { setEntries([]); setLoadError(error.message); })
       .finally(() => setLoading(false));
   }, [filter]);
+  useEffect(() => { loadEntries(); }, [loadEntries]);
 
   const filterOptions = ["all", "bug", "leak", "rule", "cost", "architecture", "documentation", "infrastructure"];
   return (
@@ -119,7 +127,7 @@ function ChangelogTab() {
         <Field label="Filter"><Select value={filter} onChange={(event) => setFilter(event.target.value)}>{filterOptions.map((option) => <option key={option} value={option}>{option === "all" ? "All categories" : option}</option>)}</Select></Field>
       </CardHeader>
       <CardBody>
-        {loading ? <ActionFeedback>Loading changelog...</ActionFeedback> : entries.length === 0 ? (
+        {loading ? <ActionFeedback>Loading changelog...</ActionFeedback> : loadError ? <ActionFeedback error onRetry={loadEntries}>Could not load the changelog: {loadError}</ActionFeedback> : entries.length === 0 ? (
           <p className="py-8 text-center text-ink-secondary">No changelog entries{filter !== "all" ? ` for category “${filter}”` : ""} yet.</p>
         ) : (
           <Table className="min-w-[820px]" aria-label="Pricing changelog">
@@ -158,14 +166,15 @@ function ProposalsTab() {
   const [reviewNotes, setReviewNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState(null);
+  const [loadError, setLoadError] = useState("");
 
   const loadProposals = useCallback(() => {
     setLoading(true);
     af(
       `/admin/pricing-proposals?status=${encodeURIComponent(statusFilter)}&limit=50`,
     )
-      .then((data) => setProposals(data.proposals || []))
-      .catch(() => setProposals([]))
+      .then((data) => { setProposals(data.proposals || []); setLoadError(""); })
+      .catch((error) => { setProposals([]); setLoadError(error.message); })
       .finally(() => setLoading(false));
   }, [statusFilter]);
   useEffect(() => { loadProposals(); }, [loadProposals]);
@@ -198,7 +207,7 @@ function ProposalsTab() {
       </CardHeader>
       <CardBody className="space-y-4">
         {feedback && <ActionFeedback error={feedback.error}>{feedback.message}</ActionFeedback>}
-        {loading ? <ActionFeedback>Loading proposals...</ActionFeedback> : proposals.length === 0 ? <p className="py-8 text-center text-ink-secondary">No {statusFilter === "all" ? "" : `${statusFilter} `}proposals.</p> : (
+        {loading ? <ActionFeedback>Loading proposals...</ActionFeedback> : loadError ? <ActionFeedback error onRetry={loadProposals}>Could not load proposals: {loadError}</ActionFeedback> : proposals.length === 0 ? <p className="py-8 text-center text-ink-secondary">No {statusFilter === "all" ? "" : `${statusFilter} `}proposals.</p> : (
           <Table className="min-w-[900px]" aria-label="Pricing proposals">
             <THead><TR><TH>Config key</TH><TH>Change</TH><TH align="center">% change</TH><TH>Source</TH><TH>Status</TH><TH>Created</TH><TH align="right">Actions</TH></TR></THead>
             <TBody>{proposals.map((proposal) => <TR key={proposal.id} className="cursor-pointer" onClick={() => openProposal(proposal)}>
@@ -314,9 +323,17 @@ function LawnBracketsTab() {
   const [activeTrack, setActiveTrack] = useState("st_augustine");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const tiers = ["standard", "enhanced", "premium"];
   const trackLabels = { st_augustine: "St. Augustine", bermuda: "Bermuda", zoysia: "Zoysia", bahia: "Bahia" };
-  useEffect(() => { af("/admin/pricing-config/lawn-brackets").then((data) => setTracks(data.tracks || {})).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const loadBrackets = useCallback(() => {
+    setLoading(true);
+    af("/admin/pricing-config/lawn-brackets")
+      .then((data) => { setTracks(data.tracks || {}); setLoadError(""); })
+      .catch((nextError) => setLoadError(nextError.message))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { loadBrackets(); }, [loadBrackets]);
   const handleCellUpdate = async (sqft, tier, newPrice) => {
     const updated = (tracks[activeTrack] || []).map((row) => row.sqft_bracket === sqft && row.tier === tier ? { ...row, monthly_price: newPrice } : row);
     setTracks((previous) => ({ ...previous, [activeTrack]: updated })); setSaving(true); setError("");
@@ -330,6 +347,7 @@ function LawnBracketsTab() {
     finally { setSaving(false); }
   };
   if (loading) return <ActionFeedback>Loading brackets...</ActionFeedback>;
+  if (loadError) return <ActionFeedback error onRetry={loadBrackets}>Could not load lawn brackets: {loadError}</ActionFeedback>;
   const trackKeys = Object.keys(tracks);
   if (trackKeys.length === 0) return <ActionFeedback>No bracket data found. Run the pricing_config migration first.</ActionFeedback>;
   const trackData = tracks[activeTrack] || [];
@@ -345,7 +363,15 @@ function DiscountRulesTab() {
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  useEffect(() => { af("/admin/pricing-config/discount-rules").then((data) => setRules(data.rules || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const [loadError, setLoadError] = useState("");
+  const loadRules = useCallback(() => {
+    setLoading(true);
+    af("/admin/pricing-config/discount-rules")
+      .then((data) => { setRules(data.rules || []); setLoadError(""); })
+      .catch((nextError) => setLoadError(nextError.message))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { loadRules(); }, [loadRules]);
   const handleUpdate = async (serviceKey, field, value) => {
     setRules((previous) => previous.map((rule) => rule.service_key === serviceKey ? { ...rule, [field]: value } : rule)); setError("");
     try { await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
@@ -355,6 +381,7 @@ function DiscountRulesTab() {
     catch (nextError) { setError(`Save failed: ${nextError.message}`); }
   };
   if (loading) return <ActionFeedback>Loading discount rules...</ActionFeedback>;
+  if (loadError) return <ActionFeedback error onRetry={loadRules}>Could not load discount rules: {loadError}</ActionFeedback>;
   if (rules.length === 0) return <ActionFeedback>No discount rules found. Run the pricing_config migration.</ActionFeedback>;
   return <Card><CardHeader><CardTitle className="text-16">Service discount rules</CardTitle></CardHeader><CardBody className="space-y-3">{error && <ActionFeedback error>{error}</ActionFeedback>}<Table className="min-w-[900px]" aria-label="Service discount rules"><THead><TR><TH>Service</TH><TH align="center">Tier qualifier</TH><TH align="center">Max discount</TH><TH align="center">Exclude %</TH><TH align="center">Flat credit</TH><TH align="center">Min tier</TH><TH>Notes</TH></TR></THead><TBody>{rules.map((rule) => <TR key={rule.service_key}><TD className="font-medium capitalize">{rule.service_key.replace(/_/g, " ")}</TD><TD align="center"><Switch checked={rule.tier_qualifier} disabled={!canEditPricing()} aria-label={`${rule.service_key} tier qualifier`} onChange={(value) => handleUpdate(rule.service_key, "tier_qualifier", value)} /></TD><TD align="center">{rule.max_discount_pct != null ? <EditCell value={Number(rule.max_discount_pct)} onSave={(value) => handleUpdate(rule.service_key, "max_discount_pct", value)} /> : "—"}</TD><TD align="center"><Switch checked={rule.exclude_from_pct_discount} disabled={!canEditPricing()} aria-label={`${rule.service_key} exclude from percent discount`} onChange={(value) => handleUpdate(rule.service_key, "exclude_from_pct_discount", value)} /></TD><TD align="center">{rule.flat_credit ? <EditCell value={Number(rule.flat_credit)} onSave={(value) => handleUpdate(rule.service_key, "flat_credit", value)} /> : "—"}</TD><TD align="center" className="capitalize">{rule.flat_credit_min_tier || "—"}</TD><TD className="max-w-[240px] truncate text-ink-secondary" title={rule.notes || ""}>{rule.notes || "—"}</TD></TR>)}</TBody></Table></CardBody></Card>;
 }
@@ -362,15 +389,33 @@ function DiscountRulesTab() {
 function ProductsTab() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
-  useEffect(() => { af("/admin/inventory?limit=200").then((data) => setProducts(data.products || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const [loadError, setLoadError] = useState("");
+  const adminViewer = canEditPricing();
+  const loadProducts = useCallback(() => {
+    setLoading(true);
+    af("/admin/inventory?limit=200")
+      .then((data) => { setProducts(data.products || []); setLoadError(""); })
+      .catch((error) => setLoadError(error.message))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { loadProducts(); }, [loadProducts]);
   if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
-  const pricedProducts = products.filter((product) => product.best_price > 0).sort((a, b) => (a.category || "").localeCompare(b.category || ""));
-  return <Card><CardHeader><CardTitle className="text-16">Product cost reference</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">{products.length} products loaded. Full catalog available under Inventory tab.</p></CardHeader><CardBody><Table className="min-w-[760px]" aria-label="Product cost reference"><THead><TR><TH>Product</TH><TH>Category</TH><TH>Active ingredient</TH><TH align="right">Best price</TH><TH align="right">Unit price</TH></TR></THead><TBody>{pricedProducts.map((product) => <TR key={product.id}><TD className="font-medium">{product.product_name || product.name}</TD><TD>{product.category}</TD><TD className="max-w-[220px] truncate text-ink-secondary" title={product.active_ingredient || ""}>{product.active_ingredient || "—"}</TD><TD align="right" nums>${Number(product.best_price || 0).toFixed(2)}</TD><TD align="right" nums>{product.unit_price ? `$${Number(product.unit_price).toFixed(4)}` : "—"}</TD></TR>)}</TBody></Table></CardBody></Card>;
+  if (loadError) return <ActionFeedback error onRetry={loadProducts}>Could not load products: {loadError}</ActionFeedback>;
+  // The inventory API strips owner-only cost fields for non-admins, so there is nothing to price.
+  const pricedProducts = products.filter((product) => Number(product.bestPrice) > 0).sort((a, b) => (a.category || "").localeCompare(b.category || ""));
+  return <Card><CardHeader><CardTitle className="text-16">Product cost reference</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">{adminViewer ? `${products.length} products loaded. Full catalog available under Inventory tab.` : "Product costs are visible to admins only."}</p></CardHeader>{adminViewer && <CardBody><Table className="min-w-[760px]" aria-label="Product cost reference"><THead><TR><TH>Product</TH><TH>Category</TH><TH>Active ingredient</TH><TH align="right">Best price</TH><TH align="right">Unit cost</TH></TR></THead><TBody>{pricedProducts.map((product) => <TR key={product.id}><TD className="font-medium">{product.name}</TD><TD>{product.category}</TD><TD className="max-w-[220px] truncate text-ink-secondary" title={product.activeIngredient || ""}>{product.activeIngredient || "—"}</TD><TD align="right" nums>${Number(product.bestPrice).toFixed(2)}</TD><TD align="right" nums>{formatUnitCost(product.costPerUnit, product.costUnit)}</TD></TR>)}</TBody></Table></CardBody>}</Card>;
 }
 
 function AuditLog() {
   const [logs, setLogs] = useState([]);
-  useEffect(() => { af("/admin/pricing-config/audit-log?limit=30").then((data) => setLogs(data.logs || [])).catch(() => {}); }, []);
+  const [loadError, setLoadError] = useState("");
+  const loadLogs = useCallback(() => {
+    af("/admin/pricing-config/audit-log?limit=30")
+      .then((data) => { setLogs(data.logs || []); setLoadError(""); })
+      .catch((error) => setLoadError(error.message));
+  }, []);
+  useEffect(() => { loadLogs(); }, [loadLogs]);
+  if (loadError) return <ActionFeedback error onRetry={loadLogs}>Could not load recent changes: {loadError}</ActionFeedback>;
   if (logs.length === 0) return null;
   return <Card><CardHeader><CardTitle className="text-16">Recent changes</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{logs.map((log, index) => <div key={`${log.config_key}-${log.changed_at}-${index}`} className="py-2 text-ui-body text-ink-secondary"><span className="font-medium text-zinc-900 u-nums">{log.config_key}</span> changed by <span className="text-zinc-900">{log.changed_by || "admin"}</span> — <span className="u-nums">{formatDate(log.changed_at, true)}</span>{log.reason && <span> ({log.reason})</span>}</div>)}</CardBody></Card>;
 }
@@ -379,7 +424,15 @@ export default function PricingLogicPanel() {
   const [activeTab, setActiveTab] = useState("global");
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
-  useEffect(() => { af("/admin/pricing-config").then((data) => setConfigs(data.configs || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const [loadError, setLoadError] = useState("");
+  const loadConfigs = useCallback(() => {
+    setLoading(true);
+    af("/admin/pricing-config")
+      .then((data) => { setConfigs(data.configs || []); setLoadError(""); })
+      .catch((error) => setLoadError(error.message))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { loadConfigs(); }, [loadConfigs]);
   const handleConfigUpdate = useCallback((key, data) => setConfigs((previous) => previous.map((config) => config.config_key === key ? { ...config, data } : config)), []);
   const filteredConfigs = configs.filter((config) => config.category === activeTab);
   const specialTab = ["products", "proposals", "changelog"].includes(activeTab);
@@ -387,13 +440,14 @@ export default function PricingLogicPanel() {
   return <div className="space-y-5 text-ui-body text-ink-primary">
     <div className="flex flex-wrap gap-2" aria-label="Pricing configuration category">{TABS.map((tab) => <Button key={tab.key} variant={activeTab === tab.key ? "primary" : "secondary"} aria-pressed={activeTab === tab.key} onClick={() => setActiveTab(tab.key)}>{tab.label}</Button>)}</div>
     {loading ? <ActionFeedback className="min-h-20">Loading pricing configuration...</ActionFeedback> : <>
+      {loadError && <ActionFeedback error onRetry={loadConfigs}>Could not load pricing configuration: {loadError}</ActionFeedback>}
       {activeTab === "lawn" && <LawnBracketsTab />}
       {activeTab === "waveguard" && <DiscountRulesTab />}
       {activeTab === "products" && <ProductsTab />}
       {activeTab === "proposals" && <ProposalsTab />}
       {activeTab === "changelog" && <ChangelogTab />}
       {!specialTab && filteredConfigs.length > 0 && <div className="space-y-3"><h2 className="text-18 font-medium text-zinc-900">{activeTab === "waveguard" ? "Tier configuration" : activeTab === "lawn" ? "Lawn pricing config" : `${sectionLabel} configuration`}</h2>{filteredConfigs.map((config) => <ConfigCard key={config.config_key} config={config} onUpdate={handleConfigUpdate} />)}</div>}
-      {!specialTab && filteredConfigs.length === 0 && activeTab !== "lawn" && activeTab !== "waveguard" && <ActionFeedback>No configuration data for this category yet. Run the pricing_config migration to seed data.</ActionFeedback>}
+      {!specialTab && !loadError && filteredConfigs.length === 0 && activeTab !== "lawn" && activeTab !== "waveguard" && <ActionFeedback>No configuration data for this category yet. Run the pricing_config migration to seed data.</ActionFeedback>}
       {["global", "waveguard", "lawn"].includes(activeTab) && <AuditLog />}
     </>}
   </div>;
