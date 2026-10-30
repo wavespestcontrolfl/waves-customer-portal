@@ -589,6 +589,8 @@ function CustomerIntelligenceTab() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          flexWrap: "wrap",
+          gap: 8,
         }}
       >
         {" "}
@@ -608,7 +610,7 @@ function CustomerIntelligenceTab() {
             border: `1px solid ${D.teal}`,
             background: "transparent",
             color: D.teal,
-            fontSize: 12,
+            fontSize: 14,
             cursor: "pointer",
             opacity: scanPending ? 0.5 : 1,
           }}
@@ -680,10 +682,11 @@ function CustomerIntelligenceTab() {
               {" "}
               <div
                 style={{
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: 500,
                   color: D.heading,
                   marginBottom: 4,
+                  overflowWrap: "anywhere",
                 }}
               >
                 {o.first_name} {o.last_name} — {o.outreach_type?.toUpperCase()}{" "}
@@ -691,7 +694,7 @@ function CustomerIntelligenceTab() {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 12,
+                  fontSize: 14,
                   color: D.text,
                   lineHeight: 1.6,
                   marginBottom: 8,
@@ -699,11 +702,12 @@ function CustomerIntelligenceTab() {
                   background: D.card,
                   borderRadius: 6,
                   fontStyle: "italic",
+                  overflowWrap: "anywhere",
                 }}
               >
                 "{o.message_content}"
               </div>{" "}
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {" "}
                 <button
                   onClick={() =>
@@ -718,7 +722,7 @@ function CustomerIntelligenceTab() {
                     border: "none",
                     background: D.green,
                     color: "#fff",
-                    fontSize: 11,
+                    fontSize: 14,
                     fontWeight: 500,
                     cursor: "pointer",
                     opacity:
@@ -746,7 +750,7 @@ function CustomerIntelligenceTab() {
                     border: `1px solid ${D.border}`,
                     background: "transparent",
                     color: D.muted,
-                    fontSize: 11,
+                    fontSize: 14,
                     cursor: "pointer",
                     opacity:
                       !isAdmin ||
@@ -789,7 +793,7 @@ function CustomerIntelligenceTab() {
             <div style={{ fontSize: 16, fontWeight: 500, color: D.green }}>
               Upsell Opportunities ({upsells.length})
             </div>{" "}
-            <div style={{ fontSize: 13, color: D.muted }}>
+            <div style={{ fontSize: 14, color: D.muted }}>
               Potential:{" "}
               <span style={{ color: D.green, fontFamily: MONO }}>
                 ${data.upsellTotalMonthly}/mo
@@ -818,7 +822,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -829,7 +833,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -840,7 +844,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "left",
                       borderBottom: `1px solid ${D.border}`,
@@ -851,7 +855,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "right",
                       borderBottom: `1px solid ${D.border}`,
@@ -862,7 +866,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "right",
                       borderBottom: `1px solid ${D.border}`,
@@ -873,7 +877,7 @@ function CustomerIntelligenceTab() {
                   <th
                     style={{
                       padding: "8px 12px",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.muted,
                       textAlign: "center",
                       borderBottom: `1px solid ${D.border}`,
@@ -890,7 +894,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 13,
+                        fontSize: 14,
                         color: D.heading,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -900,7 +904,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.muted,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -910,7 +914,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.teal,
                         borderBottom: `1px solid ${D.border}`,
                       }}
@@ -920,7 +924,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 13,
+                        fontSize: 14,
                         color: D.green,
                         textAlign: "right",
                         fontFamily: MONO,
@@ -932,7 +936,7 @@ function CustomerIntelligenceTab() {
                     <td
                       style={{
                         padding: "8px 12px",
-                        fontSize: 12,
+                        fontSize: 14,
                         color: D.muted,
                         textAlign: "right",
                         fontFamily: MONO,
@@ -958,7 +962,7 @@ function CustomerIntelligenceTab() {
                           border: "none",
                           background: D.teal,
                           color: "#fff",
-                          fontSize: 10,
+                          fontSize: 14,
                           cursor: "pointer",
                           opacity: pendingActions[`upsell:${u.id}`] ? 0.5 : 1,
                         }}

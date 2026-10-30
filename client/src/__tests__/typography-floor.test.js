@@ -46,12 +46,12 @@ describe('typography floor (UI audit unit 7)', () => {
     });
   }
 
-  it('TimeGridDays renders the Unassigned label at the 11px caption class (F0212)', () => {
+  it('TimeGridDays renders the Unassigned label at the 14px readability floor (F0212, dispatch audit 10-29)', () => {
     const label = read('components/schedule/TimeGridDays.jsx')
       .split('\n')
       .find((line) => line.includes('>Unassigned</span>'));
     expect(label).toBeDefined();
-    expect(label).toMatch(/\btext-11\b/);
+    expect(label).toMatch(/\btext-14\b/);
     expect(label).not.toMatch(/fontSize:\s*\d+/);
   });
 });

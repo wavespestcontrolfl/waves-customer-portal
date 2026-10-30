@@ -351,11 +351,17 @@ router.post('/:key/preview', async (req, res, next) => {
   try {
     const loaded = await loadTemplateByKey(req.params.key);
     if (!loaded) return res.status(404).json({ error: 'Document template not found' });
-    if (!loaded.activeVersion) return res.status(409).json({ error: 'Document template has no active version' });
+    // The editor sends its draft (title + body, unsaved edits included) so
+    // staff see the text they are editing; with no draft this renders the
+    // active saved version. A preview writes nothing.
+    const draft = req.body?.draft && typeof req.body.draft === 'object'
+      ? { title: String(req.body.draft.title ?? ''), body: String(req.body.draft.body ?? '') }
+      : null;
+    if (!draft && !loaded.activeVersion) return res.status(409).json({ error: 'Document template has no active version' });
     const context = req.body?.context || req.body?.values || {};
     const rendered = renderDocumentTemplate({
       template: loaded.template,
-      version: loaded.activeVersion,
+      version: draft || loaded.activeVersion,
       context,
     });
     res.json({ rendered });

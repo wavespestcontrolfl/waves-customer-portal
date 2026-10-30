@@ -35,8 +35,10 @@ export default function ChannelROI({ data, loading, error }) {
 
   return (
     <UiSurface>
-      {/* Topline: total money in vs total all-in money out, blends visible */}
-      <div className="flex items-baseline justify-between gap-3 mb-3">
+      {/* Topline: total money in vs total all-in money out, blends visible.
+          On a phone the blends wrap to their own line (and to two lines at
+          320px) — the mobile card clips anything wider than itself. */}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
         <div>
           <span className="u-nums text-22 font-medium tracking-tight">
             {fmtMoney(data.totalRevenue || 0)}
@@ -45,8 +47,10 @@ export default function ChannelROI({ data, loading, error }) {
             revenue on {fmtMoney(data.totalAllInSpend || 0)} all-in spend
           </span>
         </div>
-        <span className="u-nums whitespace-nowrap text-ui-caption text-ink-secondary">
-          blended ROAS {fmtX(data.blendedROAS)} · LTV:CAC {fmtTo1(data.blendedLtvCac)}
+        <span className="u-nums text-ui-caption text-ink-secondary">
+          <span className="whitespace-nowrap">blended ROAS {fmtX(data.blendedROAS)}</span>
+          {" · "}
+          <span className="whitespace-nowrap">LTV:CAC {fmtTo1(data.blendedLtvCac)}</span>
         </span>
       </div>
 

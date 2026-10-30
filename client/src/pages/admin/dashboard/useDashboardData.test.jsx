@@ -16,6 +16,9 @@ const response = (path) => {
   if (path.endsWith('/stale-visits')) return { visits: [] };
   if (path.endsWith('/today-completion')) return { total: 2, completed: 1 };
   if (path === '/admin/dashboard') return { path, kpis: { revenue: 100 } };
+  if (path.endsWith('/funnel')) return { path, funnel: {} };
+  if (path.endsWith('/aging')) return { path, aging: {} };
+  if (path.endsWith('/review-trend')) return { path, trend: [] };
   return { path };
 };
 const settle = async () => { await act(async () => {}); };
@@ -358,5 +361,23 @@ describe('dashboard request recovery', () => {
     expect(result.current.errors.staleVisits).toBeInstanceOf(Error);
     expect(result.current.errors.today).toBeInstanceOf(Error);
     expect(result.current.lastUpdated).toBeNull();
+  });
+
+  it('treats malformed analytics feeds as unavailable rather than a false empty state', async () => {
+    const malformed = ['/admin/dashboard/funnel', '/admin/dashboard/aging', '/admin/dashboard/review-trend'];
+    adminFetch.mockImplementation(async (path) => (malformed.includes(path) ? {} : response(path)));
+    const { result } = renderHook(() => useDashboardData('all', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    for (const key of ['funnel', 'aging', 'reviewTrend']) {
+      expect(result.current.errors[key]).toBeInstanceOf(Error);
+      expect(result.current.values[key]).toBeNull();
+    }
+  });
+
+  it('accepts an empty but well-formed analytics container as real data', async () => {
+    const { result } = renderHook(() => useDashboardData('all', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    for (const key of ['funnel', 'aging', 'reviewTrend']) expect(result.current.errors[key]).toBeNull();
+    expect(result.current.values.aging.aging).toEqual({});
   });
 });

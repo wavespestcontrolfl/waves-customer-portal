@@ -177,6 +177,70 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     });
   });
 
+  describe('live pickers on real rows (GATE_SERVICE_LINE_MAP=live)', () => {
+    beforeEach(() => { process.env.GATE_SERVICE_LINE_MAP = 'live'; });
+    const pest = { serviceType: 'General Pest Control' };
+
+    test('lineOfferRanking: home 0, gap 1, anyone else dropped; null when the gate is not live or no line has a technician set', async () => {
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('lawn', ownerId, null)]);
+      const general = await lineTech.lineOfferRanking(db, { lines: ['general'] });
+      expect(general.lines).toEqual(['general']);
+      expect([hireId, ownerId, futureId, null].map((id) => general.rankOf(id))).toEqual([0, 1, null, null]);
+      // Two lines: the owner is the gap of one and the home of the other; the hire is not on the lawn line.
+      const both = await lineTech.lineOfferRanking(db, { lines: ['general', 'lawn'] });
+      expect([ownerId, hireId].map((id) => both.rankOf(id))).toEqual([1, null]);
+      // A line with nobody set adds no rule; the other line still does.
+      const withTermite = await lineTech.lineOfferRanking(db, { lines: ['termite', 'lawn'] });
+      expect(withTermite.lines).toEqual(['lawn']);
+      expect(await lineTech.lineOfferRanking(db, { lines: ['termite'] })).toBeNull();
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      expect(await lineTech.lineOfferRanking(db, { lines: ['general'] })).toBeNull();
+    });
+
+    test('lineOfferRanking: a technician switched Off for the line is dropped', async () => {
+      await db('service_line_techs').insert(lineRow('rodent', hireId, ownerId));
+      await db('technician_capabilities').insert({ technician_id: hireId, service_category: 'rodent', active: false, capability_level: 'qualified' });
+      const ranking = await lineTech.lineOfferRanking(db, { lines: ['rodent'] });
+      expect([hireId, ownerId].map((id) => ranking.rankOf(id))).toEqual([null, 1]);
+      await db('technician_capabilities').where({ technician_id: hireId }).del();
+    });
+
+    test('pickLineTechnician: home, then gap on an off day or an absence, then nobody; the caller\'s list bounds it', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('mosquito', futureId, null)]);
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toEqual({ mapped: true, line: 'general', technicianId: hireId, reason: 'home' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: FRIDAY })).toMatchObject({ technicianId: ownerId, reason: 'gap_off_day' });
+      await db('technician_absences').insert({ technician_id: hireId, absence_date: MONDAY, reason: 'sick' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toMatchObject({ technicianId: ownerId, reason: 'gap_absent' });
+      await db('technician_absences').where({ technician_id: hireId }).del();
+      // The caller's own eligible list: the home tech is not on it, so the gap tech takes it.
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY, candidateIds: [ownerId] })).toMatchObject({ technicianId: ownerId, reason: 'gap_not_listed' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY, candidateIds: [futureId] })).toMatchObject({ technicianId: null, reason: 'none' });
+      // A not-yet-started home tech with no gap: nobody (the caller saves the visit unassigned).
+      expect(await lineTech.pickLineTechnician(db, { serviceType: 'Mosquito Control', date: MONDAY })).toEqual({ mapped: true, line: 'mosquito', technicianId: null, reason: 'none' });
+    });
+
+    test('pickLineTechnician: an unmapped line and a gate that is not live both tell the caller to keep today\'s choice', async () => {
+      await db('service_line_techs').insert(lineRow('general', hireId, ownerId));
+      expect(await lineTech.pickLineTechnician(db, { serviceType: 'Termite Inspection', date: MONDAY })).toMatchObject({ mapped: false, line: 'termite', reason: 'no_map' });
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toMatchObject({ mapped: false, technicianId: null, reason: 'off' });
+    });
+
+    test('the Team-tab card works in live: GET and PUT answer with mode live, and the roster marks the response', async () => {
+      const got = await call('get', '/service-lines');
+      expect(got.statusCode).toBe(200);
+      expect(got.body.mode).toBe('live');
+      const saved = await call('put', '/service-lines', { technicianId: ownerId, body: { lines: [
+        { service_category: 'termite', home_technician_id: ownerId, gap_technician_id: null },
+      ] } });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.body.mode).toBe('live');
+      expect((await call('get', '/technicians')).body.serviceLinesEnabled).toBe(true);
+      expect((await call('get', '/service-lines/shadow-summary')).statusCode).toBe(200);
+    });
+  });
+
   describe('recorder', () => {
     test('gate off: no row and the log table is never queried', async () => {
       await db('service_line_techs').insert(lineRow('general', hireId, ownerId));

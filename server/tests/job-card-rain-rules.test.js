@@ -94,11 +94,25 @@ describe('buildSprayCheck with rain rules', () => {
     expect(verdict(deltaDust, [65, 0, 0])).toMatchObject({ verdict: 'caution', source: 'label' });
   });
 
-  test('a label dry-before-rain advice is a caution only, and a gap in it is not "unknown"', () => {
-    expect(verdict(sedgehammer, [0, 0, 0, 95, 0]).verdict).toBe('caution');
-    expect(verdict(sedgehammer, [0, 0, 0, 95, 0]).reason).toBe('rain 95% within 4 h — label advises 4 h to dry');
+  test('a label dry-before-rain advice is a caution, the Warning level above 80%, and a gap in it is not "unknown"', () => {
+    expect(verdict(sedgehammer, [0, 0, 0, 65, 0])).toMatchObject({ verdict: 'caution', source: 'label advice', reason: 'rain 65% within 4 h — label advises 4 h to dry', action: 'Spray it first.' });
+    expect(verdict(sedgehammer, [0, 0, 0, 65, 0])).not.toHaveProperty('level');
+    // Label audit 2026-10-30: the label's own dry time warns like the Waves rule does.
+    expect(verdict(sedgehammer, [0, 0, 0, 95, 0])).toMatchObject({ verdict: 'caution', level: 'warning', reason: 'rain 95% within 4 h — label advises 4 h to dry', action: 'Skip it today and note why, or plan a re-treat.' });
     expect(verdict(sedgehammer, [0, 0, 0, 0, 95]).verdict).toBe('ok');
     expect(verdict(sedgehammer, [0, null, 0, 0]).verdict).toBe('ok');
+  });
+
+  test('label audit 2026-10-30: Merit 2F waters in; a mosquito dunk tablet and a surfactant get no Waves dry time', () => {
+    const merit = { id: 'm', name: 'Merit 2F', category: 'insecticide', formulation: 'flowable', rate_unit: 'fl_oz', epa_reg_number: '101563-60', label_verified_at: '2026-01-01' };
+    expect(verdict(merit, [95, 95, 95, 95, 95], ['Every 6 Weeks Lawn Care Service'])).toEqual({ productId: 'm', verdict: 'ok', reason: null });
+    const dunks = { id: 'k', name: 'Summit Mosquito Dunk Tablets', category: 'mosquito', formulation: 'tablet', application_method: 'spot_treatment', epa_reg_number: '6218-87', label_verified_at: '2026-01-01' };
+    expect(verdict(dunks, [95, 95, 95], ['Mosquito Barrier Treatment']).verdict).toBe('ok');
+    const nis = { id: 'n', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', formulation: 'liquid adjuvant', epa_reg_number: 'N/A', label_verified_at: '2026-01-01' };
+    expect(verdict(nis, [95, 95, 95], [PEST]).verdict).toBe('ok');
+    expect(verdict(nis, [95, 95, 95, 95, 95], ['Monthly Lawn Care Service']).verdict).toBe('ok');
+    // A real spray beside them still gets its Waves dry time.
+    expect(verdict(alpine, [0, 95], [PEST])).toMatchObject({ verdict: 'caution', level: 'warning', source: 'Waves rule' });
   });
 
   test('a water-in product and a non-spray get no rain check', () => {
@@ -223,11 +237,13 @@ describe('the Dispatch weather chip', () => {
     expect(chip([talak], [65, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm' });
     expect(chip([alpine], [0, 85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
     expect(chip([alpine], [0, 65])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
-    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([sedgehammer], [0, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
+    expect(chip([sedgehammer], [0, 0, 70])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
     expect(chip([celsius], [0, 85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
     // The product goes on the chip, and a Warning beats an earlier product's caution.
-    const names = new Map([['a', 'Alpine WSG'], ['s', 'Sedgehammer Plus']]);
-    expect(weatherIssue(check([sedgehammer, alpine], [0, 85, 95]), true, names)).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Alpine WSG' });
+    const names = new Map([['t', 'Atticus Talak 7.9 F'], ['s', 'Sedgehammer Plus']]);
+    // Talak: 65% at the start (a caution); Sedgehammer: 85% at 5 pm, inside its 4 h (a Warning).
+    expect(weatherIssue(check([talak, sedgehammer], [65, 0, 0, 85]), true, names)).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning · Sedgehammer Plus' });
     const windy = { ...celsius, max_wind_mph: 10 };
     const hot = { ...celsius, max_temp_f: 95 };
     expect(weatherIssue(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }), true))
@@ -241,7 +257,7 @@ describe('the Dispatch weather chip', () => {
 
   test('a caution comes before "Weather unknown" (a missing forecast), and other days wait', () => {
     // Talak has no start-hour reading (unknown); Sedgehammer's rain is still said.
-    expect(chip([talak, sedgehammer], [null, 0, 95])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
+    expect(chip([talak, sedgehammer], [null, 0, 70])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain caution' });
     expect(chip([talak], [null])).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
     expect(chip([talak], [10], false)).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
   });

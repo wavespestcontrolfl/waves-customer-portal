@@ -36,10 +36,10 @@
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
 //     With the context's `spotRules` (GATE_LAWN_SPOT_RULES, owner 2026-10-08) a
-//     spot-treatment row takes its area from the tech instead: quick sizes
-//     (100 / 250 / 500 / 1,000 sq ft) or a typed number, which figures the
-//     amount the same way, goes to /complete as areaValue (sqft), and is
-//     required (or a typed amount) before Complete. The weed products the
+//     spot-treatment row asks for the amount used (owner 2026-10-30) and takes
+//     an optional typed area, which figures the amount the same way when none
+//     is typed, goes to /complete as areaValue (sqft), and one of the two is
+//     required before Complete. The weed products the
 //     protocol ties together are ONE "Weed spots" entry (the context's
 //     `plannedProducts.weedMix`, decided on the server: the yearly cap, the
 //     surfactant by temperature) whose rows share one area control.
@@ -745,7 +745,14 @@ function plannedRate(planned) {
 // product has none and starts on its own default method.
 // The guide card or entry that opened a row (weeds, chinch, fungus, caterpillars, dry_spots), or
 // null; and the plan's notes for the product (a watering hold, a distance), which the row shows.
-const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
+// A tapped add-on's list line is short (method and rate); the plan's longer words for it, the
+// substitution and the protocol line, show on the row once it is added (protocolNote).
+const protocolNoteOf = (planned) => [planned?.substituteFor ? `In place of ${planned.substituteFor}` : '', planned?.line || ''].filter(Boolean).join(' · ');
+const guideRowFields = (planned, guided, added = false) => ({
+  guided: guided || null,
+  gateNotes: planned?.gateNotes || [],
+  ...(added && planned ? { protocolNote: protocolNoteOf(planned) } : {}),
+});
 
 function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
   const rawMethod = startMethodFor(product, planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn'));
@@ -766,7 +773,7 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     fromProtocol: added && !!planned,
     // One of the Weed spots entry's rows: they share one area (weedArea).
     weedGroup,
-    ...guideRowFields(planned, guided),
+    ...guideRowFields(planned, guided, added),
     // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
     method,
     dimension: seeded.dimension,
@@ -952,8 +959,7 @@ function derivedAmount(row, lawnSqft) {
   };
 }
 
-// Spot-area quick sizes (sq ft) offered beside the typed box.
-export const SPOT_AREA_SIZES = [100, 250, 500, 1000];
+const SPOT_AREA_LABEL = 'Area sprayed (sq ft), if you know it';
 
 const sameId = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
 const positiveNumber = (value) => (Number(value) > 0 ? Number(value) : null);
@@ -1142,6 +1148,19 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
 // The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
 const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
 
+// A yearly limit is a warning, never a block (owner 2026-10-30): one line per product and place, in the limit's own words (which
+// open with the product's name), above the Complete button. The completion records the application and the office is told.
+const LIMIT_WARNING_TAIL = 'You can still complete. The office gets an alert.';
+function limitWarningsOf(rows) {
+  const lines = rows.filter((row) => row.placeRule && row.placeWarning).map((row) => {
+    const lead = `${row.name}:`;
+    const message = String(row.placeWarning).trim();
+    const words = message.startsWith(lead) ? message.slice(lead.length).trim() : message;
+    return `${row.name}, ${areaLabelOf(row)}: ${words} ${LIMIT_WARNING_TAIL}`;
+  });
+  return [...new Set(lines)];
+}
+
 // GATE_LAWN_NEW_SOD_NOTE: the server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
 const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
@@ -1157,7 +1176,8 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
-  // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
+  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
+  // it here; a yearly limit is a warning on the footer (limitWarningsOf).
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
   const missingPlace = rows.find((row) => row.placeRule && !row.place);
   const [, reason = ''] = [
@@ -1176,8 +1196,8 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
-    // A spot row needs the area treated or a typed amount (spot rules).
-    [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
+    // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
+    [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
     [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
@@ -1754,6 +1774,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
+  const limitWarnings = limitWarningsOf(rows);
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
@@ -1863,6 +1884,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
         submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
+        warnings={limitWarnings}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
@@ -2033,16 +2055,14 @@ function ProtocolAddOns({ newSod = null, addOns, month, weedMix = null, chinch =
   );
 }
 
-// One opt-in product of the month: its name, the protocol's own words for it, and its tap.
+// One opt-in product of the month: its name, how and at what rate it goes down, and its tap.
 function AddOnLine({ item, sod, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
   const look = sodAddLook(sod);
   const why = [
     // GATE_LAWN_NEW_SOD_NOTE: the hold's reason (or the part-of-lawn skip note) leads the line.
     sodWords(sod),
-    item.substituteFor ? `In place of ${item.substituteFor}` : '',
-    item.line || '',
-    ...(item.gateNotes || []),
+    // Short on purpose (owner 2026-10-30): the protocol line, the substitution and the gate notes show on the row once added.
     item.applicationMethod ? methodLabel(item.applicationMethod) : '',
     rate,
     // A product whose limit read failed is never silent: the one wording says what to do.
@@ -2295,18 +2315,14 @@ function ChinchFoundEntry({ newSod, chinch, catalog, places, labels, on, locked,
   );
 }
 
-// The area a spot row went down on: quick sizes and a typed box (owner 2026-10-08).
+// The area a spot row went down on: one optional box (owner 2026-10-30). The tech fills in the
+// amount he used; an area, when he knows it, figures the amount if he left it empty.
 function SpotAreaControl({ title = null, value, locked, onChange, children = null }) {
   const areaId = useId();
   return (
-    <div role="group" aria-label={title || 'Area treated'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
+    <div role="group" aria-label={title || 'Area sprayed'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
       {title && <p className="tech-product-editor-label">{title}</p>}
-      <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>
-      <div className="tech-visit-tile-grid">
-        {SPOT_AREA_SIZES.map((size) => (
-          <Chip disabled={locked} key={size} label={`${size.toLocaleString('en-US')} sq ft`} pressed={Number(value) === size} onClick={() => onChange(String(size))} />
-        ))}
-      </div>
+      <label htmlFor={areaId} className="tech-product-editor-label">{SPOT_AREA_LABEL}</label>
       <Input
         id={areaId}
         className="tech-visit-control tech-product-amount-input"
@@ -2332,6 +2348,15 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
   // is "planned area". Only a method that needs square feet shows one.
   const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : null;
   const areaText = area ? `${area === lawnSqft ? 'Whole lawn' : 'Planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
+  const amountBlock = (
+    <>
+      <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+      {/* A weed-mix row reads the entry's shared area; any other spot row asks for its own, here, after the amount. */}
+      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value, spotGallons: '' })} />}
+      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
+      {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
+    </>
+  );
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
@@ -2339,17 +2364,15 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.fromProtocol ? 'from the protocol' : row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
+      {/* Spot rules: the amount used comes first, right under How; the area is optional. */}
+      {row.spotRule && amountBlock}
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
-      {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
-      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value, spotGallons: '' })} />}
-      {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
       {/* GATE_LAWN_TROUBLE_AREAS: where the spot went (the caller's place control; a weed-mix row reads the entry's shared place). */}
       {children}
+      {row.protocolNote && <p className="tech-visit-muted">{row.protocolNote}</p>}
       {note && <p className="tech-visit-muted" role="status">{note}</p>}
       {(row.gateNotes || []).map((gateNote) => <p key={gateNote} className="tech-visit-muted" role="status">{gateNote}</p>)}
-      <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
-      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
-      {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
+      {!row.spotRule && amountBlock}
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
       </div>

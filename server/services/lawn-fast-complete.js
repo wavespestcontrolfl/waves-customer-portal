@@ -1251,8 +1251,8 @@ function visitTypeRefusal(verdict, lawnFast) {
  * (confirm, then resubmit under a fresh key).
  *
  * With GATE_LAWN_TROUBLE_AREAS live the last check is the places: every spot-treatment row carries a place (400
- * lawn_place_required / lawn_place_invalid) that the yearly limits allow (400 lawn_place_limit), by the same limit reader
- * the sheet followed (lawn-trouble-areas.js preflightPlaces).
+ * lawn_place_required / lawn_place_invalid), and a take-all card row sits on a mapped one (lawn-trouble-areas.js
+ * preflightPlaces). A yearly limit at the place is never refused: the sheet warns and the closeout audit tells the office.
  *
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.

@@ -516,6 +516,12 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
   });
   if (!result.ok) {
     const known = BOOKING_REFUSALS[result.code];
+    // A first visit that landed after bookingContext's read (another tab won the estimate guard): answer it with the
+    // booked visit, as bookingContext does, so the picker can show its date and time.
+    if (result.code === 'ALREADY_BOOKED') {
+      const booked = await linkedFirstVisit(estimate.id).catch(() => null);
+      if (booked) return { ...refusal(409, ...known), visit: publicVisit(booked) };
+    }
     if (known) return refusal(409, ...known);
     return result.status === 409 ? refusal(409, 'slot_taken', result.error) : refusal(result.status || 500, 'booking_failed', CALL_US);
   }

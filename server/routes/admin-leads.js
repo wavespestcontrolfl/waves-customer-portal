@@ -1876,6 +1876,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // conflicts): collected in the trx, returned as `warnings`.
     const bookingWarnings = [];
 
+    // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
+    // runs): bought BEFORE the transaction, so the booking's route number and
+    // route check read the same Google road times the Edit dialog's check
+    // does. This router is requireAdmin: the staff user pays. A customer with
+    // no saved location (a brand-new one) keeps the cache and the model.
+    if (windowStart && technicianId && existingCustomer?.latitude != null && existingCustomer?.longitude != null) {
+      await require('../services/scheduling/save-road-buy').buyRoadsBeforeSave({
+        spender: req.technicianId, date: String(date).split('T')[0], technicianId, windowStart, windowEnd,
+        prospective: { lat: existingCustomer.latitude, lng: existingCustomer.longitude,
+          estimated_duration_minutes: duration, service_type: svcType },
+      });
+    }
+
     // Everything that mutates state runs in one transaction so a failure anywhere
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.

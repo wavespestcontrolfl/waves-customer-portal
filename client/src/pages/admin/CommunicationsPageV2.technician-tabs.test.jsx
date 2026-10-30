@@ -72,6 +72,25 @@ describe("Communications tabs by role", () => {
   });
 });
 
+describe("Activity counts", () => {
+  const statsRequested = () => fetch.mock.calls.some(([url]) => String(url).includes("/admin/communications/stats"));
+
+  it("are never requested or shown for a technician (the server answers 403), so no counts error appears", async () => {
+    mount("technician");
+    await screen.findByText("Synthetic customer text");
+    expect(statsRequested()).toBe(false);
+    expect(screen.queryByText("Sent This Month")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Activity counts are unavailable/)).not.toBeInTheDocument();
+  });
+
+  it("load for an admin", async () => {
+    mount("admin");
+    await screen.findByText("Synthetic customer text");
+    expect(statsRequested()).toBe(true);
+    expect(await screen.findByText("Sent This Month")).toBeInTheDocument();
+  });
+});
+
 describe("Call back in a text thread", () => {
   async function openThread(role) {
     mount(role);

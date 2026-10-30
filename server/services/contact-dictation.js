@@ -327,7 +327,63 @@ const DECODER_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
   ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
   : 180000;
 
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the decoder no longer depends on
+// Gemini alone. Gemini first, then the OpenAI model the call extraction uses,
+// through the shared fallback chain; each leg gets the old single-call budget.
+const DECODER_ROUTE = () => {
+  const MODELS = require('../config/models');
+  return Object.freeze({
+    name: 'contactDecoder',
+    primary: Object.freeze({ provider: MODELS.PROVIDER.GEMINI, model: DECODER_MODEL() }),
+    fallback: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER }),
+  });
+};
+const DECODER_DOWN_DEDUPE_MS = 24 * 60 * 60 * 1000;
+
+// One engineering row a day in the Activity feed when every model failed.
+// Fail-open: an alert problem never touches the call.
+async function reportDecoderDown(reasons) {
+  try {
+    const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    await require('./ops-digest').deliverOpsDigest({
+      key: 'contact-decoder-down',
+      subject: 'FIX: call email spelling check could not run',
+      headline: 'System — Call email spelling check could not run',
+      summary: 'Both AI models failed, so the spelling hints for a call\'s email and address were skipped.',
+      text: `The call contact decoder failed on every model (${reasons}). Emails heard on calls keep the read-back card and their first-touch hold until it recovers.`,
+      audience: 'engineering',
+      link: '/admin/communications',
+      dedupeKey: `contact-decoder-down:${day}`,
+      dedupeWindowMs: DECODER_DOWN_DEDUPE_MS,
+      sendEmail: async () => ({ ok: true }),
+    });
+  } catch (err) {
+    logger.warn(`[contact-dictation] decoder-down report failed: ${err.message}`);
+  }
+}
+
+async function fetchDecoderWithFallback(prompt) {
+  const { dispatchWithFallback } = require('./llm/call');
+  const res = await dispatchWithFallback(DECODER_ROUTE(), {
+    text: prompt,
+    jsonMode: true,
+    temperature: 0,
+    // The chain reads its budget from the payload; reserveFallbackBudget
+    // splits it, so each leg keeps the old single-call limit.
+    timeoutMs: DECODER_TIMEOUT_MS * 2,
+  }, {
+    reserveFallbackBudget: true,
+    validate: (result) => (result.json && Array.isArray(result.json.emails) ? null : 'decoder_shape_invalid'),
+  });
+  if (res?.ok && res.json) return JSON.stringify(res.json);
+  const reasons = (res?.failures || []).map((f) => `${f.provider} ${f.reason}`).join(', ') || res?.reason || 'unknown';
+  logger.warn(`[contact-dictation] decoder failed on every model: ${reasons}`);
+  await reportDecoderDown(reasons);
+  return null;
+}
+
 async function fetchDecoderResponse(prompt) {
+  if (require('../config/feature-gates').callEmailChecksLive?.() === true) return fetchDecoderWithFallback(prompt);
   if (!process.env.GEMINI_API_KEY) return null;
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${DECODER_MODEL()}:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -341,7 +397,11 @@ async function fetchDecoderResponse(prompt) {
       signal: AbortSignal.timeout(DECODER_TIMEOUT_MS),
     }
   );
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // Was silent: a capped key looked exactly like "no email dictated".
+    logger.warn(`[contact-dictation] decoder request failed: gemini ${res.status}`);
+    return null;
+  }
   const data = await res.json();
   return data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || null;
 }

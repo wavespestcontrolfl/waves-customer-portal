@@ -201,3 +201,55 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect(mockHandle).not.toHaveBeenCalled();
   });
 });
+
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// this domain" as a blocked bounce. Gate off it stays on the sender-retry rail;
+// gate on it is a bad address and goes to people only (the bounced-contact
+// alert and the recording re-check card), never to recovery, rescue or a
+// resend. Another template than the rate review letter.
+describe('SendGrid event webhook → a blocked bounce for a domain with no mail server', () => {
+  const deadDomainBounce = () => event({ type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' });
+  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
+
+  test('the message row: gate off schedules a provider retry; gate on records a bounce with no retry', () => {
+    const { computeEmailMessageEventUpdates } = require('../routes/webhooks-sendgrid');
+    const message = { ...MESSAGE, template_key: 'appointment.confirmation' };
+    const off = computeEmailMessageEventUpdates(deadDomainBounce(), message);
+    expect(off.status).toBe('failed');
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    const on = computeEmailMessageEventUpdates(deadDomainBounce(), message);
+    expect(on.status).toBe('bounced');
+    expect(on.bounced_at).toBeInstanceOf(Date);
+    expect(on.provider_retry_next_at).toBeUndefined();
+  });
+
+  test.each([
+    ['tracked, gate off: the sender-retry rail, nothing else', 'appointment.confirmation', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
+    ['tracked, gate on: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'appointment.confirmation', 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+    ['untracked send, gate off: nothing (not a hard bounce)', null, undefined, { retry: 0, alert: 0, rescue: 0, recheck: 0 }],
+    ['untracked send, gate on: the same people-only path', null, 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+  ])('%s', async (_label, templateKey, gate, want) => {
+    if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
+    const recovery = require('../services/email-bounce-recovery');
+    const rescue = require('../services/email-bounce-rescue');
+    const reverify = require('../services/email-bounce-reverify');
+    const providerRetry = require('../services/transactional-email-provider-retry');
+    const attempt = jest.spyOn(recovery, 'attemptRecovery').mockResolvedValue({ resent: false });
+    const alert = jest.spyOn(recovery, 'alertBouncedContactAddress').mockResolvedValue(null);
+    const rescueCall = jest.spyOn(rescue, 'rescueBouncedAddress').mockResolvedValue(null);
+    const recheck = jest.spyOn(reverify, 'reverifyBouncedEmailFromCall').mockResolvedValue(null);
+    const retryAlert = jest.spyOn(providerRetry, 'alertIfProviderRetriesExhausted').mockResolvedValue(null);
+    try {
+      mockState.message = templateKey ? { ...MESSAGE, template_key: templateKey } : null;
+      expect((await post([deadDomainBounce()])).status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(retryAlert).toHaveBeenCalledTimes(want.retry);
+      expect(attempt).not.toHaveBeenCalled();
+      expect(alert).toHaveBeenCalledTimes(want.alert);
+      expect(rescueCall).toHaveBeenCalledTimes(want.rescue);
+      expect(recheck).toHaveBeenCalledTimes(want.recheck);
+    } finally {
+      [attempt, alert, rescueCall, recheck, retryAlert].forEach((spy) => spy.mockRestore());
+    }
+  });
+});

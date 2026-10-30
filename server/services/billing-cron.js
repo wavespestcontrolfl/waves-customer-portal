@@ -838,13 +838,21 @@ const BillingCron = {
         const retryAt = new Date();
         retryAt.setDate(retryAt.getDate() + RETRY_DELAYS_DAYS[0]);
 
-        // Find the failed payment record (created by the charge method)
-        const failedPayment = await db('payments')
-          .where({ customer_id: customer.id, status: 'failed' })
-          .where('payment_date', '>=', monthStart)
-          .where('description', 'like', '%WaveGuard Monthly%')
-          .orderBy('created_at', 'desc')
-          .first();
+        // Arm the failed row charge() recorded for THIS attempt (err.paymentRecord).
+        // This runs after the billing lock is released, so "the newest failed
+        // monthly row" can be an older month's retry rung that failed in the gap;
+        // arming it would leave this month's failure with no retry. The query is
+        // a fallback only when no attempt row was recorded, and it is held to
+        // this month's obligation stamp (chargeMonthly sets billed_month).
+        const failedPayment = err.paymentRecord?.id && err.paymentRecord.status === 'failed'
+          ? err.paymentRecord
+          : await db('payments')
+            .where({ customer_id: customer.id, status: 'failed' })
+            .where('payment_date', '>=', monthStart)
+            .where('description', 'like', '%WaveGuard Monthly%')
+            .whereRaw("metadata->>'billed_month' = ?", [`${year}-${String(month).padStart(2, '0')}`])
+            .orderBy('created_at', 'desc')
+            .first();
 
         const emailChoice = failedPayment ? await paymentIssueEmailChoice(customer.id) : false;
         const emailDescriptor = failedPayment && emailChoice !== false && emailChoice !== null

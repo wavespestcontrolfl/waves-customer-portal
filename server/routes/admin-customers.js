@@ -949,7 +949,78 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   };
 }
 
+// The scheduler cadence for an authored count of visits a year: a named cadence the New Appointment modal books, else an
+// even custom interval.
+const PROPOSAL_CADENCE_FOR_VISITS = Object.freeze({
+  52: 'weekly', 26: 'biweekly', 12: 'monthly', 6: 'bimonthly', 4: 'quarterly', 3: 'triannual', 2: 'semiannual', 1: 'annual',
+});
+function proposalCadence(visitsPerYear) {
+  const named = PROPOSAL_CADENCE_FOR_VISITS[visitsPerYear];
+  return named ? { cadence: named, intervalDays: null } : { cadence: 'custom', intervalDays: Math.round(365 / visitsPerYear) };
+}
+
+// An authored commercial proposal (estimate_data.proposal, services/estimate-proposal.js) is the agreement, and it
+// prices its own visits: a program bills its price per application at its visits a year, a building line bills its
+// amount once per period, and corrective work is one-time. The engine rows read below never see any of it, so a
+// programs-only proposal fell to the totals fallback: one quarterly line at the MONTHLY average, and a $300 application
+// prefilled at $100 (pipeline audit 2026-10-30, item 2). Commercial visits stay off the residential catalog (no service
+// id or key, as services/commercial-first-visit.js books them). Null when the estimate has no authored proposal.
+function authoredProposalScheduleLines(estimate) {
+  const { normalizeProposal, OCCURRENCES_PER_YEAR } = require('../services/estimate-proposal');
+  const proposal = normalizeProposal(estimate);
+  if (proposal.enabled !== true || proposal.synthesized === true) return null;
+  const line = ({ name, price, recurring, visitsPerYear = null, cadence = null, minutes = null, unitPrice = {} }) => ({
+    serviceId: null,
+    serviceKey: null,
+    name,
+    estimateLabel: name,
+    category: null,
+    billingType: recurring ? 'recurring' : 'one_time',
+    frequency: null,
+    visitsPerYear,
+    duration: minutes,
+    price,
+    ...(recurring ? cadence : { cadence: 'one_time', intervalDays: null }),
+    source: recurring ? 'recurring' : 'one_time',
+    estimateId: estimate.id,
+    ...unitPrice,
+  });
+  const lines = (proposal.programs || []).map((program) => line({
+    name: program.label,
+    price: program.pricePerApplication,
+    recurring: true,
+    visitsPerYear: program.frequencyPerYear,
+    cadence: proposalCadence(program.frequencyPerYear),
+    minutes: program.visitMinutes || null,
+    unitPrice: { perApplicationPrice: program.pricePerApplication },
+  }));
+  const multiBuilding = proposal.buildings.length > 1;
+  for (const building of proposal.buildings) {
+    for (const item of building.lineItems) {
+      if (!(item.amount > 0)) continue;
+      const name = `${multiBuilding ? `${building.name} — ` : ''}${item.description || 'Service'}`;
+      if (item.frequency === 'one_time') {
+        lines.push(line({ name, price: item.amount, recurring: false }));
+      } else if (item.frequency === 'per_application') {
+        if (!(item.visitsPerYear > 0)) continue;
+        lines.push(line({ name, price: item.amount, recurring: true, visitsPerYear: item.visitsPerYear,
+          cadence: proposalCadence(item.visitsPerYear), unitPrice: { perApplicationPrice: item.amount } }));
+      } else {
+        lines.push(line({ name, price: item.amount, recurring: true, visitsPerYear: OCCURRENCES_PER_YEAR[item.frequency] || null,
+          cadence: { cadence: item.frequency, intervalDays: null },
+          unitPrice: item.frequency === 'monthly' ? { monthlyPrice: item.amount } : {} }));
+      }
+    }
+  }
+  for (const work of proposal.correctiveWork || []) {
+    if (work.amount > 0) lines.push(line({ name: work.label || 'Corrective work', price: work.amount, recurring: false }));
+  }
+  return lines;
+}
+
 function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines = false } = {}) {
+  const authoredLines = authoredProposalScheduleLines(estimate);
+  if (authoredLines) return authoredLines;
   const estData = parseJsonObject(estimate.estimate_data);
   let recurringSvcList = [];
   let oneTimeList = [];
@@ -1486,6 +1557,51 @@ function isEmailLike(value) {
 
 function comparableEmail(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+// Service-contact slots on PUT /:id, with their column widths
+// (20260422000002 / 20260611000004 migrations).
+const SERVICE_CONTACT_SLOTS = [
+  { column: 'service_contact', field: 'serviceContact', label: 'Service contact' },
+  { column: 'service_contact2', field: 'serviceContact2', label: 'Service contact 2' },
+  { column: 'service_contact3', field: 'serviceContact3', label: 'Service contact 3' },
+];
+const SERVICE_CONTACT_PARTS = [
+  { part: 'name', suffix: 'Name', max: 100 },
+  { part: 'phone', suffix: 'Phone', max: 20 },
+  { part: 'email', suffix: 'Email', max: 150 },
+];
+
+// Normalizes in `updates` each service-contact value that differs from the
+// stored row (the editor posts every slot; an unchanged stored value is not a
+// new write and never blocks an unrelated save). A blank value clears and is
+// always allowed. A phone takes the primary phone's normalization and NANP
+// check and must read as a phone number; an email takes the primary email's
+// normalization and must look like an address. Returns the first problem as
+// { error, field } (field = the request body key), else null.
+function normalizeChangedServiceContacts(updates, before) {
+  const { isLikelyE164 } = require('../utils/phone');
+  for (const slot of SERVICE_CONTACT_SLOTS) {
+    for (const { part, suffix, max } of SERVICE_CONTACT_PARTS) {
+      const column = `${slot.column}_${part}`;
+      const value = updates[column];
+      if (value === undefined || String(value ?? '') === String(before[column] ?? '')) continue;
+      const field = `${slot.field}${suffix}`;
+      if (value !== null && typeof value !== 'string') return { error: `${slot.label} ${part} must be text.`, field };
+      if (!cleanText(value)) continue;
+      if (part === 'phone') {
+        const problem = contactPhoneProblem(value);
+        if (problem) return { error: problem, field };
+        updates[column] = normalizeContactPhone(value);
+        if (!isLikelyE164(updates[column])) return { error: `${cleanText(value)} is not a valid phone number for ${slot.label}.`, field };
+      } else if (part === 'email') {
+        updates[column] = normalizeContactEmail(value);
+        if (!isEmailLike(updates[column])) return { error: `Enter a valid email address for ${slot.label}.`, field };
+      }
+      if (updates[column].length > max) return { error: `${slot.label} ${part} must be ${max} characters or fewer.`, field };
+    }
+  }
+  return null;
 }
 
 const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
@@ -4070,19 +4186,26 @@ const customerUpdateHandler = async (req, res, next) => {
     // and its fail-open policy live in services/billing-mode-rules.js, shared
     // with the Intelligence Bar's update_customer.
     const BillingModeRules = require('../services/billing-mode-rules');
-    const unpricedFutureBillableVisits = (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(db, req.params.id, { customerOverride });
-    if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
-      // Lane prerequisites (monthly rate, per-application fee, live annual
-      // term, priced upcoming visits) — one copy, services/billing-mode-rules.js,
-      // so the Intelligence Bar refuses exactly what this save refuses.
-      const refusal = await BillingModeRules.billingModeRefusal(req.body.billingMode, {
-        requestedMonthlyRate: req.body.monthlyRate,
-        loadRates: () => db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee'),
-        loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(db, req.params.id),
-        loadUnpricedFutureVisits: unpricedFutureBillableVisits,
-      });
-      if (refusal) return res.status(400).json({ error: refusal });
-    } else if (req.body.billingMode !== undefined) {
+    // The billing-type refusal for this save, judged against `row` (the
+    // customer's stored rates/tier) with reads on `conn`. It runs twice: here,
+    // before any lock, and again inside the transaction below on the LOCKED
+    // row, after the customer comms lock a Schedule booking holds while it
+    // inserts visits — so a visit booked between this read and the write is
+    // seen there and refuses the save (Customers audit C01).
+    const billingModeChangeRefusal = async (conn, row) => {
+      const unpricedFutureBillableVisits = (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(conn, req.params.id, { customerOverride });
+      if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
+        // Lane prerequisites (monthly rate, per-application fee, live annual
+        // term, priced upcoming visits) — one copy, services/billing-mode-rules.js,
+        // so the Intelligence Bar refuses exactly what this save refuses.
+        return BillingModeRules.billingModeRefusal(req.body.billingMode, {
+          requestedMonthlyRate: req.body.monthlyRate,
+          loadRates: async () => row,
+          loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(conn, req.params.id),
+          loadUnpricedFutureVisits: unpricedFutureBillableVisits,
+        });
+      }
+      if (req.body.billingMode === undefined) return null;
       // Clearing the selector to "Not set" re-enters legacy inference — a
       // tier-less or sentinel-tier customer with a lingering rate RESOLVES
       // per_visit, and completion refuses the monthly-rate fallback for
@@ -4090,23 +4213,21 @@ const customerUpdateHandler = async (req, res, next) => {
       // (Codex r10). Resolve against the EFFECTIVE tier/rate this same
       // save produces (tier and monthlyRate may change in the same PUT).
       const { resolveBillingLane } = require('../services/billing-lane');
-      const effectiveTier = req.body.tier !== undefined ? req.body.tier : before.waveguard_tier;
+      const effectiveTier = req.body.tier !== undefined ? req.body.tier : row.waveguard_tier;
       const effectiveRateForClear = req.body.monthlyRate !== undefined
         ? (req.body.monthlyRate === '' ? 0 : parseFloat(req.body.monthlyRate) || 0)
-        : (parseFloat(before.monthly_rate) || 0);
+        : (parseFloat(row.monthly_rate) || 0);
       const resolvedOnClear = resolveBillingLane({
         billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
       });
-      if (resolvedOnClear.mode !== 'monthly_membership') {
-        const billable = await unpricedFutureBillableVisits({ billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear });
-        if (billable.length > 0) {
-          const plural = billable.length !== 1;
-          return res.status(400).json({
-            error: `Not set resolves this customer to per-visit billing — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'}, or pick an explicit lane.`,
-          });
-        }
-      }
-    }
+      if (resolvedOnClear.mode === 'monthly_membership') return null;
+      const billable = await unpricedFutureBillableVisits({ billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear });
+      if (billable.length === 0) return null;
+      const plural = billable.length !== 1;
+      return `Not set resolves this customer to per-visit billing — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'}, or pick an explicit lane.`;
+    };
+    const billingRefusal = await billingModeChangeRefusal(db, before);
+    if (billingRefusal) return res.status(400).json({ error: billingRefusal });
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
@@ -4146,6 +4267,12 @@ const customerUpdateHandler = async (req, res, next) => {
       const phoneProblem = contactPhoneProblem(updates.phone);
       if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
     }
+    // The additional service contacts get the same treatment (Customers audit
+    // C13): each value this save changes is normalized like the primary's and
+    // refused as a field error when it is not text, not a phone number / email
+    // address, or longer than its column.
+    const serviceContactProblem = normalizeChangedServiceContacts(updates, before);
+    if (serviceContactProblem) return res.status(400).json({ ...serviceContactProblem, code: 'INVALID_SERVICE_CONTACT' });
     // A changed number drops the shared-phone texting mark unless this save
     // sets it (intake-normalize.clearSharedPhoneMarkOnPhoneChange, codex #6268).
     require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, before);
@@ -4294,7 +4421,12 @@ const customerUpdateHandler = async (req, res, next) => {
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
             ['property-preferences', String(req.params.id)],
           );
-          if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
+          // A billing-type change takes it too: a Schedule booking inserts its
+          // visits under this lock, so the in-lock billing recheck below sees
+          // a visit booked after the pre-transaction check, and a booking
+          // that waits here re-reads the new type before it books (Customers
+          // audit C01).
+          if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined || updates.billing_mode !== undefined) {
             await lockCustomerComms(trx, req.params.id);
           }
           // Combined-session lock BEFORE the customer row lock (codex #3427
@@ -4313,7 +4445,14 @@ const customerUpdateHandler = async (req, res, next) => {
           // from the locked row — a pre-transaction 'before' from the losing
           // editor would no longer match snapshots the first edit already
           // moved, stranding them.
-          const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          // A customer archived after the read above refuses the edit rather than
+          // rewriting the archived row (Customers audit C11).
+          const lockedBefore = await trx('customers').where({ id: req.params.id }).whereNull('deleted_at').forUpdate().first();
+          if (!lockedBefore) throw Object.assign(new Error('Customer not found'), { customerNotFound: true });
+          // The billing-type rules again, on the locked row and this
+          // transaction's reads (C01): nothing has been written yet.
+          const lockedBillingRefusal = await billingModeChangeRefusal(trx, lockedBefore);
+          if (lockedBillingRefusal) throw Object.assign(new Error(lockedBillingRefusal), { billingRefusal: lockedBillingRefusal });
           contactAuditBefore = lockedBefore;
           // req.ibExpectedPayerId is set only by setCustomerBillToFromBar (never an HTTP field): the Bill-To
           // the bar card showed as current. Judged on the LOCKED row, so an edit that landed after the
@@ -4590,6 +4729,8 @@ const customerUpdateHandler = async (req, res, next) => {
         });
       } catch (e) {
         if (e && e.churnBlocked) return res.status(409).json(e.payload);
+        if (e && e.customerNotFound) return res.status(404).json({ error: 'Customer not found' });
+        if (e && e.billingRefusal) return res.status(400).json({ error: e.billingRefusal });
         if (e && e.code === '23505') {
           return res.status(409).json({
             error: 'address_matches_existing_property',
@@ -4821,7 +4962,11 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     // Row → address key, like every customer address writer: a billing
     // address assigned here contends with a bearer-link handoff that read
     // it as unowned, so the handoff commits first or re-judges ownership.
-    await db.transaction(async (trx) => {
+    const found = await db.transaction(async (trx) => {
+      // A live customer only, its row held first so an archive cannot commit
+      // in between; a missing or archived id seeds no rows (Customers audit C12).
+      const live = await trx('customers').where({ id: req.params.id }).whereNull('deleted_at').forUpdate().first('id');
+      if (!live) return false;
       if (!existing) {
         // Create through the canonical helper (marketing flags NULL), then
         // apply exactly the admin-named fields — a bare insert would take the
@@ -4836,7 +4981,9 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
       if (dbUpdates.appointment_notify_primary !== undefined) {
         await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.params.id);
       }
+      return true;
     });
+    if (!found) return res.status(404).json({ error: 'Customer not found' });
 
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })
@@ -5330,7 +5477,10 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     // state, and must not be able to undo a committed churn.
     try {
       await db.transaction(async (trx) => {
-        const locked = await trx('customers').where({ id: req.params.id }).forUpdate().first() || customer;
+        // Archived after the read above: refuse, never relabel (or reactivate)
+        // an archived row (Customers audit C11).
+        const locked = await trx('customers').where({ id: req.params.id }).whereNull('deleted_at').forUpdate().first();
+        if (!locked) throw Object.assign(new Error('Customer not found'), { customerNotFound: true });
         oldStage = locked.pipeline_stage;
         const stageUpdates = {
           pipeline_stage: stage,
@@ -5359,6 +5509,7 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       });
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
+      if (e && e.customerNotFound) return res.status(404).json({ error: 'Customer not found' });
       throw e;
     }
     await db('customer_interactions').insert({
@@ -5487,10 +5638,25 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Runs `write` in one transaction only while the customer is live: the row
+// is locked first, so an archive cannot commit between the check and the
+// write. Resolves false (nothing written) for a missing or archived customer
+// (Customers audit C12).
+async function writeForLiveCustomer(customerId, write) {
+  return db.transaction(async (trx) => {
+    const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
+    if (!live) return false;
+    await write(trx);
+    return true;
+  });
+}
+
 // POST /api/admin/customers/:id/tags
 router.post('/:id/tags', requireAdmin, async (req, res, next) => {
   try {
-    await db('customer_tags').insert({ customer_id: req.params.id, tag: req.body.tag }).onConflict(['customer_id', 'tag']).ignore();
+    const found = await writeForLiveCustomer(req.params.id, (trx) => trx('customer_tags')
+      .insert({ customer_id: req.params.id, tag: req.body.tag }).onConflict(['customer_id', 'tag']).ignore());
+    if (!found) return res.status(404).json({ error: 'Customer not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -5498,7 +5664,9 @@ router.post('/:id/tags', requireAdmin, async (req, res, next) => {
 // DELETE /api/admin/customers/:id/tags/:tag
 router.delete('/:id/tags/:tag', requireAdmin, async (req, res, next) => {
   try {
-    await db('customer_tags').where({ customer_id: req.params.id, tag: req.params.tag }).del();
+    const found = await writeForLiveCustomer(req.params.id, (trx) => trx('customer_tags')
+      .where({ customer_id: req.params.id, tag: req.params.tag }).del());
+    if (!found) return res.status(404).json({ error: 'Customer not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -5507,11 +5675,15 @@ router.delete('/:id/tags/:tag', requireAdmin, async (req, res, next) => {
 router.post('/:id/interactions', requireAdmin, async (req, res, next) => {
   try {
     const { type, subject, body } = req.body;
-    await db('customer_interactions').insert({
-      customer_id: req.params.id, interaction_type: type || 'note',
-      subject, body, admin_user_id: req.technicianId,
+    // The note and the customer's last-contact stamp commit together.
+    const found = await writeForLiveCustomer(req.params.id, async (trx) => {
+      await trx('customer_interactions').insert({
+        customer_id: req.params.id, interaction_type: type || 'note',
+        subject, body, admin_user_id: req.technicianId,
+      });
+      await trx('customers').where({ id: req.params.id }).update({ last_contact_date: new Date(), last_contact_type: type || 'note' });
     });
-    await db('customers').where({ id: req.params.id }).update({ last_contact_date: new Date(), last_contact_type: type || 'note' });
+    if (!found) return res.status(404).json({ error: 'Customer not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -5519,9 +5691,11 @@ router.post('/:id/interactions', requireAdmin, async (req, res, next) => {
 // POST /api/admin/customers/:id/follow-up
 router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
   try {
-    await db('customers').where({ id: req.params.id }).update({
+    // One statement: a missing or archived customer updates no row.
+    const updated = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').update({
       next_follow_up_date: req.body.date, follow_up_notes: req.body.notes,
     });
+    if (!updated) return res.status(404).json({ error: 'Customer not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

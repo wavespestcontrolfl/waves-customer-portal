@@ -7245,6 +7245,11 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // GATE_ROUTE_CHECK_ACCEPT_SAVES: the same-trip parent copies the
+              // reserved start's technician and window and was never numbered;
+              // number it here, inside `trx` (always a transaction). Gate off:
+              // touches nothing. Never throws.
+              if (sameTrip) await require('./scheduling/staff-save-route-check').placeAcceptedVisit(trx, { visit: parentRow });
               // Tech-facing "new visit" card (tech-visit-notifications.js,
               // codex r9 P1): this promoted same-trip parent inherits the
               // reserved start's technician and is inserted directly — no

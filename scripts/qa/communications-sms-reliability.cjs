@@ -37,7 +37,7 @@ async function main() {
         let body = {}, status = 200;
         if (api === '/admin/auth/me') body = { id: 'fixture-owner', name: 'Fixture operator', role: 'admin' };
         else if (api === '/health') body = { status: 'ok', gates: {} };
-        else if (api === '/admin/feature-flags') body = { flags: { 'admin-navigation': true } };
+        else if (api === '/admin/feature-flags') body = { flags: {} };
         else if (api === '/admin/notifications/unread-count') body = { count: 0 };
         else if (api === '/admin/communications/unread-count') body = { conversations: 0 };
         else if (api === '/admin/usage/track') body = {};

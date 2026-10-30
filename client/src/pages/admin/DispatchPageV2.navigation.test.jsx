@@ -47,7 +47,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); localStorage.removeItem('waves_admin_user'); });
 
 function deferred() {
   let resolve;
@@ -368,6 +368,8 @@ it('preserves a consumed missing-appointment message during background refresh',
 });
 
 it('shows a held visit above the stops and Book it opens the new-appointment modal on its day, time and customer', async () => {
+  // The held-visits strip is office-only (a technician's request answers 403).
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const held = {
     call_log_id: 'call-held', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM',
     caller_name: 'Pat Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' },
@@ -401,6 +403,7 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
 });
 
 it('only the newest Book it click opens the form when an earlier customer lookup is slow', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const row = (id, customerId) => ({
     call_log_id: id, kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: `Caller ${id}`,
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
@@ -426,6 +429,7 @@ it('only the newest Book it click opens the form when an earlier customer lookup
 });
 
 it('a Book it lookup still pending when the day changes does not open the form', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   const held = {
     call_log_id: 'call-late', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
