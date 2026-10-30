@@ -101,7 +101,12 @@ import {
   formatInvoiceDate,
   isInvoiceDueDateOverdue,
 } from "../../lib/invoiceDates";
-import { formatETDate, formatETDateTime } from "../../lib/timezone";
+import {
+  addETDays,
+  etDateString,
+  formatETDate,
+  formatETDateTime,
+} from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
@@ -343,25 +348,15 @@ async function uploadInvoiceAttachments(invoiceId, files) {
   );
   return result.attachments || [];
 }
-function formatDateParam(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function datePeriodStart(period) {
-  const current = new Date();
-  const today = new Date(
-    current.getFullYear(),
-    current.getMonth(),
-    current.getDate(),
-  );
-  if (period === "today") return today;
-  if (period === "7d") return new Date(today.getTime() - 7 * 86400000);
-  if (period === "30d") return new Date(today.getTime() - 30 * 86400000);
-  if (period === "month")
-    return new Date(current.getFullYear(), current.getMonth(), 1);
-  return null;
+// Date presets are Eastern-calendar ranges: [from, to] are inclusive
+// YYYY-MM-DD strings (the server compares `from <= date <= to`), and `to` is
+// today in ET so an invoice dated in the future never lands in a past period.
+function datePeriodRange(period, now = new Date()) {
+  if (!["today", "7d", "30d", "month"].includes(period)) return null;
+  const to = etDateString(now);
+  if (period === "today") return { from: to, to };
+  if (period === "month") return { from: `${to.slice(0, 8)}01`, to };
+  return { from: etDateString(addETDays(now, period === "7d" ? -7 : -30)), to };
 }
 function dateOnlyAtNoon(dateOnly) {
   return new Date(`${dateOnly}T12:00:00`);
@@ -1040,8 +1035,11 @@ export function buildInvoiceListParams({
   const term = query.trim();
   if (term) params.set("search", term);
   if (customerFilterId) params.set("customerId", customerFilterId);
-  const start = datePeriodStart(datePeriod);
-  if (start) params.set("from", formatDateParam(start));
+  const range = datePeriodRange(datePeriod);
+  if (range) {
+    params.set("from", range.from);
+    params.set("to", range.to);
+  }
   return params;
 }
 export default function AdminInvoicesPage() {
@@ -2687,6 +2685,20 @@ function InvoiceList({
                           >
                             #{inv.invoice_number}
                           </div>{" "}
+                          {isMobile &&
+                            isAdminUser &&
+                            invoicePaidSoFar(inv) > 0 && (
+                              <div
+                                data-testid="invoice-row-part-payment"
+                                style={{
+                                  marginTop: 4,
+                                }}
+                                className="text-ui-body text-ink-secondary"
+                              >
+                                Paid so far ${invoicePaidSoFar(inv).toFixed(2)}{" "}
+                                · ${invoiceStillOwed(inv).toFixed(2)} owed
+                              </div>
+                            )}
                         </div>{" "}
                         <div
                           style={{
@@ -2697,8 +2709,11 @@ function InvoiceList({
                           <div className="text-ui-field font-medium text-zinc-900">
                             ${parseFloat(inv.total).toFixed(2)}
                           </div>{" "}
-                          {isAdminUser && invoicePaidSoFar(inv) > 0 && (
+                          {!isMobile &&
+                            isAdminUser &&
+                            invoicePaidSoFar(inv) > 0 && (
                             <div
+                              data-testid="invoice-row-part-payment"
                               style={{
                                 marginTop: 4,
                               }}
@@ -3360,6 +3375,10 @@ function InvoiceList({
           onSent={() => {
             setReceiptModalInvoice(null);
             showToast("Receipt sent");
+            load();
+            onRefresh();
+          }}
+          onPartial={() => {
             load();
             onRefresh();
           }}
@@ -4437,6 +4456,63 @@ function SendInvoiceModal({
   );
 }
 
+// What happened on each receipt channel the operator asked for. The server
+// answers ok when ANY leg went out, with a result per leg: { ok, error?,
+// skipped?, deliveryOutcome? } — an email leg tagged deliveryOutcome
+// "uncertain" may still have reached the provider. A requested leg is "sent",
+// "uncertain" (never offer a resend) or "failed" (with its reason).
+export function receiptDeliveryOutcome(res, requested) {
+  // No per-leg results at all: fall back to the overall flag.
+  if (!res?.email && !res?.sms) {
+    return {
+      sent: [],
+      uncertain: [],
+      failed: [],
+      settled: [],
+      complete: !!res?.ok,
+      message: res?.ok ? "" : "Receipt send failed: Send failed",
+    };
+  }
+  const legs = [
+    ["email", "Email", res?.email],
+    ["sms", "SMS", res?.sms],
+  ].filter(([key]) => requested?.[key]);
+  const sent = [];
+  const uncertain = [];
+  const failed = [];
+  const notes = [];
+  for (const [key, label, leg] of legs) {
+    const reason = leg?.error || (leg?.skipped ? "not attempted" : "not sent");
+    if (leg?.ok) {
+      sent.push(key);
+      notes.push(`${label} sent.`);
+    } else if (leg?.deliveryOutcome === "uncertain") {
+      uncertain.push(key);
+      notes.push(
+        `${label} may have been delivered (${reason}). Check before sending it again.`,
+      );
+    } else {
+      failed.push(key);
+      notes.push(`${label} failed: ${reason}.`);
+    }
+  }
+  const settled = [...sent, ...uncertain];
+  const complete = legs.length > 0 && sent.length === legs.length;
+  let message = "";
+  if (!complete) {
+    message = settled.length
+      ? `Receipt not fully sent. ${notes.join(" ")}${
+          failed.length
+            ? ` Only ${failed.map((key) => (key === "sms" ? "SMS" : "Email")).join(" and ")} is selected to retry.`
+            : ""
+        }`
+      : `Receipt send failed: ${
+          [res?.email?.error, res?.sms?.error].filter(Boolean).join(" · ") ||
+          "Send failed"
+        }`;
+  }
+  return { sent, uncertain, failed, settled, complete, message };
+}
 // ── Send Receipt Modal ──
 // Per-invoice action for paid invoices. Memo is ephemeral (stored on the
 // invoice row as receipt_memo for audit) — not a customer preference.
@@ -4445,6 +4521,7 @@ function SendReceiptModal({
   isMobile,
   onClose,
   onSent,
+  onPartial,
   onError: reportError,
 }) {
   const sendingRef = useRef(false);
@@ -4515,13 +4592,19 @@ function SendReceiptModal({
           }),
         },
       );
-      if (!res.ok) {
-        const detail =
-          [res.email?.error, res.sms?.error].filter(Boolean).join(" · ") ||
-          "Send failed";
-        onError(`Receipt send failed: ${detail}`);
-      } else {
+      const outcome = receiptDeliveryOutcome(res, {
+        email: sendEmail,
+        sms: sendSms,
+      });
+      if (outcome.complete) {
         onSent();
+      } else {
+        // Keep the dialog open. A channel that went out (or may have) is
+        // unselected so a retry sends only what failed.
+        if (outcome.settled.includes("email")) setSendEmail(false);
+        if (outcome.settled.includes("sms")) setSendSms(false);
+        if (outcome.settled.length) onPartial?.();
+        onError(outcome.message);
       }
     } catch (err) {
       onError(`Receipt send failed: ${err.message}`);
@@ -6060,11 +6143,14 @@ function PaymentPlanModal({
     setActionError(message);
     reportError(message);
   };
-  const total = Number(invoice.total || 0);
+  // The plan covers what is still owed (total less account credit less money
+  // already received), never the original invoice total. The server clamps to
+  // the same figure and stays the authority.
+  const owed = invoiceStillOwed(invoice);
   const startDate = todayDateInput();
   const [paymentAmount, setPaymentAmount] = useState(
-    Number.isFinite(total) && total > 0
-      ? (Math.ceil((total / 3) * 100) / 100).toFixed(2)
+    Number.isFinite(owed) && owed > 0
+      ? (Math.ceil((owed / 3) * 100) / 100).toFixed(2)
       : "",
   );
   const [paymentFrequency, setPaymentFrequency] = useState("monthly");
@@ -6075,7 +6161,10 @@ function PaymentPlanModal({
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const amount = Number(paymentAmount);
-  const validAmount = Number.isFinite(amount) && amount > 0 && amount <= total;
+  const validAmount =
+    Number.isFinite(amount) &&
+    amount > 0 &&
+    Math.round(amount * 100) <= Math.round(owed * 100);
   const createDisabled =
     saving || !validAmount || !nextPaymentDate || !planStartDate;
   const createPlan = async () => {
@@ -6088,7 +6177,7 @@ function PaymentPlanModal({
       await adminFetch(`/admin/invoices/${invoice.id}/payment-plan`, {
         method: "POST",
         body: JSON.stringify({
-          totalBalance: total,
+          totalBalance: owed,
           paymentAmount: amount,
           paymentFrequency,
           planStartDate,
@@ -6136,7 +6225,7 @@ function PaymentPlanModal({
           }}
           className="text-ui-body text-ink-secondary"
         >
-          Invoice #{invoice.invoice_number} · ${total.toFixed(2)} ·{" "}
+          Invoice #{invoice.invoice_number} · ${owed.toFixed(2)} owed ·{" "}
           {invoice.first_name} {invoice.last_name}
         </div>
         <Field label={<>Payment amount</>} className="min-w-0">
@@ -6156,8 +6245,9 @@ function PaymentPlanModal({
             }}
             className="text-alert-fg text-ui-body"
           >
-            Enter an amount greater than $0 and no more than ${total.toFixed(2)}
-            .
+            {owed > 0
+              ? `Enter an amount greater than $0 and no more than $${owed.toFixed(2)}.`
+              : "Nothing is owed on this invoice."}
           </div>
         )}
         <label
