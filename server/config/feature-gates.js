@@ -9102,6 +9102,17 @@ function acceptedPlanRingOnChangeLive() {
 // GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
 module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
 
+// GATE_CUSTOMER_ALERTS_RING read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-29,
+// "small" E1 of the admin bell rebuild). On, an admin alert declared as a customer contact or as a promise we owe a
+// customer (registry rule `contact`/`promise`, or the same flag in the alert's metadata) rings whatever else the bell
+// policy says, and a customer's failed invoice payment (bill_payment_error) rings beside payment_failed. Off = what
+// rings is today's behavior, byte for byte.
+function customerAlertsRingLive() {
+  return process.env.GATE_CUSTOMER_ALERTS_RING === 'true';
+}
+// GATE_CUSTOMER_ALERTS_RING reader, on its own line so gate PRs never conflict.
+module.exports.customerAlertsRingLive = customerAlertsRingLive;
+
 // GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
 // On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is
 // 'person') or one of our own engineering faults (the classes in services/admin-alert-routing.js) is written Activity-only
