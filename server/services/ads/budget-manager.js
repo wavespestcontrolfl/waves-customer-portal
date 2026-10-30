@@ -490,7 +490,7 @@ class BudgetManager {
     for (const date of dates) {
       const weekday = etDateWeekday(date);
       const perTech = weekday === 6 ? settings.saturday_limit : weekday === 0 ? settings.sunday_limit : settings.weekday_limit;
-      const techs = await this.getTechCountForArea('general', date);
+      const techs = await this.getTechCountForArea('general', date, { workDays: true });
       const stops = stopsByDay.get(date) || 0;
       const limit = techs * perTech;
       days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops) });
@@ -612,7 +612,7 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(_area, dateStr) {
+  async getTechCountForArea(_area, dateStr, { workDays = false } = {}) {
     // Capacity is driven by the real assignable-technician count (active AND
     // field-dispatchable — a prospective placeholder or an office-only account
     // can take no slot, so it adds no capacity). There is no per-area tech
@@ -625,8 +625,10 @@ class BudgetManager {
     // only on a date they are not absent and not off that weekday (the shared
     // absentTechDays helper; weekdays off only while GATE_TECH_WORK_DAYS is on
     // too). Gate off or no date = every assignable technician, as before.
+    // workDays: true applies the same date filter whatever that gate says (the
+    // gap rule must never count an absent technician's day as open time).
     const techs = await applyAssignable(db('technicians'));
-    if (!dateStr || !adsCapacityWorkDaysLive() || !techs.length) return techs.length;
+    if (!dateStr || !(workDays || adsCapacityWorkDaysLive()) || !techs.length) return techs.length;
     const day = String(dateStr).slice(0, 10);
     const away = await absentTechDays(db, {
       dateFrom: day,

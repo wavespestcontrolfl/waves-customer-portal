@@ -262,7 +262,7 @@ describe('getGapWindow', () => {
     const win = await BudgetManager.getGapWindow(NOW, DEFAULTS);
     expect(win.days.find((d) => d.date === '2026-11-02').limit).toBe(0);
     expect(win.days.find((d) => d.date === '2026-10-30').limit).toBe(18);
-    expect(BudgetManager.getTechCountForArea).toHaveBeenCalledWith('general', '2026-10-30');
+    expect(BudgetManager.getTechCountForArea).toHaveBeenCalledWith('general', '2026-10-30', { workDays: true });
   });
 
   test('uses ONE grouped query that counts distinct customers on live route stops', async () => {
