@@ -566,11 +566,12 @@ function customerBillingPin(customer = {}) {
 // The booked visits a caller anchored the prepay term and coverage on (the call-prepay-choice card), as one
 // string: the fields the term start and coverage were derived from. Pure: the caller pins the rows it checked,
 // and the accept re-reads them in its own transaction (pin 'bookedVisits' below).
-// Every field the caller's eligibility read uses (owner, property, date, window, status, service, cadence,
-// setup fee, link).
+// Every field the caller's eligibility read uses (owner, property and stamped service address, date, window,
+// status, service, cadence, setup fee, recorded payment, link).
 const BOOKED_VISIT_PIN_FIELDS = [
-  'id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'status', 'service_type',
-  'is_recurring', 'recurring_pattern', 'recurring_interval_days', 'pending_setup_fee', 'source_estimate_id',
+  'id', 'customer_id', 'property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+  'scheduled_date', 'window_start', 'status', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days',
+  'pending_setup_fee', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'source_estimate_id',
 ];
 function bookedVisitsPinOf(rows = []) {
   return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');

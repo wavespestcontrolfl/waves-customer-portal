@@ -1920,7 +1920,7 @@ async function stampCallPrepayActions(items, isAdmin = false) {
   for (const item of cards) {
     try {
       const payload = parseCardPayload(item) || {};
-      const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: item.customer_id, estimateId: payload.estimate_id || null });
+      const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: payload.customer_id || item.customer_id, estimateId: payload.estimate_id || null });
       item.call_prepay = ev.ok
         ? {
           can_accept: true, amount: ev.amount, preview_token: previewTokenOf(ev), message: null,

@@ -92,6 +92,7 @@ describeDb('call prepay choice (PostgreSQL)', () => {
   async function estimate(customerId, over = {}) {
     const [row] = await trx('estimates').insert({
       customer_id: customerId, status: 'sent', monthly_total: 39.33, annual_total: 472, estimate_data: JSON.stringify(quotedData()),
+      address: '100 Example Lane, Sampleton, FL 34200',
       expires_at: new Date(Date.now() + 14 * 86400000), ...over,
     }).returning('*');
     return row;
@@ -109,7 +110,8 @@ describeDb('call prepay choice (PostgreSQL)', () => {
     const id = randomUUID();
     await trx('scheduled_services').insert({
       id, customer_id: customerId, source_call_log_id: callLogId, scheduled_date: inDays(9), window_start: '09:00',
-      service_type: 'Quarterly Pest Control Service', status: 'pending', ...over,
+      service_type: 'Quarterly Pest Control Service', status: 'pending',
+      service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_state: 'FL', service_address_zip: '34200', ...over,
     });
     return id;
   }
@@ -432,6 +434,15 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       await expect(lastStepInAccept({ callLogId, customerId, bookedRows: await rowsNow() })(trx, { estimate: est }))
         .rejects.toMatchObject({ callPrepayRefusal: 'customer_changed' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
+    });
+
+    test('a payment recorded on the visit after the card was filed refuses the tap (Codex #7050 r3)', async () => {
+      const { visitId, card, token } = await filed();
+      await trx('scheduled_services').where({ id: visitId }).update({ prepaid_amount: 118, prepaid_method: 'zelle' });
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
+      expect(out.status).toBe(409);
+      expect(out.body).toMatchObject({ code: 'visit_prepaid' });
+      expect(acceptSpy).not.toHaveBeenCalled();
     });
 
     test('a record that changed inside the accept (preview_changed) is a plain refusal; the card stays open', async () => {

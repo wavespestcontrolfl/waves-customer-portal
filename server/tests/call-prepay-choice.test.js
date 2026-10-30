@@ -191,11 +191,14 @@ describe('the held-visit row', () => {
 
 describe('derivePrepayCoverage: what the accept is handed', () => {
   const estimate = (over = {}) => ({
-    id: 7, customer_id: 'cust-1', status: 'sent', property_id: null, annual_total: 472,
+    id: 7, customer_id: 'cust-1', status: 'sent', property_id: null, annual_total: 472, address: '100 Example Lane, Sampleton, FL 34200',
     estimate_data: { recurring: { services: [{ name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4, price: 118 }] }, customerSelection: { frequency: 'quarterly' } },
     ...over,
   });
-  const row = (over = {}) => ({ id: 'v1', service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-11-10', is_recurring: false, ...over });
+  const row = (over = {}) => ({
+    id: 'v1', service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-11-10', is_recurring: false,
+    service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_zip: '34200', ...over,
+  });
 
   test('the quote is read as a quarterly pest plan', () => {
     expect(quotePlanOf(estimate())).toEqual({ name: 'Quarterly Pest Control', cadence: 'quarterly' });
@@ -222,6 +225,11 @@ describe('derivePrepayCoverage: what the accept is handed', () => {
     ['two kinds of visit', { rows: [row(), row({ id: 'v2', service_type: 'Lawn Care Service' })] }, 'mixed_services'],
     ['a service other than the quoted one', { rows: [row({ service_type: 'Lawn Care Service' })] }, 'service_mismatch'],
     ['a different property than the quote', { estimate: estimate({ property_id: 'prop-1' }), rows: [row({ property_id: 'prop-2' })] }, 'property_mismatch'],
+    // No property ids (every open quote today): the quote's address against the visit's stamped address.
+    ['a visit stamped at another address than the quote', { rows: [row({ service_address_line1: '200 Other Road' })] }, 'property_mismatch'],
+    ['a visit with no stamped address (unknown is a mismatch)', { rows: [row({ service_address_line1: null })] }, 'property_mismatch'],
+    ['a payment already recorded on the visit (cash, Zelle)', { rows: [row({ prepaid_amount: '118.00', prepaid_method: 'cash' })] }, 'visit_prepaid'],
+    ['a visit already covered by another annual term', { rows: [row({ annual_prepay_term_id: 'term-old' })] }, 'visit_prepaid'],
     ['a stamped setup fee', { rows: [row({ pending_setup_fee: '99.00' })] }, 'setup_fee_stamped'],
     ['add-on lines', { rows: [row()], hasAddons: true }, 'has_addons'],
     ['no booked visit date', { rows: [row({ scheduled_date: null })] }, 'no_booked_visit'],

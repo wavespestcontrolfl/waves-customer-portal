@@ -421,18 +421,23 @@ export function FamilyEvidence({ payload, openCustomerIds = null, canAttach = fa
 // customer gets no message (the server files no card for a termite estimate, whose accept can send one).
 const prepayMoney = (n) => (Number.isFinite(Number(n)) ? `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.replace(/\.00$/, "") : null);
 
-export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = false, isAdmin = false, busy = false, onAcceptPrepay }) {
-  const p = parsePayload(payload);
-  if (!p) return null;
-  const amount = prepayMoney(callPrepay?.amount ?? p.invoice_total);
-  // The live plan the tap's terms token covers (callPrepay.plan); the facts the card was filed with otherwise.
-  const plan = callPrepay?.plan || p;
+export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, busy, onAcceptPrepay }) {
+  // The facts the card was filed with (the sweep always writes them; a malformed payload shows only the choice).
+  const p = parsePayload(payload) || {};
+  // What the server read now (call_prepay): the amount, the plan the tap's terms token covers, and whether the
+  // tap can run. The facts the card was filed with stand in until it is read.
+  const live = callPrepay || {};
+  const amount = prepayMoney(live.amount ?? p.invoice_total);
+  const plan = live.plan || p;
   const rows = [
     ["Caller chose", "Annual prepay"],
     ["Plan", [plan.service_type, plan.cadence && String(plan.cadence).replace(/_/g, " "), plan.covered_visits && `${plan.covered_visits} visits a year`].filter(Boolean).join(" · ")],
     ["First visit", plan.first_visit_date],
     ["Invoice", amount && `${amount} (a draft; it is not sent)`],
   ].filter(([, value]) => value);
+  // What the tap area shows, decided once: nothing on a closed card, the admin-only note, the server's
+  // refusal message, or the button.
+  const tap = !isOpenView ? null : !isAdmin ? "admin" : live.can_accept ? "accept" : "refused";
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before accepting</div>
@@ -441,11 +446,9 @@ export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = fa
           <span className="text-ink-tertiary">{label}:</span> {value}
         </div>
       ))}
-      {isOpenView && !isAdmin && <div className="mt-1 text-12 text-ink-tertiary">Accepting needs an admin.</div>}
-      {isOpenView && isAdmin && callPrepay && !callPrepay.can_accept && callPrepay.message && (
-        <div className="mt-1 text-14 text-zinc-900">{callPrepay.message}</div>
-      )}
-      {isOpenView && isAdmin && callPrepay?.can_accept && (
+      {tap === "admin" && <div className="mt-1 text-12 text-ink-tertiary">Accepting needs an admin.</div>}
+      {tap === "refused" && live.message && <div className="mt-1 text-14 text-zinc-900">{live.message}</div>}
+      {tap === "accept" && (
         <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPrepay}
           title="Accepts the customer's estimate as annual prepay. Creates a draft invoice that is not sent. The customer gets no text or email.">
           {busy ? "Accepting…" : `Accept as annual prepay${amount ? ` (${amount})` : ""}`}

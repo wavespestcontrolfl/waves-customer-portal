@@ -68,12 +68,12 @@ const REFUSALS = {
   customer_changed: 'The call was linked to a different customer after this card was filed. Review the card.',
   no_booked_visit: 'The visit from this call is no longer on the calendar. Nothing was accepted.',
   no_open_estimate: 'This customer has no open estimate to accept. Nothing was accepted.',
-  estimate_not_open: 'That estimate is no longer open (it was accepted, declined or expired). Nothing was accepted.',
-  estimate_other_customer: 'That estimate belongs to a different customer. Nothing was accepted.',
+  estimate_not_open: 'That estimate is no longer open for this customer (it was accepted, declined, expired or moved). Nothing was accepted.',
   visit_already_linked: 'A visit from this call is already linked to an estimate. Nothing was accepted.',
   mixed_services: 'The call booked more than one kind of visit, so one prepay term cannot cover them. Accept it from the estimate.',
   property_mismatch: 'The visit is at a different property than the estimate. Accept it from the estimate.',
   setup_fee_stamped: 'The visit carries a setup fee. Accept it from the estimate so the setup is billed once.',
+  visit_prepaid: 'The visit already has a payment recorded. Annual prepay cannot be combined with it. Accept it from the estimate.',
   has_addons: 'The visit has add-on lines. Annual prepay cannot cover them. Accept it from the estimate.',
   existing_customer: 'This customer already has a live plan, so annual prepay is not offered. Nothing was accepted.',
   live_plan_unknown: 'The system could not confirm the customer’s plan just now. Try again in a minute.',
@@ -136,11 +136,21 @@ function bookedCadenceOf(row) {
 // The coverage config the accept needs, from the booked visits and the quoted plan. Pure.
 // { ok: true, coverage, termStart, bookedIds } or a refusal. The covered-visit count is FIXED by the cadence
 // (the invoice prices the quoted plan), never taken from the booking.
+// Per-row rules, in order: the first rule any booked visit breaks names the refusal. Property: the shared
+// estimate-vs-visit compare (property ids when both carry one, else the quote's address against the visit's
+// stamped service address; an unknown address is a mismatch). Prepaid: a payment recorded on the visit (cash,
+// Zelle, another term) cannot be combined with annual invoicing, as on the New appointment form.
+const BOOKED_ROW_RULES = [
+  ['property_mismatch', (r, estimate) => !require('./completion-pricing').propertyMatches(r, estimate)],
+  ['visit_prepaid', (r) => Number(r.prepaid_amount) > 0 || !!r.prepaid_method || !!r.annual_prepay_term_id],
+  ['setup_fee_stamped', (r) => Number(r.pending_setup_fee) > 0],
+];
+
 function derivePrepayCoverage({ estimate, rows, hasAddons = false }) {
   const serviceTypes = [...new Set(rows.map((r) => String(r.service_type || '').trim().toLowerCase()))];
   if (serviceTypes.length !== 1 || !serviceTypes[0]) return refusal('mixed_services');
-  if (estimate.property_id && rows.some((r) => r.property_id && String(r.property_id) !== String(estimate.property_id))) return refusal('property_mismatch');
-  if (rows.some((r) => Number(r.pending_setup_fee) > 0)) return refusal('setup_fee_stamped');
+  const broken = BOOKED_ROW_RULES.find(([, breaks]) => rows.some((r) => breaks(r, estimate)));
+  if (broken) return refusal(broken[0]);
   if (hasAddons) return refusal('has_addons');
   const quote = quotePlanOf(estimate);
   if (!quote.cadence) return refusal(quote.name ? 'cadence_unsupported' : 'cadence_unknown');
@@ -177,11 +187,12 @@ async function liveVisitsOfCall(conn, callLogId, customerId, callStartedAt) {
     .select('*');
 }
 
-// The customer's newest open (sent or viewed, not lapsed) estimate that the customer owns. An unowned quote
-// is never picked: attaching one to a customer is the form's job.
-async function newestOpenEstimate(conn, customerId, now) {
+// The customer's open (sent or viewed, not lapsed) estimate that the customer owns: the card's own estimate
+// when it names one, else the newest. An unowned quote is never picked: attaching one is the form's job.
+async function openEstimateFor(conn, customerId, now, estimateId = null) {
   return conn('estimates')
     .where({ customer_id: customerId })
+    .modify((qb) => { if (estimateId) qb.where({ id: estimateId }); })
     .whereIn('status', OPEN_ESTIMATE_STATUSES)
     .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
     .orderBy('created_at', 'desc')
@@ -214,6 +225,14 @@ async function termOverlap(conn, customerId, termStart) {
 // (per application, none) or failed the extraction makes the card obsolete ('choice_changed', moot); a pass
 // still running is only a wait ('call_reprocessing'), so the card stays.
 const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'created_at', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+// What is wrong with the call for this card, or null: it moved to another customer, it is being re-read, or
+// it no longer shows the annual prepay choice. The evaluation and the accept's last step ask the same.
+function callRefusal(call, customerId) {
+  if (!call || String(call.customer_id || '') !== String(customerId)) return 'customer_changed';
+  const state = choiceStateOf(call);
+  return state === 'ok' ? null : state;
+}
+
 function choiceStateOf(call) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   if (!call) return 'choice_changed';
@@ -235,10 +254,8 @@ function lastStepInAccept({ callLogId, customerId, bookedRows }) {
   const pin = bookedVisitsPinOf(bookedRows);
   const stop = (reason) => Object.assign(new Error(REFUSALS[reason] || REFUSALS.not_eligible), { callPrepayRefusal: reason });
   return async (trx, { estimate }) => {
-    const callRow = await trx('call_log').where({ id: callLogId }).forShare().first(CALL_CHOICE_COLUMNS);
-    if (!callRow || String(callRow.customer_id || '') !== String(customerId)) throw stop('customer_changed');
-    const state = choiceStateOf(callRow);
-    if (state !== 'ok') throw stop(state);
+    const callProblem = callRefusal(await trx('call_log').where({ id: callLogId }).forShare().first(CALL_CHOICE_COLUMNS), customerId);
+    if (callProblem) throw stop(callProblem);
     const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate().select(BOOKED_VISIT_PIN_FIELDS);
     if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== pin) throw stop('changed_since_check');
     if (await bookedVisitsHaveAddons(trx, ids)) throw stop('changed_since_check');
@@ -249,33 +266,19 @@ function lastStepInAccept({ callLogId, customerId, bookedRows }) {
 async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, conn = db, now = new Date() }) {
   if (!customerId) return refusal('no_customer');
   const call = await conn('call_log').where({ id: callLogId }).first(CALL_CHOICE_COLUMNS);
-  const choice = choiceStateOf(call);
-  if (choice !== 'ok') return refusal(choice);
+  const callProblem = callRefusal(call, customerId);
+  if (callProblem) return refusal(callProblem);
   const rows = await liveVisitsOfCall(conn, callLogId, customerId, call.created_at);
   if (!rows.length) return refusal('no_booked_visit');
-  let estimate;
-  if (estimateId) {
-    estimate = await conn('estimates').where({ id: estimateId }).first();
-    if (!estimate || !OPEN_ESTIMATE_STATUSES.includes(estimate.status)
-      || (estimate.expires_at && new Date(estimate.expires_at) < now)) return refusal('estimate_not_open');
-    if (!estimate.customer_id || String(estimate.customer_id) !== String(customerId)) return refusal('estimate_other_customer');
-  } else {
-    estimate = await newestOpenEstimate(conn, customerId, now);
-    if (!estimate) return refusal('no_open_estimate');
-  }
+  const estimate = await openEstimateFor(conn, customerId, now, estimateId);
+  if (!estimate) return refusal(estimateId ? 'estimate_not_open' : 'no_open_estimate');
   if (termiteEstimate(estimate)) return refusal('termite_estimate', { estimate });
   if (rows.some((r) => r.source_estimate_id)) return refusal('visit_already_linked');
-  const { prepayBookingEligibility } = require('./estimate-manual-acceptance');
-  const eligibility = await prepayBookingEligibility(estimate, conn, customerId, rows.map((r) => r.id));
+  const { prepayBookingEligibility, bookedVisitsHaveAddons } = require('./estimate-manual-acceptance');
+  const rowIds = rows.map((r) => r.id);
+  const eligibility = await prepayBookingEligibility(estimate, conn, customerId, rowIds);
   if (!eligibility.eligible) return refusal(REFUSALS[eligibility.reason] ? eligibility.reason : 'not_eligible', { estimate });
-  let hasAddons = false;
-  try {
-    hasAddons = !!(await conn('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((r) => r.id)).first('id'));
-  } catch (e) {
-    // No add-on table in this environment: no add-on lines can exist.
-    if (e.code !== '42P01') throw e;
-  }
-  const derived = derivePrepayCoverage({ estimate, rows, hasAddons });
+  const derived = derivePrepayCoverage({ estimate, rows, hasAddons: await bookedVisitsHaveAddons(conn, rowIds) });
   if (!derived.ok) return { ...derived, estimate };
   if (await termOverlap(conn, customerId, derived.termStart)) return refusal('term_overlap', { estimate });
   return {
@@ -350,7 +353,7 @@ async function fileCard({ call, extraction, evaluation }) {
 // Closes an OPEN card that stopped being true: the estimate was accepted or lapsed, or the visit is gone.
 // Dismissed, not resolved (nobody acted on it). A card that is merely ineligible right now stays: the
 // office sees the reason on it.
-const MOOT_REASONS = new Set(['estimate_not_open', 'no_booked_visit', 'visit_already_linked', 'estimate_other_customer', 'no_customer', 'choice_changed']);
+const MOOT_REASONS = new Set(['estimate_not_open', 'no_booked_visit', 'visit_already_linked', 'no_customer', 'choice_changed', 'customer_changed']);
 async function closeMootCards({ now }) {
   const open = await db('triage_items as t')
     .join('call_log as c', 'c.id', 't.call_log_id')
@@ -362,14 +365,13 @@ async function closeMootCards({ now }) {
     const payload = parseJson(card.payload);
     let evaluation;
     try {
-      evaluation = await evaluateCallPrepay({ callLogId: card.call_log_id, customerId: card.customer_id, estimateId: payload.estimate_id || null, now });
+      // The card's own customer: a call relinked since reads customer_changed, which is moot.
+      evaluation = await evaluateCallPrepay({ callLogId: card.call_log_id, customerId: payload.customer_id || card.customer_id, estimateId: payload.estimate_id || null, now });
     } catch (e) {
       logger.warn(`[call-prepay-choice] moot check skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
       continue;
     }
-    const moot = !evaluation.ok && (MOOT_REASONS.has(evaluation.reason)
-      || (card.customer_id && payload.customer_id && String(card.customer_id) !== String(payload.customer_id)));
-    if (!moot) continue;
+    if (evaluation.ok || !MOOT_REASONS.has(evaluation.reason)) continue;
     await db.transaction(async (trx) => {
       await lockTriageCall(trx, card.call_log_id);
       const stamp = new Date();
@@ -460,17 +462,14 @@ function previewTokenOf(evaluation) {
  */
 async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken = null, now = new Date() }) {
   const payload = parseJson(item.payload);
-  const call = await db('call_log').where({ id: item.call_log_id }).first('id', 'customer_id');
-  if (!call?.customer_id) return refusal('no_customer');
-  if (payload.customer_id && String(payload.customer_id) !== String(call.customer_id)) return refusal('customer_changed');
-  const evaluation = await evaluateCallPrepay({ callLogId: call.id, customerId: call.customer_id, estimateId: payload.estimate_id || null, now });
+  const evaluation = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: payload.customer_id || null, estimateId: payload.estimate_id || null, now });
   if (!evaluation.ok) return evaluation;
-
   // The card the admin tapped must still show these terms: a price, cadence or visit change since the list
   // loaded asks for a fresh look rather than accepting terms nobody saw.
-  if (!previewToken || previewToken !== previewTokenOf(evaluation)) return refusal('preview_changed');
+  if (previewToken !== previewTokenOf(evaluation)) return refusal('preview_changed');
 
   const { markEstimateManuallyAccepted, estimateRowPin, bookedVisitsPinOf } = require('./estimate-manual-acceptance');
+  const bookedRows = bookedRowsOf(evaluation);
   let result;
   try {
     result = await markEstimateManuallyAccepted({
@@ -480,9 +479,9 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken =
       // or cancel since refuses (preview_changed) before any invoice or term exists.
       expected: {
         ...estimateRowPin(evaluation.estimate),
-        bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(bookedRowsOf(evaluation)), noAddons: true },
+        bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(bookedRows), noAddons: true },
       },
-      beforeCommit: lastStepInAccept({ callLogId: call.id, customerId: call.customer_id, bookedRows: bookedRowsOf(evaluation) }),
+      beforeCommit: lastStepInAccept({ callLogId: item.call_log_id, customerId: payload.customer_id, bookedRows }),
       bookedAppointmentIds: evaluation.bookedIds,
       adminUserId,
       source: 'verbal_annual_prepay_booking',
@@ -495,22 +494,26 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken =
   } catch (err) {
     // The accept and its invoice and term are one transaction: nothing is half-applied.
     logger.warn(`[call-prepay-choice] accept failed for estimate ${evaluation.estimate.id}: ${err.code || err.name || 'error'}`);
-    if (err.annualPrepayOverlap) return refusal('term_overlap');
-    if (err.callPrepayRefusal) return refusal(err.callPrepayRefusal);
-    if (err.code === 'preview_changed') return refusal('changed_since_check');
-    const message = err.statusCode && err.statusCode < 500 && err.message ? `${err.message} Nothing was accepted.` : REFUSALS.accept_failed;
-    return { ok: false, reason: 'accept_failed', message };
+    return acceptErrorRefusal(err);
   }
   // Another session accepted it between our read and the accept: the short-circuit made no invoice and no term.
   if (result?.alreadyAccepted) return refusal('already_accepted');
-
-  // The accept linked the booked visits to the estimate inside its own transaction (the bookedVisits pin's
-  // last step). The property link stays best-effort, as on the form.
-  const warnings = Array.isArray(result?.warnings) ? [...result.warnings] : [];
+  // The accept linked the booked visits inside its own transaction (lastStepInAccept). The property link
+  // stays best-effort, as on the form.
   await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
-    estimateId: evaluation.estimate.id, customerId: call.customer_id, onlyServiceIds: evaluation.bookedIds,
+    estimateId: evaluation.estimate.id, customerId: payload.customer_id, onlyServiceIds: evaluation.bookedIds,
   }).catch((e) => logger.warn(`[call-prepay-choice] property link skipped for estimate ${evaluation.estimate.id}: ${e.code || e.name || 'error'}`));
-  return { ok: true, invoiceId: result?.conversion?.draftInvoiceId || null, amount: evaluation.amount, warnings };
+  return { ok: true, invoiceId: result?.conversion?.draftInvoiceId || null, amount: evaluation.amount, warnings: Array.isArray(result?.warnings) ? result.warnings : [] };
+}
+
+// What a failed accept tells the office: a refusal the card's own step or a pin raised, else the accept's
+// own 4xx message, else a plain failure. Nothing was accepted in every case.
+const ACCEPT_ERROR_REASONS = { preview_changed: 'changed_since_check' };
+function acceptErrorRefusal(err) {
+  const reason = err.callPrepayRefusal || (err.annualPrepayOverlap ? 'term_overlap' : ACCEPT_ERROR_REASONS[err.code]);
+  if (reason) return refusal(reason);
+  const message = err.statusCode && err.statusCode < 500 && err.message ? `${err.message} Nothing was accepted.` : REFUSALS.accept_failed;
+  return { ok: false, reason: 'accept_failed', message };
 }
 
 module.exports = {
