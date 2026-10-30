@@ -2354,7 +2354,9 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('backfill invoices stay due near-term instead of minting instantly overdue', () => {
-    expect(source).toMatch(/dueDate: isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\)/);
+    expect(source).toMatch(/dueDate: proposalTermsDue \|\| \(isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\)\)/);
+    // An invoice-mode proposal's Net term (owner 2026-10-30) counts from today on a backfill too, never the old visit day.
+    expect(source).toMatch(/proposalTermsDueDate\(\s*db, svc\.source_estimate_id, isBackfillCompletion \? etDateString\(\) : serviceDateOnly\(record\.service_date\),\s*\)/);
   });
 
   test('backfill suppresses the decline notice and the payer AP send', () => {

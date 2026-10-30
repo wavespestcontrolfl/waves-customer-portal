@@ -503,6 +503,28 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  // Owner 2026-10-30 (pipeline audit item 1, option A): an invoice-mode commercial proposal makes no invoice at the
+  // win, so the visit invoice bills once and carries the agreement's Net term, also for a self-pay customer.
+  test('a visit from an invoice-mode commercial proposal on Net 30 bills once, due 30 days after the visit', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await mockPg('estimates').where({ id: estimateId }).update({
+      bill_by_invoice: true,
+      estimate_data: JSON.stringify({ proposal: {
+        enabled: true, taxRate: 0, buildings: [{ name: 'Main', lineItems: [] }],
+        programs: [{ service: 'pest', label: 'Commercial pest', frequencyPerYear: 4, pricePerApplication: 300 }],
+        commercialTerms: { paymentTerms: 'net30' },
+      } }),
+    });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result).toMatchObject({ status: 202 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    const day = (value) => (value instanceof Date
+      ? Date.UTC(value.getFullYear(), value.getMonth(), value.getDate())
+      : Date.parse(`${String(value).slice(0, 10)}T00:00:00Z`));
+    expect((day(invoices[0].due_date) - day(invoices[0].service_date)) / 86400000).toBe(30);
+  });
+
   test.each([
     ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
   ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {

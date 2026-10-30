@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import DocumentRequestsPage from "./DocumentRequestsPage";
+
+// Most cases render the 100-row queue page several times. On a loaded CI
+// runner that outlasts vitest's 5 s test timeout and the 1 s findBy wait with
+// no code change (main runs 41018887505 and 41019750762, 2026-10-30).
+vi.setConfig({ testTimeout: 30000 });
+configure({ asyncUtilTimeout: 5000 });
 
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));

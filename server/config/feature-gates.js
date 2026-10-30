@@ -92,6 +92,7 @@
  *   GATE_BID_DESK_CHARLOTTE_DATES=true (Bid Desk, needs GATE_BID_DESK: an open Charlotte County Purchasing bid with a bid number and no due date gets its date from the county's own public bid list (purchasingbids.charlottecountyfl.gov, one read, at most hourly, and only while such a bid is waiting); the date counts as confirmed only while GATE_BID_DESK_AUTO_DATES is also on. An existing date, a decided bid and every other source are never touched. Admin portal only: it sends nothing to a buyer, contractor, agency or customer and rings no new bell. Read at call time via bidDeskCharlotteDatesLive(), strict 'true', dark by default; off = no call to the county and the Bid Desk works as before.)
  *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
  *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
+ *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
@@ -1252,6 +1253,13 @@ const gates = {
   // contract). No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
   // Kill switch: unset — the endpoint 404s (dark).
   mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
+
+  // Owner MCP admin reads: the /api/mcp-admin endpoint (routes/mcp-admin.js)
+  // that serves an allow-list of Intelligence Bar read tools to Claude Code
+  // under the owner's mcp_read key (services/mcp-admin-key.js). Read-only;
+  // opt-in in EVERY environment. Kill switch: unset — the endpoint 403s and
+  // every key stops.
+  mcpAdminRead: process.env.GATE_MCP_ADMIN_READ === 'true',
 
   // Public A2A endpoint: /api/public/a2a — the informational Agent2Agent
   // server behind the hub's agent-card.json. Static single-reply, LLM-free,
@@ -2517,6 +2525,8 @@ const gates = {
   callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
   // GATE_CALL_PREPAY_CHOICE (annual prepay chosen on a call: carried to Dispatch + one office card per booked call, dark). Boot-log entry only; the call-time reader is callPrepayChoiceLive().
   callPrepayChoice: process.env.GATE_CALL_PREPAY_CHOICE === 'true',
+  // GATE_SAME_QUESTION_CHECK (new-blog same-question check: owner page rewrite instead of a sibling post, dark). Boot-log entry only; the call-time reader is sameQuestionCheckLive().
+  sameQuestionCheck: process.env.GATE_SAME_QUESTION_CHECK === 'true',
   // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
   // sweep reads recent two-party calls and quiet text threads where only a DAY
   // was agreed for a visit (or a move of one), asks the model what the office
@@ -9310,6 +9320,12 @@ function satellitePalmCountTypedLive() {
 function callPrepayChoiceLive() {
   return process.env.GATE_CALL_PREPAY_CHOICE === 'true';
 }
+
+// GATE_SAME_QUESTION_CHECK read at CALL time, strict `=== 'true'`, dark in every environment. Off, the same-question rule only records a shadow result;
+// on, it blocks the new post and queues the owner-page rewrite. Also the consumption switch for same_question_refresh rows.
+function sameQuestionCheckLive() {
+  return process.env.GATE_SAME_QUESTION_CHECK === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9450,3 +9466,5 @@ module.exports.callApplicantHandlingLive = callApplicantHandlingLive;
 module.exports.callEmailChecksLive = callEmailChecksLive;
 // GATE_CALL_PREPAY_CHOICE reader, on its own line so gate PRs never conflict.
 module.exports.callPrepayChoiceLive = callPrepayChoiceLive;
+// GATE_SAME_QUESTION_CHECK reader, on its own line so gate PRs never conflict.
+module.exports.sameQuestionCheckLive = sameQuestionCheckLive;
