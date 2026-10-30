@@ -1325,8 +1325,11 @@ const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days'];
 
 // Money and count settings feed promoter balances and fraud limits, so a
 // negative, fractional or non-numeric value must never reach the table. No
-// upper bound on purpose: that is a business decision.
+// upper bound on purpose: that is a business decision. Every column is
+// nullable and the form posts the whole row back, so a stored null passes
+// through unchanged rather than blocking an unrelated save.
 function validateSettingValue(key, value) {
+  if (value === null) return null;
   if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
     const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
     if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {

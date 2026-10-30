@@ -107,7 +107,7 @@ describe('PUT /settings validation', () => {
     ['referrer_reward_cents', -2500],
     ['referee_discount_cents', 12.5],
     ['min_payout_cents', 'abc'],
-    ['bonus_gold_cents', null],
+    ['bonus_gold_cents', ''],
     ['milestone_5_bonus_cents', '-1'],
     ['max_referrals_per_month', -1],
     ['cooldown_days', 1.5],
@@ -138,7 +138,7 @@ describe('PUT /settings validation', () => {
     });
   });
 
-  test('valid settings still save (numbers, clean numeric strings, booleans, templates)', async () => {
+  test('valid settings still save (numbers, clean numeric strings, booleans, templates, stored nulls)', async () => {
     const state = freshState();
     primeDb(state);
     await withServer(async (base) => {
@@ -150,6 +150,9 @@ describe('PUT /settings validation', () => {
         invite_sms_template: null,
         reward_sms_template: 'Thanks!',
         base_url: 'https://example.test/r/',
+        // The form posts the whole row back; a stored null must not block the save.
+        bonus_gold_cents: null,
+        auto_credit_enabled: null,
       });
       expect(res.status).toBe(200);
       expect(state.updates).toHaveLength(1);
@@ -160,6 +163,8 @@ describe('PUT /settings validation', () => {
         program_active: false,
         invite_sms_template: null,
         reward_sms_template: 'Thanks!',
+        bonus_gold_cents: null,
+        auto_credit_enabled: null,
       });
     });
   });
