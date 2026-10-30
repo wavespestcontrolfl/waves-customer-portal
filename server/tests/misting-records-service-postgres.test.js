@@ -12,6 +12,9 @@ const knex = require('knex');
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const mockEnsurePrimary = jest.fn();
+jest.mock('../services/customer-properties', () => ({ ensurePrimaryProperty: (...a) => mockEnsurePrimary(...a) }));
+
 const migration = require('../models/migrations/20261030120000_misting_records');
 const svc = require('../services/misting-records');
 const { etDateString } = require('../utils/datetime-et');
@@ -60,6 +63,7 @@ postgres('misting records service (PostgreSQL)', () => {
   let app;
   let customerId;
   let tech;
+  let homeId;
 
   const create = (over, id = customerId) => svc.createCalibration({ customerId: id, input: calInput(over), actorId: tech, knex: app });
   const refill = (calibrationId, over, id = customerId) => svc.createRefill({ customerId: id, input: refillInput(calibrationId, over), actorId: tech, knex: app });
@@ -96,6 +100,9 @@ postgres('misting records service (PostgreSQL)', () => {
   beforeEach(async () => {
     customerId = (await app('customers').insert({}).returning('id'))[0].id;
     tech = (await app('technicians').insert({ name: 'Test Tech' }).returning('id'))[0].id;
+    // Most customers have their primary property on file; a calibration is stamped with its real id.
+    homeId = await addProperty({ is_primary: true, label: 'Home', address_line1: '1 Test Lane' });
+    mockEnsurePrimary.mockReset();
   });
 
   afterAll(async () => {
@@ -107,7 +114,7 @@ postgres('misting records service (PostgreSQL)', () => {
   test('saves a calibration with the server-computed numbers, sorted mist times and the recorder', async () => {
     const cal = await create();
     expect(cal).toMatchObject({
-      customerId, propertyId: null, installedOn: '2026-03-01', vendor: 'Pynamite', tankGallons: 55, zoneCount: 2,
+      customerId, propertyId: homeId, installedOn: '2026-03-01', vendor: 'Pynamite', tankGallons: 55, zoneCount: 2,
       nozzleCount: 40, riserCount: 4, mistTimes: ['06:30', '19:30', '22:30'], epaRegNo: '1021-1834',
       concentrateFlOzPerTank: 64, mixFlOzPerGal: 1.164, treatedVolumeCuFt: 48000, outputFlOzPerCycle: 33,
       dailyOutputFlOz: 99, labelDailyCapFlOz: 456, cabinetLocked: true, source: 'staff', voidedAt: null,
@@ -171,23 +178,48 @@ postgres('misting records service (PostgreSQL)', () => {
     expect(await code(create({}, randomUUID()))).toMatchObject({ status: 404 });
   });
 
-  test('properties: one home needs none; 2+ active homes require a pick; a stranger or retired property is refused; the primary is stored as NULL', async () => {
-    const primary = await addProperty({ is_primary: true, label: 'Home' });
-    expect((await create()).propertyId).toBeNull();
-    expect((await create({ propertyId: primary })).propertyId).toBeNull();
+  test('properties: the real id is always stored; 2+ active homes require a pick; a stranger or retired property is refused', async () => {
+    const primary = homeId;
+    expect((await create()).propertyId).toBe(primary);
+    expect((await create({ propertyId: primary })).propertyId).toBe(primary);
     const second = await addProperty({ label: 'Lake house', address_line1: '12 Test Lane', city: 'Venice', state: 'FL', zip: '34285' });
     expect(await code(create())).toEqual({ status: 400, code: 'MISTING_BAD_INPUT', message: 'Pick which property the system is at.' });
     expect((await create({ propertyId: second })).propertyId).toBe(second);
-    expect((await create({ propertyId: primary })).propertyId).toBeNull();
+    expect((await create({ propertyId: primary })).propertyId).toBe(primary);
     const stranger = (await app('customers').insert({}).returning('id'))[0].id;
     const strangerProp = (await app('customer_properties').insert({ customer_id: stranger }).returning('id'))[0].id;
     expect(await code(create({ propertyId: strangerProp }))).toMatchObject({ status: 400 });
     const retired = await addProperty({ active: false });
     expect(await code(create({ propertyId: retired }))).toMatchObject({ status: 400 });
+    expect(mockEnsurePrimary).not.toHaveBeenCalled();
   });
 
-  test('the newest non-voided calibration is current per property, NULL-safe; a re-calibration supersedes', async () => {
-    const primary = await addProperty({ is_primary: true });
+  test('a customer who never had a property row gets the primary created first, and the calibration is stamped with it', async () => {
+    const fresh = (await app('customers').insert({}).returning('id'))[0].id;
+    mockEnsurePrimary.mockImplementation(async (id) => {
+      const [row] = await app('customer_properties').insert({ customer_id: id, is_primary: true, label: 'Primary' }).returning('id');
+      return { created: true, propertyId: row.id };
+    });
+    const cal = await create({}, fresh);
+    expect(mockEnsurePrimary).toHaveBeenCalledTimes(1);
+    expect(mockEnsurePrimary).toHaveBeenCalledWith(fresh);
+    const row = await app('customer_properties').where({ customer_id: fresh }).first();
+    expect(cal.propertyId).toBe(row.id);
+  });
+
+  test('no primary can be made (no address) is a 400; every row retired is a 400 and nothing is created', async () => {
+    const noAddress = (await app('customers').insert({}).returning('id'))[0].id;
+    mockEnsurePrimary.mockResolvedValue({ created: false, propertyId: null });
+    expect(await code(create({}, noAddress))).toEqual({ status: 400, code: 'MISTING_BAD_INPUT', message: 'This customer has no active property.' });
+    const retiredOnly = (await app('customers').insert({}).returning('id'))[0].id;
+    await app('customer_properties').insert({ customer_id: retiredOnly, active: false });
+    mockEnsurePrimary.mockClear();
+    expect(await code(create({}, retiredOnly))).toEqual({ status: 400, code: 'MISTING_BAD_INPUT', message: 'This customer has no active property.' });
+    expect(mockEnsurePrimary).not.toHaveBeenCalled();
+  });
+
+  test('the newest non-voided calibration is current per property; a re-calibration supersedes', async () => {
+    const primary = homeId;
     const second = await addProperty({ label: 'Lake house' });
     const a1 = await create({ propertyId: primary });
     const b1 = await create({ propertyId: second });
@@ -196,6 +228,33 @@ postgres('misting records service (PostgreSQL)', () => {
     expect(properties.map((p) => [p.id, p.isPrimary])).toEqual([[primary, true], [second, false]]);
     expect(calibrations.map((c) => c.id)).toEqual([a2.id, b1.id, a1.id]);
     expect(Object.fromEntries(calibrations.map((c) => [c.id, c.isCurrent]))).toEqual({ [a2.id]: true, [b1.id]: true, [a1.id]: false });
+    expect((await svc.currentCalibration(app, customerId, primary)).id).toBe(a2.id);
+    expect((await svc.currentCalibration(app, customerId, second)).id).toBe(b1.id);
+  });
+
+  test('moving the primary to another home leaves each system under its own home', async () => {
+    const second = await addProperty({ label: 'Lake house' });
+    const atA = await create({ propertyId: homeId });
+    await app('customer_properties').where({ id: homeId }).update({ is_primary: false });
+    await app('customer_properties').where({ id: second }).update({ is_primary: true });
+    const atB = await create({ propertyId: second });
+    const { calibrations } = await svc.listCustomerRecords(customerId, { knex: app });
+    expect(Object.fromEntries(calibrations.map((c) => [c.id, [c.propertyId, c.isCurrent]]))).toEqual({ [atA.id]: [homeId, true], [atB.id]: [second, true] });
+    expect((await svc.currentCalibration(app, customerId, homeId)).id).toBe(atA.id);
+  });
+
+  test('a calibration whose property row was deleted (NULL) is history: never current, and takes no refills', async () => {
+    const second = await addProperty({ label: 'Lake house' });
+    const cal = await create({ propertyId: second });
+    await refill(cal.id);
+    await app('customer_properties').where({ id: second }).del();
+    const { calibrations, refills } = await svc.listCustomerRecords(customerId, { knex: app });
+    expect(calibrations.find((c) => c.id === cal.id)).toMatchObject({ propertyId: null, isCurrent: false });
+    expect(refills[0]).toMatchObject({ propertyId: null });
+    expect(await svc.currentCalibration(app, customerId, null)).toBeUndefined();
+    expect(await code(refill(cal.id))).toMatchObject({ status: 409, code: 'MISTING_CALIBRATION_NOT_CURRENT' });
+    // A new calibration at the remaining home is unaffected.
+    expect((await create()).propertyId).toBe(homeId);
   });
 
   test('two writers at once keep a strict order: the later call is the newer record', async () => {
@@ -210,7 +269,7 @@ postgres('misting records service (PostgreSQL)', () => {
     const cal = await create();
     const r = await refill(cal.id, { productName: ' sector misting concentrate ', epaRegNo: '1021-1834', notes: 'First fill' });
     expect(r).toMatchObject({
-      calibrationId: cal.id, propertyId: null, refilledOn: '2026-04-01', productName: 'Sector Misting Concentrate', epaRegNo: '1021-1834',
+      calibrationId: cal.id, propertyId: homeId, refilledOn: '2026-04-01', productName: 'Sector Misting Concentrate', epaRegNo: '1021-1834',
       concentrateFlOzAdded: 64, waterGallonsAdded: 55, levelBeforePct: 20, counterReset: true, notes: 'First fill', recordedBy: { id: tech, name: 'Test Tech' },
     });
     const { refills } = await svc.listCustomerRecords(customerId, { knex: app });
@@ -238,8 +297,53 @@ postgres('misting records service (PostgreSQL)', () => {
 
   test('a refill against another customer\'s calibration is not found', async () => {
     const other = (await app('customers').insert({}).returning('id'))[0].id;
+    await app('customer_properties').insert({ customer_id: other, is_primary: true });
     const cal = await create({}, other);
     expect(await code(refill(cal.id))).toMatchObject({ status: 404 });
+  });
+
+  describe('refill vs the daily limit', () => {
+    // A system exactly at its daily cap: 19 emitters x 2.5 fl oz a minute x 60 s x 1 cycle = 47.5 fl oz, cap 47.5.
+    const atCap = { nozzleCount: 15, riserCount: 4, nozzleFlowFlOzPerMin: 2.5, cycleSeconds: 60, mistTimes: ['06:30'], treatedAreaSqFt: 1000, treatedHeightFt: 5 };
+
+    test('at the cap: the same mix and a weaker mix are accepted; a stronger mix is refused with both numbers', async () => {
+      const cal = await create(atCap);
+      expect(cal).toMatchObject({ dailyOutputFlOz: 47.5, labelDailyCapFlOz: 47.5 });
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 64 }))).toBeNull();
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 63 }))).toBeNull();
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 70 }))).toEqual({
+        status: 422,
+        code: 'MISTING_REFILL_OVER_LABEL',
+        message: 'At this mix the label allows 43.4 fl oz a day, and this system puts out 47.5. Use the calibration\'s mix, or record a new calibration.',
+      });
+    });
+
+    test('a stronger refill is fine while the system has room under the lowered cap', async () => {
+      const cal = await create();
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 70 }))).toBeNull();
+    });
+
+    test('an unknown product at the cap: a stronger refill is refused, a weaker one accepted', async () => {
+      const other = { ...atCap, productName: 'Other Concentrate', epaRegNo: '555-123' };
+      const cal = await create(other);
+      expect(cal.labelDailyCapFlOz).toBe(47.5);
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 70 }))).toMatchObject({ status: 422, code: 'MISTING_REFILL_OVER_LABEL' });
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 60 }))).toBeNull();
+    });
+
+    test('a Sector refill outside the label mix range is refused with the label-range message, even inside the 10% slack', async () => {
+      const cal = await create();
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 60 }))).toEqual({
+        status: 422,
+        code: 'MISTING_MIX_OFF_LABEL',
+        message: 'The Sector label mixes 64 to 128 fl oz of concentrate in 55 gallons (1.16 to 2.33 fl oz a gallon). This mix is 1.09 fl oz a gallon.',
+      });
+    });
+
+    test('the 10% rule still applies first', async () => {
+      const cal = await create();
+      expect(await code(refill(cal.id, { concentrateFlOzAdded: 100 }))).toMatchObject({ code: 'MISTING_MIX_CHANGED' });
+    });
   });
 
   test('voids: reason required, once only, a calibration with open refills is blocked, and voiding the newest restores the older one', async () => {

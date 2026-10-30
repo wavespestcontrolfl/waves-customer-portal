@@ -9,6 +9,12 @@
 // against the current calibration and match its product and mix, because the calibration's daily limit
 // only holds for the product and mix it was worked out with. Voiding keeps the row and says why.
 //
+// PROPERTY RULE (this supersedes the migration header, which is frozen and says NULL means primary):
+// a new calibration ALWAYS stores the real customer_properties id of the home it is at, the primary
+// included, so a later change of the primary never moves a system to another home. property_id is NULL
+// only after its property row was hard-deleted (ON DELETE SET NULL). Such rows are history: they list
+// under "Removed property", are never current for any property, and take no refills.
+//
 // The server is the authority: the computed numbers (volume, output per cycle, daily output, daily cap)
 // come from services/misting-calibration-math.js and are stored, never taken from the client. The label
 // rules of a KNOWN product (shared/misting-products.json) are enforced here; an unknown product keeps
@@ -20,14 +26,14 @@
 const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
-const { computeCalibration, overLabelMessage, roundTo } = require('./misting-calibration-math');
+const customerProperties = require('./customer-properties');
+const { computeCalibration, overLabelMessage, roundTo, formatOzPair, capAtMix, mixWithinLabelRange } = require('./misting-calibration-math');
 const PRODUCTS = require('../../shared/misting-products.json').products;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (id) => UUID_RE.test(String(id || ''));
 
 const LIST_LIMIT = 200;
-const MIX_TOLERANCE = 0.02; // known product: slack on each end of the label's mix range
 const REFILL_MIX_TOLERANCE = 0.1; // a refill's mix against the calibration's
 
 /** Read at call time. Off = the routes answer 404 before any DB read. */
@@ -229,8 +235,9 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
   const seen = new Set();
   const calibrations = calRows.map((row) => {
     const payload = toCalibration(row);
-    const key = payload.propertyId || 'primary';
-    payload.isCurrent = !payload.voidedAt && !seen.has(key);
+    // A NULL property (its row was deleted) is history: never current.
+    const key = payload.propertyId;
+    payload.isCurrent = Boolean(key) && !payload.voidedAt && !seen.has(key);
     if (payload.isCurrent) seen.add(key);
     return payload;
   });
@@ -250,24 +257,40 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
 
 const lockCustomer = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`misting-records:${customerId}`]);
 
-// The current calibration for a property: newest non-voided. NULL property_id is the primary / single home.
+/**
+ * The current calibration for a property: the newest non-voided row with EXACTLY that property_id.
+ * A NULL property (a deleted property row) is never current. The customer-app card imports this so it
+ * and the staff service pick "current" the same way.
+ */
 async function currentCalibration(knex, customerId, propertyId) {
-  const q = knex('misting_calibrations').where({ customer_id: customerId }).whereNull('voided_at');
-  if (propertyId) q.where({ property_id: propertyId }); else q.whereNull('property_id');
-  return q.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first();
+  if (!propertyId) return undefined;
+  return knex('misting_calibrations')
+    .where({ customer_id: customerId, property_id: propertyId })
+    .whereNull('voided_at')
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .first();
 }
 
-// A property id is stored as NULL when it is the customer's primary (or only) home, so one physical
-// system never has two lineages (NULL and the primary's id).
+// The home a new calibration belongs to: always a real, active customer_properties row. A given id must
+// be one of the customer's active rows; without one, a single active row is used and 2+ must be picked.
 async function resolveProperty(knex, customerId, rawPropertyId) {
   const props = await activeProperties(knex, customerId);
   if (rawPropertyId !== undefined && rawPropertyId !== null && rawPropertyId !== '') {
-    const hit = isUuid(rawPropertyId) ? props.find((p) => p.id === String(rawPropertyId).toLowerCase() || p.id === rawPropertyId) : null;
+    const hit = isUuid(rawPropertyId) ? props.find((p) => p.id === String(rawPropertyId).toLowerCase()) : null;
     if (!hit) throw bad('That property is not an active property of this customer.');
-    return props.length === 1 || hit.is_primary === true ? null : hit.id;
+    return hit.id;
   }
   if (props.length >= 2) throw bad('Pick which property the system is at.');
-  return null;
+  if (props.length === 1) return props[0].id;
+  throw bad('This customer has no active property.');
+}
+
+// A customer who never had a property row gets the primary created lazily, the way resolveSessionScope
+// does. It runs BEFORE the transaction: ensurePrimaryProperty takes a FOR UPDATE on the customers row, and
+// this service does not hold that lock through its own writes.
+async function ensureHomeRow(knex, customerId) {
+  if (await knex('customer_properties').where({ customer_id: customerId }).first('id')) return;
+  await customerProperties.ensurePrimaryProperty(customerId);
 }
 
 const CHECK_LABELS = [
@@ -316,17 +339,18 @@ function enforceProductLabel(fields, product) {
     throw opError(422, 'MISTING_LABEL_LIMIT_MISMATCH',
       `The ${product.shortName} label allows at most ${product.labelMaxFlOzPer1000CuFtPerDay} fl oz per 1,000 cu ft a day.`);
   }
-  const perGal = fields.concentrateFlOzPerTank / fields.tankGallons;
-  const low = (product.labelRateMix.concentrateFlOz / product.labelRateMix.waterGal) * (1 - MIX_TOLERANCE);
-  const high = (product.maxMix.concentrateFlOz / product.maxMix.waterGal) * (1 + MIX_TOLERANCE);
-  if (perGal < low || perGal > high) {
-    const a = product.labelRateMix;
-    const b = product.maxMix;
-    throw opError(422, 'MISTING_MIX_OFF_LABEL',
-      `The ${product.shortName} label mixes ${a.concentrateFlOz} to ${b.concentrateFlOz} fl oz of concentrate in ${a.waterGal} gallons `
-      + `(${(a.concentrateFlOz / a.waterGal).toFixed(2)} to ${(b.concentrateFlOz / b.waterGal).toFixed(2)} fl oz a gallon). `
-      + `This mix is ${perGal.toFixed(2)} fl oz a gallon.`);
-  }
+  enforceMixRange(product, fields.concentrateFlOzPerTank / fields.tankGallons);
+}
+
+// A known product's label mix range, with 2% slack on each end (calibration and refill alike).
+function enforceMixRange(product, perGal) {
+  if (mixWithinLabelRange(product, perGal)) return;
+  const a = product.labelRateMix;
+  const b = product.maxMix;
+  throw opError(422, 'MISTING_MIX_OFF_LABEL',
+    `The ${product.shortName} label mixes ${a.concentrateFlOz} to ${b.concentrateFlOz} fl oz of concentrate in ${a.waterGal} gallons `
+    + `(${(a.concentrateFlOz / a.waterGal).toFixed(2)} to ${(b.concentrateFlOz / b.waterGal).toFixed(2)} fl oz a gallon). `
+    + `This mix is ${perGal.toFixed(2)} fl oz a gallon.`);
 }
 
 /** Record an install calibration. Throws operational errors (400 shape, 404 customer, 422 rule). */
@@ -335,6 +359,7 @@ async function createCalibration({ customerId, input, actorId = null, knex = db 
   const fields = readCalibration(input);
   const missing = CHECK_LABELS.filter(([key]) => !fields.checks[key]).map(([, label]) => label);
   const product = knownProduct(fields.epaRegNo);
+  if (!input.propertyId) await ensureHomeRow(knex, customerId);
 
   const id = await knex.transaction(async (trx) => {
     await lockCustomer(trx, customerId);
@@ -418,6 +443,7 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
     if (!(await customerExists(trx, customerId))) throw opError(404, 'MISTING_CUSTOMER_NOT_FOUND', 'Customer not found.');
     const cal = await trx('misting_calibrations').where({ id: fields.calibrationId, customer_id: customerId }).first();
     if (!cal) throw opError(404, 'MISTING_CALIBRATION_NOT_FOUND', 'Calibration not found.');
+    // A NULL property is history and never current, so a refill against it is refused here too.
     const current = cal.voided_at ? null : await currentCalibration(trx, customerId, cal.property_id);
     if (!current || current.id !== cal.id) {
       throw opError(409, 'MISTING_CALIBRATION_NOT_CURRENT', 'This calibration has been replaced. Reload and log the refill against the current one.');
@@ -436,6 +462,17 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
     if (Math.abs(mix - calMix) > REFILL_MIX_TOLERANCE * calMix) {
       throw opError(422, 'MISTING_MIX_CHANGED',
         `This mix is ${mix.toFixed(2)} fl oz per gallon; the calibration is ${calMix.toFixed(2)}. Record a new calibration first if the mix changed.`);
+    }
+    // The 10% slack must not carry a refill past the label: a known product's mix stays in its label range,
+    // and at the refill's strength the system's daily output must still fit under the daily cap.
+    const product = knownProduct(cal.epa_reg_no);
+    if (product) enforceMixRange(product, mix);
+    const calibrationPayload = toCalibration(cal);
+    const cap = capAtMix({ calibration: calibrationPayload, mixFlOzPerGal: mix, product });
+    if (calibrationPayload.dailyOutputFlOz > cap) {
+      const [allowed, puts] = formatOzPair(cap, calibrationPayload.dailyOutputFlOz);
+      throw opError(422, 'MISTING_REFILL_OVER_LABEL',
+        `At this mix the label allows ${allowed} fl oz a day, and this system puts out ${puts}. Use the calibration's mix, or record a new calibration.`);
     }
 
     const [row] = await trx('misting_refills').insert({
@@ -511,6 +548,7 @@ module.exports = {
   createRefill,
   voidCalibration,
   voidRefill,
+  currentCalibration,
   toCalibration,
   toRefill,
   knownProduct,

@@ -1,7 +1,7 @@
 // Spray-rate math for the misting install calibration (GATE_MOSQUITO_MISTING). Pure functions, checked against
 // shared/misting-calibration-cases.json, the same file the client preview math is tested against.
-const { computeCalibration, overLabelMessage, formatOzPair, roundTo } = require('../services/misting-calibration-math');
-const { cases } = require('../../shared/misting-calibration-cases.json');
+const { computeCalibration, overLabelMessage, formatOzPair, roundTo, capAtMix, mixWithinLabelRange } = require('../services/misting-calibration-math');
+const { cases, refillCases } = require('../../shared/misting-calibration-cases.json');
 const { products } = require('../../shared/misting-products.json');
 
 const productFor = (key) => (key ? products.find((p) => p.key === key) : null);
@@ -54,5 +54,31 @@ describe('overLabelMessage', () => {
   });
   test('shows three decimals when one decimal would print the pair the same', () => {
     expect(formatOzPair(47.519, 47.5)).toEqual(['47.519', '47.5']);
+  });
+});
+
+describe('capAtMix (the daily cap a refill must stay under)', () => {
+  it('has refill cases for: at the cap and stronger, at the cap and same mix, weaker, unknown product stronger, outside the range', () => {
+    expect(refillCases.length).toBeGreaterThanOrEqual(6);
+    expect(refillCases.some((c) => c.expected.withinLimit === false && c.expected.mixInLabelRange)).toBe(true);
+    expect(refillCases.some((c) => c.expected.mixInLabelRange === false)).toBe(true);
+  });
+
+  test.each(refillCases.map((c) => [c.name, c]))('%s', (_name, c) => {
+    const product = productFor(c.input.productKey);
+    const stored = computeCalibration(c.input, product);
+    const calibration = {
+      tankGallons: c.input.tankGallons,
+      concentrateFlOzPerTank: c.input.concentrateFlOzPerTank,
+      labelMaxFlOzPer1000CuFtDay: c.input.labelMaxFlOzPer1000CuFtDay,
+      treatedVolumeCuFt: stored.treatedVolumeCuFt,
+      labelDailyCapFlOz: stored.labelDailyCapFlOz,
+    };
+    const mix = c.refill.concentrateFlOzAdded / c.refill.waterGallonsAdded;
+    expect(roundTo(mix, 4)).toBe(c.expected.mixFlOzPerGal);
+    const cap = capAtMix({ calibration, mixFlOzPerGal: mix, product });
+    expect(cap).toBe(c.expected.capFlOz);
+    expect(stored.dailyOutputFlOz <= cap).toBe(c.expected.withinLimit);
+    expect(product ? mixWithinLabelRange(product, mix) : true).toBe(c.expected.mixInLabelRange);
   });
 });

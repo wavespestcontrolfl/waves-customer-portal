@@ -57,10 +57,10 @@ function blankCalibration() {
 
 // A new calibration starts from the current one. The three install checks start unticked: they are
 // confirmed again each time.
-function fromCalibration(cal, primaryId) {
+function fromCalibration(cal) {
   const text = (v) => (v === null || v === undefined ? "" : String(v));
   return {
-    propertyId: cal.propertyId || primaryId || "",
+    propertyId: cal.propertyId || "",
     installedOn: cal.installedOn || etDateString(),
     vendor: cal.vendor,
     model: cal.model,
@@ -412,15 +412,16 @@ export default function MistingRecordsPanel({ customerId }) {
   const properties = data?.properties || [];
   const calibrations = data?.calibrations || [];
   const refills = data?.refills || [];
-  const primaryId = properties.find((p) => p.isPrimary)?.id || properties[0]?.id || "";
   const current = calibrations.filter((c) => c.isCurrent);
   const earlier = calibrations.filter((c) => !c.isCurrent);
+  // Records group by their real property id. A NULL property_id means the property was removed: those rows
+  // are history under "Removed property" and are never the primary's or current.
   const propertyName = (propertyId) => {
-    if (properties.length < 2) return "";
-    const hit = properties.find((p) => p.id === (propertyId || primaryId));
-    return hit?.label || "";
+    const hit = propertyId ? properties.find((p) => p.id === propertyId) : null;
+    if (!hit) return "Removed property";
+    return properties.length < 2 ? "" : hit.label || "";
   };
-  const currentFor = (propertyId) => current.find((c) => (c.propertyId || primaryId) === (propertyId || primaryId));
+  const currentFor = (propertyId) => current.find((c) => c.propertyId === propertyId);
   const homesWithoutSystem = properties.filter((p) => !currentFor(p.id));
 
   const saved = (text) => {
@@ -526,7 +527,7 @@ export default function MistingRecordsPanel({ customerId }) {
               key={mode.base?.id || "new"}
               customerId={customerId}
               properties={properties}
-              initial={{ ...(mode.base ? fromCalibration(mode.base, primaryId) : blankCalibration()), ...(mode.base || properties.length < 2 ? {} : { propertyId: homesWithoutSystem[0]?.id || "" }) }}
+              initial={{ ...(mode.base ? fromCalibration(mode.base) : blankCalibration()), ...(mode.base || properties.length < 2 ? {} : { propertyId: homesWithoutSystem[0]?.id || "" }) }}
               onCancel={() => setMode(null)}
               onSaved={() => saved("Calibration saved.")}
             />

@@ -1,5 +1,5 @@
 {
-  "note": "Worked cases for the misting spray-rate math. Read by server/tests/misting-calibration-math.test.js and client/src/lib/mistingCalibrationMath.test.js so the two copies of the math cannot drift. productKey picks the product in shared/misting-products.json (null = an unknown product).",
+  "note": "Worked cases for the misting spray-rate math. Read by server/tests/misting-calibration-math.test.js and client/src/lib/mistingCalibrationMath.test.js so the two copies of the math cannot drift. productKey picks the product in shared/misting-products.json (null = an unknown product). refillCases: a refill's mix against a calibration already at its daily cap (47.5 fl oz); capFlOz is the cap at the refill's mix and mixInLabelRange is true when a known product's refill mix is inside its label range with 2% slack (always true for an unknown product).",
   "cases": [
     {
       "name": "Sector at the label mix (64 in 55 gal): typical system, well under the limit",
@@ -355,6 +355,204 @@
         "labelDailyCapFlOz": 456.0,
         "mixFlOzPerGal": 3.636,
         "withinLabel": true
+      }
+    }
+  ],
+  "refillCases": [
+    {
+      "name": "at the cap, same mix as the calibration: allowed",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 64,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.1636,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "at the cap, stronger refill (70 in 55 gal): refused, the cap drops",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 70,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.2727,
+        "capFlOz": 43.429,
+        "withinLimit": false,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "at the cap, weaker refill (63 in 55 gal): allowed, the cap is not raised",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 63,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.1455,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "unknown product at the cap, stronger refill: refused",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": null
+      },
+      "refill": {
+        "concentrateFlOzAdded": 70,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.2727,
+        "capFlOz": 43.429,
+        "withinLimit": false,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "unknown product at the cap, weaker refill: allowed, the cap is not raised",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": null
+      },
+      "refill": {
+        "concentrateFlOzAdded": 50,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 0.9091,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": true
+      }
+    },
+    {
+      "name": "Sector refill below the label range (60 in 55 gal): outside the range",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 60,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 1.0909,
+        "capFlOz": 47.5,
+        "withinLimit": true,
+        "mixInLabelRange": false
+      }
+    },
+    {
+      "name": "Sector refill above the label range (135 in 55 gal): outside the range and over the cap",
+      "input": {
+        "tankGallons": 55,
+        "nozzleCount": 15,
+        "riserCount": 4,
+        "nozzleFlowFlOzPerMin": 2.5,
+        "cycleSeconds": 60,
+        "mistTimes": [
+          "06:30"
+        ],
+        "treatedAreaSqFt": 1000,
+        "treatedHeightFt": 5,
+        "labelMaxFlOzPer1000CuFtDay": 9.5,
+        "concentrateFlOzPerTank": 64,
+        "productKey": "sector"
+      },
+      "refill": {
+        "concentrateFlOzAdded": 135,
+        "waterGallonsAdded": 55
+      },
+      "expected": {
+        "mixFlOzPerGal": 2.4545,
+        "capFlOz": 22.519,
+        "withinLimit": false,
+        "mixInLabelRange": false
       }
     }
   ]

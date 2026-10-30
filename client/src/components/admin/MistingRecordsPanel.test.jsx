@@ -17,7 +17,7 @@ const CAL_ID = "22222222-2222-4222-8222-222222222222";
 const calibration = (over = {}) => ({
   id: CAL_ID,
   customerId: CUSTOMER,
-  propertyId: null,
+  propertyId: "p1",
   installedOn: "2026-03-01",
   vendor: "Pynamite",
   model: "Test 55",
@@ -58,7 +58,7 @@ const refill = (over = {}) => ({
   id: "33333333-3333-4333-8333-333333333333",
   customerId: CUSTOMER,
   calibrationId: CAL_ID,
-  propertyId: null,
+  propertyId: "p1",
   refilledOn: "2026-04-01",
   productName: "Sector Misting Concentrate",
   epaRegNo: "1021-1834",
@@ -136,6 +136,28 @@ describe("MistingRecordsPanel", () => {
     expect(screen.queryByText(/30 nozzles/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
     expect(screen.getByText(/30 nozzles, 4 risers/)).toBeInTheDocument();
+  });
+
+  it("groups by real property: the primary has no special NULL reading, and rows with no property list under Removed property", async () => {
+    await openPanel(records({
+      properties: [
+        { id: "p1", label: "Home", address: "1 Test Lane", isPrimary: false },
+        { id: "p2", label: "Lake house", address: "2 Test Lane", isPrimary: true },
+      ],
+      calibrations: [
+        calibration({ id: "c-lake", propertyId: "p2", model: "Lake model" }),
+        calibration({ id: "c-gone", propertyId: null, isCurrent: false, model: "Gone model" }),
+      ],
+      refills: [refill({ id: "r-gone", propertyId: null, calibrationId: "c-gone" })],
+    }));
+    // The current system sits under its own home's label, not under the primary by default.
+    expect(screen.getByText("Lake house")).toBeInTheDocument();
+    expect(screen.getByText(/Pynamite Lake model/)).toBeInTheDocument();
+    // The other home has no system, so it can be offered one; a NULL row never counts as a system.
+    expect(screen.getByRole("button", { name: "Record install calibration at another property" })).toBeInTheDocument();
+    expect(screen.getByText(/level before 20%, counter reset, Removed property, by Test Tech/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
+    expect(screen.getByText(/Gone model.*Removed property\./)).toBeInTheDocument();
   });
 
   it("voids with an inline reason, never a browser prompt", async () => {

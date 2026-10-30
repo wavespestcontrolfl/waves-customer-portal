@@ -66,4 +66,42 @@ function overLabelMessage(dailyOutputFlOz, labelDailyCapFlOz) {
   return `This schedule puts out ${daily} fl oz a day. The label allows ${cap}. Shorten the mist or run fewer cycles.`;
 }
 
-module.exports = { roundTo, computeCalibration, overLabelMessage, formatOzPair };
+/**
+ * The daily cap at a different mix than the calibration's: what a refill must stay under.
+ *
+ * @param {object} args
+ * @param {object} args.calibration camelCase calibration: tankGallons, concentrateFlOzPerTank,
+ *   labelMaxFlOzPer1000CuFtDay, treatedVolumeCuFt, labelDailyCapFlOz
+ * @param {number} args.mixFlOzPerGal the refill's concentrate per gallon of water
+ * @param {object|null} args.product the calibration's known product, or null
+ *
+ * A KNOWN product states its limit for its label mix, so the cap is the calibration formula at the
+ * refill's strength. An UNKNOWN product's entered limit was for the calibration's own mix, so the stored
+ * cap shrinks by the refill's strength against that mix. Stronger lowers the cap; weaker never raises it.
+ */
+function capAtMix({ calibration, mixFlOzPerGal, product = null }) {
+  const mix = Number(mixFlOzPerGal);
+  const rate = product?.labelRateMix;
+  if (rate) {
+    const factor = mix / (rate.concentrateFlOz / rate.waterGal);
+    const cap = (Number(calibration.labelMaxFlOzPer1000CuFtDay) * Number(calibration.treatedVolumeCuFt)) / 1000 / Math.max(1, factor);
+    return roundTo(cap, 3);
+  }
+  const calibrationMix = Number(calibration.concentrateFlOzPerTank) / Number(calibration.tankGallons);
+  return roundTo(Number(calibration.labelDailyCapFlOz) / Math.max(1, mix / calibrationMix), 3);
+}
+
+// A known product's label mix range with 2% slack on each end, in fl oz of concentrate per gallon.
+const MIX_SLACK = 0.02;
+function labelMixRange(product) {
+  return {
+    low: (product.labelRateMix.concentrateFlOz / product.labelRateMix.waterGal) * (1 - MIX_SLACK),
+    high: (product.maxMix.concentrateFlOz / product.maxMix.waterGal) * (1 + MIX_SLACK),
+  };
+}
+const mixWithinLabelRange = (product, mixFlOzPerGal) => {
+  const { low, high } = labelMixRange(product);
+  return mixFlOzPerGal >= low && mixFlOzPerGal <= high;
+};
+
+module.exports = { roundTo, computeCalibration, overLabelMessage, formatOzPair, capAtMix, labelMixRange, mixWithinLabelRange };
