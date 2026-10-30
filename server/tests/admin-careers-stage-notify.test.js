@@ -8,10 +8,12 @@
 const mockMarkInboundSmsRead = jest.fn(async () => ({ updated: 1, notificationsCleared: 1 }));
 jest.mock('../services/inbound-sms-read', () => ({ markInboundSmsRead: (...a) => mockMarkInboundSmsRead(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The signed-in staff member: a technicians.id, as admin-auth sets it.
+const mockStaffId = 'bbbbbbbb-0000-4000-8000-000000000001';
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
-    req.technicianId = 'tech-1';
+    req.technicianId = mockStaffId;
     req.techRole = 'admin';
     next();
   },
@@ -239,7 +241,7 @@ describe('PATCH /:id/status', () => {
     expect(mockSendStageComms).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'aaaaaaaa-0000-4000-8000-000000000001' }),
       'interview_invite',
-      expect.objectContaining({ sms: true, email: false, by: 'tech-1' }),
+      expect.objectContaining({ sms: true, email: false, by: mockStaffId }),
     );
   });
 
@@ -595,7 +597,7 @@ describe('GET /:id detail never exposes the raw token', () => {
 });
 
 describe('History names the staff member behind each stage change (audit F10)', () => {
-  const STAFF = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const STAFF = mockStaffId;
   const GONE = 'bbbbbbbb-0000-4000-8000-000000000002';
   const history = () => [
     { from: 'new', to: 'reviewed', note: null, by: STAFF, at: '2026-10-27T14:00:00Z' },
@@ -618,8 +620,10 @@ describe('History names the staff member behind each stage change (audit F10)', 
     mockDb.__setStaff([{ id: STAFF, name: 'Sam Office' }]);
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'reviewed', note: 'Second call' });
     expect(status).toBe(200);
-    expect(body.application.status_history[0].by_name).toBe('Sam Office');
     expect(body.application.status_history).toHaveLength(4);
+    // The entry this request just wrote carries the signed-in staff name.
+    expect(body.application.status_history[3]).toMatchObject({ note: 'Second call', by: STAFF, by_name: 'Sam Office' });
+    expect(body.application.status_history[0].by_name).toBe('Sam Office');
     expect(mockDb.__rows()[0].status_history.some((e) => 'by_name' in e)).toBe(false);
   });
 

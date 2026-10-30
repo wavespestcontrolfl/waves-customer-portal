@@ -261,13 +261,16 @@ function stageChangeLabel(entry) {
   return `${STATUS_LABEL[entry.from] || entry.from} → ${to}`;
 }
 
+// A staff entry's `by` is a technicians.id (the status PATCH records it).
+const STAFF_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Who made a history entry: the applicant, or the staff member the server
 // named (by_name). A staff id with no name on file still says "Staff",
 // never the raw id.
 function historyActor(entry) {
   if (entry.by === "applicant") return "Applicant";
   if (entry.by_name) return entry.by_name;
-  return entry.by ? "Staff" : "";
+  return STAFF_ID_RE.test(entry.by || "") ? "Staff" : "";
 }
 
 // status_history is append-only, newest last — reverse for display. It holds
