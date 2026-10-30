@@ -266,11 +266,11 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(spec.why).toBe('The October 2026 $55.30 dues payment was canceled at Stripe before it cleared; the month is unpaid.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'autopay-canceled:cust-1:pi_dues_1' });
     expect(opts.detail).toMatch(/No message was sent to the customer\./);
-    // Customer 360's Charge now posts no amount (it bills the CURRENT month), so the alert sends the
-    // office to the Invoices page, which collects any month, and opens it filtered to the customer.
-    expect(spec.link).toBe('/admin/invoices?customerId=cust-1');
-    expect(opts.detail).toMatch(/create an invoice for it on the Invoices page, then charge the card on file or send the invoice\./);
-    expect(opts.detail).toMatch(/Charge now on the customer's page bills the current month only, so it fits only while it is still October 2026\./);
+    // Charge now (Customer 360) is the one office action that stamps the month as paid, so it is the
+    // advice while the month lasts; after it, a hand-made invoice leaves the month open to a re-bill.
+    expect(spec.link).toBe('/admin/customers?customerId=cust-1');
+    expect(opts.detail).toMatch(/While it is still October 2026, Charge now on the customer's page collects it and records October 2026 as paid\./);
+    expect(opts.detail).toMatch(/an invoice made by hand does not mark October 2026 as paid \(a plan visit in October 2026 completed later could bill it again\)/);
     expect(opts.detail).toMatch(/To waive it, mark this done\./);
     expect(updatesWhenAlerted).toBe(0); // raised before the canceled flip
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_canceled', expect.objectContaining({
@@ -281,6 +281,19 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(paymentUpdates()).toHaveLength(1);
     expect(paymentUpdates()[0].patch).toEqual({ status: 'canceled' });
+  });
+
+  test('a card attempt shows its dues, not its card-fee total (a new charge adds its own fee)', async () => {
+    mockState.processingRow = duesRow({ amount: '57.00', base_amount_cents: 5530, surcharge_amount_cents: 170 });
+    await handleCanceled(DUES_PI);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/^The October 2026 \$55\.30 dues payment/);
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_canceled', expect.objectContaining({ amountCents: 5530 }));
+  });
+
+  test('a legacy row with no base amount subtracts its stored card fee', async () => {
+    mockState.processingRow = duesRow({ amount: '57.00', base_amount_cents: null, surcharge_amount_cents: 170 });
+    await handleCanceled(DUES_PI);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/^The October 2026 \$55\.30 dues payment/);
   });
 
   test('another row already collected the month: no ring', async () => {

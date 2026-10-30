@@ -6898,7 +6898,10 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     }
   }
 
-  const amount = parseFloat(row.amount);
+  // The dues themselves, not the attempt's total: a card attempt's amount includes its card fee, and
+  // any new charge adds its own. Legacy rows without base_amount_cents subtract the stored fee.
+  const amount = (Number(row.base_amount_cents)
+    || Math.round(parseFloat(row.amount) * 100) - (Number(row.surcharge_amount_cents) || 0)) / 100;
   const monthLabel = month
     ? new Date(`${month}-15T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
     : '';
@@ -6919,8 +6922,8 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     ]),
     why: `The ${duesPayment} ${copy.why}; the month is unpaid.`,
     severity: 'needs-you',
-    // The Invoices page is where it is collected (a new invoice, then Charge card on file or Send).
-    link: `/admin/invoices?customerId=${encodeURIComponent(customerId)}`,
+    // Customer 360 holds Charge now, the one office action that records the month as paid.
+    link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
     subject: { type: 'customer', id: customerId },
     // Nothing closes this alert automatically: a person marks it done after collecting or waiving.
     doneWhen: 'collected_and_marked_done',
@@ -6929,10 +6932,12 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     // A needs-you money item must ring: with GATE_ADMIN_BELL_POLICY on, billing is not
     // allowlisted, and bell: true is the sanctioned site-level opt-in (as autopay-sca-parked.js).
     bell: true,
-    // Customer 360's Charge now posts no amount, so it bills monthly_rate as the CURRENT month
-    // (billed_month = this month): after a month rollover it would mark the wrong month collected.
-    // A new invoice on the Invoices page collects any month.
-    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. To collect it, create an invoice for it on the Invoices page, then charge the card on file or send the invoice. Charge now on the customer's page bills the current month only, so it fits only while it is still ${monthWords}. To waive it, mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
+    // Customer 360's Charge now posts no amount: it bills monthly_rate stamped billed_month = the
+    // CURRENT month, the stamp every dues-coverage reader (the cron, monthlyDuesCollected at plan-visit
+    // completion) trusts. So it is the right tool only while it is still the canceled month. An
+    // invoice made by hand carries no dues-month stamp (create() strips it), so a plan visit of that
+    // month completed later could mint the month's dues again.
+    detail: `${name}'s ${duesPayment} ${copy.what}, so it was not collected. Nothing else has paid ${monthWords}, and nothing will retry it on its own. While it is still ${monthWords}, Charge now on the customer's page collects it and records ${monthWords} as paid. After that, Charge now bills the new month, and an invoice made by hand does not mark ${monthWords} as paid (a plan visit in ${monthWords} completed later could bill it again), so check the customer's invoices before billing it another way. To waive it, mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
     dedupeKey: `autopay-canceled:${customerId}:${piId}`,
     metadata: {
       customer_id: customerId,
