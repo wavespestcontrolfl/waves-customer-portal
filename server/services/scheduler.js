@@ -7362,7 +7362,17 @@ function initScheduledJobs() {
     logger.info('Running: ad budget adjustment');
     try {
       const BudgetManager = require('./ads/budget-manager');
-      await BudgetManager.adjustBudgets();
+      // runExclusive records job_health ('ads-budget-adjust') and keeps an
+      // overlapping deploy instance from pushing the same budgets twice. It
+      // never changes which budget is pushed: a run where any campaign's push
+      // or save failed throws so the failed tick shows in job_health.
+      await runExclusive('ads-budget-adjust', async () => {
+        const result = await BudgetManager.adjustBudgets();
+        if (result && result.failed > 0) {
+          throw new Error(`ad budget adjustment: ${result.failed} of ${result.evaluated} campaign(s) failed`);
+        }
+        return result;
+      });
     } catch (err) {
       logger.error(`Ad budget adjustment failed: ${err.message}`);
     }

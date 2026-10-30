@@ -323,6 +323,196 @@ router.post('/campaigns/:id/enable', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// GAP RULE (GATE_ADS_GAP_RULE: shadow | true) — 7-day open-stop budget rule,
+// plus the owner's hold switch. Every route answers 404 gap_rule_off while the
+// gate is off, so the dark gate adds no reachable surface.
+// =========================================================================
+const GAP_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HOLD_MAX_DAYS = 60;
+
+function gapRuleMode() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.adsGapRuleMode === 'function' ? gates.adsGapRuleMode() : 'off';
+}
+
+// Returns the mode ('shadow' | 'live'), or answers 404 and returns null.
+function requireGapRule(res) {
+  const mode = gapRuleMode();
+  if (mode === 'off') {
+    res.status(404).json({ error: 'gap_rule_off' });
+    return null;
+  }
+  return mode;
+}
+
+function metadataObject(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  if (typeof v === 'string') {
+    try { const o = JSON.parse(v); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch { return {}; }
+  }
+  return {};
+}
+
+function gapDecisionText(decision, win, settings) {
+  if (decision === 'base') return `${win.total_open} open stops is at least ${settings.run_at_open}, so the ad runs at its base budget.`;
+  if (decision === 'stop') return `${win.total_open} open stops is below ${settings.stop_below_open}, so the ad drops to its 1% floor.`;
+  return `${win.total_open} open stops is between ${settings.stop_below_open} and ${settings.run_at_open}, so each campaign keeps its current state.`;
+}
+
+// GET /api/admin/ads/gap-rule
+router.get('/gap-rule', async (req, res, next) => {
+  try {
+    const mode = requireGapRule(res);
+    if (!mode) return undefined;
+    const BudgetManager = getBudgetManager();
+    const now = new Date();
+    const today = etDateString(now);
+    const targets = await db('ad_targets').first();
+    const ev = await BudgetManager.evaluateGapRule(now, targets);
+    const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+    const lastRow = await db('system_settings').where({ key: BudgetManager.GAP_LAST_KEY }).first();
+    let lastRun = null;
+    try {
+      const last = JSON.parse(lastRow?.value || 'null');
+      if (last && typeof last === 'object') {
+        lastRun = { at: last.at, mode: last.mode, total_open: last.total_open, decision: last.decision };
+      }
+    } catch { lastRun = null; }
+    res.json({
+      mode,
+      settings: ev.settings,
+      window: {
+        start: ev.window_start,
+        end: ev.window_end,
+        days: ev.days.map((d) => ({ ...d, weekday: GAP_WEEKDAYS[BudgetManager.etDateWeekday(d.date)] })),
+        total_open: ev.total_open,
+        total_limit: ev.total_limit,
+        total_stops: ev.total_stops,
+      },
+      decision: { mode: ev.decision, reason: gapDecisionText(ev.decision, ev, ev.settings) },
+      campaigns: campaigns.map((c) => {
+        const hold = BudgetManager.activeBudgetHold(c.metadata, today);
+        return {
+          id: c.id,
+          campaign_name: c.campaign_name,
+          budget_mode: c.budget_mode,
+          daily_budget_current: c.daily_budget_current,
+          daily_budget_base: c.daily_budget_base,
+          hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
+        };
+      }),
+      last_run: lastRun,
+    });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/ads/gap-rule/settings — any subset of the 6 settings
+router.put('/gap-rule/settings', requireAdmin, async (req, res, next) => {
+  try {
+    if (!requireGapRule(res)) return undefined;
+    const BudgetManager = getBudgetManager();
+    let settings;
+    let invalid = null;
+    await db.transaction(async (trx) => {
+      const row = await trx('ad_targets').forUpdate().first();
+      const checked = BudgetManager.validateGapSettingsPatch(req.body, BudgetManager.normalizeGapSettings(row?.metadata));
+      if (!checked.ok) { invalid = checked.error; return; }
+      settings = checked.merged;
+      // Merge into metadata; every other metadata key stays.
+      const metadata = JSON.stringify({ ...metadataObject(row?.metadata), gap_rule: settings });
+      if (row) await trx('ad_targets').where({ id: row.id }).update({ metadata, updated_at: new Date() });
+      else await trx('ad_targets').insert({ metadata });
+    });
+    if (invalid) return res.status(400).json({ error: invalid });
+    res.json({ settings });
+  } catch (err) { next(err); }
+});
+
+// Merge-safe write of one campaign's metadata under its row lock.
+async function updateCampaignMetadata(campaignId, change) {
+  return db.transaction(async (trx) => {
+    const row = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
+    if (!row) return null;
+    const metadata = change(metadataObject(row.metadata));
+    const [updated] = await trx('ad_campaigns')
+      .where({ id: campaignId })
+      .update({ metadata: JSON.stringify(metadata), updated_at: new Date() })
+      .returning('*');
+    return updated;
+  });
+}
+
+// POST /api/admin/ads/campaigns/:id/hold — { mode: 'base'|'stop', until: 'YYYY-MM-DD' }
+router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
+  try {
+    if (!requireGapRule(res)) return undefined;
+    const { mode, until } = req.body || {};
+    if (mode !== 'base' && mode !== 'stop') {
+      return res.status(400).json({ error: "mode must be 'base' or 'stop'." });
+    }
+    const now = new Date();
+    const today = etDateString(now);
+    const last = etDateString(addETDays(now, HOLD_MAX_DAYS));
+    const isRealDate = typeof until === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(until)
+      && new Date(`${until}T12:00:00Z`).toISOString().slice(0, 10) === until;
+    if (!isRealDate || until < today || until > last) {
+      return res.status(400).json({ error: `until must be a real date from ${today} to ${last} (YYYY-MM-DD, Eastern time).` });
+    }
+    const campaign = UUID_RE.test(req.params.id) ? await db('ad_campaigns').where({ id: req.params.id }).first() : null;
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Holds aren't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
+    if (campaign.status !== 'active') {
+      return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before holding its budget.` });
+    }
+
+    // Apply the mode now, push first. A campaign already in the held mode has
+    // nothing to push (setMode would refuse it as a no-op), so only the hold
+    // is saved. Nothing is saved when the push or persist fails.
+    if (campaign.budget_mode !== mode) {
+      const applied = await applyLive(async () => {
+        try {
+          return await getBudgetManager().setMode(campaign.id, mode, `Hold: ${mode} until ${until} (set in the portal)`, { requireLivePush: true, requireActive: true, trigger: 'manual' });
+        } catch (err) {
+          if (err.code === 'mode_noop') return null; // another writer already made this change
+          throw err;
+        }
+      }, res);
+      if (applied === APPLY_FAILED) return undefined;
+    }
+
+    const hold = {
+      mode,
+      until,
+      set_at: now.toISOString(),
+      set_by: req.technicianId || null,
+      reason: `Held ${mode} until ${until} from the portal`,
+    };
+    const updated = await updateCampaignMetadata(campaign.id, (meta) => ({ ...meta, budget_hold: hold }));
+    if (!updated) return res.status(404).json({ error: 'Campaign not found' });
+    res.json({ campaign: updated, hold });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/ads/campaigns/:id/hold — the next 2-hour run decides
+router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
+  try {
+    if (!requireGapRule(res)) return undefined;
+    const updated = UUID_RE.test(req.params.id)
+      ? await updateCampaignMetadata(req.params.id, (meta) => {
+        const { budget_hold: _removed, ...rest } = meta;
+        return rest;
+      })
+      : null;
+    if (!updated) return res.status(404).json({ error: 'Campaign not found' });
+    res.json({ campaign: updated, hold: null });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/ads/sync — trigger full Google Ads sync
 router.post('/sync', requireAdmin, async (req, res, next) => {
   try {
