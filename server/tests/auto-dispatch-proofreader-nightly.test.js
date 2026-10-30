@@ -464,6 +464,21 @@ describe('closeNotices', () => {
     return q;
   };
 
+  test('a notice, open or done, retires once its visit left the placement it is about or is no longer open', async () => {
+    db.mockImplementationOnce(recorder([]));
+    await nightly.closeNotices(new Date());
+    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
+    const [spec] = audit.retireResolvedNotices.mock.calls[0];
+    spec.stillOpen(q);
+    const sql = q.whereRaw.mock.calls[0][0];
+    expect(sql).toContain("metadata->>'scheduledDate'");
+    expect(sql).toContain("s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'");
+    expect(sql).toContain("s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'");
+    expect(sql).toContain("s.customer_id::text IS NOT DISTINCT FROM notifications.metadata->>'customerId'");
+    expect(q.whereIn).toHaveBeenCalledWith('s.status', ['pending', 'confirmed']);
+    expect(spec).toMatchObject({ keyPattern: 'auto-dispatch-proofreader:%', resolvedTitle: nightly.RESOLVED_TITLE, resolution: 'The visit moved or is no longer open' });
+  });
+
   test('every run closes the notices still open from before, and never one a person marked done', async () => {
     const calls = [];
     db.mockImplementationOnce(recorder(calls));
@@ -475,7 +490,8 @@ describe('closeNotices', () => {
     expect(calls).toContainEqual(['whereNull', 'done_at']);
     expect(calls).toContainEqual(['whereRaw', "metadata->>'dedupeKey' LIKE ?", ['auto-dispatch-proofreader:%']]);
     expect(calls.find(([name]) => name === 'update')[1]).toMatchObject({ title: nightly.RESOLVED_TITLE, detail: null, done_by: 'auto-dispatch' });
-    expect(audit.retireResolvedNotices).not.toHaveBeenCalled();
+    // After the placement retirement, which is what retires an old Done.
+    expect(audit.retireResolvedNotices).toHaveBeenCalledTimes(1);
   });
 
   test('the check turned off: every notice closes, the done ones too', async () => {
@@ -490,6 +506,8 @@ describe('closeNotices', () => {
 
   test('a failed close is logged and never throws, and the run is not green', async () => {
     db.mockImplementationOnce(recorder([], { fail: true }));
+    await expect(nightly.closeNotices(new Date())).resolves.toBe(false);
+    audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
     await expect(nightly.closeNotices(new Date())).resolves.toBe(false);
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
     await expect(nightly.closeNotices(new Date(), { enabled: false })).resolves.toBe(false);

@@ -46,6 +46,12 @@ const REASON_CODE = {
   person: 'PROOFREADER_PERSON_HELD',
 };
 
+// The placement a notice is about, as the database prints it.
+const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'scheduledDate'"
+  + " AND s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'"
+  + " AND s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'"
+  + " AND s.customer_id::text IS NOT DISTINCT FROM notifications.metadata->>'customerId'";
+const OPEN_STATUSES = ['pending', 'confirmed'];
 const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
 // The notices raised before 2026-10-29 were keyed per visit and PLACEMENT:
@@ -406,25 +412,31 @@ function approvedSlotTaken(checked, err) {
   return reason ? { reason_code: reason[0], reason_description: reason[1] } : null;
 }
 
-// Run end, in every run, and on the scheduler's no-run path: close the
-// notices still open from before 2026-10-29, when an unsure move raised one
-// (no run raises one now: nobody is asked). A notice a person marked done is
-// left as it is: it still holds its visit (personHeld). With the check off
-// nothing holds a move any more, so every notice closes, the done ones too:
-// a rollback leaves none standing (Codex #6313 r2). Never throws; false = the
-// close failed and stale notices may stand (statusAfterNotices).
+// Run end, in every run, and on the scheduler's no-run path. Before
+// 2026-10-29 an unsure move raised a notice; no run raises one now.
+//   1. A notice, open or done, whose visit left the placement it is about or
+//      is no longer open decides nothing: it is retired (Codex #6313 r1), so a
+//      visit that later comes back to that placement is not held by an old
+//      Done. With the check off nothing holds a move: every notice is retired,
+//      the done ones too, and a rollback leaves none standing (r2).
+//   2. With the check on, the notices still open are closed: nobody is asked,
+//      so nothing waits on a person. A notice a person marked done is left as
+//      it is: it still holds its visit on that placement (personHeld).
+// Never throws; false = the close failed and stale notices may stand
+// (statusAfterNotices).
 async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
   try {
-    if (!enabled) {
-      await require('../audit').retireResolvedNotices({
-        keyPattern: `${KEY_PREFIX}%`,
-        stillOpen: (q) => q.whereRaw('1 = 0'),
-        resolvedTitle: RESOLVED_TITLE,
-        resolution: 'The move check is turned off',
-        body: 'The move check is off; auto-dispatch no longer holds this move.',
-      }, nowDate);
-      return true;
-    }
+    await require('../audit').retireResolvedNotices({
+      keyPattern: `${KEY_PREFIX}%`,
+      stillOpen: (q) => {
+        if (enabled) q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
+        else q.whereRaw('1 = 0');
+      },
+      resolvedTitle: RESOLVED_TITLE,
+      resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
+      body: enabled ? 'This visit moved, was done or is no longer on that date.' : 'The move check is off; auto-dispatch no longer holds this move.',
+    }, nowDate);
+    if (!enabled) return true;
     const conn = require('../../../models/db');
     const { doneColumns } = require('../../notification-service')._private;
     await conn('notifications')
