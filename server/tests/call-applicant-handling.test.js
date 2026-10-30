@@ -118,6 +118,10 @@ describe('2. customer-only cards', () => {
       { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_promised: true } },
       { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', price_discussed: true } },
       { scheduling: { status: 'none' }, service_request: { service_intent: 'new_service' } },
+      // Existing-service asks are service asks for a third party too (callback, complaint, cancellation).
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'follow_up_existing_service' } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'complaint_or_callback' } },
+      { scheduling: { status: 'canceled' }, service_request: { service_intent: 'cancellation_request' } },
     ];
     for (const nature of ['job_applicant', 'vendor_or_partner']) {
       for (const shape of asks) {
@@ -391,6 +395,10 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(thirdPartyCallMakesNoServiceAsk(applicantOnly)).toBe(true);
     expect(thirdPartyCallMakesNoServiceAsk(applicantAsksQuote)).toBe(false);
     expect(thirdPartyCallMakesNoServiceAsk(vendorBooks)).toBe(false);
+    const vendorCallback = { call_nature: 'vendor_or_partner', scheduling: { status: 'none' }, service_request: { service_intent: 'complaint_or_callback' } };
+    const applicantCancels = { call_nature: 'job_applicant', scheduling: { status: 'canceled' }, service_request: { service_intent: 'cancellation_request' } };
+    expect(thirdPartyCallMakesNoServiceAsk(vendorCallback)).toBe(false);
+    expect(thirdPartyCallMakesNoServiceAsk(applicantCancels)).toBe(false);
   });
   test('the Careers step runs once, after the commitments step, in the main path', () => {
     expect(src.match(/await fileApplicantCareersRowStep\(/g).length).toBe(1);

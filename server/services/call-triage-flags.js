@@ -957,19 +957,18 @@ function isThirdPartyCallNature(extraction) {
 }
 
 // A third-party call asks no service of its own only when it carries no
-// scheduling and no quote or price evidence (AGENTS.md: address cards drop on
-// the service ask, never on a nature label alone). It widens
-// callMakesNoServiceAsk by one case: service_intent 'quote_only' with no quote
-// asked or promised and no price discussed, which the model files on applicant
-// and vendor calls by default. An applicant who asks for service at their own
-// home keeps every card.
+// scheduling, no quote or price evidence and no service intent beyond the
+// 'quote_only' default the model files on applicant and vendor calls (AGENTS.md:
+// address cards drop on the service ask, never on a nature label alone). Unlike
+// callMakesNoServiceAsk, an existing-service intent (a callback, a complaint, a
+// cancellation) IS a service ask here: those promises keep their SLA tracking.
+// An applicant who asks for service at their own home keeps every card.
 function thirdPartyCallMakesNoServiceAsk(extraction) {
-  if (callMakesNoServiceAsk(extraction)) return true;
   const status = String(extraction?.scheduling?.status || 'none');
   if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
   const sr = extraction?.service_request || {};
   if (sr.quote_requested === true || sr.quote_promised === true || sr.price_discussed === true) return false;
-  return sr.service_intent === 'quote_only';
+  return !sr.service_intent || sr.service_intent === 'quote_only';
 }
 
 function thirdPartyCustomerOnlyCards(extraction, { gateOn = false } = {}) {
