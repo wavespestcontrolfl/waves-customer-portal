@@ -2846,6 +2846,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
+      // applySeriesMoveEffects already broadcast this stop's board update; a
+      // caller that emits one per moved stop must skip it (no double emit).
+      ...(shiftedOccurrences ? { boardBroadcastBySeriesEffects: true } : {}),
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
       // The repair the alert names must match the actual failure (codex
       // #3609 r34): a parent-retarget failure has ZERO stragglers — every

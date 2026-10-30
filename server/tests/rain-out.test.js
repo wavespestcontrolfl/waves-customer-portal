@@ -999,6 +999,9 @@ describe('rain-out service', () => {
       );
       // Series path replaces the single move entirely.
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      // The shared effects pass owns the board broadcast; callers that emit per
+      // stop (the tech Quick Move route) read this marker and skip the stop.
+      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true, boardBroadcastBySeriesEffects: true });
       // Sibling effects (reminder sync, board, conflict card) run through the
       // shared durable pass — marker-fenced and reconciled — with the text
       // OFF (Quick Move's own moved-SMS is the customer notice); nothing runs

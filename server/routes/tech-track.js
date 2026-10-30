@@ -728,6 +728,13 @@ router.post('/:id/rain-out', async (req, res, next) => {
       scope: scope === 'route' ? 'route' : 'job',
       target,
       notifyCustomer: notifyCustomer !== false,
+      // Fences the WRITE itself, not just the ownsTrackedVisit pre-read above:
+      // commit() merges this into the rebooker's options.expect (technician_id
+      // is part of the atomic UPDATE predicate), so a dispatch reassignment
+      // landing between that read and the write makes the write miss and 409
+      // with nothing sent. It also keeps this caller off the unfenced series
+      // branch (same contract as the admin-dispatch twin).
+      requireAssignedTechnicianId: req.technicianId,
       // Authenticated tech quick-move tap — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
@@ -735,9 +742,25 @@ router.post('/:id/rain-out', async (req, res, next) => {
     // commit() collects every moved row's route-quality dates for its caller
     // to flush once (codex #4295 r4 P2) — without this a Quick Move from the
     // tech portal refreshed nothing. Best-effort, after the move committed.
-    if (result.ok && Array.isArray(result.qualityDates) && result.qualityDates.length) {
+    // The board broadcasts below add their dates to the SAME Set, so the
+    // route quality refresh stays ONE flush.
+    if (result.ok) {
+      const dispatchAssignment = require('../services/dispatch-assignment');
+      const qualityDates = new Set(Array.isArray(result.qualityDates) ? result.qualityDates : []);
+      // Re-render any other operator's open Dispatch Board: one job update per
+      // successfully moved stop, covered grouped members included (same as the
+      // admin-dispatch rain-out twin). A stop whose series effects pass
+      // already broadcast it (boardBroadcastBySeriesEffects) is skipped.
+      for (const moved of result.results || []) {
+        if (!moved.ok || moved.boardBroadcastBySeriesEffects) continue;
+        try {
+          await dispatchAssignment.emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates });
+        } catch (err) {
+          logger.error(`[tech-track] quick move board broadcast failed for ${moved.id}: ${err.message}`);
+        }
+      }
       try {
-        await require('../services/dispatch-assignment').flushDispatchQualityDates(new Set(result.qualityDates));
+        await dispatchAssignment.flushDispatchQualityDates(qualityDates);
       } catch (err) {
         logger.error(`[tech-track] quick move route quality refresh failed: ${err.message}`);
       }
