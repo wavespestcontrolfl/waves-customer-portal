@@ -198,6 +198,20 @@ describe('calendar facts on the days', () => {
     expect(screen.getByText('Wed Jan 3 (last resort)')).toBeTruthy();
   });
 
+  it('an already-late day (GATE_ROUTE_CHECK_LATE_DAYS) keeps its hours and says so in the day line, never as a verdict', () => {
+    const late = { date: '2035-01-03', status: 'open', alreadyLate: true, hours: [hour('2035-01-03', '15:00', 4, { dayAlreadyLate: true })] };
+    const availability = answer(null, [offDay, late, openDay]);
+    const v = availabilityVerdict(availability, at('2035-01-02', '09:00'));
+    expect(v.text).not.toMatch(/late|fit/i);
+    render(<AvailabilityStrip availability={availability} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    // The pill still counts the open hour.
+    expect(screen.getAllByTestId('availability-day')[1].textContent).toBe('Wed31 open');
+    fireEvent.click(screen.getAllByTestId('availability-day')[1]);
+    expect(screen.getByText('Wed Jan 3 (already late)')).toBeTruthy();
+    fireEvent.click(screen.getAllByTestId('availability-day')[2]);
+    expect(screen.getByText('Fri Jan 5')).toBeTruthy();
+  });
+
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
     expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');

@@ -191,3 +191,38 @@ describe('the box', () => {
     expect(within(screen.getByRole('list', { name: 'Open dates' })).getAllByRole('listitem')).toHaveLength(4);
   });
 });
+
+// GATE_ROUTE_CHECK_LATE_DAYS: a day whose booked stops already arrive late keeps its open hours and
+// carries a small tag. Owner 2026-10-24/25: still only open times, never a "doesn't fit" sentence.
+describe('already-late days', () => {
+  const lateDays = [
+    day('2035-01-01', [hour('2035-01-01', '15:00', 4, { dayAlreadyLate: true })], { alreadyLate: true }),
+    day('2035-01-02', [hour('2035-01-02', '10:00', 6)]),
+  ];
+
+  it('tags the day on its row, leaves the other days plain, and adds no sentence', () => {
+    render(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-05" currentStart="09:00" onPick={() => {}} />);
+    const rows = screen.getAllByTestId('open-time-row');
+    expect(rows).toHaveLength(2);
+    const tagged = rows.filter((row) => within(row).queryByTestId('already-late-tag'));
+    expect(tagged).toHaveLength(1);
+    expect(tagged[0].textContent).toContain('Mon Jan 1');
+    expect(tagged[0].textContent).toContain('already late');
+    expect(tagged[0].textContent).toContain('3 PM');
+    expect(screen.queryByText(/doesn't fit|fits\.|anyway|full/i)).toBeNull();
+  });
+
+  it('the one-day view tags the day header once, not every hour', () => {
+    const { rerender } = render(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-05" currentStart="15:00" onPick={() => {}} />);
+    rerender(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-01" currentStart="15:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('already-late-tag')).toHaveLength(1);
+    expect(screen.getByText('Mon Jan 1').textContent).toContain('already late');
+    expect(rowTexts()).toEqual(['3 PMFixture Techadds ~4 min']);
+  });
+
+  it('a day with no flag shows no tag at all', () => {
+    render(<OpenTimesBox availability={answer()} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.queryByTestId('already-late-tag')).toBeNull();
+  });
+});
+

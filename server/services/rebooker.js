@@ -1643,7 +1643,8 @@ class SmartRebooker {
       if (ranked) {
         return ranked.slice(0, 3).map((entry) => buildOption(entry.candidate, entry.window, entry.routeChecked
           ? { routeChecked: true, ...(Number.isFinite(Number(entry.slot?.detour_minutes))
-            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}) }
+            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}),
+          ...(entry.alreadyLate === true ? { dayAlreadyLate: true } : {}) }
           : { routeChecked: false }));
       }
       // No day could be route-checked: today's list, from the same candidates.

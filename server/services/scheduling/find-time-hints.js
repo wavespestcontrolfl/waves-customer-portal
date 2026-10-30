@@ -473,6 +473,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       // 'google' when the route check itself drove this hour on Google
       // (GATE_PICKER_ROAD_CHECK); otherwise set by the road re-pricing.
       ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
+      // GATE_ROUTE_CHECK_LATE_DAYS: the day's existing stops already arrive late; this hour adds no new late stop.
+      ...(slot.day_already_late === true ? { day_already_late: true } : {}),
       [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
@@ -487,6 +489,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     // GATE_AUTO_DISPATCH_DAY_RULES on) is a working day the strip offers
     // only when no other day has room.
     ...(closedDates?.has(date) ? { closed: true } : (lastResortDates?.has(date) ? { last_resort: true } : {})),
+    // The day's existing stops already break an arrival promise (GATE_ROUTE_CHECK_LATE_DAYS): a small tag, never a verdict.
+    ...(hours.some((hour) => hour.day_already_late) ? { already_late: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
 }
@@ -554,6 +558,7 @@ function publicChip(chip) {
     rain_chance: chip.rain_chance ?? null,
     stops_that_day: chip.stops_that_day ?? null,
     technician: chip.technician || null,
+    ...(chip.day_already_late === true ? { day_already_late: true } : {}),
   };
 }
 

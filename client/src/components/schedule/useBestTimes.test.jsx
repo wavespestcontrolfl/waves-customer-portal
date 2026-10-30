@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { useBestTimes, resetHintsGated, resetOpenTimesUi } from './useBestTimes';
+import { useBestTimes, resetHintsGated, resetOpenTimesUi, normalizeAvailability, normalizeOpenTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -454,3 +454,24 @@ it('Quick Move: the search says so, for the server to pick its route check', asy
   await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
   expect(searches(fetch)[0]).toMatchObject({ hint: true, openTimes: true, quickMove: true });
 });
+
+// GATE_ROUTE_CHECK_LATE_DAYS: the day tag rides through both list shapes, and only when the server sent it.
+it('an already_late day and its day_already_late hours reach the strip and the open-times box; a clean day gets neither', () => {
+  const hourOf = (date, start, over = {}) => ({ start_time: start, end_time: `${Number(start.slice(0, 2)) + 1}:00`, detour_minutes: 3, technician: { id: 't1', name: 'T' }, ...over });
+  const data = {
+    summary: {
+      open_times: { from: '2035-01-01', to: '2035-01-02' },
+      days: [
+        { date: '2035-01-01', status: 'open', already_late: true, hours: [hourOf('2035-01-01', '15:00', { day_already_late: true })] },
+        { date: '2035-01-02', status: 'open', hours: [hourOf('2035-01-02', '10:00')] },
+      ],
+    },
+  };
+  for (const out of [normalizeAvailability(data, { date: '2035-01-01', scopedToTech: false }), normalizeOpenTimes(data, { date: '2035-01-01' })]) {
+    expect(out.days[0]).toMatchObject({ alreadyLate: true });
+    expect(out.days[0].hours[0]).toMatchObject({ dayAlreadyLate: true });
+    expect(out.days[1]).not.toHaveProperty('alreadyLate');
+    expect(out.days[1].hours[0]).not.toHaveProperty('dayAlreadyLate');
+  }
+});
+

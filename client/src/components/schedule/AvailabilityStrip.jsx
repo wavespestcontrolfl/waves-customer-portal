@@ -455,7 +455,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         <div>
           <div style={{ marginBottom: 6, color: '#52525B' }}>
             {viewed.hours.length
-              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}${viewed.last_resort ? ' (last resort)' : ''}`
+              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}${viewed.last_resort ? ' (last resort)' : ''}${viewed.alreadyLate ? ' (already late)' : ''}`
               : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
           </div>
           {viewed.hours.length > 0 && (
