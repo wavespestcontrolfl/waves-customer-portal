@@ -290,3 +290,44 @@ it("sends a queued note draft even when a tick's reload brings back the older sa
   await act(async () => { releases[0](); });
   await waitFor(() => expect(notePatches).toEqual(["One", "One and two"]));
 });
+
+it("keeps a typed, unsaved due date when a decision save loses its reply and the bid reloads", async () => {
+  let reads = 0;
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
+    if (path === "/admin/bid-desk/b1") { reads += 1; return reply(detail()); }
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const due = await screen.findByLabelText("Due date (Eastern time)");
+  fireEvent.change(due, { target: { value: "2026-11-04T14:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  expect(await screen.findByText("Could not confirm the save. The list below shows what the server has now.")).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(2));
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-11-04T14:00");
+});
+
+it("still sends a newer note draft queued behind a save that lost its reply", async () => {
+  const notePatches = [];
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1") return reply(detail());
+    if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) {
+      notePatches.push(options.body.notes);
+      if (notePatches.length === 1) return new Promise((resolve, reject) => { setTimeout(() => reject(new TypeError("Failed to fetch")), 30); });
+      return reply({ ok: true });
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const input = await screen.findByLabelText(NOTE);
+  input.focus();
+  fireEvent.change(input, { target: { value: "One" } });
+  input.blur();
+  await waitFor(() => expect(notePatches).toEqual(["One"]));
+  input.focus();
+  fireEvent.change(input, { target: { value: "One and two" } });
+  input.blur(); // queued behind the first save, which then loses its reply
+  await waitFor(() => expect(notePatches).toEqual(["One", "One and two"]));
+});

@@ -257,8 +257,11 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
       do {
         again.current = false;
         const text = draft.current;
-        if (text === lastSent.current || !(await onNotes(item, text))) break;
-        lastSent.current = text;
+        if (text === lastSent.current) break;
+        // A failed save (refused, or no answer) stops here unless a newer draft was blurred behind it: that one was
+        // already left by the operator and is still sent.
+        if (await onNotes(item, text)) lastSent.current = text;
+        else if (!again.current) break;
       } while (again.current);
     } finally {
       saving.current = false;

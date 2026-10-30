@@ -250,7 +250,13 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const headingRef = useRef(null);
   const arrived = useRef(false);
 
-  const load = useCallback(async () => {
+  // The due date typed but not saved yet, as of the last render (load() reads it without re-creating itself).
+  const dueEditedAtNow = useRef(null);
+  dueEditedAtNow.current = dueEditedAt;
+
+  // keepDueDraft: a reload after a lost reply keeps a due date the operator typed but has not saved, still tied to the
+  // version it was typed on, as the decision save itself does.
+  const load = useCallback(async ({ keepDueDraft = false } = {}) => {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
@@ -259,8 +265,10 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
         : null;
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
-      setDueInput(etDatetimeLocalValue(data.bid.due_at));
-      setDueEditedAt(null);
+      if (!(keepDueDraft && dueEditedAtNow.current)) {
+        setDueInput(etDatetimeLocalValue(data.bid.due_at));
+        setDueEditedAt(null);
+      }
       setStatus(data.bid.status);
       setNote(data.bid.decision_note || "");
     } catch (err) {
@@ -305,7 +313,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         // No answer arrived (the network dropped): the server may have written the change, so show what it has.
         setMessage(UNCONFIRMED_MESSAGE);
         onChanged();
-        load();
+        load({ keepDueDraft: true });
       }
       return false;
     } finally {
