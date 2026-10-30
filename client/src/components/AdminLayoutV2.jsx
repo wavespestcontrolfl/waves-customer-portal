@@ -22,9 +22,7 @@ import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
   Search,
-  LogOut,
   Menu,
-  X,
   Sparkles,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
@@ -32,10 +30,8 @@ import useModalFocus from "../hooks/useModalFocus";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
-  ADMIN_DESKTOP_NAV_SECTIONS,
   ADMIN_MOBILE_TABS,
   isAdminNavItemActive,
-  isAdminNavItemEnabled,
   isPathAdminOnly,
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
@@ -48,20 +44,6 @@ import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 import { useTechNavigationLock } from "./tech/TechNavigationLock";
 import useStaffSession from "../hooks/useStaffSession";
 
-
-function initialsFor(name) {
-  if (!name) return "•";
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-function roleLabel(role) {
-  if (!role) return "Staff";
-  if (role === "admin") return "Admin";
-  if (role === "technician") return "Technician";
-  return role.charAt(0).toUpperCase() + role.slice(1);
-}
 
 // Alert red (owner ruling 2026-09-07, DECISIONS.md): an unread inbound text is
 // a genuine alert — a customer is waiting on a reply — so the Messages badge
@@ -152,7 +134,6 @@ export default function AdminLayoutV2() {
   const bidDeskEnabled = useFeatureFlag("bid_desk", false, userId);
   // Bid kit (GATE_BID_KIT): the server only sends this flag while the gate is on.
   const bidKitEnabled = useFeatureFlag("bid_kit", false, userId);
-  const navigationEnabled = useFeatureFlag("admin-navigation", false, userId);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
@@ -253,7 +234,7 @@ export default function AdminLayoutV2() {
 
   return (
     <IntelligenceBarPageDataProvider open={openPalette}>
-    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && sessionReady} agentEstimateEnabled={agentEstimateEnabled} bidDeskEnabled={bidDeskEnabled} bidKitEnabled={bidKitEnabled}>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={sessionReady} agentEstimateEnabled={agentEstimateEnabled} bidDeskEnabled={bidDeskEnabled} bidKitEnabled={bidKitEnabled}>
     <div
       className="admin-shell-v2"
       style={{
@@ -312,11 +293,11 @@ export default function AdminLayoutV2() {
           </button>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
           <div style={{ flex: 1 }} />
-          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={openPageFinder} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
+          <Button density="comfortable" variant="ghost" onClick={openPageFinder} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>
           <button
             type="button"
             onClick={openPalette}
-            aria-label={navigationEnabled ? "Ask Waves" : "Open Intelligence Bar"}
+            aria-label="Ask Waves"
             style={{
               background: "none",
               border: "none",
@@ -365,7 +346,7 @@ export default function AdminLayoutV2() {
         // AT tree so a keyboard user can't Tab into the invisible menu.
         {...(!sidebarVisible ? { inert: "" } : {})}
         style={{
-          width: navigationEnabled ? 240 : 220,
+          width: 240,
           background: "var(--surface-primary)",
           borderRight: "1px solid var(--border-default)",
           display: "flex",
@@ -381,298 +362,14 @@ export default function AdminLayoutV2() {
             ? "env(safe-area-inset-bottom, 0px)"
             : undefined,
           zIndex: 100,
-          overflowY: navigationEnabled ? "hidden" : "auto",
+          overflowY: "hidden",
           transform: sidebarVisible ? "translateX(0)" : "translateX(-100%)",
           transition: "transform 0.2s ease",
           boxShadow:
             isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
-        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
-        {/* Logo + title + notification bell */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "16px 14px 12px",
-            borderBottom: "1px solid var(--border-subtle)",
-            flexShrink: 0,
-          }}
-        >
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
-          <div style={{ flex: 1 }} />
-          {isMobile ? (
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(false)}
-              aria-label="Close menu"
-              style={{
-                background: "none",
-                border: "none",
-                color: "var(--text-secondary)",
-                width: 44,
-                height: 44,
-                borderRadius: 6,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                cursor: "pointer",
-              }}
-            >
-              <X size={20} strokeWidth={1.75} />
-            </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={openPalette}
-                aria-label="Open Intelligence Bar"
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-primary)",
-                  width: 36,
-                  height: 36,
-                  borderRadius: 6,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  cursor: "pointer",
-                }}
-              >
-                <Sparkles size={18} strokeWidth={1.75} />
-              </button>
-              <NotificationBell type="admin" />
-            </>
-          )}
-        </div>
-
-        {/* Search trigger → opens ⌘K palette */}
-        <button
-          type="button"
-          onClick={openPalette}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            margin: "10px 12px",
-            padding: isMobile ? "0 12px" : "0 10px",
-            minHeight: isMobile ? 44 : 36,
-            boxSizing: "border-box",
-            borderRadius: 4,
-            border: "1px solid var(--border-default)",
-            background: "var(--surface-hover)",
-            color: "var(--text-tertiary)",
-            fontSize: isMobile ? 14 : 13,
-            cursor: "pointer",
-            textAlign: "left",
-          }}
-          aria-label="Open search"
-        >
-          <Search size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden />
-          <span style={{ flex: 1 }}>Search…</span>
-          <kbd
-            style={{
-              fontFamily: "inherit",
-              fontSize: 11,
-              padding: "2px 6px",
-              borderRadius: 4,
-              background: "var(--kbd-bg)",
-              border: "1px solid var(--kbd-border)",
-              color: "var(--kbd-fg)",
-            }}
-          >
-            ⌘K
-          </kbd>
-        </button>
-
-        {/* Nav sections */}
-        <nav
-          aria-label="Admin sections"
-          style={{ flex: 1, padding: "4px 8px 12px" }}
-        >
-          {ADMIN_DESKTOP_NAV_SECTIONS.map(({ section, items }) => {
-            const visibleItems = items
-              .filter((item) => !item.adminOnly || user?.role === "admin")
-              .filter((item) => isAdminNavItemEnabled(item, { agent_estimate: agentEstimateEnabled, bid_desk: bidDeskEnabled, bid_kit: bidKitEnabled }));
-            // Role/flag filtering can empty a whole section (e.g. Marketing
-            // for a technician) — an orphaned heading reads as a bug.
-            if (visibleItems.length === 0) return null;
-            const headingId = `admin-nav-${section
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, "-")}`;
-            return (
-            <div
-              key={section}
-              role="group"
-              aria-labelledby={headingId}
-              style={{ marginBottom: 10 }}
-            >
-              <h2
-                id={headingId}
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.4,
-                  fontWeight: 500,
-                  color: "var(--text-secondary)",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  padding: "12px 12px 4px",
-                  margin: 0,
-                  userSelect: "none",
-                }}
-              >
-                {section}
-              </h2>
-              {visibleItems.map((item) => {
-                const { path, icon: Icon, label } = item;
-                const isActive = isAdminNavItemActive(
-                  item,
-                  location.pathname,
-                  location.search,
-                );
-                return (
-                  <Link
-                    key={path}
-                    to={path}
-                    aria-current={isActive ? "page" : undefined}
-                    onClick={(e) => {
-                      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                      // A true no-op re-tap (already exactly at this URL, no
-                      // query to strip) triggers no route change, so no
-                      // beacon consumes the mark — don't leave a stale one
-                      // for the next unmarked navigation to inherit.
-                      if (`${location.pathname}${location.search}` !== path) {
-                        markUsageSource("sidebar");
-                      }
-                      if (location.pathname === path || location.pathname.startsWith(path + "/")) {
-                        e.preventDefault();
-                        navigate(path);
-                      }
-                    }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: "0 12px",
-                      minHeight: isMobile ? 44 : 36,
-                      boxSizing: "border-box",
-                      borderRadius: 6,
-                      marginBottom: 1,
-                      background: isActive
-                        ? "var(--surface-active)"
-                        : "transparent",
-                      color: isActive
-                        ? "var(--text-primary)"
-                        : "var(--text-secondary)",
-                      fontSize: isMobile ? 14 : 14,
-                      fontWeight: isActive ? 600 : 500,
-                      textDecoration: "none",
-                      transition: "background 0.1s ease",
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!isActive)
-                        e.currentTarget.style.background =
-                          "var(--surface-hover)";
-                    }}
-                    onMouseLeave={(e) => {
-                      if (!isActive)
-                        e.currentTarget.style.background = "transparent";
-                    }}
-                  >
-                    <Icon size={18} strokeWidth={1.75} aria-hidden />
-                    <span style={{ flex: 1 }}>
-                      {label}
-                      {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
-                    </span>
-                    {item.id === "communications" ? (
-                      <UnreadBadge count={unreadConversations} />
-                    ) : null}
-                  </Link>
-                );
-              })}
-            </div>
-            );
-          })}
-        </nav>
-
-        {/* User chip footer */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "10px 12px",
-            borderTop: "1px solid var(--border-subtle)",
-            flexShrink: 0,
-          }}
-        >
-          <div
-            style={{
-              width: 30,
-              height: 30,
-              borderRadius: "50%",
-              background: "var(--surface-active)",
-              color: "var(--text-primary)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 12,
-              fontWeight: 500,
-              flexShrink: 0,
-            }}
-          >
-            {initialsFor(user?.name)}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 500,
-                color: "var(--text-primary)",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {user?.name || "Staff"}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-              {roleLabel(user?.role)}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={handleLogout}
-            aria-label="Sign out"
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-tertiary)",
-              cursor: "pointer",
-              padding: isMobile ? 0 : 6,
-              width: isMobile ? 44 : undefined,
-              height: isMobile ? 44 : undefined,
-              minWidth: isMobile ? 44 : undefined,
-              borderRadius: isMobile ? 6 : 4,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--surface-hover)";
-              e.currentTarget.style.color = "var(--text-primary)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "none";
-              e.currentTarget.style.color = "var(--text-tertiary)";
-            }}
-          >
-            <LogOut size={15} strokeWidth={1.75} aria-hidden />
-          </button>
-        </div>
-        </>}
+        <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} />
       </aside>
 
       {/* Main content */}
@@ -681,7 +378,7 @@ export default function AdminLayoutV2() {
           flex: 1,
           minWidth: 0,
           maxWidth: "100%",
-          marginLeft: isMobile ? 0 : navigationEnabled ? 240 : 220,
+          marginLeft: isMobile ? 0 : 240,
           paddingTop: mainPadding.top,
           paddingBottom: mainPadding.bottom,
           paddingLeft: mainPadding.x,
@@ -771,13 +468,13 @@ export default function AdminLayoutV2() {
                     {item.id === "communications" ? (
                       <UnreadBadge
                         count={unreadConversations}
-                        style={{ ...(navigationEnabled ? { fontSize: 14, minWidth: 22, height: 22, borderRadius: 11 } : {}), position: "absolute", top: -6, right: -12 }}
+                        style={{ fontSize: 14, minWidth: 22, height: 22, borderRadius: 11, position: "absolute", top: -6, right: -12 }}
                       />
                     ) : null}
                   </span>
                   <span
                     style={{
-                      fontSize: navigationEnabled ? 14 : 12,
+                      fontSize: 14,
                       lineHeight: 1.1,
                       letterSpacing: "0.02em",
                       fontWeight: 500,

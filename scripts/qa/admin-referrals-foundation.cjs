@@ -191,7 +191,7 @@ async function main() {
           role: "admin",
         };
       else if (api === "/admin/feature-flags")
-        body = { flags: { "admin-navigation": true } };
+        body = { flags: {} };
       else if (api === "/admin/notifications/unread-count") body = { count: 0 };
       else if (api === "/admin/communications/unread-count")
         body = { conversations: 0 };

@@ -38,8 +38,10 @@ import {
 import { MOBILE_SETTINGS_SECTIONS } from "./mobileSettingsSections";
 
 // Canonical metadata for every destination currently rendered by the admin
-// shell. The desktop sidebar and mobile More page are derived from the same
-// taxonomy so a destination cannot silently disappear from one surface.
+// shell. The grouped workspace menu (getAdminWorkspaceGroups) is the only
+// admin menu. NAV_SECTION_DEFINITIONS below is no longer rendered as a menu;
+// it only decides which destinations the Settings tab owns for its active
+// state (isAdminNavItemActive, id "more").
 //
 // `adminOnly: true` scopes a destination to role === 'admin' (the owner).
 // A technician-role login keeps only the day-to-day service surfaces:
@@ -417,11 +419,6 @@ function materializeSections(definitions, surface) {
   }));
 }
 
-export const ADMIN_DESKTOP_NAV_SECTIONS = materializeSections(
-  NAV_SECTION_DEFINITIONS,
-  "desktop",
-);
-
 export const ADMIN_MOBILE_MORE_SECTIONS = materializeSections(
   MOBILE_MORE_SECTION_DEFINITIONS,
   "more",
@@ -457,7 +454,7 @@ const WORKSPACE_GROUPS = [
 
 export const ADMIN_WORKSPACE_GROUP_IDS = WORKSPACE_GROUPS.map(({ id }) => id);
 
-// The one flag rule for every menu surface (sidebar, mobile More, grouped workspaces). `flag` needs that flag on;
+// The one flag rule for every menu surface (grouped sidebar, mobile Settings page). `flag` needs that flag on;
 // `anyFlag` needs at least one of its flags on. A flag the server did not send counts as off (fails closed).
 export function isAdminNavItemEnabled(item, flags = {}) {
   if (item.flag && flags[item.flag] !== true) return false;
