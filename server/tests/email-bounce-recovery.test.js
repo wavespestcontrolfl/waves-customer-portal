@@ -76,6 +76,34 @@ describe('isHardBounceEvent', () => {
   });
 });
 
+describe('isNoMailServerEvent (GATE_CALL_EMAIL_CHECKS, owner 2026-10-29)', () => {
+  const DEAD = { event: 'bounce', type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' };
+  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
+  test('gate off: never', () => {
+    expect(recovery.isNoMailServerEvent(DEAD)).toBe(false);
+  });
+  test('gate on: a blocked bounce for a domain with no mail server', () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(recovery.isNoMailServerEvent(DEAD)).toBe(true);
+    expect(recovery.isNoMailServerEvent({ event: 'blocked', response: '550 5.1.2 Host or domain name not found' })).toBe(true);
+  });
+  test('gate on: a real sender block, or a non-failure event, is not one', () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(recovery.isNoMailServerEvent({ event: 'bounce', type: 'blocked', reason: '554 5.7.1 client host blocked using a DNS block list' })).toBe(false);
+    expect(recovery.isNoMailServerEvent({ event: 'delivered', reason: 'unable to get mx info' })).toBe(false);
+    expect(recovery.isNoMailServerEvent({})).toBe(false);
+  });
+  test('gate on: a hard bounce with a no-domain reason keeps the hard-bounce path', () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(recovery.isNoMailServerEvent({ event: 'bounce', type: 'bounce', reason: '550 5.1.2 Host or domain name not found' })).toBe(false);
+    expect(recovery.isNoMailServerEvent({ event: 'bounce', reason: 'DNS lookup failed: NXDOMAIN' })).toBe(false);
+  });
+  test('suppression is not widened: the hard-bounce test still says no for it', () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(recovery.isHardBounceEvent(DEAD)).toBe(false);
+  });
+});
+
 describe('isRecoveryMessage', () => {
   test('detects the bounce_recovery category in array or JSON-string form', () => {
     expect(recovery.isRecoveryMessage({ categories: ['email_template', 'bounce_recovery'] })).toBe(true);
