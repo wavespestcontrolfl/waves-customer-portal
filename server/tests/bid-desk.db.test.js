@@ -892,6 +892,98 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     });
   });
 
+  describe('GATE_BID_DESK_NOT_OUR_WORK', () => {
+    const NOTE = 'Not our work: mowing, edging or trimming (owner 2026-10-29).';
+    const CC_AUTH = 'mx.google.com; dkim=permerror (no key for signature) header.i=@charlottecountyfl.gov header.s=s1; spf=pass (google.com: domain of bounces+1-2@em1.charlottecountyfl.gov designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.charlottecountyfl.gov"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=charlottecountyfl.gov';
+    const ccNotice = (number, project, threadId = `t-cc-${randomUUID()}`) => storeEmail({
+      from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing', gmail_thread_id: threadId,
+      authentication_results: CC_AUTH, subject: `Charlotte County Purchasing Addendum Notification for Bid ${number}`,
+      body_text: [
+        'Charlotte County Purchasing Division', '100 Sample Circle, Suite 1 Sampleport, FL 33948 941-555-0100',
+        `Addendum Notification for Bid ${number}`,
+        `An addendum has been added to Charlotte County Purchasing Request for Bid: 20260601 - ${project}`,
+      ].join('\n'),
+    });
+    // A BuildingConnected invite that names no package, so the title is the project alone.
+    const bcInvite = (project) => storeEmail({
+      subject: `Fixture Build Co has invited you to bid on ${project}`,
+      body_text: BC_BODY(project).replace(': Pest Control', ''),
+    });
+    beforeEach(() => { process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true'; });
+    afterEach(() => { delete process.env.GATE_BID_DESK_NOT_OUR_WORK; });
+
+    test('a county notice for mowing is filed as no bid with the note, rings no bell and owes none', async () => {
+      const out = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract'));
+      expect(out).toMatchObject({ created: true });
+      expect(await bidRow(out.bidId)).toMatchObject({
+        status: 'no_bid', decision_note: NOTE, project_title: expect.stringContaining('Lot Mowing'), historical: false,
+      });
+      const [link] = await links(out.bidId);
+      expect(link.alert_kind).toBeNull();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      await service.deliverOwedAlerts();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('with the gate off the same notice is filed as new and rings, exactly as before', async () => {
+      delete process.env.GATE_BID_DESK_NOT_OUR_WORK;
+      const out = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract'));
+      expect(await bidRow(out.bidId)).toMatchObject({ status: 'new', decision_note: null });
+      expect(rung('new')).toHaveLength(1);
+    });
+
+    test('a BuildingConnected invite for grounds maintenance is filed as no bid', async () => {
+      const out = await service.ingestEmail(await bcInvite('Grounds Maintenance'));
+      expect(out).toMatchObject({ created: true });
+      expect(await bidRow(out.bidId)).toMatchObject({ source: 'buildingconnected', status: 'no_bid', decision_note: NOTE });
+      expect(rung('new')).toHaveLength(0);
+    });
+
+    test('mowing with fertilization, and a plain pest control invite, are filed as new with a bell', async () => {
+      const mixed = await service.ingestEmail(await bcInvite('Mowing and Fertilization'));
+      expect(await bidRow(mixed.bidId)).toMatchObject({ status: 'new', decision_note: null });
+      const pest = await service.ingestEmail(await storeEmail());
+      expect(await bidRow(pest.bidId)).toMatchObject({ status: 'new', decision_note: null });
+      expect(rung('new')).toHaveLength(2);
+    });
+
+    test('a package that names our work keeps the bid', async () => {
+      const out = await service.ingestEmail(await storeEmail({
+        subject: 'Fixture Build Co has invited you to bid on Lot Mowing', body_text: BC_BODY('Lot Mowing'),
+      }));
+      expect(await bidRow(out.bidId)).toMatchObject({ package_name: 'Pest Control', status: 'new' });
+    });
+
+    test('a person marking a mowing email as a bid is never declined', async () => {
+      const email = await storeEmail({ from_address: 'manager@sample-hoa.example', subject: 'Lot Mowing quote', body_text: 'Please send pricing for lot mowing.' });
+      const out = await service.markEmailAsBid(email.id);
+      expect(out).toMatchObject({ created: true });
+      expect(await bidRow(out.bidId)).toMatchObject({ source: 'manual', status: 'new', decision_note: null });
+    });
+
+    test('a later addendum joins the declined bid and rings nothing; the bid stays no bid', async () => {
+      const first = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract', 't-cc-a'));
+      const second = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract', 't-cc-b'));
+      expect(second).toMatchObject({ created: false, bidId: first.bidId, kind: 'addendum' });
+      expect(await links(first.bidId)).toHaveLength(2);
+      expect((await links(first.bidId)).map((l) => l.alert_kind)).toEqual([null, null]);
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid', decision_note: NOTE });
+      await service.deliverOwedAlerts();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    });
+
+    test('an existing open mowing bid is left alone when the gate comes on', async () => {
+      delete process.env.GATE_BID_DESK_NOT_OUR_WORK;
+      const open = await service.ingestEmail(await ccNotice('26-674', 'Facilities Grounds Maintenance - Annual Contract'));
+      expect((await bidRow(open.bidId)).status).toBe('new');
+      process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
+      await service.ingestEmail(await ccNotice('26-674', 'Facilities Grounds Maintenance - Annual Contract'));
+      expect(await bidRow(open.bidId)).toMatchObject({ status: 'new', decision_note: null });
+    });
+  });
+
   describe('admin routes', () => {
     async function filed() {
       const first = await storeEmail();
