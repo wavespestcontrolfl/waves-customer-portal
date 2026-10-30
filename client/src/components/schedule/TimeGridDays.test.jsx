@@ -197,14 +197,14 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
     expect(alert).not.toHaveBeenCalled();
     expect(modal.props.open).toBe(false);
     expect(onChange).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('alert')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    expect(screen.getByRole('status')).toHaveTextContent('Moved. Could not refresh the schedule.');
     // The moved state stays: the visit sits on Tuesday, not back on Monday.
     const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
     expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
     expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
     expect(gets).toBe(3);
     expect(posts).toBe(1); // retry re-reads only; the move is never re-sent
     expect(onChange).toHaveBeenCalledTimes(2);
@@ -227,7 +227,7 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
     await act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(gets).toBe(3));
-    expect(screen.getByRole('alert')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    expect(screen.getByRole('status')).toHaveTextContent('Moved. Could not refresh the schedule.');
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
   });
 
@@ -248,6 +248,6 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
     expect(alert).toHaveBeenCalledWith(expect.stringContaining('Reschedule failed'));
     expect(modal.props.open).toBe(false);
     expect(onChange).not.toHaveBeenCalled();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });

@@ -729,12 +729,11 @@ export default function TimeGridDays({
   const [loadError, setLoadError] = useState(null);
   const [retryKey, setRetryKey] = useState(0);
   const [optimistic, setOptimistic] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // The one status line under the grid: { text, retry? }. 'Saving…' while a
+  // write is in flight; after a write COMMITTED but the week read failed it
+  // says so and offers a refresh-only retry (the committed result stays shown).
+  const [status, setStatus] = useState(null);
   const [pending, setPending] = useState(null);
-  // Set when a move/assign COMMITTED but the follow-up week read failed: the
-  // committed result stays on screen and this drives a refresh-only retry.
-  const [refreshFailure, setRefreshFailure] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [unassignedCollapsed, setUnassignedCollapsed] = useState(false);
 
   const monday = useMemo(() => startOfWeek(date), [date]);
@@ -745,7 +744,7 @@ export default function TimeGridDays({
     setLoadError(null);
     setData(null);
     setOptimistic(null);
-    setRefreshFailure(null);
+    setStatus(null);
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => {
         if (!active) return;
@@ -950,19 +949,25 @@ export default function TimeGridDays({
     });
   }, [data]);
 
-  // The one week re-read after a committed write, shared by the commit path
-  // and the refresh-only retry.
-  const refreshWeek = useCallback(async () => {
-    const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
-    setData(j);
-    setOptimistic(null);
-    setRefreshFailure(null);
-  }, [monday]);
+  // The one week re-read after a committed write, used by the commit path and
+  // the refresh-only retry. A failed read never undoes the committed result.
+  const reloadWeek = useCallback(async () => {
+    setStatus({ text: 'Refreshing…' });
+    try {
+      setData(await adminFetch(`/admin/schedule/week?start=${monday}`));
+      setOptimistic(null);
+      setStatus(null);
+    } catch (err) {
+      console.error(err);
+      setStatus({ text: 'Moved. Could not refresh the schedule.', retry: true });
+    }
+    onChange?.();
+  }, [monday, onChange]);
 
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { mode, svc, toDate, newWindow } = pending;
-    setBusy(true);
+    setStatus({ text: 'Saving…' });
     try {
       if (mode === 'assign') {
         await adminFetch(`/admin/schedule/${svc.id}/assign`, {
@@ -997,14 +1002,11 @@ export default function TimeGridDays({
     } catch (err) {
       // A refused collective-move ack carries a refreshed preview — the modal
       // re-renders it and stays open; nothing moved, nothing to revert.
-      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) {
-        setBusy(false);
-        throw err;
-      }
+      setStatus(null);
+      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
       alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
-      setBusy(false);
       return;
     }
 
@@ -1012,31 +1014,8 @@ export default function TimeGridDays({
     // failed move: keep the optimistic result on screen, close the
     // confirmation and tell the parent either way (its own read may also fail).
     setPending(null);
-    try {
-      await refreshWeek();
-    } catch (err) {
-      console.error(err);
-      setRefreshFailure({ mode, message: apiErrorMessage(err) });
-    } finally {
-      setBusy(false);
-    }
-    onChange?.();
-  }, [pending, refreshWeek, onChange]);
-
-  // Refresh-only retry after a committed move whose week read failed. Never
-  // re-sends the move.
-  const retryRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await refreshWeek();
-      onChange?.();
-    } catch (err) {
-      console.error(err);
-      setRefreshFailure((prev) => ({ ...(prev || {}), message: apiErrorMessage(err) }));
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshWeek, onChange]);
+    await reloadWeek();
+  }, [pending, reloadWeek]);
 
   const cancelReschedule = useCallback(() => {
     setOptimistic(null);
@@ -1111,30 +1090,17 @@ export default function TimeGridDays({
           </div>
         </div>
       </DndContext>
-      {refreshFailure && (
+      {status && (
         <div
-          role="alert"
-          className="px-3 py-2 text-14 text-alert-fg flex flex-wrap items-center gap-3"
+          role="status"
+          className="px-3 py-2 text-14 text-ink-secondary flex flex-wrap items-center gap-3"
           style={{ borderTop: '1px solid #E4E4E7' }}
         >
-          <span>
-            {refreshFailure.mode === 'assign' ? 'Saved.' : 'Moved.'} Could not refresh the schedule.
-          </span>
-          <button
-            type="button"
-            className="underline"
-            onClick={retryRefresh}
-            disabled={refreshing}
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
+          <span>{status.text}</span>
+          <button type="button" className="underline" hidden={!status.retry} onClick={reloadWeek}>
+            Refresh
           </button>
         </div>
-      )}
-      {busy && (
-        <div
-          className="px-3 py-1 text-11 text-ink-secondary"
-          style={{ borderTop: '1px solid #E4E4E7' }}
-        >Saving…</div>
       )}
       <RescheduleConfirmModal
         open={!!pending}
