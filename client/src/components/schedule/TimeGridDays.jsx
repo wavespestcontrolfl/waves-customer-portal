@@ -223,6 +223,40 @@ function CloseoutOwedChip() {
   );
 }
 
+// The customer name (opens the profile), closeout-owed chip and prepaid chip,
+// shared by the week-grid block and the unassigned-rail card. `showPrepaid` is
+// off on blocks too short to carry the chip.
+function VisitNameRow({ service, onViewCustomer, owesCompletion, showPrepaid = true }) {
+  const customerId = service.customerId || service.customer_id;
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+        )}
+        title={customerId ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
+      {owesCompletion?.(service) && <CloseoutOwedChip />}
+      {showPrepaid && service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+          style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
+          title="Prepaid"
+        >$</span>
+      )}
+    </div>
+  );
+}
+
 function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
@@ -270,32 +304,12 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
             return min == null ? '' : minutesToLabel(min);
           })()}
         </div>
-        <div className="flex items-center gap-1 min-w-0">
-          <button
-            type="button"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              const customerId = service.customerId || service.customer_id;
-              if (customerId) onViewCustomer?.(service);
-            }}
-            className={cn(
-              'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-              'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-            )}
-            title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-          >
-            {service.customerName || 'Unassigned'}
-          </button>
-          {owesCompletion?.(service) && <CloseoutOwedChip />}
-          {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
-            <span
-              className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-              style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
-              title="Prepaid"
-            >$</span>
-          )}
-        </div>
+        <VisitNameRow
+          service={service}
+          onViewCustomer={onViewCustomer}
+          owesCompletion={owesCompletion}
+          showPrepaid={!compact}
+        />
       </div>
       {isLawnService(service) && onTreatmentPlan && (
         <button
@@ -587,32 +601,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, 
       <div className="u-nums opacity-90 mb-0.5">
         {dayLabel} · {timeLabel}
       </div>
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const customerId = service.customerId || service.customer_id;
-            if (customerId) onViewCustomer?.(service);
-          }}
-          className={cn(
-            'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-          )}
-          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-        >
-          {service.customerName || 'Unassigned'}
-        </button>
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
-            title="Prepaid"
-          >$</span>
-        )}
-      </div>
+      <VisitNameRow service={service} onViewCustomer={onViewCustomer} owesCompletion={owesCompletion} />
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}

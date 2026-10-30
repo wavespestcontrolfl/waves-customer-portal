@@ -1272,10 +1272,7 @@ export default function TechHomePage({ section = 'today' }) {
       {rainOutService && (
         <RainOutSheet
           service={rainOutService}
-          stopName={(id) => {
-            const row = schedule.find((r) => String(r.id) === String(id));
-            return row?.customer_name || row?.customerName || '';
-          }}
+          stopName={(id) => customerNameOf(schedule.find((r) => String(r.id) === String(id)))}
           onClose={() => setRainOutService(null)}
           onDone={(result) => {
             // Some stops moved: refresh the route either way.
@@ -1591,6 +1588,10 @@ const EXTRA_REASONS = [
   { code: 'gate_locked', label: "Can't access gate" },
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
+// A schedule row's customer name (snake or camel case), '' when it has none.
+const customerNameOf = (row) => row?.customer_name || row?.customerName || '';
+// Reasons that move this stop only (the server rejects a route scope for them).
+const SINGLE_STOP_REASONS = new Set(['customer_noshow', 'gate_locked']);
 
 // Friendly copy for the server's structured rejections.
 const EXTRA_REASON_ERROR_COPY = {
@@ -1652,6 +1653,9 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   };
   const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
+  // One lock for the Move button: no slot picked, a move in flight, or a move
+  // that already committed and is showing its result.
+  const moveLocked = !selected || busy || committed;
 
   // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
   // pure clock offsets, so they can land on another booked stop — the
@@ -1696,7 +1700,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   // scope); running late may hide the highlighted same-day preset.
   const pickReason = (code) => {
     setReason(code);
-    if (code === 'customer_noshow' || code === 'gate_locked') setScope('job');
+    if (SINGLE_STOP_REASONS.has(code)) setScope('job');
     if (selectedKey) {
       const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
       if (!stillVisible) {
@@ -1777,7 +1781,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
           }}>×</button>
         </div>
         <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 14 }}>
-          {(service.customer_name || service.customerName || 'Customer')}
+          {customerNameOf(service) || 'Customer'}
           {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
         </div>
 
@@ -1800,17 +1804,15 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
             }}
           >
             <div>{attention.message}</div>
-            {attention.followUps.length > 0 && (
-              <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                {attention.followUps.map((stop) => (
-                  <li key={stop.id}>
-                    <strong style={{ fontWeight: 500 }}>{stop.name}</strong>
-                    {': '}
-                    {stop.issues.join('; ')}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {attention.followUps.map((stop) => (
+                <li key={stop.id} style={{ marginTop: 8 }}>
+                  <strong style={{ fontWeight: 500 }}>{stop.name}</strong>
+                  {': '}
+                  {stop.issues.join('; ')}
+                </li>
+              ))}
+            </ul>
             <button
               type="button"
               onClick={onClose}
@@ -1901,7 +1903,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
               </div>
             )}
 
-            {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && (
+            {options.remainingRouteCount > 0 && !SINGLE_STOP_REASONS.has(reason) && (
               <>
                 <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
@@ -1923,11 +1925,11 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
             <button
               type="button"
               onClick={handleCommit}
-              disabled={!selected || busy || committed}
+              disabled={moveLocked}
               style={{
                 width: '100%', padding: '13px 0', borderRadius: 6, border: 'none',
                 background: FIELD.ink, color: '#fff', fontSize: 15, fontWeight: 500,
-                cursor: busy ? 'wait' : committed ? 'default' : 'pointer', opacity: (!selected || busy || committed) ? 0.6 : 1,
+                cursor: busy ? 'wait' : 'pointer', opacity: moveLocked ? 0.6 : 1,
               }}
             >
               {busy ? 'Moving…' : committed ? 'Moved' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`}
