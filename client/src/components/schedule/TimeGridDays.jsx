@@ -725,31 +725,42 @@ export default function TimeGridDays({
   const [loadError, setLoadError] = useState(null);
   const [retryKey, setRetryKey] = useState(0);
   const [optimistic, setOptimistic] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // The one status line under the grid: { text, retry? }. 'Saving…' while a
+  // write is in flight; after a write COMMITTED but the week read failed it
+  // says so and offers a refresh-only retry (the committed result stays shown).
+  const [status, setStatus] = useState(null);
   const [pending, setPending] = useState(null);
   const [unassignedCollapsed, setUnassignedCollapsed] = useState(false);
 
   const monday = useMemo(() => startOfWeek(date), [date]);
 
+  // Request generation. The week load below owns one value per week/refreshKey/
+  // retry; every post-write re-read (reloadWeek) bumps it; navigating away or
+  // unmounting bumps it. An async continuation applies its result only while
+  // the generation it captured is still current, so a late week, refresh or
+  // POST response can never land on a week the grid no longer shows.
+  const genRef = useRef(0);
+
   useEffect(() => {
-    let active = true;
+    const gen = genRef.current;
     setLoading(true);
     setLoadError(null);
     setData(null);
     setOptimistic(null);
+    setStatus(null);
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         setData(j);
         setLoading(false);
       })
       .catch((err) => {
-        if (!active) return;
+        if (gen !== genRef.current) return;
         console.error(err);
         setLoadError(err);
         setLoading(false);
       });
-    return () => { active = false; };
+    return () => { genRef.current += 1; };
   }, [monday, refreshKey, retryKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -941,10 +952,29 @@ export default function TimeGridDays({
     });
   }, [data]);
 
+  // The one week re-read after a committed write, used by the commit path and
+  // the refresh-only retry. A failed read never undoes the committed result.
+  const reloadWeek = useCallback(async () => {
+    const gen = ++genRef.current;
+    setStatus({ text: 'Refreshing…' });
+    let next = null;
+    try {
+      next = await adminFetch(`/admin/schedule/week?start=${monday}`);
+    } catch (err) {
+      console.error(err);
+    }
+    // Navigated away or superseded by a newer re-read: drop everything.
+    if (gen !== genRef.current) return;
+    if (next) setData(next);
+    setStatus(next ? null : { text: 'Moved. Could not refresh the schedule.', retry: true });
+    onChange?.();
+  }, [monday, onChange]);
+
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { mode, svc, toDate, newWindow } = pending;
-    setBusy(true);
+    const gen = genRef.current;
+    setStatus({ text: 'Saving…' });
     try {
       if (mode === 'assign') {
         await adminFetch(`/admin/schedule/${svc.id}/assign`, {
@@ -976,22 +1006,33 @@ export default function TimeGridDays({
           showScheduleSaveNotice(`Moved.\n\n${result.warnings.join('\n\n')}`);
         }
       }
-      const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
-      setData(j);
-      setOptimistic(null);
-      setPending(null);
-      onChange?.();
     } catch (err) {
       // A refused collective-move ack carries a refreshed preview — the modal
       // re-renders it and stays open; nothing moved, nothing to revert.
+      setStatus(null);
       if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
       alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
-    } finally {
-      setBusy(false);
+      return;
     }
-  }, [pending, monday, onChange]);
+
+    // The write committed. From here a failure is a failed REFRESH, never a
+    // failed move: promote the committed result into the baseline (a later
+    // drag, or a cancelled one, starts from it; a good refresh replaces it
+    // with server data), close the confirmation and tell the parent either
+    // way (its own read may also fail).
+    setPending(null);
+    // The week changed while the write was in flight: the move is saved, but
+    // this week's optimistic copy must not become the new week's baseline.
+    if (gen !== genRef.current) return;
+    setData(optimistic || data);
+    setOptimistic(null);
+    // Not awaited: the confirmation resolves once the write commits, so a slow
+    // refresh never holds its busy state over the next drag (reloadWeek catches
+    // its own failure and is generation-guarded).
+    void reloadWeek();
+  }, [pending, optimistic, data, reloadWeek]);
 
   const cancelReschedule = useCallback(() => {
     setOptimistic(null);
@@ -1066,11 +1107,17 @@ export default function TimeGridDays({
           </div>
         </div>
       </DndContext>
-      {busy && (
+      {status && (
         <div
-          className="px-3 py-1 text-14 text-ink-secondary"
+          role="status"
+          className="px-3 py-2 text-14 text-ink-secondary flex flex-wrap items-center gap-3"
           style={{ borderTop: '1px solid #E4E4E7' }}
-        >Saving…</div>
+        >
+          <span>{status.text}</span>
+          <button type="button" className="underline" hidden={!status.retry} onClick={reloadWeek}>
+            Refresh
+          </button>
+        </div>
       )}
       <RescheduleConfirmModal
         open={!!pending}

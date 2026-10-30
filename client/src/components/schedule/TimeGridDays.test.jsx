@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDays from './TimeGridDays';
 
+const dnd = vi.hoisted(() => ({ props: null }));
+const modal = vi.hoisted(() => ({ props: null }));
+vi.mock('./RescheduleConfirmModal', () => ({
+  default: (props) => {
+    modal.props = props;
+    return props.open ? <div>Move confirmation</div> : null;
+  },
+}));
+
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children }) => <div>{children}</div>,
+  DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
   useSensors: () => [],
@@ -140,3 +149,260 @@ describe('TimeGridDays closeout-owed chip', () => {
     expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-owed' }));
   });
 });
+
+describe('TimeGridDays committed move followed by a failed week read', () => {
+  const service = {
+    id: 'svc-1',
+    customerName: 'Synthetic Customer',
+    status: 'confirmed',
+    windowStart: '09:00',
+    windowEnd: '10:00',
+    technicianId: 'tech-1',
+    technicianName: 'Alex Tech',
+  };
+  const movedService = { ...service, windowStart: '10:00', windowEnd: '11:00' };
+  const payload = (services) => ({
+    startDate: '2026-11-02',
+    days: [
+      { date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, services: services[0] },
+      { date: '2026-11-03', dayOfWeek: 'Tue', dayNum: 3, services: services[1] },
+    ],
+  });
+  const unavailable = { ok: false, status: 503, statusText: 'Unavailable', text: async () => 'refresh temporarily unavailable' };
+
+  it('keeps the moved result, says it moved, and retries only the refresh', async () => {
+    vi.stubGlobal('alert', vi.fn());
+    let gets = 0;
+    let posts = 0;
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') { posts += 1; return response({ success: true, notificationSent: true }); }
+      gets += 1;
+      if (gets === 1) return response(payload([[service], []]));
+      if (gets === 2) return unavailable;
+      return response(payload([[], [movedService]]));
+    });
+    const onChange = vi.fn();
+    render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+    await screen.findByText('Synthetic Customer');
+
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    expect(modal.props.open).toBe(true);
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'sms', scope: 'this_only' }); });
+
+    // The move committed: no failure alert, confirmation closed, parent told.
+    expect(posts).toBe(1);
+    expect(alert).not.toHaveBeenCalled();
+    expect(modal.props.open).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    // The moved state stays: the visit sits on Tuesday, not back on Monday.
+    const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
+    expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+    expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    expect(gets).toBe(3);
+    expect(posts).toBe(1); // retry re-reads only; the move is never re-sent
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Synthetic Customer')).toBeInTheDocument();
+  });
+
+  it('keeps the notice up when the retry also fails', async () => {
+    let gets = 0;
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') return response({ success: true });
+      gets += 1;
+      return gets === 1 ? response(payload([[service], []])) : unavailable;
+    });
+    render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+    await screen.findByText('Synthetic Customer');
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(gets).toBe(3));
+    expect(screen.getByRole('status')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+  });
+
+  it('still reports a real move failure and reverts when the POST itself fails', async () => {
+    vi.stubGlobal('alert', vi.fn());
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') return { ok: false, status: 500, statusText: 'Boom', text: async () => 'move refused' };
+      return response(payload([[service], []]));
+    });
+    const onChange = vi.fn();
+    render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+    await screen.findByText('Synthetic Customer');
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    await act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('Reschedule failed'));
+    expect(modal.props.open).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  describe('a second drag after a committed move whose refresh failed', () => {
+    const other = { ...service, id: 'svc-2', customerName: 'Second Customer', windowStart: '13:00', windowEnd: '14:00' };
+    const threeDays = (mon, tue, wed) => ({
+      startDate: '2026-11-02',
+      days: [
+        { date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, services: mon },
+        { date: '2026-11-03', dayOfWeek: 'Tue', dayNum: 3, services: tue },
+        { date: '2026-11-04', dayOfWeek: 'Wed', dayNum: 4, services: wed },
+      ],
+    });
+    const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
+    const drag = (svc, date) => act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: svc } } },
+      over: { data: { current: { date, slotMin: 600 } } },
+    }));
+    const confirm = () => act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+
+    function stubServer() {
+      let gets = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') return response({ success: true });
+        gets += 1;
+        return gets === 1 ? response(threeDays([service, other], [], [])) : unavailable;
+      });
+    }
+
+    it('keeps the first move when the second drag is cancelled', async () => {
+      stubServer();
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag(service, '2026-11-03');
+      await confirm();
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+
+      await drag(other, '2026-11-04');
+      act(() => { modal.props.onCancel(); });
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(within(column('Mon')).getByText('Second Customer')).toBeInTheDocument();
+    });
+
+    it('shows both moves after a second committed move whose refresh also failed', async () => {
+      stubServer();
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag(service, '2026-11-03');
+      await confirm();
+      await drag(other, '2026-11-04');
+      await confirm();
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+      expect(within(column('Wed')).getByText('Second Customer')).toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Second Customer')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('navigating to another week while a post-write request is pending', () => {
+    const nextWeek = () => week('2026-11-09', 'Next Week Customer');
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      return { promise, resolve };
+    };
+    const drag = () => act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+
+    // Serves the first week read at once, then holds every later read of the
+    // first week on `readGate`; the next week always answers immediately.
+    async function start({ postGate = null, readGate = null, onChange } = {}) {
+      let reads = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') {
+          if (postGate) await postGate.promise;
+          return response({ success: true });
+        }
+        if (String(url).includes('start=2026-11-09')) return response(nextWeek());
+        reads += 1;
+        return reads === 1 || !readGate ? response(payload([[service], []])) : readGate.promise;
+      });
+      const view = render(<TimeGridDays date="2026-11-02" dayCount={7} onChange={onChange} />);
+      await screen.findByText('Synthetic Customer');
+      await drag();
+      await act(async () => { void modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+      return view;
+    }
+
+    it('a delayed refresh success does not overwrite the new week', async () => {
+      const readGate = deferred();
+      const view = await start({ readGate });
+      expect(screen.getByRole('status')).toHaveTextContent('Refreshing…');
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { readGate.resolve(response(payload([[], [service]]))); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('a delayed refresh failure does not attach a retry notice to the new week', async () => {
+      const readGate = deferred();
+      const onChange = vi.fn();
+      const view = await start({ readGate, onChange });
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} onChange={onChange} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { readGate.resolve(unavailable); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    // Codex #7054: the dialog stays mounted between drags and keeps its busy state until
+    // onConfirm resolves, so onConfirm must not wait for the refresh.
+    it('the confirmation resolves once the write commits, while a slow refresh is still pending', async () => {
+      const readGate = deferred();
+      let reads = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') return response({ success: true });
+        reads += 1;
+        return reads === 1 ? response(payload([[service], []])) : readGate.promise;
+      });
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag();
+      let settled = false;
+      await act(async () => { modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }).then(() => { settled = true; }); });
+      await waitFor(() => expect(settled).toBe(true));
+      expect(modal.props.open).toBe(false);
+      expect(screen.getByRole('status')).toHaveTextContent('Refreshing…');
+      await act(async () => { readGate.resolve(response(payload([[], [movedService]]))); });
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('a late POST response does not promote the old week into the new one', async () => {
+      const postGate = deferred();
+      const view = await start({ postGate });
+
+      view.rerender(<TimeGridDays date="2026-11-09" dayCount={7} />);
+      await screen.findByText('Next Week Customer');
+      await act(async () => { postGate.resolve(); });
+
+      expect(screen.getByText('Next Week Customer')).toBeInTheDocument();
+      expect(screen.queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(modal.props.open).toBe(false);
+    });
+  });
+});
+

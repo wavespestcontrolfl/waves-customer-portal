@@ -1725,7 +1725,7 @@ export default function DispatchPageV2({
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
-          onChange={() => fetchSchedule(date)}
+          onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
@@ -1757,7 +1757,7 @@ export default function DispatchPageV2({
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
-          onChange={() => fetchSchedule(date)}
+          onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
