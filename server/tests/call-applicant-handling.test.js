@@ -93,12 +93,35 @@ describe('2. customer-only cards', () => {
   test('gate on: applicant and vendor drop the address, name, email, consent and visit cards', () => {
     for (const nature of ['job_applicant', 'vendor_or_partner']) {
       const dropped = thirdPartyCustomerOnlyCards({ call_nature: nature }, { gateOn: true });
+      // The live applicant shape: the model files service_intent 'quote_only' with no quote asked.
+      const applicantShape = {
+        call_nature: nature,
+        scheduling: { status: 'none' },
+        service_request: { service_intent: 'quote_only', quote_requested: false, quote_promised: false, price_discussed: false },
+      };
+      expect(thirdPartyCustomerOnlyCards(applicantShape, { gateOn: true })).toContain('missing_service_address');
       for (const code of [
         'missing_service_address', 'low_confidence_address', 'missing_unit_number',
         'email_unverified', 'email_invalid', 'missing_last_name', 'missing_first_name',
         'no_sms_consent_captured', 'sms_consent_missing', 'not_confirmed',
       ]) {
         expect(dropped).toContain(code);
+      }
+    }
+  });
+
+  test('gate on: an applicant or vendor call that asks for service keeps every card', () => {
+    const asks = [
+      { scheduling: { status: 'requested' } },
+      { scheduling: { status: 'confirmed' } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_requested: true } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_promised: true } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', price_discussed: true } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'new_service' } },
+    ];
+    for (const nature of ['job_applicant', 'vendor_or_partner']) {
+      for (const shape of asks) {
+        expect(thirdPartyCustomerOnlyCards({ call_nature: nature, ...shape }, { gateOn: true })).toEqual([]);
       }
     }
   });
