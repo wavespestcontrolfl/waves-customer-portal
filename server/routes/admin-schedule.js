@@ -9404,6 +9404,29 @@ async function scheduleCreateHandler(req, res, next) {
     // The linked estimate as the booking transaction read it under its lock (see assertLockedEstimateAddOns); the preflight copy
     // until that read.
     let lockedLinkedEstimate = linkedEstimate;
+    // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
+    // runs): bought BEFORE the transaction, so the save's route check and
+    // route number below read the same Google road times the Edit dialog's
+    // check does. This is an admin route (requireAdmin): the staff user pays.
+    // A parent with a time, a technician and a location only; any refusal,
+    // error or slow answer leaves the save on the cache and the model.
+    if (windowStart && resolvedTechId) {
+      // A chosen property is stamped on the visit with its own pin (nulls
+      // included: the route read then excludes the primary address's pin), so
+      // only that pin is priced; the customer's pin is for a visit with none.
+      const stopPin = bookingProperty ? { lat: bookingProperty.lat, lng: bookingProperty.lng }
+        : { lat: customer?.latitude, lng: customer?.longitude };
+      const stopLat = stopPin.lat ?? null;
+      const stopLng = stopPin.lng ?? null;
+      if (stopLat != null && stopLng != null) {
+        await require('../services/scheduling/save-road-buy').buyRoadsBeforeSave({
+          spender: req.technicianId, date: dateOnly(scheduledDate), technicianId: resolvedTechId,
+          windowStart, windowEnd: computedEnd,
+          prospective: { lat: stopLat, lng: stopLng, estimated_duration_minutes: duration, service_type: serviceType,
+            is_recurring: !!isRecurring },
+        });
+      }
+    }
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, FIRST statement of the trx, before the comms lock
@@ -12345,6 +12368,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // GATE_SAVE_ROAD_BUY: this route is requireAdmin; the anchor's hour
+        // buys its road times before the series transaction.
+        ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Never carries grouped partners (refuseCarriedStopInEditMove's
         // promise holds even if a stop is grouped after that preflight).
         carryVisit: false,
@@ -15023,6 +15049,19 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       } else {
         await preloadServiceLocations(db, assignmentPlan?.targetIds || [req.params.id]);
       }
+    }
+    // Road times for the saved hour (GATE_SAVE_ROAD_BUY; unset = nothing runs):
+    // bought BEFORE the transaction, so the save's route check and route
+    // number read the same Google road times the Edit dialog's slot check
+    // does (this route is requireAdmin: the staff user pays). A save that
+    // changes the visit's address keeps today's cache-only read. A reassignment
+    // is applied later (assignScheduleJobs), so the requested technician joins
+    // the purchase here: the buy prices the destination route the check reads.
+    if (useArrivalWindows && occupancyRouteTouched && !addressPlan) {
+      await require('../services/scheduling/save-road-buy').buyRoadsForVisitSave({
+        spender: req.technicianId, serviceId: req.params.id,
+        changes: requestedTechnicianId === undefined ? updates : { ...updates, technician_id: requestedTechnicianId },
+      });
     }
     let addressUpdatedIds = [];
     // The Stripe cancels of a planned Bill-To session release, run as the transaction's last step.

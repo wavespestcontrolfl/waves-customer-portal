@@ -549,6 +549,21 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
+    // GATE_SAVE_ROAD_BUY: only the admin dispatch route passes a spender; the rebooker
+    // buys the move's road times before its transaction. A technician passes none.
+    test('an admin Quick Move hands the rebooker its staff spender; a technician\'s hands none', async () => {
+      wireSingle();
+      const args = { serviceId: 'svc-1', technicianId: 'tech-1', reasonCode: 'weather_rain', scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } }, notifyCustomer: false };
+      await RainOut.commit({ ...args, roadSpender: 'staff-1' });
+      expect(SmartRebooker.reschedule).toHaveBeenLastCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        expect.objectContaining({ overlapAdvisory: true, placeInRoute: true, roadSpender: 'staff-1' }));
+      wireSingle();
+      await RainOut.commit(args);
+      expect(SmartRebooker.reschedule.mock.lastCall[5]).not.toHaveProperty('roadSpender');
+    });
+
     test('an ABSENT v2 template row falls back to the legacy row with legacy variables', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],

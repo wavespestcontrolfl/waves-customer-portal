@@ -276,8 +276,10 @@ function trafficLeg(leg, nowEt) {
  * (`claimed`: key -> settled when that purchase ends), so concurrent checks
  * never oversubscribe it or buy the same leg twice.
  */
-function createPickerBudget({ signal = null } = {}) {
-  return { traffic: 0, plain: 0, signal, refused: null, claimed: new Map() };
+function createPickerBudget({ signal = null, maxLookups = null } = {}) {
+  // `maxLookups` = a cap on the request's lookups in all (a staff save's
+  // purchase, GATE_SAVE_ROAD_BUY); unset = only the per-mode REQUEST_MAX.
+  return { traffic: 0, plain: 0, signal, refused: null, claimed: new Map(), ...(maxLookups != null ? { maxLookups } : {}) };
 }
 
 // The two Google answers a leg can get: how it is keyed and cached.
@@ -403,6 +405,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
         // Another check of this request is buying it: wait for that answer.
         if (budget.claimed.has(r.key)) { waits.add(budget.claimed.get(r.key)); continue; }
         if (budget[r.mode] >= REQUEST_MAX[r.mode]) continue;
+        if (budget.maxLookups != null && budget.traffic + budget.plain >= budget.maxLookups) continue;
         // Claimed before any await, so concurrent checks cannot oversubscribe.
         budget[r.mode] += 1;
         budget.claimed.set(r.key, settled);

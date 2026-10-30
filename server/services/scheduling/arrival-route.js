@@ -198,6 +198,10 @@ async function loadArrivalRouteContext({
   // route under way starts from the stop the tech is at or driving to
   // (resolvePlacementOrigin) instead of reading as unverified.
   fromActiveStop = false,
+  // A caller outside any transaction that must not geocode (a staff save's
+  // road purchase, buySaveRoads): read the geocoder's cache only, as the
+  // save's own locked read does.
+  cacheLocation = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -228,7 +232,7 @@ async function loadArrivalRouteContext({
       city: target.service_address_city || customer?.city,
       state: target.service_address_state || customer?.state, zip: target.service_address_zip || customer?.zip });
   }
-  const location = await resolveServiceLocation(target, undefined, { cacheOnly: conn.isTransaction === true });
+  const location = await resolveServiceLocation(target, undefined, { cacheOnly: conn.isTransaction === true || cacheLocation === true });
   target.lat = location.lat;
   target.lng = location.lng;
   if (dateOnly(stored.scheduled_date) !== date || (stored.technician_id || null) !== (techId || null)) {
@@ -1300,6 +1304,88 @@ function staffSaveTravel(date) {
     ? roadTimes.createPickerTravel({ cacheOnly: true }) : null;
 }
 
+// GATE_SAVE_ROAD_BUY (owner 2026-10-28 design, "ok go" 2026-10-29): before an
+// ADMIN staff save opens its transaction, buy the Google road times its own
+// check and route number will read, for the legs no picker bought. The save
+// then reads them from the cache (GATE_SAVE_ROAD_TIMES), so the New
+// Appointment save, the Edit save and the Edit dialog's slot check agree.
+// Needs the save road times and the pickers' road check.
+function saveRoadBuyLive() {
+  return gateEnvValue('GATE_SAVE_ROAD_BUY') && saveRoadTimesLive() && arrivalWindowRoutingEnabled();
+}
+
+// One save buys at most this many lookups (about 15 cents) and waits at most
+// this long: a slow Google never stalls a save.
+const SAVE_BUY_MAX_LOOKUPS = 15;
+const SAVE_BUY_TIMEOUT_MS = 2000;
+
+/** Buys the road times one staff save will read (GATE_SAVE_ROAD_BUY). Call it
+ *  BEFORE the save's transaction, scheduling lock and row lock: it refuses to
+ *  run on a transaction. Admin callers only (`spender` = the staff user, the
+ *  one the lookups count against; a technician or an automatic writer passes
+ *  none). `serviceId` + `changes` describe a visit being moved or edited;
+ *  `prospective` ({ lat, lng, estimated_duration_minutes, service_type })
+ *  describes a visit about to be created. It evaluates the save's two reads:
+ *  the advisory arrival check, then the route number's placement (`place`),
+ *  (`check: false` leaves out the first, for a move that runs none), and asks
+ *  Google only for the legs still missing, inside the pickers' spend
+ *  ceilings (picker-road-spend.js). Never throws, never blocks: a refused,
+ *  failed or slow purchase leaves the save on the cache and the model, as
+ *  before. Returns { lookups, skipped?, refused?, timedOut? }. */
+async function buySaveRoads({
+  spender = null, serviceId = null, prospective = null, changes = {}, date, technicianId,
+  windowStart, windowEnd, excludeServiceIds = [], conn = db, check = true,
+  maxLookups = SAVE_BUY_MAX_LOOKUPS, timeoutMs = SAVE_BUY_TIMEOUT_MS,
+} = {}) {
+  const roadTimes = require('./hint-road-times');
+  const day = dateOnly(date);
+  // The first refusal that applies, in order; a purchase runs only when none does.
+  const [, skipped] = [
+    [!saveRoadBuyLive(), 'gate'],
+    [conn?.isTransaction, 'in_transaction'],
+    [!spender, 'no_spender'],
+    [!(day && technicianId && windowStart && (serviceId || prospective)), 'no_placement'],
+    [!roadTimes.onRoads(day, etDateString(new Date())), 'not_road_day'],
+  ].find(([refused]) => refused) || [];
+  if (skipped) return { lookups: 0, skipped };
+  const controller = new AbortController();
+  const budget = roadTimes.createPickerBudget({ signal: controller.signal, maxLookups });
+  const [start, end] = [windowStart, windowEnd].map((value) => String(value ?? '').slice(0, 5) || undefined);
+  const work = async () => {
+    const load = (extra) => loadArrivalRouteContext({
+      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true, ...extra,
+    });
+    const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
+    // The route number is read from a context with no exclusions and no active
+    // stop (placeMovedVisit); reuse the check's when it is the same one.
+    const placeContext = staffRouteInsertionLive() && !capacityEnabled()
+      && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
+    const travel = roadTimes.createPickerTravel({ spender, budget });
+    // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
+    const reads = [[check && checkContext, { allowInsertion: false }], [placeContext, { place: true }]]
+      .filter(([context]) => context);
+    reads.forEach(([context]) => { context.travel = travel; });
+    // Three passes, as checkArrivalPlacement: a re-timed leg is asked again.
+    for (let pass = 0; pass < 3 && !budget.refused && !controller.signal.aborted; pass++) {
+      const before = budget.traffic + budget.plain;
+      const legs = [];
+      reads.forEach(([context, mode]) => evaluateArrivalPlacement(context, { windowStart: start, windowEnd: end, ...mode, collectLegs: legs }));
+      await travel.preload(legs);
+      if (budget.traffic + budget.plain === before) break;
+    }
+  };
+  let timer;
+  // Never throws, never waits past the limit: any failure is an outcome, not an error.
+  const outcome = await Promise.race([
+    work().then(() => 'done', (error) => { logger.warn(`[arrival-route] save road purchase skipped: ${error.message}`); return 'error'; }),
+    new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve('timeout'); }, timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  const lookups = budget.traffic + budget.plain;
+  logger.info(`[arrival-route] save road purchase: ${lookups} lookups, ${outcome}, refused: ${budget.refused || 'no'}`);
+  return { lookups, refused: budget.refused || undefined, timedOut: outcome === 'timeout' };
+}
+
 async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, ...options
 }) {
@@ -1324,7 +1410,7 @@ async function checkArrivalPlacement({
 
 
 module.exports = {
-  arrivalWindowRoutingEnabled, pickerRoadCheckLive, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
+  arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   routeCheckStaffListsLive,
   groupRouteStops, workDuration,
