@@ -160,6 +160,20 @@ describe("MistingRecordsPanel", () => {
     expect(screen.getByText(/Gone model.*Removed property\./)).toBeInTheDocument();
   });
 
+  it("shows a retired property's records read-only under Removed property", async () => {
+    await openPanel(records({
+      calibrations: [calibration({ id: "c-old", propertyId: "retired-1", isCurrent: false, model: "Retired model" })],
+      refills: [refill({ id: "r-old", propertyId: "retired-1", calibrationId: "c-old" })],
+    }));
+    expect(screen.getByText("No misting system on file.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Log refill" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New calibration" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Void" })).not.toBeInTheDocument();
+    expect(screen.getByText(/counter reset, Removed property, by Test Tech/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
+    expect(screen.getByText(/Retired model.*Removed property\./)).toBeInTheDocument();
+  });
+
   it("voids with an inline reason, never a browser prompt", async () => {
     const prompt = vi.spyOn(window, "prompt");
     await openPanel(records({ calibrations: [calibration()] }));

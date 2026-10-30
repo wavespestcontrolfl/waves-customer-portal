@@ -302,6 +302,84 @@ postgres('misting records service (PostgreSQL)', () => {
     expect(await code(refill(cal.id))).toMatchObject({ status: 404 });
   });
 
+  describe('a retired property (active = false, property_id kept)', () => {
+    const retire = (id) => app('customer_properties').where({ id }).update({ active: false });
+    const reactivate = (id) => app('customer_properties').where({ id }).update({ active: true });
+
+    test('its calibration stops being current, takes no refill, and lists as history; re-activating brings it back', async () => {
+      const second = await addProperty({ label: 'Lake house' });
+      const atHome = await create({ propertyId: homeId });
+      const atLake = await create({ propertyId: second });
+      await refill(atLake.id);
+      await retire(second);
+
+      expect(await svc.currentCalibration(app, customerId, second)).toBeUndefined();
+      expect((await svc.currentCalibrationForCustomer(app, customerId)).id).toBe(atHome.id);
+      expect(await code(refill(atLake.id))).toEqual({
+        status: 409,
+        code: 'MISTING_PROPERTY_RETIRED',
+        message: 'This property was removed from the customer. Re-add it before logging a refill.',
+      });
+      const { calibrations, refills, properties } = await svc.listCustomerRecords(customerId, { knex: app });
+      expect(properties.map((p) => p.id)).toEqual([homeId]);
+      expect(calibrations.find((c) => c.id === atLake.id)).toMatchObject({ propertyId: second, isCurrent: false });
+      expect(calibrations.find((c) => c.id === atHome.id).isCurrent).toBe(true);
+      expect(refills[0]).toMatchObject({ propertyId: second });
+      // A superseded or voided calibration keeps its own code.
+      const newer = await create({ propertyId: homeId, notes: 'Re-calibrated' });
+      expect(await code(refill(atHome.id))).toMatchObject({ status: 409, code: 'MISTING_CALIBRATION_NOT_CURRENT' });
+      expect(await code(refill(newer.id))).toBeNull();
+
+      await reactivate(second);
+      expect((await svc.currentCalibration(app, customerId, second)).id).toBe(atLake.id);
+      expect(await code(refill(atLake.id))).toBeNull();
+    });
+
+    test('a calibration cannot be recorded at a retired property, and a new one at an active home works as usual', async () => {
+      const second = await addProperty({ label: 'Lake house' });
+      await create({ propertyId: second });
+      await retire(second);
+      expect(await code(create({ propertyId: second }))).toMatchObject({ status: 400, message: 'That property is not an active property of this customer.' });
+      const atHome = await create({ propertyId: homeId });
+      expect(await code(refill(atHome.id))).toBeNull();
+    });
+
+    test('voiding a row at a removed property is still allowed (it fixes a mistake)', async () => {
+      const second = await addProperty({ label: 'Lake house' });
+      const cal = await create({ propertyId: second });
+      const r = await refill(cal.id);
+      await retire(second);
+      expect(await svc.voidRefill({ id: r.id, reason: 'Logged on the wrong day', actorId: tech, knex: app })).toMatchObject({ voidReason: 'Logged on the wrong day' });
+      expect(await svc.voidCalibration({ id: cal.id, reason: 'Entered by mistake', actorId: tech, knex: app })).toMatchObject({ voidReason: 'Entered by mistake' });
+    });
+
+    test('a property row of another customer never counts as active for this customer', async () => {
+      const other = (await app('customers').insert({}).returning('id'))[0].id;
+      const otherHome = (await app('customer_properties').insert({ customer_id: other, is_primary: true }).returning('id'))[0].id;
+      const cal = await create({}, other);
+      expect(cal.propertyId).toBe(otherHome);
+      expect(await svc.currentCalibration(app, customerId, otherHome)).toBeUndefined();
+      expect(await svc.currentCalibrationForCustomer(app, customerId)).toBeUndefined();
+    });
+  });
+
+  test('currentCalibrationForCustomer picks the newest across active properties and ignores retired and NULL ones', async () => {
+    const lake = await addProperty({ label: 'Lake house' });
+    const gone = await addProperty({ label: 'Old house' });
+    const deleted = await addProperty({ label: 'Deleted house' });
+    expect(await svc.currentCalibrationForCustomer(app, customerId)).toBeUndefined();
+    const atHome = await create({ propertyId: homeId });
+    const atLake = await create({ propertyId: lake });
+    expect((await svc.currentCalibrationForCustomer(app, customerId)).id).toBe(atLake.id);
+    await create({ propertyId: gone, notes: 'newest, but retired' });
+    await create({ propertyId: deleted, notes: 'even newer, but deleted' });
+    await app('customer_properties').where({ id: gone }).update({ active: false });
+    await app('customer_properties').where({ id: deleted }).del();
+    expect((await svc.currentCalibrationForCustomer(app, customerId)).id).toBe(atLake.id);
+    await svc.voidCalibration({ id: atLake.id, reason: 'Wrong house', actorId: tech, knex: app });
+    expect((await svc.currentCalibrationForCustomer(app, customerId)).id).toBe(atHome.id);
+  });
+
   describe('refill vs the daily limit', () => {
     // A system exactly at its daily cap: 19 emitters x 2.5 fl oz a minute x 60 s x 1 cycle = 47.5 fl oz, cap 47.5.
     const atCap = { nozzleCount: 15, riserCount: 4, nozzleFlowFlOzPerMin: 2.5, cycleSeconds: 60, mistTimes: ['06:30'], treatedAreaSqFt: 1000, treatedHeightFt: 5 };

@@ -14,6 +14,10 @@
 // included, so a later change of the primary never moves a system to another home. property_id is NULL
 // only after its property row was hard-deleted (ON DELETE SET NULL). Such rows are history: they list
 // under "Removed property", are never current for any property, and take no refills.
+// The office removes a property by setting active = false, which keeps property_id set; a calibration at a
+// retired property is treated the same way (history, not current, no refills: 409 MISTING_PROPERTY_RETIRED)
+// until the property is active again. Voiding a row at a removed property stays allowed: it fixes a mistake
+// and records nothing new.
 //
 // The server is the authority: the computed numbers (volume, output per cycle, daily output, daily cap)
 // come from services/misting-calibration-math.js and are stored, never taken from the client. The label
@@ -232,13 +236,16 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
     refillRows(knex).where('r.customer_id', customerId)
       .orderBy([{ column: 'r.refilled_on', order: 'desc' }, { column: 'r.created_at', order: 'desc' }, { column: 'r.id', order: 'desc' }]).limit(LIST_LIMIT),
   ]);
-  const seen = new Set();
+  // The newest current row per property, from the one definition of "current". Rows at a deleted (NULL) or
+  // retired property are history, grouped under "Removed property" by the panel.
+  const currentIds = new Set();
+  const seenProperty = new Set();
+  (await currentQuery(knex, customerId)).forEach((row) => {
+    if (!seenProperty.has(row.property_id)) { seenProperty.add(row.property_id); currentIds.add(row.id); }
+  });
   const calibrations = calRows.map((row) => {
     const payload = toCalibration(row);
-    // A NULL property (its row was deleted) is history: never current.
-    const key = payload.propertyId;
-    payload.isCurrent = Boolean(key) && !payload.voidedAt && !seen.has(key);
-    if (payload.isCurrent) seen.add(key);
+    payload.isCurrent = currentIds.has(payload.id);
     return payload;
   });
   return {
@@ -257,18 +264,34 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
 
 const lockCustomer = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`misting-records:${customerId}`]);
 
-/**
- * The current calibration for a property: the newest non-voided row with EXACTLY that property_id.
- * A NULL property (a deleted property row) is never current. The customer-app card imports this so it
- * and the staff service pick "current" the same way.
- */
+// "Current" is defined here once. A current calibration is a non-voided row at an ACTIVE customer_properties
+// row of THIS customer, newest first (created_at, then id). A NULL property (deleted row) and a retired
+// property (active = false, how the office removes one) have no current calibration. The staff service, the
+// list and the customer-app card all build on this query.
+function currentQuery(knex, customerId) {
+  return knex('misting_calibrations as c')
+    .join('customer_properties as p', function activeHome() {
+      this.on('p.id', 'c.property_id').andOn('p.customer_id', 'c.customer_id');
+    })
+    .where('c.customer_id', customerId)
+    .where('p.active', true)
+    .whereNull('c.voided_at')
+    .orderBy([{ column: 'c.created_at', order: 'desc' }, { column: 'c.id', order: 'desc' }])
+    .select('c.*');
+}
+
+/** The current calibration at one property (see currentQuery), or undefined. */
 async function currentCalibration(knex, customerId, propertyId) {
   if (!propertyId) return undefined;
-  return knex('misting_calibrations')
-    .where({ customer_id: customerId, property_id: propertyId })
-    .whereNull('voided_at')
-    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .first();
+  return currentQuery(knex, customerId).where('c.property_id', propertyId).first();
+}
+
+/**
+ * The newest current calibration across all of the customer's active properties, or undefined. For a caller
+ * that is not scoped to one house (a single home).
+ */
+async function currentCalibrationForCustomer(knex, customerId) {
+  return currentQuery(knex, customerId).first();
 }
 
 // The home a new calibration belongs to: always a real, active customer_properties row. A given id must
@@ -443,7 +466,14 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
     if (!(await customerExists(trx, customerId))) throw opError(404, 'MISTING_CUSTOMER_NOT_FOUND', 'Customer not found.');
     const cal = await trx('misting_calibrations').where({ id: fields.calibrationId, customer_id: customerId }).first();
     if (!cal) throw opError(404, 'MISTING_CALIBRATION_NOT_FOUND', 'Calibration not found.');
-    // A NULL property is history and never current, so a refill against it is refused here too.
+    // A calibration at a retired property takes no refill until the property is back; a NULL property is
+    // history and never current, so it is refused below as not current.
+    if (!cal.voided_at && cal.property_id) {
+      const home = await trx('customer_properties').where({ id: cal.property_id, customer_id: customerId }).first('active');
+      if (!home || home.active !== true) {
+        throw opError(409, 'MISTING_PROPERTY_RETIRED', 'This property was removed from the customer. Re-add it before logging a refill.');
+      }
+    }
     const current = cal.voided_at ? null : await currentCalibration(trx, customerId, cal.property_id);
     if (!current || current.id !== cal.id) {
       throw opError(409, 'MISTING_CALIBRATION_NOT_CURRENT', 'This calibration has been replaced. Reload and log the refill against the current one.');
@@ -549,6 +579,7 @@ module.exports = {
   voidCalibration,
   voidRefill,
   currentCalibration,
+  currentCalibrationForCustomer,
   toCalibration,
   toRefill,
   knownProduct,

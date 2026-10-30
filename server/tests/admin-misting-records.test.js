@@ -166,6 +166,7 @@ describe('error mapping', () => {
     [422, 'MISTING_MIX_CHANGED'],
     [422, 'MISTING_REFILL_OVER_LABEL'],
     [422, 'MISTING_MIX_OFF_LABEL'],
+    [409, 'MISTING_PROPERTY_RETIRED'],
   ])('a refill save that fails with %i %s maps through', async (status, code) => {
     mockSvc.createRefill.mockRejectedValue(opError(status, code, 'Plain words'));
     expect(await call('POST', `/customers/${CUSTOMER}/refills`, { body: {} })).toEqual({ status, json: { error: 'Plain words', code } });

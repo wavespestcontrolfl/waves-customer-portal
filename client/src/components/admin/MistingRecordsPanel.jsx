@@ -421,6 +421,8 @@ export default function MistingRecordsPanel({ customerId }) {
     if (!hit) return "Removed property";
     return properties.length < 2 ? "" : hit.label || "";
   };
+  // A removed property (row deleted, or retired by the office) is shown read-only.
+  const isRemoved = (propertyId) => !propertyId || !properties.some((p) => p.id === propertyId);
   const currentFor = (propertyId) => current.find((c) => c.propertyId === propertyId);
   const homesWithoutSystem = properties.filter((p) => !currentFor(p.id));
 
@@ -548,7 +550,7 @@ export default function MistingRecordsPanel({ customerId }) {
                     </div>
                     {r.notes && <div className={cn("text-ui-label text-ink-secondary", r.voidedAt && "line-through")}>{r.notes}</div>}
                     {r.voidedAt && <div className="text-ui-label">Voided {dayOf(r.voidedAt)}: {r.voidReason}</div>}
-                    {!r.voidedAt && (
+                    {!r.voidedAt && !isRemoved(r.propertyId) && (
                       <button data-ui-text-action type="button" className="text-ui-label text-ink-secondary underline u-focus-ring" onClick={() => startVoid("refill", r.id)}>
                         Void
                       </button>
