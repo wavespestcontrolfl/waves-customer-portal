@@ -6926,7 +6926,8 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
       ? `The ${payment ? `${payment} ` : ''}dues payment was canceled at Stripe, so its retries stopped; the month is unpaid.`
       : `The ${payment ? `${payment} ` : ''}dues payment was canceled at Stripe before it cleared; the month is unpaid.`,
     severity: 'needs-you',
-    link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    // The Invoices page is where it is collected (a new invoice, then Charge card on file or Send).
+    link: `/admin/invoices?customerId=${encodeURIComponent(customerId)}`,
     subject: { type: 'customer', id: customerId },
     // Nothing closes this alert automatically: a person marks it done after collecting or waiving.
     doneWhen: 'collected_and_marked_done',
@@ -6935,9 +6936,10 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
     // A needs-you money item must ring: with GATE_ADMIN_BELL_POLICY on, billing is not
     // allowlisted, and bell: true is the sanctioned site-level opt-in (as autopay-sca-parked.js).
     bell: true,
-    // The plain Charge now button bills the CURRENT month (billed_month = this month): after a
-    // month rollover it would mark the wrong month collected, so the office enters the amount.
-    detail: `${name}'s ${payment ? `${payment} ` : ''}monthly dues payment ${what}, so it was not collected. Nothing else has paid ${monthLabel || 'that month'}, and nothing will retry it on its own. To collect it, enter the exact amount on the customer's page (the plain Charge now button bills the current month). To waive it, mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
+    // Customer 360's Charge now posts no amount, so it bills monthly_rate as the CURRENT month
+    // (billed_month = this month): after a month rollover it would mark the wrong month collected.
+    // A new invoice on the Invoices page collects any month.
+    detail: `${name}'s ${payment ? `${payment} ` : ''}monthly dues payment ${what}, so it was not collected. Nothing else has paid ${monthLabel || 'that month'}, and nothing will retry it on its own. To collect it, create an invoice for it on the Invoices page, then charge the card on file or send the invoice. Charge now on the customer's page bills the current month only, so it fits only while it is still ${monthLabel || 'that month'}. To waive it, mark this done. No message was sent to the customer. Stripe PaymentIntent ${piId}, payment record ${row.id}.`,
     dedupeKey: `autopay-canceled:${customerId}:${piId}`,
     metadata: {
       customer_id: customerId,

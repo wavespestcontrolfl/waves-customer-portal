@@ -266,8 +266,11 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(spec.why).toBe('The October 2026 $55.30 dues payment was canceled at Stripe before it cleared; the month is unpaid.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'autopay-canceled:cust-1:pi_dues_1' });
     expect(opts.detail).toMatch(/No message was sent to the customer\./);
-    // The plain Charge now button bills the current month, so the office is told to enter the amount.
-    expect(opts.detail).toMatch(/enter the exact amount on the customer's page \(the plain Charge now button bills the current month\)/);
+    // Customer 360's Charge now posts no amount (it bills the CURRENT month), so the alert sends the
+    // office to the Invoices page, which collects any month, and opens it filtered to the customer.
+    expect(spec.link).toBe('/admin/invoices?customerId=cust-1');
+    expect(opts.detail).toMatch(/create an invoice for it on the Invoices page, then charge the card on file or send the invoice\./);
+    expect(opts.detail).toMatch(/Charge now on the customer's page bills the current month only, so it fits only while it is still October 2026\./);
     expect(opts.detail).toMatch(/To waive it, mark this done\./);
     expect(updatesWhenAlerted).toBe(0); // raised before the canceled flip
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_canceled', expect.objectContaining({
