@@ -627,6 +627,8 @@ describe('processCancellationRequest', () => {
   test('an in-progress visit is never auto-cancelled but is flagged for manual review; churn still proceeds', async () => {
     db.__tables.scheduled_services = [
       { id: 'sLive', customer_id: 'c1', status: 'en_route', scheduled_date: FUTURE, track_state: 'en_route', cancelled_at: null, recurring_ongoing: true },
+      // A tech checked in on an earlier day and never closed the visit out.
+      { id: 'sStuck', customer_id: 'c1', status: 'on_site', scheduled_date: PAST, track_state: 'on_property', cancelled_at: null, recurring_ongoing: false },
       { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
     ];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true }];
@@ -635,13 +637,18 @@ describe('processCancellationRequest', () => {
 
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req8' });
 
+    // Both stay put and both are flagged; only the earlier-day one is
+    // reported stale, so the caller may still confirm the cancel as done.
+    expect(db.__tables.scheduled_services.find((r) => r.id === 'sStuck').status).toBe('on_site');
+    expect(result.staleInProgressVisitIds).toEqual(['sStuck']);
+
     // The live visit stays live; the pending one is pulled.
     const live = db.__tables.scheduled_services.find((r) => r.id === 'sLive');
     expect(live.status).toBe('en_route');
     expect(result.cancelledCount).toBe(1);
     // Flagged so the admin alert says "review manually" instead of claiming
     // full auto-processing while a tech is rolling.
-    expect(result.errors).toEqual(['in_progress_visit:sLive']);
+    expect(result.errors).toEqual(['in_progress_visit:sLive', 'in_progress_visit:sStuck']);
     expect(result.ok).toBe(false);
     // Churn + billing wind-down still run (owner directive: churn on submit).
     const cust = db.__tables.customers[0];
