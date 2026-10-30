@@ -730,15 +730,18 @@ describe('slot reservation helpers', () => {
   // gets its stop number in the accept's own transaction.
   describe('commitReservation — GATE_ROUTE_CHECK_ACCEPT_SAVES stop number', () => {
     const arrivalRoute = require('../services/scheduling/arrival-route');
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    // Relative to today (AGENTS.md: near-today date literals go red): a hold well past the booking notice window.
+    const HOLD_DATE = etDateString(addETDays(new Date(), 30));
     let placeSpy;
     function wireCommit() {
       const chain = (extra) => ({ where: jest.fn().mockReturnThis(), ...extra });
       const reservationBuilder = chain({
         select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
         first: jest.fn().mockResolvedValue({
-          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: HOLD_DATE,
           window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
-          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+          reservation_expires_at: `${HOLD_DATE}T13:15:00.000Z`,
         }),
       });
       const conflictBuilder = chain({
@@ -752,7 +755,7 @@ describe('slot reservation helpers', () => {
         returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1', technician_id: null }]),
       });
       const scheduledBuilders = [
-        chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) }),
+        chain({ first: jest.fn().mockResolvedValue({ scheduled_date: HOLD_DATE }) }),
         reservationBuilder, conflictBuilder, makeGlobalProbeBuilder([]), updateBuilder,
       ];
       const trx = jest.fn((table) => {

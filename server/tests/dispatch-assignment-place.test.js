@@ -28,7 +28,10 @@ const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const arrivalRoute = require('../services/scheduling/arrival-route');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
 
-const JOB = { id: 'job-1', status: 'scheduled', technician_id: 't-old', scheduled_date: '2099-01-15' };
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+const DAY = etDateString(addETDays(new Date(), 30));
+const JOB = { id: 'job-1', status: 'scheduled', technician_id: 't-old', scheduled_date: DAY };
 const UPDATED = { ...JOB, technician_id: 't-new', route_order: null };
 const calls = [];
 let placeSpy;
@@ -38,7 +41,7 @@ function buildTrx() {
   const chain = {};
   for (const name of ['where', 'whereNotIn', 'whereRaw', 'modify', 'whereNull', 'update']) chain[name] = jest.fn(() => chain);
   // first(raw): the day read inside the assign; first(): the job read (when a caller hands in its trx).
-  chain.first = jest.fn(async (...args) => (args.length ? { day: '2099-01-15' } : JOB));
+  chain.first = jest.fn(async (...args) => (args.length ? { day: DAY } : JOB));
   chain.select = jest.fn(async () => []);
   chain.returning = jest.fn(async () => [UPDATED]);
   const t = jest.fn(() => chain);
