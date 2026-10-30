@@ -412,16 +412,14 @@ function buildRodentBundleLine(bundle, componentTotal, discounted, savings) {
   };
 }
 
-// A staff service credit runs after the package line is priced, so a credit
-// on a package component would stack with the package. When a credit touched
-// a component, re-select the package from what the components still cost:
-// a component credited to $0 no longer counts, and no package means no line.
-function repriceRodentBundleAfterCredits(lineItems) {
-  const idx = lineItems.findIndex((i) => i.service === 'rodent_bundle_discount');
-  if (idx < 0) return;
+// The package is priced ONCE, after the percentage pass, any staff price
+// override and any staff service credit, from each component's final net.
+// A component at $0 net no longer counts, so a credit that zeroes a component
+// drops to the right smaller package (or none). Savings are taken to the cent
+// from the bundled total because applyRodentBundle rounds them to dollars.
+function applyRodentPackage(lineItems, { commercial = false } = {}) {
+  if (commercial) return;
   const { trap, exclusion, sanitation } = rodentBundleComponents(lineItems);
-  const components = [trap, ...exclusion, sanitation].filter(Boolean);
-  if (!components.some((i) => i.priceBeforeServiceSpecificDiscount !== undefined)) return;
   const net = (item) => Math.max(0, serviceCreditLinePrice({ price: item?.priceAfterDiscount ?? item?.price }));
   const exclusionNet = exclusion.reduce((sum, i) => sum + net(i), 0);
   const bundle = selectRodentBundle({
@@ -430,17 +428,16 @@ function repriceRodentBundleAfterCredits(lineItems) {
     hasSanitation: net(sanitation) > 0,
     sanitationTier: sanitation?.tier,
   });
+  if (!bundle) return;
   const componentTotal = roundMoney(net(trap) + exclusionNet + net(sanitation));
-  // Component nets can carry cents after a fractional credit; applyRodentBundle
-  // rounds savings to whole dollars, so take the savings from its bundled total.
   const { discounted } = applyRodentBundle(componentTotal, bundle);
   const savings = Math.max(0, roundMoney(componentTotal - discounted));
-  if (!bundle || !(savings > 0)) {
-    lineItems.splice(idx, 1);
-    return;
-  }
-  const { discount: _rate, ...fields } = buildRodentBundleLine(bundle, componentTotal, discounted, savings);
-  Object.assign(lineItems[idx], fields, { priceBeforeDiscount: -savings, priceAfterDiscount: -savings });
+  if (!(savings > 0)) return;
+  lineItems.push({
+    ...buildRodentBundleLine(bundle, componentTotal, discounted, savings),
+    priceBeforeDiscount: -savings,
+    priceAfterDiscount: -savings,
+  });
 }
 
 function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = []) {
@@ -2219,27 +2216,6 @@ function generateEstimate(input) {
     }
   }
 
-  // ── Rodent bundle discount ──────────────────────────────────
-  // Apply bundle discount when 2+ rodent service categories are present.
-  // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
-  // Adjusts the trap/exclusion/sanitation line item prices in-place to reflect
-  // the bundled total, with savings tracked in the bundle line item.
-  if (!propertyIsCommercial) {
-    const { trap: trapItem, exclusion: exclRows, sanitation: sanItem } = rodentBundleComponents(lineItems);
-    const exclTotal = exclRows.reduce((sum, i) => sum + i.price, 0);
-    const bundle = selectRodentBundle({
-      hasTrapping: !!trapItem,
-      hasExclusion: exclRows.length > 0,
-      hasSanitation: !!sanItem,
-      sanitationTier: sanItem?.tier,
-    });
-    if (bundle) {
-      const componentTotal = (trapItem?.price || 0) + exclTotal + (sanItem?.price || 0);
-      const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
-      if (savings > 0) lineItems.push(buildRodentBundleLine(bundle, componentTotal, discounted, savings));
-    }
-  }
-
   // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
   // we no longer auto-fire on any trap + exclusion presence. Caller signals
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
@@ -2620,12 +2596,7 @@ function generateEstimate(input) {
       }
     } else if (item.price) {
       item.priceBeforeDiscount = item.price;
-      // The rodent package line is already a negative money amount; the
-      // percentage pass floors a negative at $0, which dropped the package
-      // savings from the one-time total. Carry it through unchanged.
-      item.priceAfterDiscount = item.service === 'rodent_bundle_discount'
-        ? item.price
-        : applyDiscount(item.price, discount);
+      item.priceAfterDiscount = applyDiscount(item.price, discount);
     } else if (item.total) {
       item.totalBeforeDiscount = item.total;
       item.totalAfterDiscount = applyDiscount(item.total, discount);
@@ -2637,7 +2608,13 @@ function generateEstimate(input) {
     lineItems,
     input.serviceSpecificDiscounts || input.serviceSpecificCredits || [],
   );
-  repriceRodentBundleAfterCredits(lineItems);
+  // ── Rodent package discount ─────────────────────────────────
+  // Apply a package discount when 2+ rodent service categories are present.
+  // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
+  // The package line carries the savings; the component lines keep their own
+  // net prices. It runs here, after the percentage pass, staff overrides and
+  // staff credits, so it is priced on what each component actually costs.
+  applyRodentPackage(lineItems, { commercial: propertyIsCommercial });
   const recurringItems = lineItems.filter(i => i.annual);
   const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);

@@ -989,6 +989,73 @@ describe('rodent package discount sees the V2 exclusion section rows (owner 2026
     });
   });
 
+  describe('the package is priced once, on each component\'s final net', () => {
+    const trapEx = { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion };
+    const fullPackage = { ...trapEx, sanitation: { affectedSqFt: 300, tier: 'light' } };
+
+    test('recurring customer: the 15% one-time perk applies first, then the package', () => {
+      const estimate = generateEstimate(baseInput({ recurringCustomer: true, services: trapEx }));
+      const [bundle] = bundleOf(estimate);
+      // 2,500 x 0.85 = 2,125; 7% = 1,976.25, rounded to the $10 step = 1,980.
+      expect(bundle).toMatchObject({
+        bundleKind: 'trapExclusion',
+        discount: 0.07,
+        componentTotal: 2125,
+        bundledTotal: 1980,
+        price: -145,
+        priceBeforeDiscount: -145,
+        priceAfterDiscount: -145,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(1980);
+    });
+
+    test('recurring customer: a $1 exclusion credit never raises the bill', () => {
+      const noCredit = generateEstimate(baseInput({ recurringCustomer: true, services: trapEx }));
+      const credited = generateEstimate(baseInput({
+        recurringCustomer: true,
+        services: trapEx,
+        serviceSpecificDiscounts: [{
+          source: 'catalog_preset',
+          presetKey: 'credit_one_dollar',
+          catalogCategory: 'service_specific_credit',
+          discountType: 'fixed',
+          requestedAmount: 1,
+          service: 'rodent_exclusion',
+          label: 'Credit',
+        }],
+      }));
+      expect(credited.summary.oneTimeTotal).toBeLessThanOrEqual(noCredit.summary.oneTimeTotal);
+      expect(bundleOf(credited)[0].componentTotal).toBe(2124);
+    });
+
+    test('a trapping price override moves the package base: $350 -> $100 prices on $2,250', () => {
+      const estimate = generateEstimate(baseInput({
+        services: trapEx,
+        linePriceOverrides: { rodent_trapping: { price: 100 } },
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle).toMatchObject({ componentTotal: 2250, bundledTotal: 2090, price: -160 });
+      expect(estimate.summary.oneTimeTotal).toBe(2090);
+    });
+
+    test('a sanitation price override moves the full-package base', () => {
+      const estimate = generateEstimate(baseInput({
+        services: fullPackage,
+        linePriceOverrides: { rodent_sanitation: { price: 200 } },
+      }));
+      const [bundle] = bundleOf(estimate);
+      // 350 + 2,150 + 200 = 2,700; 10% = 2,430 (above the $1,195 light floor).
+      expect(bundle).toMatchObject({
+        bundleKind: 'fullRemediation',
+        discount: 0.1,
+        componentTotal: 2700,
+        bundledTotal: 2430,
+        price: -270,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(2430);
+    });
+  });
+
   test('commercial property gets no rodent package discount', () => {
     const commercial = generateEstimate(baseInput({
       propertyType: 'commercial',
