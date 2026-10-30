@@ -633,6 +633,9 @@ export default function ReferralsPageV2() {
       setLoadErrors({
         stats: s === FAILED,
         promoters: p === FAILED,
+        // The Promoters tab's copy of the first-page failure; a later
+        // successful search or page clears it (the Dashboard keeps its own).
+        promotersTab: p === FAILED,
         queue: q === FAILED,
         payouts: pay === FAILED,
         inbound: inb === FAILED,
@@ -685,6 +688,7 @@ export default function ReferralsPageV2() {
         setPromoterPage(page);
         setPromoterHasMore(Boolean(r.hasMore));
         setPromoterBusy(false);
+        setLoadErrors((e) => (e.promotersTab ? { ...e, promotersTab: false } : e));
       })
       .catch(() => {
         if (req !== promoterReq.current) return;
@@ -1405,16 +1409,16 @@ export default function ReferralsPageV2() {
               Enroll Customer
             </button>{" "}
           </div>{" "}
-          {loadErrors.promoters && (
+          {loadErrors.promotersTab && (
             <ErrorRow what="promoters" onRetry={load} />
           )}
-          {!loadErrors.promoters && promoterError && (
+          {!loadErrors.promotersTab && promoterError && (
             <ErrorRow
               what="promoters"
               onRetry={() => fetchPromoters(...promoterLast.current)}
             />
           )}
-          {!loadErrors.promoters && (
+          {!loadErrors.promotersTab && (
           <div
             style={{
               background: D.card,
