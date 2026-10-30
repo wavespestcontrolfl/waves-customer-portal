@@ -343,16 +343,13 @@ class BudgetManager {
   }
 
   /**
-   * Get the full weekly capacity heatmap for all areas.
+   * Capacity for the next 14 ET days, starting today, plus the live campaigns
+   * and the last 10 budget changes. One row ('all'): the whole schedule, which
+   * is what the budget rule reads (getCapacityForArea('general')).
+   * Every date and label comes from the ET date string, never a UTC weekday.
    */
-  async getWeeklyHeatmap(startDate) {
-    const start = startDate ? new Date(startDate + 'T12:00:00') : new Date();
-    // Always start from Monday of the current week
-    const dayOffset = start.getDay() === 0 ? -6 : 1 - start.getDay();
-    const monday = new Date(start);
-    monday.setDate(monday.getDate() + dayOffset);
-
-    const areas = ['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice'];
+  async getWeeklyHeatmap() {
+    const now = new Date();
     const targets = await db('ad_targets').first();
     const thresholds = {
       green: parseFloat(targets?.capacity_green_max || 70),
@@ -360,67 +357,53 @@ class BudgetManager {
       orange: parseFloat(targets?.capacity_orange_max || 95),
     };
 
-    const heatmap = {};
+    const all = { days: [], weeklyBooked: 0, weeklySlots: 0, techs: 0, weeklyUtilization: 0 };
+    for (let d = 0; d < 14; d++) {
+      // addETDays anchors at noon UTC of the ET calendar day, so the labels stay on that day.
+      const date = addETDays(now, d);
+      const dateStr = etDateString(date);
+      const cap = await this.getCapacityForArea('general', dateStr);
 
-    for (const area of areas) {
-      heatmap[area] = { days: [], weeklyBooked: 0, weeklySlots: 0, techs: 0 };
+      let colorZone;
+      if (cap.utilizationPct <= thresholds.green) colorZone = 'green';
+      else if (cap.utilizationPct <= thresholds.yellow) colorZone = 'yellow';
+      else if (cap.utilizationPct <= thresholds.orange) colorZone = 'orange';
+      else colorZone = 'red';
 
-      for (let d = 0; d < 7; d++) {
-        const date = new Date(monday);
-        date.setDate(date.getDate() + d);
-        const dateStr = date.toISOString().split('T')[0];
-        const queryArea = area === 'all' ? 'general' : area;
-        const cap = await this.getCapacityForArea(queryArea, dateStr);
-
-        // Determine budget mode from current campaigns for this area
-        const campaignsForArea = await db('ad_campaigns')
-          .where('status', 'active')
-          .where(function () {
-            if (area === 'all') return;
-            this.where('target_area', area).orWhere('target_area', 'general');
-          })
-          .select('budget_mode');
-
-        const primaryMode = campaignsForArea.length > 0
-          ? this.dominantMode(campaignsForArea.map(c => c.budget_mode))
-          : 'base';
-
-        let colorZone;
-        if (cap.utilizationPct <= thresholds.green) colorZone = 'green';
-        else if (cap.utilizationPct <= thresholds.yellow) colorZone = 'yellow';
-        else if (cap.utilizationPct <= thresholds.orange) colorZone = 'orange';
-        else colorZone = 'red';
-
-        heatmap[area].days.push({
-          date: dateStr,
-          dayName: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-          dayLabel: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
-          booked: cap.booked,
-          slots: cap.slots,
-          utilizationPct: Math.round(cap.utilizationPct),
-          colorZone,
-          budgetMode: primaryMode,
-          isSunday: date.getDay() === 0,
-        });
-
-        heatmap[area].weeklyBooked += cap.booked;
-        heatmap[area].weeklySlots += cap.slots;
-      }
-
-      heatmap[area].techs = await this.getTechCountForArea(area);
-
-      heatmap[area].weeklyUtilization = heatmap[area].weeklySlots > 0
-        ? Math.round((heatmap[area].weeklyBooked / heatmap[area].weeklySlots) * 100)
-        : 0;
+      all.days.push({
+        date: dateStr,
+        dayName: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+        dayLabel: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
+        booked: cap.booked,
+        slots: cap.slots,
+        utilizationPct: Math.round(cap.utilizationPct),
+        colorZone,
+        isSunday: etParts(date).dayOfWeek === 0,
+      });
+      all.weeklyBooked += cap.booked;
+      all.weeklySlots += cap.slots;
     }
+    all.techs = await this.getTechCountForArea('all');
+    all.weeklyUtilization = all.weeklySlots > 0
+      ? Math.round((all.weeklyBooked / all.weeklySlots) * 100)
+      : 0;
 
-    return { heatmap, thresholds };
-  }
+    const campaigns = await db('ad_campaigns')
+      .where({ status: 'active', platform: 'google_ads' })
+      .orderBy('campaign_name')
+      .select('id', 'campaign_name', 'budget_mode', 'daily_budget_current', 'daily_budget_base');
 
-  dominantMode(modes) {
-    if (modes.includes('stop')) return 'stop';
-    if (modes.includes('spent')) return 'spent';
-    return 'base';
+    const recentChanges = await db('ad_budget_log as l')
+      .join('ad_campaigns as c', 'c.id', 'l.campaign_id')
+      .where('c.platform', 'google_ads')
+      .orderBy('l.created_at', 'desc')
+      .limit(10)
+      .select(
+        'l.created_at', 'l.campaign_name', 'l.previous_mode', 'l.new_mode',
+        'l.previous_budget', 'l.new_budget', 'l.reason', 'l.trigger', 'l.google_ads_updated',
+      );
+
+    return { heatmap: { all }, thresholds, campaigns, recentChanges };
   }
 
   /**

@@ -787,7 +787,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
 // GET /api/admin/ads/capacity-heatmap
 router.get('/capacity-heatmap', async (req, res, next) => {
   try {
-    const result = await getBudgetManager().getWeeklyHeatmap(req.query.week);
+    const result = await getBudgetManager().getWeeklyHeatmap();
     res.json(result);
   } catch (err) { next(err); }
 });
