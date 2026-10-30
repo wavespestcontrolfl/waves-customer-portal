@@ -31,6 +31,10 @@
  * mid-sweep and stamp its weekly marker onto pre-sweep counts — suppressing
  * the corrected rollup for six days.
  *
+ * A fourth leg (FIX:), behind GATE_AI_CHANGE_CHECK as well as the digest gate,
+ * reports pages whose AI citations dropped after a content change (see
+ * impact-tracker checkAiChange). One email a day lists every new "lost" row.
+ *
  * Composition is pure (compose* take rows, return null or an email) so the
  * copy and the thresholds are testable without a DB or a mailer.
  */
@@ -49,7 +53,7 @@ const opsKeyFor = (label) => `impact-digest:${label}`;
 const db = require('../../models/db');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { runExclusive } = require('../../utils/cron-lock');
-const { addETDays } = require('../../utils/datetime-et');
+const { addETDays, etDateString } = require('../../utils/datetime-et');
 
 // Dark-ship gate: inert until the owner flips it. When off we still compute
 // and shadow-log what WOULD have gone out, so the flip is a known quantity.
@@ -86,6 +90,11 @@ const BLIND_LOOP_MIN_MEASURED = 5;
 
 const PAUSED_MARKER_PREFIX = 'impact-paused:';
 const BLIND_MARKER_KEY = 'impact-loop-blind';
+const AI_CHANGE_MARKER_KEY = 'impact-ai-change-lost';
+// One email a day: the marker is stamped by the 8am tick, so 20h separates
+// "sent this morning" from "tomorrow's tick" with slack for cron jitter.
+const AI_CHANGE_DUE_MS = 20 * 60 * 60 * 1000;
+const AI_CHANGE_LABEL = 'ai-citation-drop alert';
 const ROLLUP_MARKER_KEY = 'impact-verdict-rollup';
 
 const MEASURED_VERDICTS = ['improved', 'neutral', 'regressed'];
@@ -312,6 +321,62 @@ function composeVerdictRollup(rows, { days = ROLLUP_WINDOW_DAYS } = {}) {
   return { subject, html, text, counts, measured };
 }
 
+// ── AI citations dropped after a content change ─────────────────────
+
+function parseJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+const pct = (n, d) => (d > 0 ? `${Math.round((100 * n) / d)}%` : 'n/a');
+
+function aiChangeLine(row) {
+  const pre = parseJson(row.ai_change_pre) || {};
+  const post = parseJson(row.ai_change_post) || {};
+  const deployed = row.deployed_at ? etDateString(row.deployed_at) : 'unknown date';
+  const page = `${pre.cites ?? 0} of ${pre.answers ?? 0} answers before, ${post.cites ?? 0} of ${post.answers ?? 0} after`;
+  const site = `site-wide ${pct(pre.siteCites, pre.answers)} before, ${pct(post.siteCites, post.answers)} after`;
+  return {
+    html: `<li style="margin:0 0 10px 0;"><strong>${esc(row.page_url)}</strong><br><span style="color:#5A6B7B;font-size:12px;">${esc(row.bucket || '—')} · changed ${esc(deployed)} · cited in ${esc(page)} · ${esc(site)}</span></li>`,
+    text: `- ${row.page_url} (${row.bucket || '—'}, changed ${deployed}): cited in ${page}; ${site}`,
+  };
+}
+
+/**
+ * composeAiChangeLossAlert(rows) → email | null
+ * rows: content_optimization_impact rows with ai_change_verdict = 'lost'.
+ * Counts are the stored pre/post windows (14 days before the change vs days
+ * 2 to 16 after it); "site-wide" is the share of answers that cited ANY Waves
+ * page, the control the verdict is adjusted against.
+ */
+function composeAiChangeLossAlert(rows) {
+  const list = (rows || []).filter((r) => r && r.page_url);
+  if (!list.length) return null;
+
+  const impactUrl = `${adminPortalUrl()}/admin/blog?tab=autopilot`;
+  const subject = list.length === 1
+    ? `FIX: AI citations dropped after a content change — ${list[0].page_url}`
+    : `FIX: AI citations dropped after ${list.length} content changes`;
+  const lines = list.map(aiChangeLine);
+
+  const html = shell(
+    'AI citations dropped after a content change',
+    `AI answers cited ${list.length === 1 ? 'this page' : 'these pages'} much less in the 14 days after the change than in the 14 days before, once site-wide Waves citations are taken out. Review the change${list.length === 1 ? '' : 's'}. History: <a href="${impactUrl}">${impactUrl}</a>.`,
+    [`<ul style="margin:0;padding-left:18px;">${lines.map((l) => l.html).join('')}</ul>`],
+  );
+  const text = [
+    'AI citations dropped after a content change',
+    '',
+    `AI answers cited ${list.length === 1 ? 'this page' : 'these pages'} much less in the 14 days after the change than in the 14 days before, once site-wide Waves citations are taken out.`,
+    '',
+    ...lines.map((l) => l.text),
+    '',
+    `History: ${impactUrl}`,
+  ].join('\n');
+
+  return { subject, html, text, count: list.length };
+}
+
 // ── data reads ──────────────────────────────────────────────────────
 
 // Window boundaries are real Date objects built with the ET helpers — a naive
@@ -493,6 +558,46 @@ async function alertBlindLoop({ database, mailer }) {
   });
 }
 
+// Leg 4 — AI citations dropped after a content change. Needs the digest gate
+// AND GATE_AI_CHANGE_CHECK. Rows are stamped alerted only after the email
+// left, so a gated or failed send keeps them for the next tick.
+async function alertAiChangeLoss({ database, mailer }) {
+  if (!require('../../config/feature-gates').aiChangeCheckLive()) return { skipped: 'ai-gate-off' };
+  let rows;
+  try {
+    rows = await database('content_optimization_impact')
+      .where('ai_change_verdict', 'lost')
+      .whereNull('ai_change_alerted_at')
+      .orderBy('deployed_at', 'asc')
+      .select('id', 'page_url', 'bucket', 'deployed_at', 'ai_change_pre', 'ai_change_post');
+  } catch (err) {
+    logger.error(`[impact-digest] ai-change query failed: ${err.message}`);
+    return { skipped: 'error' };
+  }
+  const composed = composeAiChangeLossAlert(rows);
+  if (!composed) return { skipped: 'none-lost' };
+  if (await sentRecently(database, AI_CHANGE_MARKER_KEY, AI_CHANGE_DUE_MS)) return { skipped: 'not-due' };
+
+  const result = await sendComposed(composed, {
+    mailer,
+    database,
+    markerKey: AI_CHANGE_MARKER_KEY,
+    categories: ['content-engine', 'impact-ai-change'],
+    label: AI_CHANGE_LABEL,
+  });
+  if (result.sent) {
+    try {
+      await database('content_optimization_impact')
+        .whereIn('id', rows.map((r) => r.id))
+        .whereNull('ai_change_alerted_at')
+        .update({ ai_change_alerted_at: new Date() });
+    } catch (err) {
+      logger.error(`[impact-digest] ai-change alert stamp failed (the daily marker stops a repeat today): ${err.message}`);
+    }
+  }
+  return { ...result, count: composed.count };
+}
+
 /**
  * The rollup window's start.
  *
@@ -599,6 +704,7 @@ async function sendImpactDigestsLocked(opts = {}) {
     ['paused', () => alertPausedLanes({ database, mailer, tracker })],
     ['blind', () => alertBlindLoop({ database, mailer })],
     ['rollup', () => sendVerdictRollup({ database, mailer })],
+    ['aiChange', () => alertAiChangeLoss({ database, mailer })],
   ]) {
     try {
       results[name] = await leg();
@@ -629,6 +735,7 @@ module.exports = {
   composePausedAlert,
   composeBlindLoopAlert,
   composeVerdictRollup,
+  composeAiChangeLossAlert,
   _internals: { tallyVerdicts, pausedMarkerKey, checkedSince },
-  THRESHOLDS: { ROLLUP_WINDOW_DAYS, ROLLUP_DUE_MS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_MEASURED, SIX_DAYS_MS },
+  THRESHOLDS: { AI_CHANGE_DUE_MS, ROLLUP_WINDOW_DAYS, ROLLUP_DUE_MS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_MEASURED, SIX_DAYS_MS },
 };

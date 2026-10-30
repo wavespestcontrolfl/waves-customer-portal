@@ -3448,6 +3448,12 @@ function initScheduledJobs() {
         const live = await ImpactTracker.sweepNewlyLive({});
         const checked = await ImpactTracker.checkPending({});
         await ImpactTracker.checkAeoVisibility({});
+        // Before-and-after AI citation check (GATE_AI_CHANGE_CHECK, dark). Like
+        // checkAeoVisibility it is NOT gated on: it writes only ai_change_*
+        // columns, which the rollup and paused-lane legs do not read, and a failure here
+        // (it catches its own) must never decide whether the digest runs. It
+        // sits before the digest so a lost-citations alert goes out that morning.
+        try { await ImpactTracker.checkAiChange({}); } catch (err) { logger.warn(`[impact-tracker] checkAiChange failed: ${err.message}`); }
         // Leg 4 — surface what the sweep just found (halted lanes, weekly
         // verdicts). Chained here rather than given its own cron so it always
         // describes POST-sweep state.
