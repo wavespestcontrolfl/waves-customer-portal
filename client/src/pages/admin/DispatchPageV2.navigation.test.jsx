@@ -112,7 +112,7 @@ it.each(['', '&feedback=0'])(
 );
 
 
-vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button></div> }));
+vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit, onChange }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button><button onClick={() => onChange()}>Grid changed {dayCount}</button></div> }));
 vi.mock('../../components/schedule/CalendarViewsV2', async importOriginal => ({
   ...await importOriginal(), MonthViewV2: ({date}) => <div>Month date: {date}</div>,
 }));
@@ -445,4 +445,30 @@ it('a Book it lookup still pending when the day changes does not open the form',
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-15'));
   await act(async () => { releaseSlow(); await slow; });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+// Dispatch audit 2026-10-29 (Codex pre-push P1): a week grid's onChange after a
+// committed move reloads the page QUIETLY, so a failed reload never swaps the
+// grid (its committed move and its Refresh notice) for the page error screen.
+it.each([['5-Day', 5], ['Week', 7]])('a %s grid change reloads quietly: a failed reload keeps the grid mounted', async (mode, dayCount) => {
+  let failSchedule = false;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      return failSchedule ? Promise.reject(new Error('Service unavailable')) : Promise.resolve(schedulePayload('2026-09-30', 'First day'));
+    }
+    return Promise.resolve({});
+  });
+  const scheduleCalls = () => vi.mocked(adminFetch).mock.calls.filter(([url]) => url === '/admin/schedule?date=2026-09-30').length;
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-30']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click((await screen.findAllByRole('button', { name: mode, exact: true }))[0]);
+  await screen.findByText('Grid date: 2026-09-30');
+  const before = scheduleCalls();
+  failSchedule = true;
+  fireEvent.click(screen.getByRole('button', { name: `Grid changed ${dayCount}` }));
+  await waitFor(() => expect(scheduleCalls()).toBe(before + 1));
+  await act(async () => {});
+  expect(screen.getByText('Grid date: 2026-09-30')).toBeInTheDocument();
+  expect(screen.queryByText('Loading schedule…')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Failed to load schedule/)).not.toBeInTheDocument();
 });
