@@ -371,7 +371,7 @@ describe('RecruitingPage — stage history and notes (audit R2)', () => {
     expect(screen.getByText(/New → Reviewed/)).toBeInTheDocument();
   });
 
-  it('labels the applicant’s own booking entries', async () => {
+  it('labels each entry with who made it: the applicant, the named staff member, or Staff', async () => {
     const base = buildFetchMock();
     vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
       if (url.endsWith('/admin/careers/app-1')) {
@@ -379,7 +379,8 @@ describe('RecruitingPage — stage history and notes (audit R2)', () => {
           application: detailFixture({
             status: 'interview',
             status_history: [
-              { from: 'reviewed', to: 'interview', note: null, by: 'tech-uuid-1', at: '2026-10-28T14:00:00Z' },
+              { from: 'new', to: 'reviewed', note: null, by: 'bbbbbbbb-0000-4000-8000-000000000002', at: '2026-10-27T14:00:00Z' },
+              { from: 'reviewed', to: 'interview', note: null, by: 'tech-uuid-1', by_name: 'Sam Office', at: '2026-10-28T14:00:00Z' },
               { from: 'interview', to: 'interview', note: 'Interview booked Tue Nov 3, 4:30 PM (phone)', by: 'applicant', at: '2026-10-28T16:00:00Z' },
             ],
           }),
@@ -393,7 +394,10 @@ describe('RecruitingPage — stage history and notes (audit R2)', () => {
 
     expect(await screen.findByText('Interview booked Tue Nov 3, 4:30 PM (phone)')).toBeInTheDocument();
     expect(screen.getByText(/Interview · Applicant/)).toBeInTheDocument();
-    expect(screen.getByText(/Reviewed → Interview/)).toBeInTheDocument();
+    expect(screen.getByText(/Reviewed → Interview · Sam Office/)).toBeInTheDocument();
+    // A staff id with no name on file says Staff, never the raw id.
+    expect(screen.getByText(/New → Reviewed · Staff/)).toBeInTheDocument();
+    expect(screen.queryByText(/bbbbbbbb-/)).not.toBeInTheDocument();
   });
 });
 
