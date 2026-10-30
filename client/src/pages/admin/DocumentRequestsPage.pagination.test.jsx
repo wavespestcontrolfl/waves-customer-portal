@@ -195,6 +195,34 @@ it("keeps the current page after a row action reloads the list", async () => {
   expect(screen.getByText("Showing 101–101 of 101")).toBeInTheDocument();
 });
 
+it("a row action that finishes after the user changed page reloads the current page, not the old one (Codex #7093 r1)", async () => {
+  const link = deferred();
+  adminFetch.mockImplementation((path, options) => {
+    if (path === "/admin/contracts/requests/stats") return Promise.resolve(response({ stats: {} }));
+    if (path === "/admin/contracts/req-101/share-link" && options?.method === "POST") return link.promise;
+    if (path.startsWith("/admin/contracts/requests?")) return Promise.resolve(response(pageOf(101, path)));
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  mount();
+  await screen.findByText("Showing 1–100 of 101");
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  await screen.findByText("Showing 101–101 of 101");
+  fireEvent.click(screen.getByRole("button", { name: "Link", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+  await screen.findByText("Showing 1–100 of 101");
+
+  await act(async () => {
+    link.resolve(response({ signingUrl: "https://example.test/sign/abc" }));
+    await link.promise;
+  });
+  await screen.findByText("Fresh link ready");
+  await waitFor(() => expect(listPaths()).toHaveLength(4));
+  // The action's reload asked for page 1, the page on screen; page 2 never comes back.
+  expect(lastParams().get("page")).toBe("1");
+  expect(screen.getByText("Showing 1–100 of 101")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+});
+
 async function freshLink() {
   adminFetch.mockImplementation((path, options) => {
     if (path === "/admin/contracts/requests/stats") return Promise.resolve(response({ stats: {} }));

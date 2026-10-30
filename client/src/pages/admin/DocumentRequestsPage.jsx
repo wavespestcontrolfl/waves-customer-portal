@@ -277,6 +277,12 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
 
   useVisiblePageRefresh(() => loadRequests({ background: true }));
 
+  // A row action reloads after its POST resolves. By then staff may have
+  // changed page, tab or search, so the reload goes through the latest
+  // loadRequests (the current query), never the one captured at the click.
+  const loadRequestsRef = useRef(loadRequests);
+  loadRequestsRef.current = loadRequests;
+
   const runDeliveryAction = async (request, channel, action = "send") => {
     if (!request?.id) return;
     const key = `${request.id}:${channel}:${action}`;
@@ -294,7 +300,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       });
       setLatestLink(result.signingUrl || result.contract?.signingUrl || "");
       setToast(action === "reminder" ? `${channel.toUpperCase()} reminder sent` : `${channel.toUpperCase()} sent`);
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Document delivery failed");
     } finally {
@@ -312,7 +318,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       const result = await api(`/admin/contracts/${request.id}/share-link`, { method: "POST" });
       setLatestLink(result.signingUrl || result.contract?.signingUrl || "");
       setToast("Fresh signing link created");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not create signing link");
     } finally {
@@ -332,7 +338,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         body: { reason: "Cancelled from document requests queue" },
       });
       setToast("Document request cancelled");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not cancel document request");
     } finally {
@@ -349,7 +355,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
     try {
       await api(`/admin/contracts/${request.id}/countersign`, { method: "POST", body: { name: name.trim() } });
       setToast("Countersigned");
-      await loadRequests();
+      await loadRequestsRef.current();
     } catch (err) {
       setError(err.message || "Could not countersign this agreement");
     } finally {
