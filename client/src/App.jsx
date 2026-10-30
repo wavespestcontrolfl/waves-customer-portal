@@ -735,7 +735,7 @@ export default function App() {
           <Route path="/admin/report-preview/:serviceId" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportPreviewPage /></WavesShell></Suspense>} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
           <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
-          <Route path="/admin/two-step" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#0f1923',minHeight:'100vh'}}/>}><AdminTwoStepPage /></Suspense>} />
+          <Route path="/admin/two-step" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#FAFAFA',minHeight:'100vh'}}/>}><AdminTwoStepPage /></Suspense>} />
           <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
           <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           {/* The standalone tech portal is retired: the field workspace lives at
