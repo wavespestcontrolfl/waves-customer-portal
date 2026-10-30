@@ -36,6 +36,20 @@ const REQUESTS = [
   ["billing", "/admin/billing-health", "cash"],
 ];
 const OPERATIONAL_KEYS = new Set(["alerts", "today", "staleVisits"]);
+// A feed may only show data, and above all an empty backlog or a zero, after
+// a response with the container its card reads. A malformed 200 ({}) is
+// unavailable (retry), never a false "No estimates sent".
+const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const REQUIRED_SHAPE = {
+  alerts: (value) => Array.isArray(value.alerts),
+  kpiTargets: (value) => Array.isArray(value.targets),
+  staleVisits: (value) => Array.isArray(value.visits),
+  today: (value) => typeof value.total === "number",
+  data: (value) => isRecord(value.kpis),
+  funnel: (value) => isRecord(value.funnel),
+  aging: (value) => isRecord(value.aging),
+  reviewTrend: (value) => Array.isArray(value.trend),
+};
 const DASHBOARD_REFRESH_MS = 60000;
 
 async function fetchDashboard(path, signal) {
@@ -110,14 +124,8 @@ export default function useDashboardData(section, periodQS) {
         const [key, path] = cycleRequests[nextIndex++];
         try {
           const value = await fetchDashboard(path, signal);
-          // These operational feeds may only claim an empty backlog after a
-          // valid response. An error-shaped/malformed payload is unavailable.
-          if (!value || value.error
-            || (key === "alerts" && !Array.isArray(value.alerts))
-            || (key === "kpiTargets" && !Array.isArray(value.targets))
-            || (key === "staleVisits" && !Array.isArray(value.visits))
-            || (key === "today" && typeof value.total !== "number")
-            || (key === "data" && (!value.kpis || typeof value.kpis !== "object" || Array.isArray(value.kpis)))) {
+          // An error-shaped or malformed payload is unavailable (REQUIRED_SHAPE).
+          if (!value || value.error || (REQUIRED_SHAPE[key] && !REQUIRED_SHAPE[key](value))) {
             throw new Error("Dashboard data is unavailable.");
           }
           if (signal.aborted) return;
