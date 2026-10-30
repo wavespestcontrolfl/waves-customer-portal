@@ -394,6 +394,45 @@ function standingMissingGeoKeys() {
   return standingNoticeKeys('auto-dispatch-missing-geo:%', MISSING_GEO_RESOLVED_TITLE);
 }
 
+// GATE_ROUTE_WARNING_DETAIL (owner 2026-10-29, route-dispatcher audit fix B): the night run's address-pin
+// notices cover only a recurring child visit that auto-dispatch loads (is_recurring, past the lock
+// window, not locked, excluded or customer-confirmed). A one-time, rodent or project visit with no
+// map pin got no notice, so its route read "could not verify" with nobody told why. With the gate on
+// the SAME notice (same key, dedupe, ring budget and close rules) also covers every pending or
+// confirmed visit in the next NEAR_TERM_PIN_DAYS days with no usable pin. Admin notice only; the
+// gate off keeps the lane exactly as it was.
+const NEAR_TERM_PIN_DAYS = 7;
+
+// A visit the run can never move (not a recurring child) needs its pin for the route check alone,
+// so a lock, an exclusion or a customer confirmation does not make its notice moot. A recurring
+// child keeps the old rule: those flags take it out of auto-dispatch, so the pin no longer matters.
+function pinNoticeHeldOut(row) {
+  const { heldOutOfAutoDispatch } = require('./eligibility');
+  if (require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row)) return null;
+  return heldOutOfAutoDispatch(row);
+}
+
+// Pending or confirmed visits today through NEAR_TERM_PIN_DAYS days ahead (Eastern) with no usable pin,
+// as the rows the missing-pin lane raises. `skipIds`: visits the run already collected or found
+// pinned. Same pin test as the lane (resolveGeo) and the same customer rules as its re-read.
+async function nearTermPinlessVisits(nowDate = new Date(), skipIds = new Set()) {
+  const { etDateString, addETDays } = require('../../utils/datetime-et');
+  const { resolveGeo } = require('./geo');
+  const rows = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereBetween('scheduled_services.scheduled_date', [etDateString(nowDate), etDateString(addETDays(nowDate, NEAR_TERM_PIN_DAYS))])
+    .whereNull('customers.deleted_at')
+    .where(function activeCustomer() { this.where('customers.active', true).orWhereNull('customers.active'); })
+    .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+      'customers.active as customer_active', 'customers.deleted_at as customer_deleted_at');
+  return (rows || []).filter((row) => !skipIds.has(String(row.id)) && !resolveGeo(row)).map((row) => {
+    const date = toDateStr(row.scheduled_date);
+    return { id: row.id, customer_id: row.customer_id, recurring_parent_id: row.recurring_parent_id, scheduled_date: date, date, routeOnly: true };
+  });
+}
+
 // Retire standing notices that no longer apply, then return the visits to
 // raise: computed first so a lapsed plan's notice closes in the same pass.
 async function prepareNoWindowNotices(nowDate, today, to) {
@@ -489,14 +528,14 @@ async function maintainMissingGeoNotices(nowDate = new Date()) {
     .whereIn('scheduled_services.id', ids)
     .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
       'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
-  const { lapsedPlanKeys, planKey, heldOutOfAutoDispatch } = require('./eligibility');
+  const { lapsedPlanKeys, planKey } = require('./eligibility');
   // A pin that resolves, a plan that lapsed, or a visit held out of
   // auto-dispatch (locked, excluded or customer-confirmed): the visit is no longer skipped for
   // its pin, so the notice closes (the run applies the same tests; r18, r21
   // P2). One plan read for all; an unreadable plan keeps the notice.
   const lapsed = await lapsedPlanKeys(rows, db);
   const close = new Set(rows
-    .filter((row) => resolveGeo(row) || lapsed.has(planKey(row)) || heldOutOfAutoDispatch(row))
+    .filter((row) => resolveGeo(row) || lapsed.has(planKey(row)) || pinNoticeHeldOut(row))
     .map((row) => String(row.id)));
   await retireMissingGeoNotices(close, nowDate);
 }
@@ -579,4 +618,4 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireResolvedNotices, standingNoticeKeys, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireResolvedNotices, standingNoticeKeys, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, nearTermPinlessVisits, pinNoticeHeldOut, NEAR_TERM_PIN_DAYS, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };

@@ -436,7 +436,12 @@ export default function WavesPPCDashboard() {
     const active = filtered.filter((c) => c.status === "active");
     return {
       spent: active.reduce((s, c) => s + (c.last7d?.spend || 0), 0),
-      budget: active.reduce((s, c) => s + (c.daily_budget_current || 0) * 7, 0),
+      // The budget rule moves daily_budget_current ($0.05 in Stop mode); the
+      // yardstick for spend is the base budget, current only when base is unset.
+      budget: active.reduce(
+        (s, c) => s + Number(c.daily_budget_base ?? c.daily_budget_current ?? 0) * 7,
+        0,
+      ),
       revenue: active.reduce((s, c) => s + (c.last7d?.conversionValue || 0), 0),
       conversions: active.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
       leads: active.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
@@ -524,11 +529,11 @@ export default function WavesPPCDashboard() {
             Waves PPC command center
           </h2>{" "}
           <Badge className="[padding:4px_12px] rounded-md text-ui-body font-medium bg-green-100 text-green-700">
-            {activeCampaigns} Active Campaigns
+            {activeCampaigns} active campaign{activeCampaigns === 1 ? "" : "s"}
           </Badge>{" "}
         </div>{" "}
         <div className="text-ui-body text-ink-secondary">
-          Google Ads + Local Service Ads -- Live data from campaign tracker
+          Google Ads and Meta Ads — synced daily
         </div>{" "}
       </div>
       <SyncHealthNotice loadErrors={loadErrors} syncs={syncStatus} />
@@ -567,19 +572,19 @@ export default function WavesPPCDashboard() {
             <KPI
               value={fmtMoney(totals.spent)}
               label="7-Day Spend"
-              sub={`of ${fmtMoney(totals.budget)} budget`}
+              sub={`of ${fmtMoney(totals.budget)} base budget`}
               color={"#18181B"}
             />{" "}
             <KPI
               value={fmtMoney(totals.revenue)}
-              label="7-Day Revenue"
-              sub="attributed revenue"
+              label="Reported value (7d)"
+              sub="ad-platform conversion value, not booked revenue"
               color={"#18181B"}
               metric="revenue"
             />{" "}
             <KPI
               value={`${overallROAS}x`}
-              label="ROAS"
+              label="Reported ROAS"
               sub="return on ad spend"
               color={parseFloat(overallROAS) >= 2 ? "#18181B" : "#991B1B"}
               metric="roas"
@@ -592,7 +597,7 @@ export default function WavesPPCDashboard() {
             />{" "}
             <KPI
               value={`$${overallCPL}`}
-              label="Cost Per Lead"
+              label="Cost per reported conversion"
               sub="all campaigns"
               color={"#18181B"}
             />{" "}
@@ -671,7 +676,8 @@ export default function WavesPPCDashboard() {
               <div className="[margin-top:16px] text-center">
                 {" "}
                 <div className="text-ui-body text-ink-secondary">
-                  {fmtMoney(totals.spent)} of {fmtMoney(totals.budget)}
+                  {fmtMoney(totals.spent)} of {fmtMoney(totals.budget)} base
+                  budget
                 </div>{" "}
                 <div className="text-ui-body [margin-top:4px] text-ink-secondary">
                   {fmtMoney(Math.max(0, totals.budget - totals.spent))}{" "}
@@ -697,6 +703,7 @@ export default function WavesPPCDashboard() {
                       c.platform === "google_ads" &&
                       ["SEARCH", "2"].includes(c.campaign_type))),
               );
+              if (type === "google_lsa" && !typeCamps.length) return null;
               const sp = typeCamps.reduce(
                 (s, c) => s + (c.last30d?.spend || 0),
                 0,
@@ -731,7 +738,7 @@ export default function WavesPPCDashboard() {
                         {fmtMoney(rv)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
-                        REVENUE
+                        GOOGLE VALUE
                       </div>
                     </div>{" "}
                     <div>
@@ -747,7 +754,7 @@ export default function WavesPPCDashboard() {
                         {sp > 0 ? (rv / sp).toFixed(1) + "x" : "--"}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
-                        ROAS
+                        GOOGLE ROAS
                       </div>
                     </div>{" "}
                   </div>{" "}
@@ -833,8 +840,8 @@ export default function WavesPPCDashboard() {
                       "Status",
                       "Budget/Day",
                       "7d Spend",
-                      "7d Revenue",
-                      "ROAS",
+                      "7d reported value",
+                      "Reported ROAS",
                       "CPA",
                       "Conv",
                       "Clicks",

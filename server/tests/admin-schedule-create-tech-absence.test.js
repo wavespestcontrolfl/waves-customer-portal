@@ -620,3 +620,75 @@ describe('POST / — admin create — GATE_ROUTE_CHECK_STAFF_SAVES route check',
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
+
+// GATE_SAVE_ROAD_BUY (owner 2026-10-29): the New Appointment save buys the
+// placement's Google road times BEFORE its transaction opens, as the staff
+// user. The helper reads its own gate and is spied: only the wiring is under
+// test here (the purchase itself is proven in save-road-buy.test.js).
+describe('POST / — admin create — GATE_SAVE_ROAD_BUY wiring', () => {
+  const roadBuy = require('../services/scheduling/save-road-buy');
+  let buySpy;
+  const located = (table) => chain(table === 'customers'
+    ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, latitude: '27.5', longitude: '-82.4' }
+    : (table === 'scheduled_services' ? { ...SVC } : undefined));
+  const body = {
+    customerId: 'cust-1', scheduledDate: '2099-07-03', windowStart: '10:00', serviceType: 'General Pest Control',
+    sendConfirmationSms: false, technicianId: TECH_ID, estimatedPrice: 89, createInvoice: true,
+  };
+  beforeEach(() => {
+    buySpy = jest.spyOn(roadBuy, 'buyRoadsBeforeSave').mockResolvedValue({ lookups: 0 });
+    db.mockImplementation(located);
+  });
+  afterEach(() => buySpy.mockRestore());
+
+  test('a timed booking with a technician and a located customer buys first, as the staff user, outside any transaction', async () => {
+    const { status } = await post({ ...body, technicianId: 'tech-no-absence' });
+    expect(status).toBe(201);
+    expect(buySpy).toHaveBeenCalledTimes(1);
+    expect(buySpy.mock.calls[0][0]).toMatchObject({
+      spender: 'staff-1', date: '2099-07-03', technicianId: 'tech-no-absence', windowStart: '10:00',
+      prospective: { lat: '27.5', lng: '-82.4', service_type: 'General Pest Control' },
+    });
+    expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
+  });
+
+  // A chosen property is stamped on the visit with its own pin (nulls too), and
+  // the route read excludes the primary address's pin for it: price that pin only.
+  describe('a chosen property', () => {
+    const customerProps = require('../services/customer-properties');
+    const converter = require('../services/estimate-converter');
+    const stamp = (pin) => ({ property_id: 'prop-2', service_address_line1: '2 Side St', service_address_city: 'Bradenton',
+      service_address_state: 'FL', service_address_zip: '34202', lat: pin.lat, lng: pin.lng });
+    const gates = require('../config/feature-gates').gates;
+    const savedAddressGate = gates.editApptAddress;
+    beforeEach(() => {
+      gates.editApptAddress = true;
+      jest.spyOn(converter, 'buildSeriesAddressScope').mockResolvedValue(null);
+    });
+    afterEach(() => { gates.editApptAddress = savedAddressGate; jest.restoreAllMocks(); });
+    const book = (pin) => {
+      jest.spyOn(customerProps, 'bookingPropertyStamp').mockResolvedValue(stamp(pin));
+      return post({ ...body, technicianId: 'tech-no-absence', propertyId: 'prop-2' });
+    };
+
+    test('with its own pin: that pin is priced, not the customer\'s', async () => {
+      await book({ lat: 27.9, lng: -82.1 });
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0].prospective).toMatchObject({ lat: 27.9, lng: -82.1 });
+    });
+
+    test('with no pin: nothing is bought, never the customer\'s primary pin', async () => {
+      await book({ lat: null, lng: null });
+      expect(buySpy).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an unassigned, untimed or unlocated booking buys nothing', async () => {
+    await post({ ...body, technicianId: undefined });
+    await post({ ...body, technicianId: 'tech-no-absence', windowStart: undefined });
+    db.mockImplementation((table) => chain(table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined));
+    await post({ ...body, technicianId: 'tech-no-absence' });
+    expect(buySpy).not.toHaveBeenCalled();
+  });
+});
+

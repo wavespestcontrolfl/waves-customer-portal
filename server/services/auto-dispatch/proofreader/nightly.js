@@ -9,7 +9,7 @@
  *   allow    the move goes ahead, on the slot the model read and no other;
  *   hold     a quoted statement in the record sets when visits happen and
  *            the new slot breaks it: the visit stays, the audit row says so;
- *   unknown  the visit stays and a person is told (the notice below).
+ *   unknown  the visit stays, the audit row says so, and nobody is asked.
  *
  * The check can only stop a move. It runs in pass 2 only, after every free
  * rule and the per-run cap, so a move that would not happen anyway is never
@@ -20,17 +20,14 @@
  * provider, a malformed answer, a read) moves nothing and the run ends
  * completed_with_errors.
  *
- * THE NOTICE. One per visit and placement (dedupe key below), rung once: a
- * later run that is still unsure about the same visit rings nothing (it
- * rewrites the text when the proposal changed), a notice a person marked
- * done included. It is raised for an "unknown" a
- * person can settle from the record (the model was unsure, or part of the
- * record could not be read). A failed model call, or a record that changed
- * while the model read it, raises nothing: the next run asks again. The lane shares the auto-dispatch ring allowance of 24
- * hours (audit.ringsLeft), soonest date first. A notice is for the placement
- * the visit had at the check (date, arrival time, technician): it is not
- * raised when the visit left that placement before the run's end, and it
- * closes when the visit leaves it or is no longer open.
+ * NO PERSON IS ASKED (owner 2026-10-29: "i dont want to have to approve every
+ * move, this is insane"). Until then an "unknown" a person could settle from
+ * the record (the model was unsure, or part of the record could not be read)
+ * raised one admin notice per visit and placement ("Schedule — check a held
+ * move"). Now such a visit stays where it is booked, like a hold, and the next
+ * run asks again. Every run closes the notices still open from before
+ * (closeNotices). A notice a person marked done before then still holds its
+ * visit on that placement (personHeld).
  *
  * Behind GATE_AUTO_DISPATCH_PROOFREADER (config.proofreaderEnabled).
  */
@@ -49,21 +46,6 @@ const REASON_CODE = {
   person: 'PROOFREADER_PERSON_HELD',
 };
 
-// The "unknown" answers a person can settle by reading the record, with the
-// sentence the notice gives when there is no quote to show.
-const PERSON_SETTLES = {
-  model_unsure: 'A note may limit when this visit can happen.',
-  hold_without_quote: 'A note may limit when this visit can happen.',
-  record_incomplete: 'Part of the customer record could not be read.',
-  record_too_long: 'The customer record is too long to check.',
-};
-
-// The model's own sentence and its quote have no length bound in the answer
-// schema. Each gets its own budget, so the quote and the closing instruction
-// are always whole inside the 2,000-character detail (Codex #6313 r1).
-const REASON_MAX_CHARS = 300;
-const QUOTE_MAX_CHARS = 1000;
-
 // The placement a notice is about, as the database prints it.
 const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'scheduledDate'"
   + " AND s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'"
@@ -72,12 +54,8 @@ const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'schedu
 const OPEN_STATUSES = ['pending', 'confirmed'];
 const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
-// One notice per visit and PLACEMENT: the date, the arrival time and the
-// technician. A
-// notice closed because the placement changed must not swallow an unsure
-// move on the new placement (Codex #6313 r5); on the same placement the key
-// repeats, so a notice a person marked done is not written again.
-const STALE = Symbol('staleNotice');
+// The notices raised before 2026-10-29 were keyed per visit and PLACEMENT:
+// the date, the arrival time and the technician (personHeld reads the key).
 const noticeKey = (id, date, placement) => `${KEY_PREFIX}${id}:${date}:${placement}`;
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
@@ -99,13 +77,13 @@ function noteBroke(state, cause) {
 }
 const causeOf = (answer) => (answer.why === 'model_failed' ? (answer.reason || 'error') : answer.why);
 
-// The run's own tally and the notices it will raise at its end. `deadlineAt`:
+// The run's own tally. `deadlineAt`:
 // no call starts after it (config.proofreaderDeadlineSeconds from the run's
 // start). The 04:10 run holds the writer lock the 04:20 route reorder needs,
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, timedOut: 0, grouped: 0, personHeld: 0, broke: 0, answered: 0, brokeCause: null, noticesFailed: 0, notices: new Map(), settled: new Set(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, timedOut: 0, grouped: 0, personHeld: 0, broke: 0, answered: 0, brokeCause: null,
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -188,18 +166,17 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const planned = await plannedMove(conn, service, best, record);
     const move = proofreader.moveFacts(planned);
     const skip = notAskable(record, state);
-    if (skip) return { answer: skip, move: null, entry: null };
+    if (skip) return { answer: skip };
     // Only a call that goes to the model spends the run's call limit: a
     // record that cannot be read, or one too long to send, asks nobody
     // (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
-    const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    return { answer, move, entry: entry || null, recordPrint: recordPrint(record) };
+    return { answer, recordPrint: recordPrint(record) };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${safeError(err)}`);
-    return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null };
+    return { answer: { verdict: 'unknown', why: 'check_failed' } };
   }
 }
 
@@ -216,13 +193,11 @@ function recordPrint(record) {
 // A model call takes up to two minutes. An allow stands only when the record
 // read again after the answer is the record the model was shown: a text, a
 // call or a note that landed meanwhile makes it "unknown", and the next run
-// reads the new words (Codex #6313 r4). No notice: nobody has judged them yet.
+// reads the new words (Codex #6313 r4). A hold or an unsure answer leaves the
+// visit where it is whatever landed, so only an allow is read again.
 async function recordStillAsRead(answer, record, { service, conn, proofreader }) {
-  // Also before a person is told: a message that settles the question while
-  // the model read makes the notice stale at once (r12). A hold stays a hold.
-  const matters = answer.verdict === 'allow' || (answer.verdict === 'unknown' && PERSON_SETTLES[answer.why]);
-  if (!matters) return answer;
-  const was = answer.verdict === 'allow' ? { model_verdict: 'allow' } : {};
+  if (answer.verdict !== 'allow') return answer;
+  const was = { model_verdict: 'allow' };
   const again = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
   // The second read itself failed: a broken check, not new words (r11). Asked
   // before the compare: a source already unread for another reason can fail
@@ -234,12 +209,12 @@ async function recordStillAsRead(answer, record, { service, conn, proofreader })
 
 const keyFor = (service) => noticeKey(service.id, toDateStr(service.scheduled_date), `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
 
-// The notice tells a person: "If not, mark this done and the visit stays."
-// That decision is kept: while the visit is on the placement the notice is
-// about, a notice a person marked done holds every automatic move of it, and
-// nobody is asked (Codex #6313 r12: a later run could get an allow and make
-// the move the person refused). A notice the system closed (the visit left
-// the placement) carries the resolved title and decides nothing.
+// The notices raised before 2026-10-29 told a person: "If not, mark this done
+// and the visit stays." That decision is kept: while the visit is on the
+// placement the notice is about, a notice a person marked done holds every
+// automatic move of it, and nobody is asked (Codex #6313 r12: a later run
+// could get an allow and make the move the person refused). A notice the
+// system closed carries the resolved title and decides nothing.
 async function personHeld(conn, service, { lock = false } = {}) {
   // The newest row of the key, open or done: with `lock` (the move
   // transaction) the row is locked FOR SHARE whatever its state, so a Done
@@ -268,19 +243,6 @@ async function heldSinceAsked(conn, service) {
     logger.warn(`[auto-dispatch] move proofreader could not re-read the notice of ${service.id}: ${safeError(err)}`);
     return null;
   }
-}
-
-function collectNotice(state, service, best, { answer, move, entry }) {
-  if (!move || !PERSON_SETTLES[answer.why]) return;
-  const date = toDateStr(service.scheduled_date);
-  const key = keyFor(service);
-  if (!date || state.notices.has(key)) return;
-  state.notices.set(key, {
-    key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
-    window_start: textOrNull(service.window_start), technician_id: textOrNull(service.technician_id),
-    to_window_start: textOrNull(best.start_time), to_technician_id: textOrNull(best.technician_id || service.technician_id),
-    quote: answer.quote || null, reason: answer.reason || null, entry: entry ? { channel: entry.channel, from: entry.from, at: entry.at } : null,
-  });
 }
 
 // The stop for a visit nobody is asked about: a grouped visit (isGroupedStop),
@@ -341,22 +303,14 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   if (answer.verdict === 'allow') {
     state.allowed += 1;
-    // The check is sure: an open notice from an earlier unsure night is
-    // obsolete whether the move then lands (its placement changes) or not (a
-    // taken slot, changed preferences): r21.
-    state.settled.add(keyFor(service));
     return { allowed: true, audit: auditOf(answer), recordPrint: asked.recordPrint };
   }
   if (answer.verdict === 'hold') {
     state.held += 1;
-    // The check is sure now: an open notice from an earlier unsure night no
-    // longer needs a person (settleNotices, at the run's end).
-    state.settled.add(keyFor(service));
     return stopped('hold', answer);
   }
   state.unsure += 1;
   if (CHECK_BROKE.has(answer.why)) noteBroke(state, causeOf(answer));
-  collectNotice(state, service, best, asked);
   return stopped('unknown', answer);
 }
 
@@ -432,16 +386,6 @@ const LOCK_NOT_AVAILABLE = '55P03';
 
 const preferencesPrint = (prefs) => JSON.stringify(prefs);
 
-// The run dropped this visit's move for a change during the check: a notice
-// for it describes a proposal nobody holds any more. The one collected this
-// run is discarded, and an open one from an earlier night is closed at the
-// run's end (settleNotices; r23).
-function dropNotice(state, service) {
-  if (!state) return;
-  state.notices.delete(keyFor(service));
-  state.settled.add(keyFor(service));
-}
-
 // apply.js makeMemberGuard, under the unit mover's stop lock and before any
 // write: a visit that was alone when it was checked and has since joined a
 // stop of two or more is not moved (see isGroupedStop). The next run sees
@@ -468,82 +412,21 @@ function approvedSlotTaken(checked, err) {
   return reason ? { reason_code: reason[0], reason_description: reason[1] } : null;
 }
 
-const slotWords = (slot, shortDateET) => `${slot.weekday} ${shortDateET(`${slot.date}T12:00:00Z`)}, ${slot.arrival_window}, technician ${slot.technician}`;
-
-// Cut at a word, with a visible mark that words are missing.
-function bounded(text, max) {
-  const { cutAtWord } = require('../../admin-alert-compose');
-  return text.length > max ? cutAtWord(text, max) : text;
-}
-
-function detailFor(item, { shortDateET, redactedWords }) {
-  const lines = [
-    `Auto-dispatch wanted to move this ${item.move.service} visit from ${slotWords(item.move.from, shortDateET)} to ${slotWords(item.move.to, shortDateET)}.`,
-    'It did not move the visit.',
-  ];
-  if (item.reason) lines.push(`The check said: ${bounded(redactedWords(item.reason), REASON_MAX_CHARS)}`);
-  if (item.quote) {
-    const where = item.entry ? ` (${[item.entry.channel, item.entry.from, item.entry.at].filter(Boolean).join(', ')})` : '';
-    lines.push(`From the customer record${where}: “${bounded(redactedWords(item.quote), QUOTE_MAX_CHARS)}”`);
-  } else {
-    lines.push(PERSON_SETTLES[item.why]);
-  }
-  lines.push('If the move is right, move the visit in dispatch. If not, mark this done and the visit stays.');
-  return lines.join('\n');
-}
-
-// What kind of change was held (prompt.js changeOf names the three kinds).
-function leadFor(move, from, to) {
-  if (move.from.date !== move.to.date) return `Move from ${from} to ${to} held`;
-  return move.from.arrival_window === move.to.arrival_window ? `Technician change on ${from} held` : `New time on ${from} held`;
-}
-
-function whyFor(item, { shortDateET, redactedWords, whyWithQuote }) {
-  const from = shortDateET(`${item.date}T12:00:00Z`);
-  const to = shortDateET(`${item.move.to.date}T12:00:00Z`);
-  const lead = leadFor(item.move, from, to);
-  if (item.quote) return whyWithQuote({ lead: `${lead}; the record says `, quote: redactedWords(item.quote) });
-  return `${lead}: ${PERSON_SETTLES[item.why].replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())}.`;
-}
-
-async function raiseOne(item, { raiseAdminAlert, names, audit, trx }) {
-  return raiseAdminAlert('schedule_conflict', {
-    area: 'Schedule',
-    action: await audit.namedVisitAction(item.customer_id, [(who) => `check a held move of ${who}'s visit`, (who) => `check ${who}'s held move`], 'check a visit move auto-dispatch held'),
-    why: whyFor(item, names),
-    severity: 'needs-you',
-    link: `/admin/dispatch?tab=schedule&date=${item.date}&appointment=${encodeURIComponent(item.id)}`,
-    subject: { type: 'visit', id: item.id },
-    doneWhen: 'visit_moved_or_done',
-    who: 'person',
-  }, {
-    bell: true,
-    dedupeKey: item.key,
-    // A later run that holds a DIFFERENT proposal for the same placement
-    // rewrites the standing notice's text, so a person never judges a
-    // proposal that is no longer the one held (Codex #6313 r13). Quietly for
-    // a standing notice: no ring, no slot, and a person's done stays done.
-    refreshOnDedupe: true,
-    // A notice the SYSTEM closed (the gate went off and on again, the visit
-    // left and came back) is open work again: it rings and reopens.
-    ringOnRefresh: (existing) => !!existing && existing.title === RESOLVED_TITLE,
-    trx,
-    detail: detailFor(item, names),
-    metadata: {
-      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
-      kind: item.why, proposedDate: item.move.to.date, proposedWindowStart: item.to_window_start, proposedTechnicianId: item.to_technician_id,
-    },
-  });
-}
-
-// A notice stays open while its visit is still open on the placement the
-// notice is about. A person who gives the visit a new time or technician on
-// the same date has decided (Codex #6313 r1).
-// With the check turned off nothing holds a move any more, so no notice
-// stays open: a rollback leaves none standing (Codex #6313 r2).
-async function closeResolved(audit, nowDate, enabled) {
+// Run end, in every run, and on the scheduler's no-run path. Before
+// 2026-10-29 an unsure move raised a notice; no run raises one now.
+//   1. A notice, open or done, whose visit left the placement it is about or
+//      is no longer open decides nothing: it is retired (Codex #6313 r1), so a
+//      visit that later comes back to that placement is not held by an old
+//      Done. With the check off nothing holds a move: every notice is retired,
+//      the done ones too, and a rollback leaves none standing (r2).
+//   2. With the check on, the notices still open are closed: nobody is asked,
+//      so nothing waits on a person. A notice a person marked done is left as
+//      it is: it still holds its visit on that placement (personHeld).
+// Never throws; false = the close failed and stale notices may stand
+// (statusAfterNotices).
+async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
   try {
-    await audit.retireResolvedNotices({
+    await require('../audit').retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
         if (enabled) q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
@@ -553,6 +436,20 @@ async function closeResolved(audit, nowDate, enabled) {
       resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
       body: enabled ? 'This visit moved, was done or is no longer on that date.' : 'The move check is off; auto-dispatch no longer holds this move.',
     }, nowDate);
+    if (!enabled) return true;
+    const conn = require('../../../models/db');
+    const { doneColumns } = require('../../notification-service')._private;
+    await conn('notifications')
+      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+      .whereNot('title', RESOLVED_TITLE)
+      .whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${KEY_PREFIX}%`])
+      .update({
+        ...doneColumns({ by: 'auto-dispatch', resolution: 'Auto-dispatch no longer asks a person about a move', at: nowDate, keepExisting: true, conn }),
+        title: RESOLVED_TITLE,
+        body: 'The visit stays where it is booked. Nothing here needs a decision.',
+        detail: null,
+      });
     return true;
   } catch (err) {
     logger.error(`[auto-dispatch] move-check notice close failed: ${safeError(err)}`);
@@ -560,117 +457,10 @@ async function closeResolved(audit, nowDate, enabled) {
   }
 }
 
-// The visit is still open on the placement the check read. Read with a row
-// lock on the transaction that writes the notice (raiseNotices), so a move or
-// a cancel cannot land between this read and that write (r12). A person can move
-// or cancel it between the check and the run's end; that notice would be
-// stale at once and would spend a ring (Codex #6313 r1). Null = the visit
-// could not be read.
-async function stillAsChecked(item, conn) {
-  try {
-    const row = await conn('scheduled_services').where({ id: item.id }).forUpdate().first('status', 'scheduled_date', 'window_start', 'technician_id', 'customer_id');
-    return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
-      && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id
-      // A customer merge (or its undo) can hand the visit to another customer:
-      // the notice names the one the check read (r20).
-      && textOrNull(row.customer_id) === textOrNull(item.customer_id);
-  } catch (err) {
-    logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${safeError(err)}`);
-    return null;
-  }
-}
-
-// Run end, in every run: close the notices that no longer apply; all of them
-// when the check is off (config.proofreaderEnabled). Never throws; false = the
-// close failed and stale notices may stand (statusAfterNotices).
-async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
-  return closeResolved(require('../audit'), nowDate, enabled);
-}
-
-/**
- * Run end, after the needs-a-person lane (a visit in conflict outranks a
- * held move for the shared allowance): raise this run's notices. Returns how
- * many writes rang. Never throws.
- */
-// Close the OPEN notice of each placement whose held proposal no longer
-// stands: the check is now sure about it (a hold on a quoted statement, or
-// an allow), or the run dropped the move for a change during the check.
-// Nobody has to decide (Codex #6313 r20, r21, r23). A
-// notice a person marked done is left alone: it still holds the visit
-// (personHeld). A failed write is counted for the run's status.
-async function settleNotices(state, conn) {
-  if (!state.settled.size) return;
-  try {
-    const { doneColumns } = require('../../notification-service')._private;
-    await conn('notifications')
-      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-      .whereNot('title', RESOLVED_TITLE)
-      .whereNull('done_at')
-      .whereIn(conn.raw("metadata->>'dedupeKey'"), [...state.settled])
-      .update({
-        ...doneColumns({ by: 'auto-dispatch', resolution: 'The held move no longer needs a decision', keepExisting: true, conn }),
-        title: RESOLVED_TITLE,
-        body: 'The held move no longer stands: nothing here needs a decision.',
-        detail: null,
-      });
-  } catch (err) {
-    state.noticesFailed += 1;
-    logger.error(`[auto-dispatch] move-check notice settle failed: ${safeError(err)}`);
-  }
-}
-
-async function raiseNotices(state, { conn = require('../../../models/db') } = {}) {
-  const audit = require('../audit');
-  if (!state) return 0;
-  await settleNotices(state, conn);
-  if (state.notices.size === 0) return 0;
-  let rang = 0;
-  try {
-    const { raiseAdminAlert } = require('../../admin-alert-compose');
-    const names = require('../../admin-alert-names');
-    let left = await audit.ringsLeft();
-    // An open notice of this lane is rewritten without a ring, so it is
-    // written with the allowance spent too (r14): its text must follow the
-    // proposal the run holds now.
-    const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
-    // Soonest date first; an internal test customer's visit takes no slot.
-    for (const item of audit.withinRingBudget([...state.notices.values()], new Set(), Infinity, (row) => row.key)) {
-      // Allowance spent: a new notice waits for the next run, which asks again.
-      if (left <= 0 && !standing.has(item.key)) continue;
-      try {
-        // The re-read and the write share one transaction and the visit's row lock.
-        const written = await conn.transaction(async (trx) => {
-          const asChecked = await stillAsChecked(item, trx);
-          // An unreadable visit (null) raises nothing, and the run reports it:
-          // the visit may still be held with nobody told (Codex #6313 r10).
-          if (asChecked === null) state.noticesFailed += 1;
-          if (!asChecked) return STALE;
-          // Only a new notice rings and spends a slot; a key that exists is left as it is.
-          return raiseOne(item, { raiseAdminAlert, names, audit, trx });
-        });
-        if (written === STALE) continue;
-        // The store answers null when its own write failed (it does not throw).
-        if (!written) state.noticesFailed += 1;
-        if (audit.noticeRang(written)) { left -= 1; rang += 1; }
-      } catch (err) {
-        // A visit held for a person and nobody told: the run reports it
-        // (state.noticesFailed, read by index.js; Codex #6313 r8).
-        state.noticesFailed += 1;
-        logger.error(`[auto-dispatch] move-check notice failed for ${item.id}: ${safeError(err)}`);
-      }
-    }
-  } catch (err) {
-    state.noticesFailed += 1;
-    logger.error(`[auto-dispatch] move-check notices failed: ${safeError(err)}`);
-  }
-  return rang;
-}
-
-// A held visit whose notice could not be written, or a close that failed
-// (stale notices stand; after a rollback, all of them), is not a green run.
-function statusAfterNotices(state, runStatus, closed = true) {
-  const failed = closed === false || (state && state.noticesFailed > 0);
-  return failed && runStatus === 'completed' ? 'completed_with_errors' : runStatus;
+// A close that failed (stale notices stand; after a rollback, all of them)
+// is not a green run.
+function statusAfterNotices(runStatus, closed = true) {
+  return closed === false && runStatus === 'completed' ? 'completed_with_errors' : runStatus;
 }
 
 // For the run's log line.
@@ -679,6 +469,6 @@ function tallyOf(state) {
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertStillApproved, preferencesPrint, dropNotice, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
-  _internals: { whyFor, detailFor, plannedMove },
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertStillApproved, preferencesPrint, approvedSlotTaken, closeNotices, statusAfterNotices, tallyOf,
+  _internals: { plannedMove },
 };

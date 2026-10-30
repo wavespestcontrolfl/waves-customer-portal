@@ -2600,6 +2600,15 @@ const gates = {
   // out. Layered on triageAutoResolve + triageAutoResolveEvidence. Sends
   // customer email — owner-flip only. Ships DARK.
   firstTouchAutoRelease: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE === 'true',
+  // First-touch auto-release for a clearly spelled email: the card carries
+  // NO decoder candidates (one spelling heard), so the one-candidate rule
+  // above never fires. On (and only while GATE_FIRST_TOUCH_AUTO_RELEASE is
+  // on too), a no-candidate email_unverified card with confidence >= 0.9, a
+  // valid release target and no email disagreement qualifies; every other
+  // check (V1/V2/target agreement, digit doubt, MX, exact-address hold, max
+  // age) still applies. Sends customer email — owner-flip only. Ships DARK.
+  // Read at call time in triage-auto-resolve; registered here for the boot log.
+  firstTouchAutoReleaseSpelled: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -9092,6 +9101,17 @@ function acceptedPlanRingOnChangeLive() {
 }
 // GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
 module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
+
+// GATE_CUSTOMER_ALERTS_RING read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-29,
+// "small" E1 of the admin bell rebuild). On, an admin alert declared as a customer contact or as a promise we owe a
+// customer (registry rule `contact`/`promise`, or the same flag in the alert's metadata) rings whatever else the bell
+// policy says, and a customer's failed invoice payment (bill_payment_error) rings beside payment_failed. Off = what
+// rings is today's behavior, byte for byte.
+function customerAlertsRingLive() {
+  return process.env.GATE_CUSTOMER_ALERTS_RING === 'true';
+}
+// GATE_CUSTOMER_ALERTS_RING reader, on its own line so gate PRs never conflict.
+module.exports.customerAlertsRingLive = customerAlertsRingLive;
 
 // GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
 // On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is

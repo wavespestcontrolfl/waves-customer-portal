@@ -258,12 +258,15 @@ async function loadLaneCatalog(database = db) {
 // the stored pin, else a staff-verified pin or the canonical geocode) — an
 // offer made anywhere else would be for a location the commit never uses
 // (Codex #4992 P1). Nothing resolvable, no offers.
-async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes, offer = false }) {
+async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes, offer = false, onLocation = null }) {
   const booking = require('./booking');
   const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
 
   const location = await customerBookingLocation(customer);
   if (!location) return null;
+  // The commit rebuild hands this exact pin to createSelfBooking's
+  // expectedLocation fence, so it is never resolved a third time.
+  if (typeof onLocation === 'function') onLocation(location);
 
   return buildBookingAvailability({
     lat: location.lat,
@@ -569,12 +572,18 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // funnel's signed-offer HMAC for this surface — same model as
     // reschedule-public. createSelfBooking's transactional conflict checks
     // below still own the race.
+    // The pin this rebuild proved route fit at. createSelfBooking re-reads the
+    // customer, so a pin/address change between here and its snapshot would
+    // otherwise be compared with itself; the existing expectedLocation fence
+    // refuses it (LOCATION_CHANGED_RETRY, handled below).
+    let rebuildLocation = null;
     const dayAvailability = await buildAvailabilityForCustomer(customer, {
       rangeFrom: date,
       rangeTo: date,
       config,
       duration: catalog.durationMinutes,
       lanes: [lane],
+      onLocation: (location) => { rebuildLocation = location; },
     });
     const day = dayAvailability?.days?.find((d) => d.date === date);
     const slot = day?.slots?.find((s) => s.start_time === startTime);
@@ -621,6 +630,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         serviceId: catalog.serviceId,
         serviceType: catalog.serviceType,
         durationMinutes: catalog.durationMinutes,
+        // The exact location the availability rebuild above resolved.
+        ...(rebuildLocation ? { expectedLocation: { lat: rebuildLocation.lat, lng: rebuildLocation.lng } } : {}),
         // Clean re-service request storage (migration 20260927100000) — the
         // customer's own words (or null), always stamped from the details
         // box; `pests` is null unless GATE_RESERVICE_PEST_CHIPS is live.

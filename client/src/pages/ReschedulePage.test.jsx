@@ -855,6 +855,31 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByText('plan just updated')).not.toBeInTheDocument();
   });
 
+  it('move notice: a search that meets the reason-only self_serve_notice refusal reloads the page and drops the old times', async () => {
+    let getCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return Promise.resolve(jsonResponse({ error: 'This appointment can no longer be rescheduled online.', reason: 'self_serve_notice' }, 409));
+      }
+      if (!opts.method || opts.method === 'GET') {
+        getCalls += 1;
+        return Promise.resolve(jsonResponse(getCalls === 1
+          ? reschedulablePayload()
+          : { ...reschedulablePayload(), state: 'not_reschedulable', reason: 'self_serve_notice', availability: null }));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on/ })).toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(getCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Choose 1:00 PM on/ })).not.toBeInTheDocument());
+    expect(screen.queryByText('This appointment can no longer be rescheduled online.')).not.toBeInTheDocument();
+  });
+
   it('move limits: a first visit past its online moves shows the text-us card, not an error', async () => {
     stubFetch({ get: jsonResponse({ ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }) });
     renderPage();

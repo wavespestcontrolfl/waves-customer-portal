@@ -183,6 +183,36 @@ describe('raiseAdminAlert', () => {
   });
 });
 
+describe('customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1)', () => {
+  test('contact or promise rides in metadata; absent stays absent', () => {
+    expect(composeAdminAlert(spec({ contact: true })).metadata).toMatchObject({ contact: true });
+    expect(composeAdminAlert(spec({ promise: true })).metadata).toMatchObject({ promise: true });
+    const plain = composeAdminAlert(spec()).metadata;
+    expect(plain).not.toHaveProperty('contact');
+    expect(plain).not.toHaveProperty('promise');
+  });
+
+  test('only true is a declaration, and an alert is never both', () => {
+    expect(violationsOf(spec({ contact: 'yes' }))).toEqual(['contact_invalid']);
+    expect(violationsOf(spec({ promise: false }))).toEqual(['promise_invalid']);
+    expect(violationsOf(spec({ contact: true, promise: true }))).toEqual(['contact_and_promise']);
+  });
+
+  test('outside tests the fallback keeps a valid declaration, so a copy violation never costs a customer alert its ring', async () => {
+    NotificationService.notifyAdmin.mockClear();
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await raiseAdminAlert('lead', spec({ why: 'Please come on 2026-10-04.', promise: true }), {});
+      await raiseAdminAlert('lead', spec({ why: 'Please come on 2026-10-04.', contact: 'yes' }), {});
+    } finally { process.env.NODE_ENV = env; }
+    const [first, second] = NotificationService.notifyAdmin.mock.calls.map((c) => c[3].metadata);
+    expect(first).toMatchObject({ promise: true });
+    expect(second).not.toHaveProperty('contact');
+    expect(second.ruleViolations).toEqual(expect.arrayContaining(['contact_invalid']));
+  });
+});
+
 describe('why is one sentence', () => {
   test.each([
     'The charge failed. Retry it now.',

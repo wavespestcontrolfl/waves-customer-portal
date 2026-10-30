@@ -198,7 +198,12 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // files a card, and never changes a phone by itself. Distinct from caller_id_disclaimed,
 // which means the number is not the caller's own. Older payloads still validate and read
 // as "no such statement". (Cut as 1.25.0 on the branch; main took 1.25.0–1.27.0 first.)
-const SCHEMA_VERSION = '1.28.0';
+// 1.29.0: additive — service_request.billing_choice (optional nullable enum "annual_prepay" |
+// "per_application" in both schemas, never `required`). The billing plan the CALLER chose for a
+// recurring plan, judged over the whole call in the caller's own words and pinned with the
+// caller's quote under /service_request/billing_choice (prompt v32). Staff explaining the options
+// is not a choice. Older payloads still validate and read as "no choice".
+const SCHEMA_VERSION = '1.29.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

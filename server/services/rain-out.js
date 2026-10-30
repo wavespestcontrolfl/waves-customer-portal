@@ -1479,6 +1479,9 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+          // GATE_ROUTE_WARNING_DETAIL: the warning names the stop, window and minutes (no customer
+          // name, so a technician's row reads the same).
+          ...require('./scheduling/route-warning-detail').detailOption(),
           // The pickers' Google road times are staff-only: a technician's
           // check stays on the model. Counted against the admin who asked
           // (picker-road-spend.js).
@@ -2252,7 +2255,7 @@ async function prepareNoteRungSms({ serviceId, service, target, note, reasonCode
   return { ok: true, prebuiltSms };
 }
 
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null, allowSeriesForAssignedTechnician = false }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null, allowSeriesForAssignedTechnician = false, roadSpender = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2560,6 +2563,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // The day options came from the staff arrival check, so the move
             // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
             placeInRoute: true,
+            // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
+            // the series transaction (the dispatch route passes none for a technician).
+            ...(roadSpender ? { roadSpender } : {}),
             sourceSurface: 'quick_move',
             qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
@@ -2624,6 +2630,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           overlapAdvisory: true,
           // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
           placeInRoute: true,
+          ...(roadSpender ? { roadSpender } : {}),
           excludeServiceIds: [job.id],
           qualityDates: rebookerQualityDates,
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_

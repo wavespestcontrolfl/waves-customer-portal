@@ -140,7 +140,9 @@ function conflictSnapshotItem(target, row) {
     conflict_end: hhmm(row.window_end),
     conflict_duration: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
     reason,
-    warning: row.warning || null,
+    // base_warning: the unchanged sentence under GATE_ROUTE_WARNING_DETAIL, whose worded warning carries
+    // clock times that can differ between a review and its apply.
+    warning: row.base_warning || row.warning || null,
     // Target status may change when reviewed moves land pending.
     status: synthetic ? null : (row.status || null),
     service_type: row.service_type || null,
@@ -2048,6 +2050,17 @@ class SmartRebooker {
     const offDayWarnings = new Set();
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
+    // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
+    // runs): an ADMIN caller (`options.roadSpender` = the staff user, set by
+    // the admin routes only) buys the legs the move's check and route number
+    // read, BEFORE the transaction, so no Google call runs under a lock.
+    if ((useArrivalWindows || options.placeInRoute === true) && updates.window_start && options.roadSpender && keptTechId) {
+      await require('./scheduling/save-road-buy').buyRoadsBeforeSave({
+        spender: options.roadSpender, serviceId, changes: updates, date: newDateStr, technicianId: keptTechId,
+        windowStart: updates.window_start, windowEnd: occupancyGateEnd, check: useArrivalWindows,
+        excludeServiceIds: (options.excludeServiceIds || []).map(String),
+      });
+    }
     // The technician on the COMMITTED row (RETURNING off the CAS write).
     let committedTechId = null;
 
@@ -2940,6 +2953,18 @@ class SmartRebooker {
         .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
         .whereNotIn('status', TERMINAL).select('id');
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
+    }
+    // Road times for the ANCHOR's landing hour (GATE_SAVE_ROAD_BUY; unset =
+    // nothing runs; `options.roadSpender` is set by the admin routes only),
+    // bought BEFORE the transaction. The later occurrences keep the cache.
+    if (options.roadSpender && options.clearAnchorWindow !== true
+      && (useArrivalWindows || options.placeInRoute === true)) {
+      await require('./scheduling/save-road-buy').buyRoadsForVisitSave({
+        spender: options.roadSpender, serviceId, check: useArrivalWindows,
+        changes: { scheduled_date: seriesDateStr, ...(win.start ? { window_start: win.start } : {}),
+          ...(win.end ? { window_end: win.end } : {}) },
+        excludeServiceIds: (options.excludeServiceIds || []).map(String),
+      });
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the

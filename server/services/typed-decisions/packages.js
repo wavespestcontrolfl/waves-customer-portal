@@ -28,6 +28,10 @@ const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('p
 // confirmation rules (bare time with no day, missing AM/PM, staff hedges, caller-proposed
 // time) moved into appointment-confirmed-rules.js. Never edit this file either.
 const CALL_JUDGE_V4_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v4-appointment-contract.txt'), 'utf8');
+// call_judge.v5's contract: the same snapshot rule, taken 10-29 after the day/time conflict
+// rule (prompt v32: the slot the caller accepted stands over a later staff-only day or time)
+// joined appointment-confirmed-rules.js. Never edit this file either.
+const CALL_JUDGE_V5_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v5-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -98,6 +102,20 @@ const CALL_JUDGE_V4 = {
   questions: {
     ...CALL_JUDGE.questions,
     appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V4_APPOINTMENT_CONTRACT}`),
+  },
+};
+
+// v5 (10-29): appointment_agreed asks the v4 rules plus the day/time conflict rule (prompt v32),
+// so a booking the caller accepted for one day is not graded as drift when staff's closing line
+// named another. Asked only for an answer the V2 extractor wrote; v4 stays registered for rows
+// answered under it. Only the appointment_agreed wording changes.
+const CALL_JUDGE_V5 = {
+  ...CALL_JUDGE,
+  id: 'call_judge.v5',
+  version: 5,
+  questions: {
+    ...CALL_JUDGE.questions,
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V5_APPOINTMENT_CONTRACT}`),
   },
 };
 
@@ -345,6 +363,7 @@ const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
   [CALL_JUDGE_V4.id]: CALL_JUDGE_V4,
+  [CALL_JUDGE_V5.id]: CALL_JUDGE_V5,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
