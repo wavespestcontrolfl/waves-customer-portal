@@ -1167,7 +1167,6 @@ const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
 
 // A yearly limit is a warning, never a block (owner 2026-10-30): one line per product and place, in the limit's own words (which
 // open with the product's name), above the Complete button. The completion records the application and the office is told.
-const LIMIT_WARNING_TAIL = 'You can still complete. The office gets an alert.';
 function limitWarningsOf(rows) {
   const lines = rows.filter((row) => row.placeRule && row.placeWarning).map((row) => {
     const lead = `${row.name}:`;
@@ -1942,7 +1941,8 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
               row.sodSwap?.reason,
               sodRowNote(newSod, row.productId),
               /\bcelsius\b/i.test(String(row.name || '')) ? ctx.carpetgrassCelsiusWarning : '',
-              limitRowNote(gov, row.productId),
+              // A limit at the row's place is on the footer already (limitWarningsOf): said once.
+              row.placeWarning ? '' : limitRowNote(gov, row.productId),
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
