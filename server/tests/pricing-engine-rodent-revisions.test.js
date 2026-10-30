@@ -947,6 +947,19 @@ describe('rodent package discount sees the V2 exclusion section rows (owner 2026
       expect(estimate.summary.oneTimeTotal).toBe(2230);
     });
 
+    test('fractional credit keeps cents: component total minus savings equals the bundled total and the charged total', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion', { requestedAmount: 100.25 })],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle.componentTotal).toBe(2399.75);
+      expect(bundle.bundledTotal).toBe(2230);
+      expect(bundle.price).toBe(-169.75);
+      expect(bundle.componentTotal + bundle.price).toBeCloseTo(bundle.bundledTotal, 2);
+      expect(estimate.summary.oneTimeTotal).toBe(2230);
+    });
+
     test('free sanitation credit: full package falls back to trapping + exclusion', () => {
       const estimate = generateEstimate(baseInput({
         services: {

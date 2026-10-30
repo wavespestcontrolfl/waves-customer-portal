@@ -431,7 +431,10 @@ function repriceRodentBundleAfterCredits(lineItems) {
     sanitationTier: sanitation?.tier,
   });
   const componentTotal = roundMoney(net(trap) + exclusionNet + net(sanitation));
-  const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
+  // Component nets can carry cents after a fractional credit; applyRodentBundle
+  // rounds savings to whole dollars, so take the savings from its bundled total.
+  const { discounted } = applyRodentBundle(componentTotal, bundle);
+  const savings = Math.max(0, roundMoney(componentTotal - discounted));
   if (!bundle || !(savings > 0)) {
     lineItems.splice(idx, 1);
     return;
