@@ -52,14 +52,59 @@ describe('workspace navigation', () => {
     expect(markUsageSource).not.toHaveBeenCalled();
   });
 
-  it('keeps Estimates current after the page consumes its query, and can return to Pipeline', async () => {
+  it('keeps Estimates current after the page consumes its query, and can return to Pipeline through Sales', async () => {
     render(<Fixture route="/admin/pipeline?tab=estimates" />);
     await waitFor(() => expect(screen.getByTestId('route')).toHaveTextContent(/^\/admin\/pipeline$/));
     expect(screen.getByRole('link', { name: 'Estimates' })).toHaveAttribute('aria-current', 'page');
-    fireEvent.click(screen.getByRole('link', { name: 'Pipeline' }));
-    await waitFor(() => expect(screen.getByRole('link', { name: 'Pipeline' })).toHaveAttribute('aria-current', 'page'));
+    expect(screen.queryByRole('link', { name: 'Pipeline' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Sales' }));
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Sales' })).toHaveAttribute('aria-current', 'page'));
     expect(screen.getByRole('link', { name: 'Estimates' })).not.toHaveAttribute('aria-current');
     expect(markUsageSource).toHaveBeenCalledWith('sidebar');
+  });
+
+  it('lists every page once: a group row opens its main page and lists only the other pages', () => {
+    render(<Fixture route="/admin/customers" />);
+    const customers = screen.getAllByRole('link', { name: 'Customers' });
+    expect(customers).toHaveLength(1);
+    expect(customers[0]).toHaveAttribute('href', '/admin/customers');
+    expect(customers[0]).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Contracts' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Gate codes' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Schedule' }));
+    expect(screen.getAllByRole('link', { name: 'Schedule' })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'Today' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Settings' }));
+    expect(screen.getAllByRole('link', { name: 'Settings' })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'Health' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Billing' }));
+    expect(screen.queryByRole('link', { name: 'Invoices' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Billing' })).toHaveAttribute('href', '/admin/invoices');
+    expect(screen.getByRole('link', { name: 'Recovery' })).toBeVisible();
+  });
+
+  it('closes a group it opened for the page on screen when navigation leaves it, and keeps groups opened by hand', async () => {
+    render(<Fixture route="/admin/customers" />);
+    expect(screen.getByRole('link', { name: 'Contracts' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Operations' }));
+    expect(screen.getByRole('link', { name: 'Inventory' })).toBeVisible();
+    fireEvent.click(screen.getByRole('link', { name: 'Billing' }));
+    await waitFor(() => expect(screen.getByTestId('route')).toHaveTextContent('/admin/invoices'));
+    expect(screen.getByRole('link', { name: 'Recovery' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Contracts' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Inventory' })).toBeVisible();
+    const saved = JSON.parse(localStorage.getItem('waves_admin_navigation:fixture-admin'));
+    expect(saved).toMatchObject({ version: 2, groups: { operations: true } });
+    expect(saved.groups).not.toHaveProperty('customers');
+    expect(saved.groups).not.toHaveProperty('billing');
+  });
+
+  it('drops groups saved before version 2 once and keeps the pins', () => {
+    localStorage.setItem('waves_admin_navigation:fixture-admin', JSON.stringify({ groups: { operations: true, marketing: true }, pins: ['customers'] }));
+    render(<Fixture />);
+    expect(screen.queryByRole('link', { name: 'Inventory' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Newsletter' })).not.toBeInTheDocument();
+    expect(within(screen.getByRole('group', { name: 'Pinned pages' })).getByRole('link', { name: 'Customers' })).toHaveAttribute('href', '/admin/customers');
   });
 
   it('preserves modified links without closing this drawer or attributing a new page here', () => {
