@@ -261,4 +261,34 @@ suite('saved-property operations against isolated Postgres', () => {
     expect(await db('customers').where({ id: customerId }).first('city', 'zip')).toEqual({ city: 'Bradenton', zip: '34212' });
   }, 30000);
 
+
+  test('address gap checks follow the review queue\'s effective pin: a pinned matching primary counts, a customer with no pin stays with the queue', async () => {
+    const service = require('../services/customer-properties');
+    const { addressKey } = require('../services/customer-property-address-keys');
+    const pin = { latitude: 27.3, longitude: -82.5 };
+    const make = async (number, { pinCustomer, pinPrimary, zip, extra = null }) => {
+      const id = crypto.randomUUID();
+      const addr = { address_line1: `${number} Example Grove`, address_line2: null, city: 'Sarasota', state: 'FL', zip };
+      await db('customers').insert({ id, first_name: 'Fixture', last_name: `Gap${id.slice(0, 8)}`, phone: `+15551${String(number).padStart(6, '0')}`,
+        ...addr, ...(pinCustomer ? pin : {}) });
+      const row = (fields, isPrimary, pinned) => ({ id: crypto.randomUUID(), customer_id: id, is_primary: isPrimary, active: true,
+        occupancy_type: 'unknown', ...fields, address_key: addressKey(fields), ...(pinned ? pin : {}) });
+      await db('customer_properties').insert(row(addr, true, pinPrimary));
+      if (extra) await db('customer_properties').insert(row(extra, false, false));
+      return id;
+    };
+    // The profile has no pin of its own; its primary is the same address and pinned, so the queue treats the customer as pinned.
+    const viaPrimary = await make(2101, { pinCustomer: false, pinPrimary: true, zip: null });
+    // No effective pin anywhere: the review queue's.
+    const queued = await make(2102, { pinCustomer: false, pinPrimary: false, zip: null });
+    // Pinned and complete, with an extra saved address that has no pin.
+    const extraNoPin = await make(2103, { pinCustomer: true, pinPrimary: true, zip: '34201',
+      extra: { address_line1: '2104 Example Grove', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' } });
+    const incomplete = await service.customersWithIncompleteAddress(db);
+    const unpinned = await service.customersWithUnpinnedSavedAddress(db);
+    expect(incomplete).toContain(viaPrimary);
+    expect([incomplete.includes(queued), unpinned.includes(queued)]).toEqual([false, false]);
+    expect(unpinned).toContain(extraNoPin);
+    expect(incomplete).not.toContain(extraNoPin);
+  }, 30000);
 });

@@ -5,7 +5,9 @@ const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { sweepMissingPrimaryProperties, customersWithStreetLineHoldingLocality } = require('../services/customer-properties');
+const {
+  sweepMissingPrimaryProperties, customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddress, customersWithIncompleteAddress,
+} = require('../services/customer-properties');
 const logger = require('../services/logger');
 
 // Fake knex: `customers as c` list → candidates; `customers` by id → the
@@ -167,5 +169,62 @@ describe('customersWithStreetLineHoldingLocality (daily lead-to-cash sweep check
       "(c.address_line1 LIKE '%,%' OR c.address_line1 ~* '\\s(fl|florida)\\M')",
       "(p.address_line1 LIKE '%,%' OR p.address_line1 ~* '\\s(fl|florida)\\M')",
     ]);
+  });
+});
+
+describe('address gap checks (daily lead-to-cash sweep)', () => {
+  const PROFILE_PIN = 'c.latitude IS NOT NULL AND c.longitude IS NOT NULL AND c.latitude <> 0 AND c.longitude <> 0';
+  // The review queue's own effective pin: the profile's, or a pinned primary that is the same address.
+  const QUEUE_LEFT_OUT = [
+    ['customer_properties', 'where', 'p.is_primary', false],
+    ['customer_properties', 'orWhereRaw', PROFILE_PIN],
+    ['customer_properties', 'orWhereRaw', require('../services/customer-geocode-review').PRIMARY_HAS_PIN_SQL],
+  ];
+  // Fake knex that records every filter, nested where-callbacks included, and answers per table.
+  function fakeConn(rows) {
+    const calls = [];
+    const conn = (table) => {
+      const name = table.split(' ')[0];
+      const q = {};
+      for (const m of ['whereNull', 'whereNotNull', 'join']) q[m] = (...args) => { calls.push([name, m, ...args]); return q; };
+      for (const m of ['whereRaw', 'orWhereRaw']) q[m] = (sql) => { calls.push([name, m, sql]); return q; };
+      q.where = (arg, value) => {
+        if (typeof arg === 'function') { calls.push([name, 'where(fn)']); arg(q); } else calls.push([name, 'where', arg, value]);
+        return q;
+      };
+      q.orWhere = (arg, value) => {
+        if (typeof arg === 'function') { calls.push([name, 'orWhere(fn)']); arg(q); } else calls.push([name, 'orWhere', arg, value]);
+        return q;
+      };
+      q.select = async () => rows[name] || [];
+      return q;
+    };
+    return { conn, calls };
+  }
+
+  test('unpinned saved addresses: active rows with no pin, leaving an unpinned customer\'s primary to the review queue; one id per customer', async () => {
+    const { conn, calls } = fakeConn({ customer_properties: [{ id: 'c2' }, { id: 'c1' }, { id: 'c2' }] });
+    expect(await customersWithUnpinnedSavedAddress(conn)).toEqual(['c1', 'c2']);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['customer_properties', 'whereNull', 'c.deleted_at'],
+      ['customer_properties', 'where', 'p.active', true],
+      ['customer_properties', 'whereRaw', '(p.latitude IS NULL OR p.longitude IS NULL OR p.latitude = 0 OR p.longitude = 0)'],
+      ...QUEUE_LEFT_OUT,
+    ]));
+  });
+
+  test('incomplete addresses: a pinned profile or a saved address with a street but no city, state or ZIP; one id per customer', async () => {
+    const { conn, calls } = fakeConn({ customers: [{ id: 'c3' }, { id: 'c1' }], customer_properties: [{ id: 'c1' }, { id: 'c2' }] });
+    expect(await customersWithIncompleteAddress(conn)).toEqual(['c1', 'c2', 'c3']);
+    const raws = calls.filter((c) => c[1] === 'whereRaw').map((c) => `${c[0]}: ${c[2]}`);
+    expect(raws).toEqual([
+      `customers: ${PROFILE_PIN}`,
+      "customers: btrim(coalesce(c.address_line1, '')) <> ''",
+      "customers: (btrim(coalesce(c.city, '')) = '' OR btrim(coalesce(c.state, '')) = '' OR btrim(coalesce(c.zip, '')) = '')",
+      "customer_properties: btrim(coalesce(p.address_line1, '')) <> ''",
+      "customer_properties: (btrim(coalesce(p.city, '')) = '' OR btrim(coalesce(p.state, '')) = '' OR btrim(coalesce(p.zip, '')) = '')",
+    ]);
+    // A saved address counts unless it is the primary of a customer with no effective pin (the review queue's).
+    expect(calls).toEqual(expect.arrayContaining(QUEUE_LEFT_OUT));
   });
 });
