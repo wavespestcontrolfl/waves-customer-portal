@@ -135,15 +135,23 @@ export function useDispatchBoard() {
   // The socket is the only live feed: while it is down (or a re-read after
   // it came back has not landed) a broadcast may have been missed, so the
   // board can be out of date. See requestResync.
+  // socketUp is the LABEL state (true until a disconnect or failed attempt, so a
+  // normal first load never says "Reconnecting"). stale starts true when a
+  // socket will be opened: the mount read can finish before the socket
+  // subscribes, so only a read that starts after a connect proves the board
+  // current (first connect included).
   const [socketUp, setSocketUp] = useState(true);
-  const [stale, setStale] = useState(false);
+  const [stale, setStale] = useState(() => {
+    try { return Boolean(localStorage.getItem('waves_admin_token')); } catch { return false; }
+  });
   // refreshSeqRef value when the board was marked possibly-out-of-date; only
   // a read that STARTED after that clears it.
   const staleSinceSeqRef = useRef(0);
   // Mirrors socketUp for loadBoard: a read STARTED while the socket was down
   // can never clear the stale flag, because broadcasts after that read are
   // not guaranteed to reach this tab.
-  const socketUpRef = useRef(true);
+  // False until the first connect, so the mount read never clears stale.
+  const socketUpRef = useRef(false);
 
   // Track the latest techsMap in a ref so the socket handler closure
   // always sees current state without re-subscribing on every render.
@@ -465,12 +473,12 @@ export function useDispatchBoard() {
 
     socket.on('dispatch:tech_absence', handleTechAbsence);
 
-    // Connection state. 'connect' also fires on the FIRST connect, which the
-    // mount hydration already covers, so only a connect that follows a
-    // disconnect / failed attempt re-reads the board.
-    let needsResync = false;
+    // Connection state. EVERY successful connect, the first included, marks
+    // the board maybe-stale and requests the debounced, sequenced re-read: the
+    // mount read can finish before this subscription is live, and a change in
+    // between is otherwise never delivered. Live is reported only after a read
+    // that started after the connect succeeds.
     function handleDisconnect() {
-      needsResync = true;
       socketUpRef.current = false;
       setSocketUp(false);
       markMaybeStale();
@@ -478,13 +486,8 @@ export function useDispatchBoard() {
     function handleConnect() {
       socketUpRef.current = true;
       setSocketUp(true);
-      if (needsResync) {
-        needsResync = false;
-        // Only a read that starts after THIS connect proves the board is
-        // current again; one begun earlier (even a successful one) does not.
-        markMaybeStale();
-        requestResync();
-      }
+      markMaybeStale();
+      requestResync();
     }
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);

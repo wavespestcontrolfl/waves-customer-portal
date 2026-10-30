@@ -34,7 +34,8 @@ afterEach(() => {
   localStorage.clear();
 });
 
-async function loaded() {
+// Mount read only: the socket has not connected yet.
+async function mounted() {
   const hook = renderHook(() => useDispatchBoard());
   await waitFor(() => expect(hook.result.current.loading).toBe(false));
   expect(hook.result.current.jobs[0].technician_id).toBe('t1');
@@ -46,6 +47,18 @@ async function settleDebounce() {
   await act(async () => { await vi.advanceTimersByTimeAsync(RESYNC_DEBOUNCE_MS + 50); });
 }
 
+// A settled board: mount read plus the first-connect read are done, status
+// live, fake timers on, and the fetch counter reset to zero.
+async function loaded() {
+  const hook = await mounted();
+  vi.useFakeTimers();
+  act(() => { socketHandlers.connect(); });
+  await settleDebounce();
+  expect(hook.result.current.boardStatus).toBe('live');
+  fetch.mockClear();
+  return hook;
+}
+
 describe('board recovery after a missed broadcast', () => {
   it('re-reads once after the socket reconnects and shows the new assignment', async () => {
     const { result } = await loaded();
@@ -55,17 +68,41 @@ describe('board recovery after a missed broadcast', () => {
     server = board('t2'); // dispatch reassigned while this tab was offline
     act(() => { socketHandlers.connect(); });
     await settleDebounce();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.current.jobs[0].technician_id).toBe('t2');
+    expect(result.current.boardStatus).toBe('live');
+  });
+
+  it('reads after the FIRST connect and is live only once that read lands', async () => {
+    const { result } = await mounted();
+    // Normal first load: no "Reconnecting" label, but not trusted as live yet.
+    expect(result.current.boardStatus).toBe('stale');
+    vi.useFakeTimers();
+    server = board('t2'); // changed between the mount snapshot and the connect
+    act(() => { socketHandlers.connect(); });
+    expect(result.current.boardStatus).toBe('stale');
+    await settleDebounce();
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(result.current.jobs[0].technician_id).toBe('t2');
     expect(result.current.boardStatus).toBe('live');
   });
 
-  it('does not re-read on the first connect (mount hydration covers it)', async () => {
-    await loaded();
+  it('a read before the first connect (focus) never makes the board live', async () => {
+    const { result } = await mounted();
     vi.useFakeTimers();
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await settleDebounce();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.boardStatus).toBe('stale');
+  });
+
+  it('stays stale when the first-connect read fails', async () => {
+    const { result } = await mounted();
+    vi.useFakeTimers();
+    fetch.mockResolvedValueOnce({ ok: false, status: 503 });
     act(() => { socketHandlers.connect(); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.current.boardStatus).toBe('stale');
   });
 
   it('re-reads after a failed first connect once the socket comes up', async () => {
@@ -75,7 +112,7 @@ describe('board recovery after a missed broadcast', () => {
     server = board('t2');
     act(() => { socketHandlers.connect(); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('re-reads once on window focus', async () => {
@@ -84,7 +121,7 @@ describe('board recovery after a missed broadcast', () => {
     server = board('t2');
     act(() => { window.dispatchEvent(new Event('focus')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(result.current.jobs[0].technician_id).toBe('t2');
   });
 
@@ -95,11 +132,11 @@ describe('board recovery after a missed broadcast', () => {
     visibility.mockReturnValue('hidden');
     act(() => { document.dispatchEvent(new Event('visibilitychange')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(0);
     visibility.mockReturnValue('visible');
     act(() => { document.dispatchEvent(new Event('visibilitychange')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
     visibility.mockRestore();
   });
 
@@ -111,7 +148,7 @@ describe('board recovery after a missed broadcast', () => {
     server = board('t2');
     act(() => { window.dispatchEvent(new Event('online')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(result.current.jobs[0].technician_id).toBe('t2');
     expect(result.current.boardStatus).toBe('live');
   });
@@ -127,7 +164,7 @@ describe('board recovery after a missed broadcast', () => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('never overlaps resync reads: a signal during a read queues exactly one more', async () => {
@@ -138,14 +175,14 @@ describe('board recovery after a missed broadcast', () => {
     fetch.mockImplementationOnce(async () => ({ ok: true, json: () => gate.then(() => board('t2')) }));
     act(() => { window.dispatchEvent(new Event('focus')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2); // in flight
+    expect(fetch).toHaveBeenCalledTimes(1); // in flight
     act(() => { window.dispatchEvent(new Event('online')); });
     act(() => { window.dispatchEvent(new Event('focus')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2); // still waiting on the first
+    expect(fetch).toHaveBeenCalledTimes(1); // still waiting on the first
     server = board('t3');
     await act(async () => { release(); await vi.advanceTimersByTimeAsync(10); });
-    expect(fetch).toHaveBeenCalledTimes(3); // one queued re-read, no more
+    expect(fetch).toHaveBeenCalledTimes(2); // one queued re-read, no more
   });
 
   it('keeps the old roster and the stale flag when the re-read fails, then clears on success', async () => {
@@ -173,7 +210,7 @@ describe('board recovery after a missed broadcast', () => {
     await settleDebounce();
     window.dispatchEvent(new Event('focus'));
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(0);
   });
 
   it('a focus read while the socket is down never clears the stale state; reconnect needs its own read', async () => {
@@ -183,7 +220,7 @@ describe('board recovery after a missed broadcast', () => {
     server = board('t2');
     act(() => { window.dispatchEvent(new Event('focus')); });
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(result.current.jobs[0].technician_id).toBe('t2'); // data applied
     expect(result.current.boardStatus).toBe('reconnecting'); // but not trusted
 
@@ -192,7 +229,7 @@ describe('board recovery after a missed broadcast', () => {
     act(() => { socketHandlers.connect(); });
     expect(result.current.boardStatus).toBe('stale');
     await settleDebounce();
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(result.current.boardStatus).toBe('stale');
 
     // A later successful read that started with the socket up clears it.
