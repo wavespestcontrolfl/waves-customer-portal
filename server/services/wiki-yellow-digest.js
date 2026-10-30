@@ -21,6 +21,9 @@ const { runExclusive } = require('../utils/cron-lock');
 // Dark-ship gate: inert until the owner flips it. When off we still compute
 // and shadow-log what WOULD have been sent, so the flip is a known quantity.
 const digestEnabled = () => process.env.GATE_WIKI_YELLOW_DIGEST === 'true';
+// GATE_LAWN_WIKI_PAUSE (owner 2026-10-30): the lawn pages are paused, so their
+// review digest stops. A partial feature-gates mock without the reader reads as off.
+const lawnWikiPaused = () => require('../config/feature-gates').lawnWikiPauseLive?.() === true;
 // Recipient is deliberately independent of SENDGRID_FROM_EMAIL: the sender
 // identity is commonly a newsletter/automations mailbox, and falling back to
 // it would land the review queue in the wrong inbox. Owner address or an
@@ -143,6 +146,12 @@ async function sendYellowDigestIfDue(opts = {}) {
 }
 
 async function sendYellowDigestLocked(opts = {}) {
+  // Paused: no digest, and the open bell is retired (it asks for reviews of
+  // pages that are paused). Nothing is stamped, so a resume sends at once.
+  if (lawnWikiPaused()) {
+    await retireIfClean('wiki-yellow-digest', { resolvedBy: 'wiki-yellow-digest:paused' });
+    return { skipped: 'paused' };
+  }
   // The six-day marker suppresses ANOTHER digest, not the clean-state check:
   // a queue that empties during those days must still retire the standing
   // bell (codex P1 on #4397), so the queue is evaluated before the guard.
