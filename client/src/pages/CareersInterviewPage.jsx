@@ -293,7 +293,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
       // No response: the booking may still have committed (recruiting audit
       // R5). Re-read the link before saying anything failed. Retrying the
       // same time is safe — the server answers it as the existing booking.
-      const seq = attemptSeq.current;
+      const seq = ++attemptSeq.current;
       try {
         const res = await fetch(`${API_BASE}/public/careers/interview/${encodeURIComponent(token)}`);
         if (seq !== attemptSeq.current) return;

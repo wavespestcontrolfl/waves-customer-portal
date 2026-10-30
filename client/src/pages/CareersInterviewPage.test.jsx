@@ -181,6 +181,23 @@ describe('CareersInterviewPage — a lost booking response is re-read, not repor
     expect(screen.queryByText(/Could not book that time/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm interview time' })).toBeEnabled();
   });
+
+  it('changing time: a re-read that still shows the OLD booking is not taken as the new time', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(bookedPayload()))        // booked at 4:30 PM
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))     // change to 5:00 PM, response lost
+      .mockResolvedValueOnce(jsonResponse(bookedPayload()));       // re-read: still 4:30 PM
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Change time' }));
+    fireEvent.click(screen.getByRole('button', { name: '5:00 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+
+    expect(await screen.findByText(/could not confirm that time/i)).toBeInTheDocument();
+    expect(screen.queryByText(/You’re booked|You're booked/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm interview time' })).toBeInTheDocument();
+  });
 });
 
 describe('CareersInterviewPage — book returns 404 (application left the Interview stage)', () => {

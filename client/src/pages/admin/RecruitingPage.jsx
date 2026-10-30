@@ -619,7 +619,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       // reviews it before deciding again (recruiting audit R1).
       if (err.status === 409 && err.body?.application) {
         onApplicationUpdated(err.body.application);
-        load(tab);
+        load(tab); // not awaited: nothing is sending, so no "Sending…" while the list reloads
       }
       setStageError(err.message);
     } finally {

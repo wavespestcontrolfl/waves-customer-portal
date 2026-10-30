@@ -4,7 +4,8 @@
  *   GET   /                  list (status/role filters, newest first, ai fields)
  *   GET   /:id                full application detail
  *   GET   /:id/stage-preview  rendered notify preview for a candidate status
- *   PATCH /:id/status         owner status transition + optional notify/resend
+ *   PATCH /:id/status         owner status transition + optional notify/resend;
+ *                             optional expected_status refuses a stale decision (409)
  *
  * Owner-only (requireAdmin): applications hold applicant PII and hiring
  * decisions. Every real transition appends to status_history — the AI
