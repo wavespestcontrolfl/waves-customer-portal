@@ -164,9 +164,14 @@ function derivePrepayCoverage({ estimate, rows, hasAddons = false }) {
   };
 }
 
-async function liveVisitsOfCall(conn, callLogId, customerId) {
+// The visits BOOKED from this call: created at or after the call began. A visit that existed before the call
+// and was only attached to it (a reschedule's make-up move, a reconfirmed booking) is not one: it stays in the
+// existing-plan check, so a live plan is never mistaken for a new booking (Codex #7050 r2; the same rule
+// no-show-detector.js applies to an attached source_call_log_id).
+async function liveVisitsOfCall(conn, callLogId, customerId, callStartedAt) {
   return conn('scheduled_services')
     .where({ source_call_log_id: callLogId, customer_id: customerId })
+    .where('created_at', '>=', callStartedAt)
     .whereIn('status', LIVE_VISIT_STATUSES)
     .orderBy([{ column: 'scheduled_date' }, { column: 'window_start' }, { column: 'id' }])
     .select('*');
@@ -208,7 +213,7 @@ async function termOverlap(conn, customerId, termStart) {
 // valid extraction of a real two-party call with billing_choice annual_prepay. A reprocess that re-read the plan
 // (per application, none) or failed the extraction makes the card obsolete ('choice_changed', moot); a pass
 // still running is only a wait ('call_reprocessing'), so the card stays.
-const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+const CALL_CHOICE_COLUMNS = ['id', 'customer_id', 'created_at', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 function choiceStateOf(call) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   if (!call) return 'choice_changed';
@@ -216,9 +221,6 @@ function choiceStateOf(call) {
   const extraction = call.v2_extraction_status === 'valid' ? parseExtraction(call.ai_extraction_enriched) : null;
   const still = !!extraction && isRealConversation(call, extraction) && billingChoiceOf(extraction) === 'annual_prepay';
   return still ? 'ok' : 'choice_changed';
-}
-async function callChoiceState(conn, callLogId) {
-  return choiceStateOf(await conn('call_log').where({ id: callLogId }).first(CALL_CHOICE_COLUMNS));
 }
 
 // The accept's last step (its beforeCommit), inside its transaction: lock the call row, then the booked visits
@@ -246,9 +248,10 @@ function lastStepInAccept({ callLogId, customerId, bookedRows }) {
 
 async function evaluateCallPrepay({ callLogId, customerId, estimateId = null, conn = db, now = new Date() }) {
   if (!customerId) return refusal('no_customer');
-  const choice = await callChoiceState(conn, callLogId);
+  const call = await conn('call_log').where({ id: callLogId }).first(CALL_CHOICE_COLUMNS);
+  const choice = choiceStateOf(call);
   if (choice !== 'ok') return refusal(choice);
-  const rows = await liveVisitsOfCall(conn, callLogId, customerId);
+  const rows = await liveVisitsOfCall(conn, callLogId, customerId, call.created_at);
   if (!rows.length) return refusal('no_booked_visit');
   let estimate;
   if (estimateId) {

@@ -175,6 +175,24 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect(await runCallPrepayChoiceSweep()).toMatchObject({ filed: 0 });
     });
 
+    test('a visit that predates the call and was only attached to it is not a new booking: the existing plan blocks the card (Codex #7050 r2)', async () => {
+      const longAgo = new Date(Date.now() - 30 * 86400000);
+      // The call attached to the customer's existing visit only: nothing was booked from it.
+      const a = await booked();
+      await trx('scheduled_services').where({ id: a.visitId }).update({ created_at: longAgo });
+      expect(await evaluateCallPrepay({ callLogId: a.callLogId, customerId: a.customerId })).toMatchObject({ ok: false, reason: 'no_booked_visit' });
+      // The call booked a new visit AND was attached to the customer's existing recurring visit: the existing one
+      // stays in the plan check, so the account is not switched to annual prepay.
+      const b = await booked();
+      await visit(b.customerId, b.callLogId, { created_at: longAgo, scheduled_date: inDays(30), is_recurring: true, recurring_pattern: 'quarterly' });
+      const out = await evaluateCallPrepay({ callLogId: b.callLogId, customerId: b.customerId });
+      expect(out.ok).toBe(false);
+      expect(['existing_customer', 'live_plan_unknown']).toContain(out.reason);
+      await runCallPrepayChoiceSweep();
+      expect(await cardsFor(a.callLogId).first()).toBeUndefined();
+      expect(await cardsFor(b.callLogId).first()).toBeUndefined();
+    });
+
     test('a termite estimate files no card: its accept can send the termite notice and agreement (Codex #7050 r1)', async () => {
       const { customerId, est, callLogId } = await booked();
       await trx('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify(quotedData({
