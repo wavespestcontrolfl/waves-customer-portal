@@ -379,6 +379,67 @@ function serviceCreditLinePrice(item = {}) {
   return Number.isFinite(amount) ? roundMoney(amount) : 0;
 }
 
+// ── Rodent package (bundle) helpers ─────────────────────────────
+// The V2 exclusion pricer emits one 'rodent_exclusion' row per section
+// (mesh points, linear mesh, bird boxes, job-minimum / urgency / inspect
+// deltas); the legacy pricer emits one 'exclusion' row. Every priced row
+// counts toward the package. A quote-required or non-finite row neither
+// qualifies the package nor adds dollars.
+function isPricedRodentExclusionRow(item) {
+  return (item.service === 'rodent_exclusion' || item.service === 'exclusion')
+    && !item.quoteRequired && Number.isFinite(item.price);
+}
+
+function rodentBundleComponents(lineItems) {
+  return {
+    trap: lineItems.find((i) => i.service === 'rodent_trapping'),
+    exclusion: lineItems.filter(isPricedRodentExclusionRow),
+    sanitation: lineItems.find((i) => i.service === 'rodent_sanitation'),
+  };
+}
+
+function buildRodentBundleLine(bundle, componentTotal, discounted, savings) {
+  return {
+    service: 'rodent_bundle_discount',
+    name: `Rodent ${bundle.kind} bundle`,
+    price: -savings,
+    bundleKind: bundle.kind,
+    discount: bundle.discount,
+    floor: bundle.floor,
+    bundledTotal: discounted,
+    componentTotal,
+    detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
+  };
+}
+
+// A staff service credit runs after the package line is priced, so a credit
+// on a package component would stack with the package. When a credit touched
+// a component, re-select the package from what the components still cost:
+// a component credited to $0 no longer counts, and no package means no line.
+function repriceRodentBundleAfterCredits(lineItems) {
+  const idx = lineItems.findIndex((i) => i.service === 'rodent_bundle_discount');
+  if (idx < 0) return;
+  const { trap, exclusion, sanitation } = rodentBundleComponents(lineItems);
+  const components = [trap, ...exclusion, sanitation].filter(Boolean);
+  if (!components.some((i) => i.priceBeforeServiceSpecificDiscount !== undefined)) return;
+  const net = (item) => Math.max(0, serviceCreditLinePrice({ price: item?.priceAfterDiscount ?? item?.price }));
+  const exclusionNet = exclusion.reduce((sum, i) => sum + net(i), 0);
+  const bundle = selectRodentBundle({
+    hasTrapping: net(trap) > 0,
+    hasExclusion: exclusionNet > 0,
+    hasSanitation: net(sanitation) > 0,
+    sanitationTier: sanitation?.tier,
+  });
+  const componentTotal = roundMoney(net(trap) + exclusionNet + net(sanitation));
+  const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
+  if (!bundle || !(savings > 0)) {
+    lineItems.splice(idx, 1);
+    return;
+  }
+  const { discount: _rate, ...fields } = buildRodentBundleLine(bundle, componentTotal, discounted, savings);
+  Object.assign(lineItems[idx], fields, { priceBeforeDiscount: -savings, priceAfterDiscount: -savings });
+}
+
 function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = []) {
   const credits = Array.isArray(serviceSpecificDiscounts)
     ? serviceSpecificDiscounts.filter(Boolean)
@@ -2161,16 +2222,8 @@ function generateEstimate(input) {
   // Adjusts the trap/exclusion/sanitation line item prices in-place to reflect
   // the bundled total, with savings tracked in the bundle line item.
   if (!propertyIsCommercial) {
-    const trapItem = lineItems.find(i => i.service === 'rodent_trapping');
-    // The V2 exclusion pricer emits one 'rodent_exclusion' row per section
-    // (mesh points, linear mesh, bird boxes, job-minimum / urgency / inspect
-    // deltas); the legacy pricer emits one 'exclusion' row. Every priced row
-    // counts toward the bundle. A quote-required or non-finite row neither
-    // qualifies the bundle nor adds dollars.
-    const exclRows = lineItems.filter(i => (i.service === 'rodent_exclusion' || i.service === 'exclusion')
-      && !i.quoteRequired && Number.isFinite(i.price));
+    const { trap: trapItem, exclusion: exclRows, sanitation: sanItem } = rodentBundleComponents(lineItems);
     const exclTotal = exclRows.reduce((sum, i) => sum + i.price, 0);
-    const sanItem = lineItems.find(i => i.service === 'rodent_sanitation');
     const bundle = selectRodentBundle({
       hasTrapping: !!trapItem,
       hasExclusion: exclRows.length > 0,
@@ -2180,19 +2233,7 @@ function generateEstimate(input) {
     if (bundle) {
       const componentTotal = (trapItem?.price || 0) + exclTotal + (sanItem?.price || 0);
       const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
-      if (savings > 0) {
-        lineItems.push({
-          service: 'rodent_bundle_discount',
-          name: `Rodent ${bundle.kind} bundle`,
-          price: -savings,
-          bundleKind: bundle.kind,
-          discount: bundle.discount,
-          floor: bundle.floor,
-          bundledTotal: discounted,
-          componentTotal,
-          detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
-        });
-      }
+      if (savings > 0) lineItems.push(buildRodentBundleLine(bundle, componentTotal, discounted, savings));
     }
   }
 
@@ -2589,13 +2630,14 @@ function generateEstimate(input) {
   }
 
   // ── 6. Calculate totals ────────────────────────────────────
-  const recurringItems = lineItems.filter(i => i.annual);
-  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
-  const specialtyItems = lineItems.filter(i => i.total && !i.annual);
   const serviceSpecificDiscounts = applyServiceSpecificCredits(
     lineItems,
     input.serviceSpecificDiscounts || input.serviceSpecificCredits || [],
   );
+  repriceRodentBundleAfterCredits(lineItems);
+  const recurringItems = lineItems.filter(i => i.annual);
+  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
+  const specialtyItems = lineItems.filter(i => i.total && !i.annual);
 
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
   const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);

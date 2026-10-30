@@ -894,6 +894,88 @@ describe('rodent package discount sees the V2 exclusion section rows (owner 2026
     expect(estimate.summary.oneTimeTotal).toBe(2230);
   });
 
+  describe('staff service credits on a package component re-select the package', () => {
+    const credit = (service, extra = {}) => ({
+      source: 'catalog_preset',
+      presetKey: `credit_${service}`,
+      catalogName: `Credit ${service}`,
+      catalogCategory: 'service_specific_credit',
+      discountType: extra.requestedAmount ? 'fixed' : 'free_service',
+      service,
+      label: `Credit ${service}`,
+      ...extra,
+    });
+
+    test('no credit: the package numbers do not change', () => {
+      const trapEx = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      }));
+      expect(trapEx.summary.oneTimeTotal).toBe(2330);
+      const full = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+      }));
+      expect(full.summary.oneTimeTotal).toBe(2610);
+    });
+
+    test('free exclusion credit: no package line, one-time total is the trapping price', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion')],
+      }));
+      expect(bundleOf(estimate)).toHaveLength(0);
+      expect(estimate.summary.oneTimeTotal).toBe(350);
+    });
+
+    test('partial $100 exclusion credit: package re-priced on $2,400, total $2,230', () => {
+      const estimate = generateEstimate(baseInput({
+        services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+        serviceSpecificDiscounts: [credit('rodent_exclusion', { requestedAmount: 100 })],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundle).toMatchObject({
+        bundleKind: 'trapExclusion',
+        componentTotal: 2400,
+        bundledTotal: 2230,
+        price: -170,
+        priceBeforeDiscount: -170,
+        priceAfterDiscount: -170,
+      });
+      expect(estimate.summary.oneTimeTotal).toBe(2230);
+    });
+
+    test('free sanitation credit: full package falls back to trapping + exclusion', () => {
+      const estimate = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+        serviceSpecificDiscounts: [credit('rodent_sanitation')],
+      }));
+      const [bundle] = bundleOf(estimate);
+      expect(bundleOf(estimate)).toHaveLength(1);
+      expect(bundle).toMatchObject({ bundleKind: 'trapExclusion', componentTotal: 2500, bundledTotal: 2330 });
+      expect(estimate.summary.oneTimeTotal).toBe(2330);
+    });
+
+    test('free trapping credit on the full package falls back to exclusion + sanitation: no package', () => {
+      const estimate = generateEstimate(baseInput({
+        services: {
+          rodentTrapping: { plan: 'standard' },
+          exclusion: v2Exclusion,
+          sanitation: { affectedSqFt: 300, tier: 'light' },
+        },
+        serviceSpecificDiscounts: [credit('rodent_trapping')],
+      }));
+      expect(bundleOf(estimate)).toHaveLength(0);
+      expect(estimate.summary.oneTimeTotal).toBe(2545);
+    });
+  });
+
   test('commercial property gets no rodent package discount', () => {
     const commercial = generateEstimate(baseInput({
       propertyType: 'commercial',
