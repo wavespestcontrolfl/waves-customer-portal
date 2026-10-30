@@ -192,6 +192,10 @@ function flatView(extraction) {
     // row). The no-price assessment booking (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING) needs exactly
     // false, so replay variance watches it.
     price_discussed: typeof svc.price_discussed === 'boolean' ? svc.price_discussed : null,
+    // The billing plan the CALLER chose for a recurring plan (schema 1.29.0): null when absent
+    // (every older row) or not one of the two plans. A claim only; the pinned caller quote decides.
+    billing_choice: svc.billing_choice === 'annual_prepay' || svc.billing_choice === 'per_application'
+      ? svc.billing_choice : null,
     staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
     selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,

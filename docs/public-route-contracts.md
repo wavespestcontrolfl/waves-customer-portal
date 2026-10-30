@@ -7103,6 +7103,18 @@ request's own capture family, and a broken/canceled chain walks the
 generation salt as before. Treat the token, the verification
 gates, the selection/mint transaction, the replacement lock, and the
 claim mechanics as security-critical.
+**One-time visits only (owner ruling 2026-10-29):** the late-cancel /
+no-show fee never applies to a recurring-lineage visit
+(`isRecurringLineageVisit`: `is_recurring`, `recurring_parent_id` or
+`recurring_pattern`). For such a visit the GET payload carries
+`cancelFeeNote: null` in every state, including `secured` (frozen row
+terms agreed before the ruling are not repeated), and the ready state
+omits `stickyDisclosureVersion`; the render stamps the row as nothing
+disclosed (`no_show_fee_amount` NULL, `cancel_window_hours` 0), and the
+invite SMS and email omit the fee clause. The fee rail refuses the visit
+(`recurring_visit`, fail-closed on a lookup error), including requests
+that agreed to fee terms before the ruling, and re-checks the lineage on
+the locked visit row immediately before Stripe submission.
 **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
 `feature-gates.js` money gates):** the /secure page RENDER stamps the
 disclosed terms onto the pending request row (`no_show_fee_amount` /

@@ -54,7 +54,6 @@ jest.mock('../services/appointment-card-request', () => ({
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
   dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
-  cancelFeeLine: jest.fn(() => ''),
 }));
 jest.mock('../services/appointment-link', () => ({ buildAppointmentLink: jest.fn() }));
 jest.mock('../services/prep-guide-sender', () => ({
