@@ -53,9 +53,14 @@ function deadDomainQuestion(domain) {
 // SendGrid's own wording for a domain with no mail server ("unable to get mx
 // info: ..."), plus the common resolver phrasings receiving relays return.
 const NO_MAIL_SERVER_REASON = /unable to get mx info|\bno mx record|\bnxdomain\b|host or domain name not found|domain (?:name )?not found|no such domain/i;
+// The same lookups also fail for a moment (a resolver timeout, SERVFAIL,
+// "Host not found, try again"): those say nothing about the domain and stay on
+// the sender-retry rail.
+const TRANSIENT_DNS_REASON = /try again|temporar|timed? ?out|timeout|servfail|server misbehaving|i\/o|connection refused|network is unreachable|no route to host/i;
 
 function isNoMailServerReason(text) {
-  return NO_MAIL_SERVER_REASON.test(String(text || ''));
+  const reason = String(text || '');
+  return NO_MAIL_SERVER_REASON.test(reason) && !TRANSIENT_DNS_REASON.test(reason);
 }
 
 module.exports = {

@@ -80,6 +80,10 @@ describe('isNoMailServerReason', () => {
     ['DNS lookup failed: NXDOMAIN', true],
     ['550 5.1.1 The email account that you tried to reach does not exist', false],
     ['554 5.7.1 Service unavailable; client host blocked using a DNS block list', false],
+    ['unable to get mx info: lookup example.net on 10.0.0.2:53: read udp 10.0.0.1:5353->10.0.0.2:53: i/o timeout', false],
+    ['unable to get mx info: lookup example.net: server misbehaving', false],
+    ['DNS lookup failed: SERVFAIL', false],
+    ['550 5.1.2 Host or domain name not found. Name service error for name=example.net type=MX: Host not found, try again', false],
     ['', false],
   ])('%s', (reason, want) => {
     expect(isNoMailServerReason(reason)).toBe(want);
