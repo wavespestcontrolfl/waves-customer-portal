@@ -2036,6 +2036,18 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
       expect(quiet.calls).toEqual([]);
     });
 
+    test('a visit more than 14 days after the due day holds nothing; exactly 14 days holds; a nearer visit wins over a far one', async () => {
+      process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+      // The promise is due on Eastern day 2040-03-11.
+      const far = visit({ id: 'far', scheduled_date: '2040-03-26' });
+      expect(await findOnTrackVisit(fakeConn([far]), promise, message, NOW)).toBeNull();
+      const edge = visit({ id: 'edge', scheduled_date: '2040-03-25' });
+      expect(await findOnTrackVisit(fakeConn([edge]), promise, message, NOW)).toMatchObject({ visit_id: 'edge' });
+      const near = visit({ id: 'near', scheduled_date: '2040-03-15' });
+      expect(await findOnTrackVisit(fakeConn([near, far]), promise, message, NOW)).toMatchObject({ visit_id: 'near' });
+      expect(await findOnTrackVisit(fakeConn([far, near]), promise, message, NOW)).toMatchObject({ visit_id: 'near' });
+    });
+
     test('no visit still ahead, or a failed read, leaves the ring as it was', async () => {
       process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
       expect(await findOnTrackVisit(fakeConn([visit({ window_start: '09:00:00', window_end: '10:00:00' })]), promise, message, NOW)).toBeNull();

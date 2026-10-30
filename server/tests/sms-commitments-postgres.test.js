@@ -4310,6 +4310,32 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(rings()).toBe(1);
       });
 
+      // A visit months out holds nothing: the promise was due on the text's day (F4 horizon, 14 days).
+      const farVisitRow = () => visitRow({ scheduled_date: etDateString(addETDays(windowEnd(), 30)) });
+
+      test('gate true: a visit booked past 14 days after the due day does not hold the ring', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        const row = await staffPromise();
+        await mockPg('scheduled_services').insert(farVisitRow());
+        await tick();
+        expect(rings()).toBe(1);
+        expect(await mockPg('call_commitments').where({ id: row.id }).first()).toMatchObject({ status: 'open' });
+      });
+
+      test('gate true: the far visit also holds nothing for a promise that shares its text with an overdue sibling; both ring', async () => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          const held = await staffPromise();
+          const report = await overdueReport(randomUUID());
+          await mockPg('scheduled_services').insert(farVisitRow());
+          await tick();
+          expect(rings()).toBe(2);
+          const rungIds = NotificationService.notifyAdmin.mock.calls.map(([, , , options]) => options.metadata.commitment_id);
+          expect(rungIds).toEqual(expect.arrayContaining([held.id, report]));
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
       // An alert an earlier ring left open (the promise was overdue before the visit was booked).
       const openAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
         title: 'Comms — follow up with Synthetic Fixture', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) })
