@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
-const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
+const { SOCIAL_FLAGS, RSS_FEED_URL, isPausedByAdmin, normalizeUrl, platformEntryOutcome } = require('../services/social-media');
 const linkedin = require('../services/linkedin');
 const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
@@ -48,7 +48,7 @@ router.get('/status', async (req, res, next) => {
         scheduledPosts: SOCIAL_FLAGS.scheduledPosts,
         newsletterAutoshare: SOCIAL_FLAGS.newsletterAutoshare,
       },
-      rssFeed: 'https://www.wavespestcontrol.com/feed.xml',
+      rssFeed: RSS_FEED_URL,
     });
   } catch (err) { next(err); }
 });
@@ -72,15 +72,16 @@ router.post('/pause', async (req, res, next) => {
 // GET /rss — fetch latest RSS items
 router.get('/rss', async (req, res, next) => {
   try {
-    const url = req.query.url || 'https://www.wavespestcontrol.com/feed.xml';
-    const items = await SocialMediaService.getRSSItems(url);
+    // Always the fixed blog feed: a caller-supplied ?url= is ignored so this
+    // endpoint can never fetch an arbitrary destination.
+    const items = await SocialMediaService.getRSSItems(RSS_FEED_URL);
     // Mark which have been posted
     for (const item of items) {
       const posted = await db('social_media_posts').where({ source_url: normalizeUrl(item.link) || item.link }).first();
       item.posted = !!posted;
       item.postId = posted?.id;
     }
-    res.json({ items, feedUrl: url });
+    res.json({ items, feedUrl: RSS_FEED_URL });
   } catch (err) { next(err); }
 });
 
@@ -294,8 +295,8 @@ router.post('/publish-single', async (req, res, next) => {
 // POST /check-rss — check RSS feed and auto-publish new items
 router.post('/check-rss', async (req, res, next) => {
   try {
-    const url = req.body.feedUrl || 'https://www.wavespestcontrol.com/feed.xml';
-    const result = await SocialMediaService.checkAndPublish(url, { manual: true });
+    // Fixed blog feed only; a body feedUrl is ignored (see GET /rss).
+    const result = await SocialMediaService.checkAndPublish(RSS_FEED_URL, { manual: true });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -376,6 +377,27 @@ router.post('/engagement/sync', async (req, res, next) => {
   }
 });
 
+// Per-platform tally for one post. Each entry is classified from its own
+// outcome when it is a result object ({platform, success|error|skipped}); a
+// plain channel string (draft/scheduled rows) or an outcome-less marker falls
+// back to the parent post status. No platform info uses a generic bucket.
+function tallyPlatforms(byPlatform, post, platformList) {
+  const entries = platformList.length > 0
+    ? platformList.map(p => (typeof p === 'string'
+      ? { name: p, outcome: null }
+      : { name: p?.platform || 'unknown', outcome: platformEntryOutcome(p) }))
+    : [{ name: 'unknown', outcome: null }];
+  for (const { name, outcome } of entries) {
+    if (!byPlatform[name]) {
+      byPlatform[name] = { total: 0, success: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0 };
+    }
+    const bucket = byPlatform[name];
+    bucket.total++;
+    const key = outcome || { published: 'success', failed: 'failed', draft: 'draft', scheduled: 'scheduled' }[post.status];
+    if (key) bucket[key]++;
+  }
+}
+
 router.get('/analytics', async (req, res, next) => {
   try {
     // Posts grouped by platform (cap at 2000 most-recent to avoid unbounded scans)
@@ -388,21 +410,7 @@ router.get('/analytics', async (req, res, next) => {
       const platforms = post.platforms_posted || [];
       const platformList = Array.isArray(platforms) ? platforms : (typeof platforms === 'string' ? JSON.parse(platforms) : []);
 
-      // If no platform info, use a generic bucket
-      const effectivePlatforms = platformList.length > 0
-        ? platformList.map(p => typeof p === 'string' ? p : (p.platform || 'unknown'))
-        : ['unknown'];
-
-      for (const platform of effectivePlatforms) {
-        if (!byPlatform[platform]) {
-          byPlatform[platform] = { total: 0, success: 0, failed: 0, draft: 0, scheduled: 0 };
-        }
-        byPlatform[platform].total++;
-        if (post.status === 'published') byPlatform[platform].success++;
-        else if (post.status === 'failed') byPlatform[platform].failed++;
-        else if (post.status === 'draft') byPlatform[platform].draft++;
-        else if (post.status === 'scheduled') byPlatform[platform].scheduled++;
-      }
+      tallyPlatforms(byPlatform, post, platformList);
 
       // Weekly trend — bucket by ISO week
       const created = new Date(post.created_at);
