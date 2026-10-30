@@ -21,7 +21,7 @@ function placeNote(row) {
   if (row.placeNowhere) return `${row.name} cannot go anywhere on this lawn right now. ${row.placeNowhere}`;
   if (row.placeBlock) return row.placeBlock;
   if (row.placeUnreadable) return 'The limits could not be checked for this place. Record what you applied; the office will review it.';
-  if (row.placeDefaulted) return 'Set from the known trouble area. Tap places to change it.';
+  if (row.placeDefaulted) return 'Set from the known trouble area. Tap another place to change it.';
   return null;
 }
 
@@ -33,7 +33,11 @@ export function PlaceControl({ areas, row, title = null, locked, onChange }) {
   const known = knownPlacesOfType(areas, troubleTypeOfRow(row));
   const note = placeNote(row);
   const current = row.places || [];
-  const toggle = (id) => onChange(areas.places.map((place) => place.id).filter((other) => (other === id ? !current.includes(id) : current.includes(other))));
+  // A place the sheet set from a known trouble area is REPLACED by the first tap on another chip (one tap, as before multi-select),
+  // so a tech moving the spot never records the default as well. After that, taps add and remove places.
+  const toggle = (id) => (row.placeDefaulted && !current.includes(id)
+    ? onChange([id])
+    : onChange(areas.places.map((place) => place.id).filter((other) => (other === id ? !current.includes(id) : current.includes(other)))));
   return (
     <div role="group" aria-label={title ? `${title} place` : `Place for ${row.name}`} className="tech-spot-area">
       <p className="tech-product-editor-label">Where on the lawn</p>

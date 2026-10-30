@@ -365,11 +365,22 @@ describe('a known trouble area', () => {
     typeArea(row, '100');
     const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
     expect(pressed(where)).toEqual(['Back · known']);
-    expect(within(where).getByText('Set from the known trouble area. Tap places to change it.')).toBeTruthy();
+    expect(within(where).getByText('Set from the known trouble area. Tap another place to change it.')).toBeTruthy();
     await analyze();
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
     expect(sent(P_FUNG)).toMatchObject({ areaPlaces: ['back'], troubleType: 'fungus' });
+  });
+
+  test('the first tap on another chip replaces the default place; later taps add places', async () => {
+    await open(placeContext({ troubleAreas: areasBlock({ known: [KNOWN_FUNGUS_BACK] }) }));
+    addFungicide();
+    const where = () => within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(pressed(where())).toEqual(['Back · known']);
+    fireEvent.click(chipOf(where(), 'Front'));
+    expect(pressed(where())).toEqual(['Front']);
+    fireEvent.click(chipOf(where(), /^Back/));
+    expect(pressed(where())).toEqual(['Front', 'Back · known']);
   });
 
   test('two known areas of the type, or one of another type, choose nothing for the tech', async () => {
@@ -1225,8 +1236,8 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
     await waitFor(() => expect(chipOf(chips(), 'Front').disabled).toBe(false));
     expect(chipOf(chips(), /^Back/).disabled).toBe(false);
+    // The default (the known Back) is replaced by the first tap on another chip.
     fireEvent.click(chipOf(chips(), 'Front'));
-    fireEvent.click(chipOf(chips(), /^Back/));
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -1240,8 +1251,8 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     const method = within(placeGroup('Spot Fungicide')).getByRole('combobox', { name: /^Method for / });
     fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
     expect(chipOf(chips(), 'Front').disabled).toBe(false);
+    // The default (the known Back) is replaced by the first tap on another chip.
     fireEvent.click(chipOf(chips(), 'Front'));
-    fireEvent.click(chipOf(chips(), /^Back/));
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
