@@ -2154,7 +2154,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
-    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    // leads.gclid is varchar(200) (migration 20260401000110), unlike the other click ids.
+    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 200) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
