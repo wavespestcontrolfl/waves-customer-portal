@@ -723,14 +723,11 @@ class BudgetManager {
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
    * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual', hold = null } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual', hold } = {}) {
     reason = boundReason(reason);
     // `hold` (the owner's budget hold, saved as metadata.budget_hold) commits in
     // the SAME locked transaction as the mode change, so the 2-hour job can never
     // run between the two and undo the mode. Only the live-push path supports it.
-    if (hold && !requireLivePush) {
-      throw new Error('A budget hold can only be saved with requireLivePush.');
-    }
     const withHold = (campaign) => (hold
       ? { metadata: JSON.stringify({ ...(parseJsonObject(campaign.metadata) || {}), budget_hold: hold }) }
       : {});
@@ -856,6 +853,8 @@ class BudgetManager {
         throw err;
       }
     }
+    // A hold is saved only by the live-push path above, never dropped here.
+    if (hold) throw new Error('A budget hold can only be saved with requireLivePush.');
 
     // Legacy (manual route) path: DB-first with a best-effort push, but now
     // inside the SAME row-locked transaction the advisor apply and the cron
