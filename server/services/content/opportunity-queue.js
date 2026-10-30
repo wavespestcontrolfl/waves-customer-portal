@@ -24,6 +24,14 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const effectiveActionSql = require('./opportunity-action-sql');
 
+// Page-anchored QUESTION refresh buckets: a refresh whose job is to add one
+// question's answer to a live page. They share one claim-time chokepoint
+// (own-run fence, route fence, 28-day page cooldown below). same_question_refresh
+// (same-question-refresh.js, GATE_SAME_QUESTION_CHECK) joined 2026-10-30 so the
+// owner-page rewrite it queues passes the SAME cooldown the aeo lane does.
+const SAME_QUESTION_BUCKET = 'same_question_refresh';
+const QUESTION_REFRESH_BUCKETS_SQL = `('aeo_question_gap', '${SAME_QUESTION_BUCKET}')`;
+
 const PAGE_EDIT_SUPERSEDED_KEY = 'page_edit_superseded';
 const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
 // pending_review parks that stand for a POSSIBLE external write whose PR or
@@ -50,7 +58,7 @@ const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-         )) AND ((${effectiveActionSql} <> 'new_supporting_blog' AND opportunity_queue.bucket <> 'aeo_question_gap') OR NOT EXISTS (
+         )) AND ((${effectiveActionSql} <> 'new_supporting_blog' AND opportunity_queue.bucket NOT IN ${QUESTION_REFRESH_BUCKETS_SQL}) OR NOT EXISTS (
            SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
              AND (r.published_url IS NOT NULL
                OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
@@ -82,7 +90,7 @@ function aeoRouteFenceSql() {
   return `NOT EXISTS (
            SELECT 1 FROM opportunity_queue route_fence
             WHERE route_fence.id <> opportunity_queue.id
-              AND (route_fence.bucket = 'aeo_question_gap' OR opportunity_queue.bucket = 'aeo_question_gap')
+              AND (route_fence.bucket IN ${QUESTION_REFRESH_BUCKETS_SQL} OR opportunity_queue.bucket IN ${QUESTION_REFRESH_BUCKETS_SQL})
               AND (route_fence.status IN ('claimed', 'pending_review')
                 OR EXISTS (
                   SELECT 1 FROM autonomous_runs route_run
@@ -90,7 +98,7 @@ function aeoRouteFenceSql() {
                      AND route_run.astro_pr_url IS NOT NULL
                      AND route_run.astro_pr_retired_at IS NULL
                      AND route_run.published_url IS NULL)
-                OR (opportunity_queue.bucket = 'aeo_question_gap' AND route_fence.status = 'done'
+                OR (opportunity_queue.bucket IN ${QUESTION_REFRESH_BUCKETS_SQL} AND route_fence.status = 'done'
                   AND route_fence.updated_at >= now() - make_interval(days => ${days})))
               AND ${writeRouteSql('route_fence')} = ${writeRouteSql('opportunity_queue')}
          )`;
@@ -137,6 +145,20 @@ function aeoQuestionLaneOpen() {
   try {
     const { isEnabled } = require('../../config/feature-gates');
     return isEnabled('aeoQuestionGapMining') === true;
+  } catch {
+    return false;
+  }
+}
+
+// Same kill-switch contract for the same_question_refresh lane (2026-10-30):
+// GATE_SAME_QUESTION_CHECK fences the runner's WRITES (it queues the row only
+// while on); this fences CONSUMPTION, so turning it off stops queued rows
+// from being claimed at all. They wait and expire unclaimed. Read at call
+// time; fail CLOSED.
+function sameQuestionLaneOpen() {
+  try {
+    const { sameQuestionCheckLive } = require('../../config/feature-gates');
+    return sameQuestionCheckLive() === true;
   } catch {
     return false;
   }
@@ -327,6 +349,7 @@ class OpportunityQueue {
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
       if (!citabilityBackfillLaneOpen()) q = q.whereNot('bucket', 'citability_backfill');
       if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
+      if (!sameQuestionLaneOpen()) q = q.whereNot('bucket', SAME_QUESTION_BUCKET);
       if (!blogSearchSuggestLaneOpen()) q = q.whereRaw(NOT_A_SUGGESTION_SQL);
       q = q.whereRaw(aeoRouteFenceSql());
       if (minScore != null) {
@@ -388,6 +411,8 @@ class OpportunityQueue {
     const whereCitabilityGate = citabilityBackfillLaneOpen() ? '' : `AND bucket <> 'citability_backfill'`;
     // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
     const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
+    // See sameQuestionLaneOpen — gate-off same-question refresh rows are unclaimable.
+    const whereSameQuestionGate = sameQuestionLaneOpen() ? '' : `AND bucket <> '${SAME_QUESTION_BUCKET}'`;
     // See blogSearchSuggestLaneOpen — gate-off suggestions are unclaimable.
     const whereSuggestGate = blogSearchSuggestLaneOpen() ? '' : `AND ${NOT_A_SUGGESTION_SQL}`;
 
@@ -441,6 +466,7 @@ class OpportunityQueue {
            ${whereFamilyGate}
            ${whereCitabilityGate}
            ${whereAeoQuestionGate}
+           ${whereSameQuestionGate}
            ${whereSuggestGate}
            AND ${aeoRouteFenceSql()}
          ORDER BY score DESC, mined_at ASC
@@ -786,6 +812,8 @@ module.exports._internals = {
   maxClaimAttempts,
   listicleFamilyLaneOpen,
   citabilityBackfillLaneOpen,
+  sameQuestionLaneOpen,
+  SAME_QUESTION_BUCKET,
   blogSearchSuggestLaneOpen,
   NOT_A_SUGGESTION_SQL,
   pageEditRouteIdentity,
