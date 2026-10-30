@@ -61,9 +61,28 @@ router.get('/stats', async (req, res, next) => {
 // =========================================================================
 // GET /promoters — list with search/filter
 // =========================================================================
+const PROMOTERS_DEFAULT_LIMIT = 50;
+const PROMOTERS_MAX_LIMIT = 200;
+
+// Positive whole number from a query value. Undefined -> fallback. Anything
+// else that is not a plain positive integer -> null (the caller answers 400),
+// so a NaN offset can never reach SQL.
+function positiveIntParam(value, fallback) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !/^[0-9]{1,9}$/.test(value)) return null;
+  const n = Number(value);
+  return n >= 1 ? n : null;
+}
+
 router.get('/promoters', async (req, res, next) => {
   try {
-    const { status = 'active', search, page = 1, limit = 50 } = req.query;
+    const { status = 'active' } = req.query;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const page = positiveIntParam(req.query.page, 1);
+    const requestedLimit = positiveIntParam(req.query.limit, PROMOTERS_DEFAULT_LIMIT);
+    if (page === null) return res.status(400).json({ error: 'page must be a positive whole number' });
+    if (requestedLimit === null) return res.status(400).json({ error: 'limit must be a positive whole number' });
+    const limit = Math.min(requestedLimit, PROMOTERS_MAX_LIMIT);
 
     let query = db('referral_promoters')
       .leftJoin('customers', 'referral_promoters.customer_id', 'customers.id')
@@ -72,7 +91,9 @@ router.get('/promoters', async (req, res, next) => {
         'customers.waveguard_tier',
         'customers.city'
       )
-      .orderBy('referral_promoters.total_referrals_converted', 'desc');
+      .orderBy('referral_promoters.total_referrals_converted', 'desc')
+      // Tie-break so pages never repeat or skip rows with equal conversions.
+      .orderBy('referral_promoters.id', 'asc');
 
     if (status !== 'all') query = query.where('referral_promoters.status', status);
 
@@ -86,10 +107,13 @@ router.get('/promoters', async (req, res, next) => {
       });
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const promoters = await query.limit(parseInt(limit)).offset(offset);
+    // Fetch one extra row to learn whether a next page exists without a
+    // second count query that could disagree with the page.
+    const offset = (page - 1) * limit;
+    const rows = await query.limit(limit + 1).offset(offset);
+    const hasMore = rows.length > limit;
 
-    res.json({ promoters });
+    res.json({ promoters: hasMore ? rows.slice(0, limit) : rows, page, limit, hasMore });
   } catch (err) { next(err); }
 });
 

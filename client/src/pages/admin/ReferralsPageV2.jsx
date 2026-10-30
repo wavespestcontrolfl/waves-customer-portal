@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { createPortal } from "react-dom";
 import {
@@ -544,6 +544,40 @@ function InboundReferralCard({ item, onDone, flash }) {
   );
 }
 
+// A failed read is not an empty result: say so, and offer a retry.
+function ErrorRow({ what, onRetry }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        flexWrap: "wrap",
+        padding: "10px 14px",
+        borderRadius: 6,
+        background: `${D.red}22`,
+        border: `1px solid ${D.red}`,
+        color: D.red,
+        fontSize: 14,
+      }}
+    >
+      <span>Could not load {what}. This is not an empty list.</span>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          style={{ ...btnSmall(D.card, D.red), border: `1px solid ${D.red}` }}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+const PROMOTERS_PAGE_SIZE = 50;
+
 export default function ReferralsPageV2() {
   const isMobile = useIsMobile();
   // `?tab=queue` (the new-referral bell row's link) opens that tab on first render.
@@ -561,6 +595,19 @@ export default function ReferralsPageV2() {
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // A failed read is tracked apart from an empty result, per section.
+  const [loadErrors, setLoadErrors] = useState({});
+  // Promoters tab rows. `promoters` stays the unsearched first page (the
+  // Dashboard's Top Promoters reads it); `promoterRows` follows the search box
+  // and "Load more".
+  const [promoterRows, setPromoterRows] = useState([]);
+  const [promoterPage, setPromoterPage] = useState(1);
+  const [promoterHasMore, setPromoterHasMore] = useState(false);
+  const [promoterBusy, setPromoterBusy] = useState(false);
+  const [promoterError, setPromoterError] = useState(false);
+  const promoterReq = useRef(0);
+  const promoterLast = useRef(["", 1]);
+  const searchSeen = useRef("");
   const [msg, setMsg] = useState(null);
 
   // Modals
@@ -574,20 +621,41 @@ export default function ReferralsPageV2() {
 
   const load = useCallback(() => {
     setLoading(true);
+    const FAILED = Symbol("failed");
+    const read = (path) => af(path).catch(() => FAILED);
     Promise.all([
-      af("/admin/referrals/stats").catch(() => null),
-      af("/admin/referrals/promoters?status=all").catch(() => ({
-        promoters: [],
-      })),
-      af("/admin/referrals/queue").catch(() => ({ referrals: [] })),
-      af("/admin/referrals/payouts").catch(() => ({ payouts: [] })),
-      af("/admin/referrals/inbound").catch(() => ({ enabled: false, items: [] })),
+      read("/admin/referrals/stats"),
+      read("/admin/referrals/promoters?status=all"),
+      read("/admin/referrals/queue"),
+      read("/admin/referrals/payouts"),
+      read("/admin/referrals/inbound"),
     ]).then(([s, p, q, pay, inb]) => {
-      setStats(s);
-      setPromoters(p.promoters || []);
-      setQueue(q.referrals || []);
-      setPayouts(pay.payouts || []);
-      setInbound({ enabled: Boolean(inb.enabled), items: inb.items || [] });
+      setLoadErrors({
+        stats: s === FAILED,
+        promoters: p === FAILED,
+        queue: q === FAILED,
+        payouts: pay === FAILED,
+        inbound: inb === FAILED,
+      });
+      setStats(s === FAILED ? null : s);
+      const firstPage = p === FAILED ? [] : p.promoters || [];
+      setPromoters(firstPage);
+      promoterReq.current += 1;
+      setPromoterRows(firstPage);
+      setPromoterPage(1);
+      setPromoterHasMore(p === FAILED ? false : Boolean(p.hasMore));
+      setPromoterError(false);
+      setPromoterBusy(false);
+      setSearch("");
+      searchSeen.current = "";
+      setQueue(q === FAILED ? [] : q.referrals || []);
+      setPayouts(pay === FAILED ? [] : pay.payouts || []);
+      // A failed inbound read says nothing about whether inbound is on.
+      setInbound(
+        inb === FAILED
+          ? { enabled: false, items: [] }
+          : { enabled: Boolean(inb.enabled), items: inb.items || [] },
+      );
       setLoading(false);
     });
   }, []);
@@ -596,15 +664,63 @@ export default function ReferralsPageV2() {
     load();
   }, [load]);
 
+  // Promoters tab: ask the server (search + paging) so rows past the first
+  // page can be found. page 1 replaces the rows, later pages append.
+  const fetchPromoters = useCallback((term, page) => {
+    const req = ++promoterReq.current;
+    promoterLast.current = [term, page];
+    const params = new URLSearchParams({ status: "all" });
+    if (term) params.set("search", term);
+    if (page > 1) {
+      params.set("page", String(page));
+      params.set("limit", String(PROMOTERS_PAGE_SIZE));
+    }
+    setPromoterBusy(true);
+    setPromoterError(false);
+    af(`/admin/referrals/promoters?${params}`)
+      .then((r) => {
+        if (req !== promoterReq.current) return;
+        const rows = r.promoters || [];
+        setPromoterRows((prev) => (page > 1 ? [...prev, ...rows] : rows));
+        setPromoterPage(page);
+        setPromoterHasMore(Boolean(r.hasMore));
+        setPromoterBusy(false);
+      })
+      .catch(() => {
+        if (req !== promoterReq.current) return;
+        setPromoterError(true);
+        setPromoterBusy(false);
+      });
+  }, []);
+
   useEffect(() => {
-    if (tab === "settings" && !settings)
-      af("/admin/referrals/settings")
-        .then((r) => setSettings(r.settings))
-        .catch(() => {});
-    if (tab === "analytics" && !analytics)
-      af("/admin/referrals/analytics")
-        .then((r) => setAnalytics(r))
-        .catch(() => {});
+    const term = search.trim();
+    if (term === searchSeen.current) return undefined;
+    const t = setTimeout(() => {
+      searchSeen.current = term;
+      fetchPromoters(term, 1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search, fetchPromoters]);
+
+  const [settingsError, setSettingsError] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState(false);
+  const loadSettings = useCallback(() => {
+    setSettingsError(false);
+    af("/admin/referrals/settings")
+      .then((r) => setSettings(r.settings))
+      .catch(() => setSettingsError(true));
+  }, []);
+  const loadAnalytics = useCallback(() => {
+    setAnalyticsError(false);
+    af("/admin/referrals/analytics")
+      .then((r) => setAnalytics(r))
+      .catch(() => setAnalyticsError(true));
+  }, []);
+
+  useEffect(() => {
+    if (tab === "settings" && !settings) loadSettings();
+    if (tab === "analytics" && !analytics) loadAnalytics();
   }, [tab]);
 
   const searchCustomers = async (q) => {
@@ -759,14 +875,6 @@ export default function ReferralsPageV2() {
     REFERRALS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
     REFERRALS_TAB_GROUPS[0];
 
-  const filteredPromoters = search
-    ? promoters.filter((p) =>
-        `${p.first_name} ${p.last_name} ${p.customer_phone} ${p.referral_code}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      )
-    : promoters;
-
   return (
     <div>
       {" "}
@@ -775,7 +883,14 @@ export default function ReferralsPageV2() {
         icon={Gift}
         sections={REFERRALS_TAB_GROUPS.map((g) =>
           g.key === "queue"
-            ? { key: g.key, label: `${g.label} (${queue.length + inbound.items.length})`, Icon: g.Icon }
+            ? {
+                key: g.key,
+                label:
+                  loadErrors.queue || loadErrors.inbound
+                    ? g.label
+                    : `${g.label} (${queue.length + inbound.items.length})`,
+                Icon: g.Icon,
+              }
             : { key: g.key, label: g.label, Icon: g.Icon },
         )}
         activeKey={activeGroup.key}
@@ -810,9 +925,13 @@ export default function ReferralsPageV2() {
         </div>
       )}
       {/* DASHBOARD */}
-      {tab === "dashboard" && stats && (
+      {tab === "dashboard" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {" "}
+          {!stats && loadErrors.stats && (
+            <ErrorRow what="referral stats" onRetry={load} />
+          )}
+          {stats && (
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {" "}
             <Stat
@@ -841,7 +960,8 @@ export default function ReferralsPageV2() {
               label="Program ROI"
               value={`${stats.programROI}%`}
             />{" "}
-          </div>{" "}
+          </div>
+          )}{" "}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {" "}
             <div
@@ -865,7 +985,9 @@ export default function ReferralsPageV2() {
               >
                 Recent Activity
               </div>
-              {queue.length === 0 ? (
+              {loadErrors.queue ? (
+                <ErrorRow what="recent referrals" onRetry={load} />
+              ) : queue.length === 0 ? (
                 <div
                   style={{
                     color: D.muted,
@@ -935,7 +1057,11 @@ export default function ReferralsPageV2() {
               >
                 Top Promoters
               </div>
-              {promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
+              {loadErrors.promoters && (
+                <ErrorRow what="top promoters" onRetry={load} />
+              )}
+              {!loadErrors.promoters &&
+                promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
                 <div style={{ fontSize: 14, color: D.muted }}>
                   No converted referrals yet
                 </div>
@@ -998,6 +1124,9 @@ export default function ReferralsPageV2() {
       {/* QUEUE */}
       {tab === "queue" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {loadErrors.inbound && (
+            <ErrorRow what="inbound referrals needing confirmation" onRetry={load} />
+          )}
           {inbound.enabled && inbound.items.length > 0 && (
             <div
               style={{
@@ -1136,9 +1265,11 @@ export default function ReferralsPageV2() {
                 marginBottom: 14,
               }}
             >
-              Referral Queue ({queue.length})
+              Referral Queue ({loadErrors.queue ? "--" : queue.length})
             </div>
-            {queue.length === 0 ? (
+            {loadErrors.queue ? (
+              <ErrorRow what="the referral queue" onRetry={load} />
+            ) : queue.length === 0 ? (
               <div
                 style={{
                   color: D.muted,
@@ -1274,6 +1405,16 @@ export default function ReferralsPageV2() {
               Enroll Customer
             </button>{" "}
           </div>{" "}
+          {loadErrors.promoters && (
+            <ErrorRow what="promoters" onRetry={load} />
+          )}
+          {!loadErrors.promoters && promoterError && (
+            <ErrorRow
+              what="promoters"
+              onRetry={() => fetchPromoters(...promoterLast.current)}
+            />
+          )}
+          {!loadErrors.promoters && (
           <div
             style={{
               background: D.card,
@@ -1299,7 +1440,7 @@ export default function ReferralsPageV2() {
                 </tr>
               </thead>{" "}
               <tbody>
-                {filteredPromoters.map((p) => (
+                {promoterRows.map((p) => (
                   <tr key={p.id}>
                     {" "}
                     <td style={tdSt}>
@@ -1354,7 +1495,42 @@ export default function ReferralsPageV2() {
                 ))}
               </tbody>{" "}
             </table>{" "}
-          </div>{" "}
+            {promoterRows.length === 0 && !promoterBusy && !promoterError && (
+              <div
+                style={{
+                  color: D.muted,
+                  padding: 20,
+                  textAlign: "center",
+                  fontSize: 14,
+                }}
+              >
+                {search.trim() ? "No promoters match this search" : "No promoters yet"}
+              </div>
+            )}
+            {promoterBusy && (
+              <div
+                style={{
+                  color: D.muted,
+                  padding: 12,
+                  textAlign: "center",
+                  fontSize: 14,
+                }}
+              >
+                Loading promoters...
+              </div>
+            )}
+            {!promoterBusy && !promoterError && promoterHasMore && (
+              <div style={{ padding: 12, textAlign: "center" }}>
+                <button
+                  onClick={() => fetchPromoters(search.trim(), promoterPage + 1)}
+                  style={btnSmall(D.teal)}
+                >
+                  Load more
+                </button>
+              </div>
+            )}
+          </div>
+          )}{" "}
         </div>
       )}
       {/* PAYOUTS */}
@@ -1378,7 +1554,9 @@ export default function ReferralsPageV2() {
           >
             Payouts
           </div>
-          {payouts.length === 0 ? (
+          {loadErrors.payouts ? (
+            <ErrorRow what="payouts" onRetry={load} />
+          ) : payouts.length === 0 ? (
             <div
               style={{
                 color: D.muted,
@@ -1448,6 +1626,15 @@ export default function ReferralsPageV2() {
         </div>
       )}
       {/* SETTINGS */}
+      {tab === "settings" && !settings && (
+        settingsError ? (
+          <ErrorRow what="settings" onRetry={loadSettings} />
+        ) : (
+          <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+            Loading settings...
+          </div>
+        )
+      )}
       {tab === "settings" &&
         settings &&
         (() => {
@@ -1731,9 +1918,13 @@ export default function ReferralsPageV2() {
       {tab === "analytics" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {!analytics ? (
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading analytics...
-            </div>
+            analyticsError ? (
+              <ErrorRow what="analytics" onRetry={loadAnalytics} />
+            ) : (
+              <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+                Loading analytics...
+              </div>
+            )
           ) : (
             <>
               {/* Funnel */}
