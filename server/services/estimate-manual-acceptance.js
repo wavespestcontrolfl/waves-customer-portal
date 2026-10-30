@@ -357,7 +357,9 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
 // after, so a rejection at markEstimateManuallyAccepted (which DOES see the
 // now-linked customer_id) leaves a booked-but-unlinked appointment. Ignored
 // once estimate.customer_id is set (that value always wins).
-async function prepayBookingEligibility(estimate = {}, database = db, prospectiveCustomerId = null) {
+// excludeRowIds (optional): visits to leave out of the live-plan check, for a caller that runs this AFTER the
+// visits were booked (the call-prepay-choice card: the accept's own bookedAppointmentIds rule, applied up front).
+async function prepayBookingEligibility(estimate = {}, database = db, prospectiveCustomerId = null, excludeRowIds = []) {
   const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return ineligible('no_recurring_annual');
@@ -401,7 +403,7 @@ async function prepayBookingEligibility(estimate = {}, database = db, prospectiv
     // preservation predicate — see customerHasLiveRecurringPlan.
     let hasLivePlan = false;
     try {
-      hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null);
+      hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null, excludeRowIds);
     } catch (e) {
       // FAIL CLOSED (codex round-3 P2): reached only when the membership
       // check above did NOT already resolve the shape (preservesMembership

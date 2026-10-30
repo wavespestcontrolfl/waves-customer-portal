@@ -73,6 +73,7 @@ const REASON_LABELS = {
   missing_first_name: "First name missing — get it",
   family_account_candidates: "Caller may match an account — confirm, then link",
   name_spelling_differs: "Caller spelled their name — check it",
+  call_prepay_choice: "Caller chose annual prepay — accept the estimate",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -162,6 +163,9 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
   const rows = [
     firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
+    // GATE_CALL_PREPAY_CHOICE: the plan the caller chose on the call (the server adds it only with the gate on).
+    p.scheduling_window?.billing_choice === "annual_prepay" && { label: "Billing", value: "Caller chose annual prepay" },
+    p.scheduling_window?.billing_choice === "per_application" && { label: "Billing", value: "Caller chose to pay per application" },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
     // three — without a row the card looks complete and nobody re-listens.
@@ -411,6 +415,43 @@ export function FamilyEvidence({ payload, openCustomerIds = null, canAttach = fa
   );
 }
 
+// call_prepay_choice (GATE_CALL_PREPAY_CHOICE, admin only): the caller chose annual prepay on a call the pipeline booked. The server reads
+// what the tap can do right now (callPrepay: can_accept, amount, message), so this screen holds no second copy of the eligibility rule.
+// The tap runs the same accept the New appointment form runs; the invoice it creates is a DRAFT that is not sent.
+const prepayMoney = (n) => (Number.isFinite(Number(n)) ? `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.replace(/\.00$/, "") : null);
+
+export function CallPrepayEvidence({ payload, callPrepay = null, isOpenView = false, isAdmin = false, busy = false, onAcceptPrepay }) {
+  const p = parsePayload(payload);
+  if (!p) return null;
+  const amount = prepayMoney(callPrepay?.amount ?? p.invoice_total);
+  const rows = [
+    ["Caller chose", "Annual prepay"],
+    ["Plan", [p.service_type, p.cadence && String(p.cadence).replace(/_/g, " "), p.covered_visits && `${p.covered_visits} visits a year`].filter(Boolean).join(" · ")],
+    ["First visit", p.first_visit_date],
+    ["Invoice", amount && `${amount} (a draft; it is not sent)`],
+  ].filter(([, value]) => value);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before accepting</div>
+      {rows.map(([label, value]) => (
+        <div key={`${label}-${value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{label}:</span> {value}
+        </div>
+      ))}
+      {isOpenView && !isAdmin && <div className="mt-1 text-12 text-ink-tertiary">Accepting needs an admin.</div>}
+      {isOpenView && isAdmin && callPrepay && !callPrepay.can_accept && callPrepay.message && (
+        <div className="mt-1 text-14 text-zinc-900">{callPrepay.message}</div>
+      )}
+      {isOpenView && isAdmin && callPrepay?.can_accept && (
+        <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPrepay}
+          title="Accepts the customer's estimate as annual prepay. Creates a draft invoice that is not sent. The customer gets no text or email.">
+          {busy ? "Accepting…" : `Accept as annual prepay${amount ? ` (${amount})` : ""}`}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 // name_spelling_differs (advisory): every spelling the caller gave that differs from the saved name, each
 // with the caller turn it came from. The card text names the first; `also` lists any other field.
 export function NameSpellingEvidence({ payload, openCustomerIds = null }) {
@@ -463,17 +504,17 @@ function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSa
 }
 
 // Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
-const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence, call_prepay_choice: CallPrepayEvidence };
 
 // Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
 // /verdict on each). The verdict badge is not shown on them.
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs",
+  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs", "call_prepay_choice",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
-const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs", "call_prepay_choice"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -1111,6 +1152,29 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : failText);
       });
   };
+  // GATE_CALL_PREPAY_CHOICE: Accept as annual prepay. Version-bound like the other card actions; the server refuses with a plain
+  // message (estimate already accepted, no longer eligible, visit gone) and changes nothing.
+  const acceptCallPrepay = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/accept-call-prepay`, {
+      method: "POST",
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+    })
+      .then((res) => {
+        setActioning(null);
+        load(mode, status);
+        if (Array.isArray(res?.warnings) && res.warnings.length) setError(res.warnings.join(" "));
+      })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409 || err?.status === 400) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Accept failed — try again.");
+      });
+  };
   const attachContact = (item, customerId, role) => familyCardAction(item, "attach-contact", { customer_id: customerId, role }, "Attach failed — try again.");
   const newCustomerFromCard = (item) => familyCardAction(item, "new-customer", {}, "New customer failed — try again.");
 
@@ -1457,7 +1521,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item) })}
                     {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
