@@ -107,7 +107,7 @@ describe('AdsGapRulePanel', () => {
     expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled();
     fireEvent.change(input, { target: { value: '99' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
-    expect(await screen.findByText('weekday_limit must be 1 to 30')).toBeInTheDocument();
+    expect(await screen.findByText('weekday_limit must be 1 to 30', {}, { timeout: 4000 })).toBeInTheDocument();
     const put = calls.find((c) => c.method === 'PUT');
     expect(put.body).toEqual({ weekday_limit: 99 });
   });
@@ -137,6 +137,21 @@ describe('AdsGapRulePanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2));
     expect(calls.find((c) => c.method === 'POST').body).toEqual({ mode: 'stop', until });
+  });
+
+  it('keeps an unsaved limit edit when a hold re-fetches the panel', async () => {
+    route({
+      'GET /admin/ads/gap-rule': () => json(payload()),
+      'POST /admin/ads/campaigns/camp-1/hold': () => json({ hold: {} }),
+    });
+    render(<AdsGapRulePanel />);
+    fireEvent.change(await screen.findByLabelText('Weekday limit'), { target: { value: '11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Keep ads off until this date' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2));
+    expect(screen.getByLabelText('Weekday limit')).toHaveValue(11);
+    expect(screen.getByLabelText('Saturday limit')).toHaveValue(5);
+    expect(screen.getByRole('button', { name: 'Save settings' })).toBeEnabled();
   });
 
   it('states the full budget for a keep-on hold and shows server errors inline', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -204,10 +204,21 @@ export default function AdsGapRulePanel() {
   }, [load]);
 
   const settings = data && data.settings;
+  // A re-fetch (after a hold or a save) refreshes each field from the server,
+  // except a field the owner has edited since the last load: that keeps what
+  // was typed until it is saved.
+  const loadedSettings = useRef(null);
   useEffect(() => {
     if (!settings) return;
-    setForm(
-      Object.fromEntries(SETTING_FIELDS.map(({ key }) => [key, String(settings[key] ?? "")])),
+    const prior = loadedSettings.current;
+    loadedSettings.current = settings;
+    setForm((current) =>
+      Object.fromEntries(
+        SETTING_FIELDS.map(({ key }) => {
+          const edited = prior && current[key] !== undefined && current[key] !== String(prior[key] ?? "");
+          return [key, edited ? current[key] : String(settings[key] ?? "")];
+        }),
+      ),
     );
   }, [settings]);
 
