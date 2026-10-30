@@ -30,7 +30,8 @@ import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageDat
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
-  classifyEstimate,
+  canSendEstimate,
+  classifyEstimateForPipeline,
   getUrgencyIndicator,
   detectCompetitor,
 } from "./EstimatePage";
@@ -275,7 +276,7 @@ function v3ChipMatches(e, chip) {
   if (chip === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
   if (chip === "risk_type_review") return !!e.riskTypeNeedsReview;
   if (chip === "archived") return !!e.archivedAt;
-  if (chip === "drafts") return e.status === "draft";
+  if (chip === "drafts") return e.status === "draft" || e.status === "send_failed";
   if (chip === "open")
     return (
       e.status === "scheduled" || e.status === "sent" || e.status === "viewed"
@@ -891,21 +892,6 @@ function estimateViewMenuItems(estimate, { onPdfError, onViewAcceptance }) {
         onClick: () => onViewAcceptance(estimate),
       },
   ];
-}
-function canSendEstimate(estimate) {
-  // Rows without a share token (quote-wizard mirrors, legacy imports) have no
-  // customer link to send — the SMS/email would carry a literal /estimate/null.
-  // The server now refuses these too (assertEstimateSendable); hiding the
-  // affordance keeps the operator from hitting that error blind.
-  if (!String(estimate?.token || "").trim()) return false;
-  return estimateAmountDisplay(estimate).value > 0;
-}
-function classifyEstimateForPipeline(estimate) {
-  if (estimate?.archivedAt) return classifyEstimate(estimate);
-  if (estimate?.status === "draft") {
-    return canSendEstimate(estimate) ? "ready_to_send" : "needs_estimate";
-  }
-  return classifyEstimate(estimate);
 }
 function fmtPct(value) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -2631,7 +2617,7 @@ function EstimatePipelineViewV2({
                      accepted/declined/expired hide it. */}
                     {(e.customerPhone ||
                       estimateHasLawnLine(e) ||
-                      (["draft", "sent", "viewed"].includes(e.status) &&
+                      (SEND_ACTION_STATUSES.includes(e.status) &&
                         canSend)) && (
                       <div className="flex gap-1.5">
                         <LawnOutlineQuickButton
@@ -2722,7 +2708,7 @@ function EstimatePipelineViewV2({
                             <FilePlus2 size={16} strokeWidth={1.75} />{" "}
                           </Button>
                         )}
-                        {["draft", "sent", "viewed"].includes(e.status) &&
+                        {SEND_ACTION_STATUSES.includes(e.status) &&
                           canSend && (
                             <Button
                               type="button"
@@ -2735,11 +2721,13 @@ function EstimatePipelineViewV2({
                                   window.alert("Send failed: " + err.message);
                                 }
                               }}
-                              aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
+                              aria-label={`${sendActionVerb(e.status)} estimate to ${e.customerName || "customer"}`}
                               title={
                                 e.status === "draft"
                                   ? "Review recipient and send estimate"
-                                  : "Review recipient and resend estimate"
+                                  : e.status === "send_failed"
+                                    ? "The last send failed. Review recipient and send again"
+                                    : "Review recipient and resend estimate"
                               }
                               className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                             >
@@ -2835,7 +2823,8 @@ function EstimatePipelineViewV2({
                         <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
                       </Button>{" "}
                       <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1 sm:flex-none">
-                        {e.status === "draft" && canSend && (
+                        {(e.status === "draft" || e.status === "send_failed") &&
+                          canSend && (
                           <Button
                             size="sm"
                             variant="primary"
@@ -2849,7 +2838,7 @@ function EstimatePipelineViewV2({
                               }
                             }}
                           >
-                            Send
+                            {sendActionVerb(e.status)}
                           </Button>
                         )}
 
@@ -2923,20 +2912,24 @@ function EstimatePipelineViewV2({
                               />
                               Schedule
                             </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              className="w-full sm:w-auto whitespace-nowrap"
-                              onClick={() => sendBookingLink(e)}
-                              disabled={!e.customerPhone}
-                              title={
-                                e.customerPhone
-                                  ? "Text the customer a link to self-schedule"
-                                  : "No phone on file"
-                              }
-                            >
-                              Send Booking
-                            </Button>
+                            {/* The server's verdict: recurring-only and invoice-mode
+                                offers never take a booking link. */}
+                            {e.bookingLinkEligible === true && (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                className="w-full sm:w-auto whitespace-nowrap"
+                                onClick={() => sendBookingLink(e)}
+                                disabled={!e.customerPhone}
+                                title={
+                                  e.customerPhone
+                                    ? "Text the customer a link to self-schedule"
+                                    : "No phone on file"
+                                }
+                              >
+                                Send Booking
+                              </Button>
+                            )}
                           </>
                         )}
 
@@ -3004,7 +2997,8 @@ function EstimatePipelineViewV2({
                               onClick: () => toggleBillByInvoice(e),
                             },
                             (e.status === "sent" || e.status === "viewed") &&
-                              canSend && {
+                              canSend &&
+                              e.bookingLinkEligible === true && {
                                 key: "send-booking",
                                 label: "Send booking link",
                                 icon: (
@@ -3428,6 +3422,7 @@ function mobileStatusClass(status) {
   if (status === "accepted") return "text-zinc-900";
   if (
     status === "draft" ||
+    status === "send_failed" ||
     status === "scheduled" ||
     status === "sent" ||
     status === "viewed"
@@ -3442,6 +3437,14 @@ function mobileStatusClass(status) {
 // Tokenless rows (quote-wizard mirrors / legacy imports, the same set
 // canSendEstimate hides) are excluded too: "edit in place" means updating the
 // customer's existing link, and these rows have no link to keep stable.
+// Statuses whose row offers Send: an unsent draft, a send the server parked as
+// send_failed (POST /:id/send admits it again), and a live offer to resend.
+const SEND_ACTION_STATUSES = ["draft", "send_failed", "sent", "viewed"];
+function sendActionVerb(status) {
+  if (status === "draft") return "Send";
+  if (status === "send_failed") return "Retry sending";
+  return "Resend";
+}
 const EDITABLE_ESTIMATE_STATUSES = [
   "draft",
   "scheduled",
@@ -3827,13 +3830,10 @@ export function MobileEstimateRow({
               onClick: () =>
                 navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
             },
-            ["draft", "sent", "viewed"].includes(estimate.status) &&
+            SEND_ACTION_STATUSES.includes(estimate.status) &&
               canSend && {
                 key: "send",
-                label:
-                  estimate.status === "draft"
-                    ? "Send estimate"
-                    : "Resend estimate",
+                label: `${sendActionVerb(estimate.status)} estimate`,
                 icon: <Send size={16} strokeWidth={1.75} />,
                 onClick: async () => {
                   try {
@@ -3846,7 +3846,8 @@ export function MobileEstimateRow({
               },
             (estimate.status === "sent" ||
               estimate.status === "viewed" ||
-              (estimate.status === "accepted" && !estimate.archivedAt)) && {
+              (estimate.status === "accepted" && !estimate.archivedAt)) &&
+              estimate.bookingLinkEligible === true && {
               key: "send-booking",
               label: "Send booking link",
               icon: <CalendarCheck size={16} strokeWidth={1.75} />,

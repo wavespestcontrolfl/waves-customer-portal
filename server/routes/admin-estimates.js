@@ -4390,6 +4390,9 @@ router.get('/', async (req, res, next) => {
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
+          // The row offers "Send booking link" only when the route would not refuse it
+          // on the row alone (recurring-only and invoice-mode offers never qualify).
+          bookingLinkEligible: bookingLinkEligible(e, estData),
           // Scaffolds count: a disabled machine-seeded proposal must route
           // to the proposal builder, not the normal edit flow (revise
           // rejects COMMERCIAL rows).
@@ -5729,6 +5732,34 @@ router.post('/:id/follow-up', async (req, res, next) => {
   }
 });
 
+// The one-time service the booking link pre-selects in /book (the same line the
+// auto-accept flow uses), or '' when the estimate has none. Shared by the route
+// below and the list's bookingLinkEligible.
+function bookingLinkOneTimeLabel(estimateData) {
+  try {
+    const estData = typeof estimateData === 'string' ? JSON.parse(estimateData) : estimateData;
+    const { oneTimeList } = acceptanceServiceLists(estData || {});
+    return oneTimeList[0]?.name || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+// Whether a list row may offer "Send booking link": the route's refusals that
+// depend on the row alone (status, archived, invoice mode, unresolved manager
+// approval, and a recurring-only offer, which routes through onboarding). The
+// phone checks and the booked-slot guard stay request-time in the route.
+function bookingLinkEligible(estimate, estimateData = estimate.estimate_data) {
+  if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) return false;
+  if (estimate.archived_at || estimate.bill_by_invoice) return false;
+  try {
+    if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
+  } catch (_) {
+    return false; // unreadable estimate_data: hide the action, never fail the list
+  }
+  return !!bookingLinkOneTimeLabel(estimateData) || !(Number(estimate.monthly_total || 0) > 0);
+}
+
 // POST /api/admin/estimates/:id/send-booking-link — manual override that
 // mirrors the post-accept one-time booking SMS. Re-fires the same flow the
 // system auto-runs when a customer accepts a one-time estimate: pre-select
@@ -5775,14 +5806,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // pre-select the service in /book. A missing one-time line on a
     // recurring estimate is a hard refusal: recurring customers belong in
     // onboarding, not the self-booking flow.
-    let oneTimeLabel = '';
-    try {
-      const estData = typeof estimate.estimate_data === 'string'
-        ? JSON.parse(estimate.estimate_data)
-        : estimate.estimate_data;
-      const { oneTimeList } = acceptanceServiceLists(estData || {});
-      oneTimeLabel = oneTimeList[0]?.name || '';
-    } catch (_) { /* fall through to recurring-only refusal below */ }
+    const oneTimeLabel = bookingLinkOneTimeLabel(estimate.estimate_data);
     if (!oneTimeLabel && Number(estimate.monthly_total || 0) > 0) {
       return res.status(400).json({
         error: 'No one-time service on this estimate — recurring offers route through onboarding, not /book.',
