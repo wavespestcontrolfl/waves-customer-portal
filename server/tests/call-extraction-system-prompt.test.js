@@ -47,12 +47,13 @@ describe('system layout of the extraction prompt', () => {
     const single = buildExtractionPrompt('', '', '', { bookableServiceNames: CATALOG });
     const { system } = buildExtractionPromptParts('', '', '', { bookableServiceNames: CATALOG });
     const rules = single.slice(single.indexOf('═══ EXTRACTION RULES ═══'));
-    // The two lines that name the call date point at the user message instead of carrying it.
-    const dateFree = (line) => !line.includes('"today" = ') && !line.includes('the day is TODAY (');
+    // The three lines that name the call date point at the user message instead of carrying it.
+    const dateFree = (line) => !line.includes('"today" = ') && !line.includes('the day is TODAY (') && !line.includes('the CALL DATE itself (');
     const ruleLines = rules.split('\n').filter((line) => line.trim() && dateFree(line));
     expect(ruleLines.length).toBeGreaterThan(150);
     for (const line of ruleLines) expect(system).toContain(line);
     expect(system).toContain('"today" = the "Call date in Eastern Time" given in the user message.');
+    expect(system).toContain('which is the CALL DATE itself (the "Call date in Eastern Time" given in the user message)');
     expect(system).toContain('BOOKABLE SERVICE CATALOG');
     expect(system).toContain('- Waves Assessment');
   });
@@ -171,12 +172,12 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
   const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
 
-  test('this is the v32 cohort, one hash per layout', () => {
-    expect(PROMPT_VERSION).toBe('v32');
-    expect(PROMPT_HASH).toMatch(/^v32-[a-f0-9]{12}$/);
-    expect(APS_PROMPT_HASH).toMatch(/^v32a-[a-f0-9]{12}$/);
-    expect(SYSTEM_PROMPT_HASH).toMatch(/^v32s-[a-f0-9]{12}$/);
-    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v32b-[a-f0-9]{12}$/);
+  test('this is the v33 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v33');
+    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v33a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v33s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v33b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 
