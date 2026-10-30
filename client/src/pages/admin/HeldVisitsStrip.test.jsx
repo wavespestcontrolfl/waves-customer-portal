@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import HeldVisitsStrip, { heldVisitFormDefaults } from './HeldVisitsStrip';
+import HeldVisitsStrip, { heldVisitFormDefaults, billingChoiceText } from './HeldVisitsStrip';
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -125,5 +125,26 @@ describe('heldVisitFormDefaults (what Book it opens the form on)', () => {
     expect(day).toMatchObject({ windowStart: undefined, requireTimeChoice: true });
     expect(day).not.toHaveProperty('addressLine1');
     expect(day.internalNotes).toBe('Booked from a phone call. Call ID: call-2. The caller asked for the morning. Address stated on the call: 40 Sample Rd, Unit 4, Bradenton, 34205.');
+  });
+});
+
+// GATE_CALL_PREPAY_CHOICE: the server adds billing_choice to a held row only with the gate on.
+describe('the plan the caller chose on the call', () => {
+  it('says "Caller chose annual prepay" on the row, and the pay-per-application choice in its own words', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...timed, billing_choice: 'annual_prepay' }, { ...dayOnly, billing_choice: 'per_application' }]} onBook={() => {}} />);
+    expect(screen.getByText('Caller chose annual prepay')).toBeInTheDocument();
+    expect(screen.getByText('Caller chose to pay per application')).toBeInTheDocument();
+  });
+
+  it('shows nothing for a row with no choice (gate off, or the call named no plan)', () => {
+    render(<HeldVisitsStrip heldVisits={[timed, { ...dayOnly, billing_choice: 'weekly' }]} onBook={() => {}} />);
+    expect(screen.queryByText(/Caller chose/)).not.toBeInTheDocument();
+    expect(billingChoiceText(timed)).toBeNull();
+  });
+
+  it('Book it asks the form to preselect annual prepay only for an annual prepay choice; every other row keeps the same defaults', () => {
+    expect(heldVisitFormDefaults({ ...timed, billing_choice: 'annual_prepay' })).toEqual({ ...heldVisitFormDefaults(timed), annualPrepay: true });
+    expect(heldVisitFormDefaults({ ...timed, billing_choice: 'per_application' })).toEqual(heldVisitFormDefaults(timed));
+    expect(heldVisitFormDefaults(timed)).not.toHaveProperty('annualPrepay');
   });
 });
