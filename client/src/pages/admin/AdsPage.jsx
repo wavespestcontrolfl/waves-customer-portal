@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import AdsGapRulePanel from "../../components/admin/AdsGapRulePanel";
 import {
   Badge as UiBadge,
   Button,
@@ -1643,6 +1644,7 @@ function CapacityTab() {
   };
   return (
     <div className="flex flex-col [gap:20px]">
+      <AdsGapRulePanel />
       {" "}
       <div className="text-ui-body text-ink-secondary">
         Capacity & Ad Budget Status — Week View
