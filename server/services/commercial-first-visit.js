@@ -93,8 +93,7 @@ function visitMinutesFor(programs, estimateData) {
 
 // The visit the signer may book, or null (the office books it). Pure.
 function firstVisitPlan(estimate = {}) {
-  // An invoice-mode proposal bills its first period when it is marked won (proposal-win.js), so a completion invoice
-  // on the first visit would bill that visit twice: the office keeps it.
+  // An invoice-mode (Net terms) proposal stays with the office: online booking is for Auto Pay or no terms.
   if (estimate.bill_by_invoice === true) return null;
   const { normalizeProposal, computeProposalTotals } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);

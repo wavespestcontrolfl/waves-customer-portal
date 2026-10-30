@@ -716,7 +716,7 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }
     const { rungIds, blockedIds, unreadableIds } = f;
     // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf). limitedIds: the rungs
     // whose own limit was read as forbidding (the sheet's search leaves out only these); absent when the limit read failed.
-    const only = { ...(f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {}), ...(Array.isArray(f.limitedIds) ? { limitedIds: f.limitedIds } : {}) };
+    const only = { ...(f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {}), ...(Array.isArray(f.limitedIds) ? { limitedIds: f.limitedIds } : {}), ...(f.limitMessages ? { limitMessages: f.limitMessages } : {}) };
     if (!f.productId) return { item: null, note: f.note, rungIds, blockedIds, unreadableIds, ...only };
     return { item: await itemFor(f), note: f.note, rungIds, blockedIds, unreadableIds, ...only };
   };
@@ -1066,12 +1066,12 @@ async function withSearchedProducts({ svc, knex, rows, ids, known, knownTypes })
 // GATE_LAWN_TROUBLE_AREAS: the lawn's active take_all areas (a stored area is server-confirmed; a cleared one is not active), less the
 // places where the month's take-all product is closed by a limit. `[]` while the gate is off, as the card always had it; a failed read is
 // `[]` too (the check-only card, never a guess).
-async function takeAllAreasOn({ svc, knex, offers }) {
+async function takeAllAreasOn({ svc, knex }) {
   if (!featureGates.lawnTroubleAreasLive()) return [];
   try {
-    const productId = offers?.fungus?.takeAll ? offers.fungus.item.productId : null;
-    const closed = (offers?.placeBlocked || {})[productId] || {};
-    return (await require('./lawn-trouble-areas').loadActive(knex, await require('./lawn-trouble-areas').propertyOf(knex, svc))).filter((area) => area.type === 'take_all' && !closed[area.place]);
+    // Every mapped take-all area stays on the card: a place at its yearly limit warns, never closes (owner 2026-10-30); the
+    // sheet's place warning (placeBlocked) names the limit there.
+    return (await require('./lawn-trouble-areas').loadActive(knex, await require('./lawn-trouble-areas').propertyOf(knex, svc))).filter((area) => area.type === 'take_all');
   } catch (err) {
     logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return [];
@@ -1115,8 +1115,10 @@ async function group11PassOver({ svc, knex }) {
  * `{ ok: true, v: 1, assessmentId, cards, weedMix, takeAllProductIds }` (`takeAllProductIds` are the plan's take-all fungicide rows read now, which the
  * sheet prefers to the context's; `weedMix` is the Weed spots decision read fresh, the
  * sheet's one source for the weed entry, the weed card and the search exclusion; null when the month has no
- * weed group), `blockedProductIds` (the governed products the fresh read kept out because of a limit, a hold or
- * a failed limit read: see lawn-treatment-guide.blockedProductIds), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
+ * weed group), `blockedProductIds` (the governed products the fresh read kept out because of a city hold, the Group 11 take-all
+ * hold or the label prohibition: see lawn-treatment-guide.blockedProductIds), `limitWarned` (`{ [productId]: the limit's own words }`:
+ * the products a yearly limit that was read closes; a WARNING, never a block, so they stay offered: see
+ * lawn-treatment-guide.limitWarnedProducts), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
  * when the protocol stages no chinch product), or `{ ok: false, reason }`: disabled, invalid_assessment,
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
@@ -1134,7 +1136,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
   const guide = require('./lawn-treatment-guide');
   const result = (cards, weedMix = null, chinch = null, ids = {}) => ({
-    ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
+    ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], limitWarned: ids.limitWarned || {}, unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
     // The take-all fungicide rows of the plan as read now (an assignment or a substitution may have changed them since the sheet opened).
     takeAllProductIds: ids.takeAll || [],
     // GATE_LAWN_TROUBLE_AREAS: the per-place blocks this read found (the key exists only while the gate is live).
@@ -1165,9 +1167,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     month: visitMonthOf(svc),
     offers: { ...offers, chinch },
     weeds: guide.weedOffer(weedMix, sheet.addOns),
-    // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active) at places the take-all product is not closed at.
-    troubleAreas: await takeAllAreasOn({ svc, knex, offers }),
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
+    // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active).
+    troubleAreas: await takeAllAreasOn({ svc, knex }),
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

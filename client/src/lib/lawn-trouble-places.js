@@ -140,8 +140,20 @@ function chinchProblem(decision, row) {
   if ((decision.unreadableIds || []).some((id) => sameId(id, row.productId))) return null;
   // With the rungs a place's limits closed (blockedIds), only those are closed there: a rung the place does not offer but does
   // not close is open, as /complete reads it. Without them (an older answer) the place offers its one product.
-  if (Array.isArray(decision.blockedIds)) return decision.blockedIds.some((id) => sameId(id, row.productId)) ? reasonText(decision.note, 'This chinch product is not available at this place.') : null;
-  return reasonText(decision.note, 'This chinch product is not available at this place.');
+  // A rung whose OWN limit is reached here (limitedIds) warns in its own words, even when the ladder stopped at an open rung
+  // before it (Arena open, Talak capped: blockedIds is empty, Talak is still at its limit here).
+  const ownWords = limitWordsAt(decision, row);
+  if (Array.isArray(decision.blockedIds)) {
+    if (decision.blockedIds.some((id) => sameId(id, row.productId))) return ownWords || reasonText(decision.note, 'This chinch product is not available at this place.');
+    return ownWords;
+  }
+  return ownWords || reasonText(decision.note, 'This chinch product is not available at this place.');
+}
+
+function limitWordsAt(decision, row) {
+  if (!(decision.limitedIds || []).some((id) => sameId(id, row.productId))) return null;
+  const key = Object.keys(decision.limitMessages || {}).find((id) => sameId(id, row.productId));
+  return reasonText(key ? decision.limitMessages[key] : null, 'A yearly limit is reached for this product at this place.');
 }
 
 // Whether the limits could not be read at a place for this row (the unknown: the row is allowed, recorded and flagged by the

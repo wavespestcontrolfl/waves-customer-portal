@@ -631,6 +631,9 @@ app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPrePar
 // body parsing, then parse with its own 256kb cap — same reason as staff
 // auth above; unauthenticated callers must not force big JSON parse work.
 app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+// Owner MCP admin reads (routes/mcp-admin.js): gate + key check + per-login
+// rate limit BEFORE any body parsing, then a 64kb capped parse.
+app.use('/api/mcp-admin', ...require('./routes/mcp-admin').mcpAdminPreParsers);
 
 // Public MCP endpoint (anonymous agents): gate + rate limit BEFORE any body
 // parsing, then a 64kb capped parse — dark (404) until GATE_MCP_PUBLIC flips.
@@ -998,6 +1001,8 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// Owner MCP admin reads — Intelligence Bar read tools under an mcp_read key, gated.
+app.use('/api/mcp-admin', require('./routes/mcp-admin'));
 // External ops-cron findings → ops_digest bell rows — machine auth
 // (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
 app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));

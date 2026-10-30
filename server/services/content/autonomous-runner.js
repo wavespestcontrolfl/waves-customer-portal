@@ -100,6 +100,18 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
+const getSameQuestionRefresh = lazy('same-question-refresh', './same-question-refresh');
+
+// GATE_SAME_QUESTION_CHECK, read at call time. A whole-module feature-gates
+// mock without the reader, or a load failure, reads as off (shadow only).
+function sameQuestionCheckOn() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.sameQuestionCheckLive === 'function' && gates.sameQuestionCheckLive() === true;
+  } catch (_) {
+    return false;
+  }
+}
 const getGithubClient = lazy('github-client', '../content-astro/github-client');
 
 // Bounds for the session-level page-edit lock held across a citability
@@ -521,6 +533,77 @@ class AutonomousRunner {
         });
         await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
         return finalized;
+      }
+
+      // 2d-bis. Same-question check (owner 2026-10-30, GATE_SAME_QUESTION_CHECK):
+      //     does a live post already hold every topic word of this brief's
+      //     keyword in its title / slug / primary keyword? Gate OFF = SHADOW:
+      //     the verdict is recorded on run.topic_targeting_result.same_question
+      //     and logged, and the run goes on. Gate ON = the new-post row is
+      //     skipped by design, and ONE refresh of the owner page is queued that
+      //     adds the question as an answer section (same-question-refresh.js).
+      //     The rule is deterministic and runs on the corpus already loaded;
+      //     a fault in it never blocks or holds the row.
+      let sameQuestion = null;
+      try {
+        if (topicIndex && typeof topicGate.evaluateSameQuestion === 'function') {
+          sameQuestion = topicGate.evaluateSameQuestion(candidate, { index: topicIndex });
+        }
+      } catch (err) {
+        logger.warn(`[autonomous-runner] same-question check failed for ${opp.id}: ${err.message}`);
+        run.topic_targeting_result = { ...(run.topic_targeting_result || {}), same_question: { mode: 'error', error: String(err.message).slice(0, 200) } };
+      }
+      if (sameQuestion) {
+        const enforce = sameQuestionCheckOn();
+        const record = {
+          mode: enforce ? 'on' : 'shadow',
+          would_block: sameQuestion.would_block === true,
+          reason: sameQuestion.reason,
+          owner_url: sameQuestion.owner?.url || null,
+          tokens: sameQuestion.tokens || [],
+          source: sameQuestion.source || null,
+        };
+        run.topic_targeting_result = { ...(run.topic_targeting_result || {}), same_question: record };
+        if (record.would_block) {
+          logger.info(`[autonomous-runner] same-question ${enforce ? 'BLOCK' : 'shadow'} for ${opp.id}: tokens=${record.tokens.join('+')} owner=${record.owner_url}`);
+        }
+        if (record.would_block && enforce) {
+          // The question is the text the match was made on: evaluateSameQuestion
+          // falls back from the keyword to the working title, then the slug,
+          // and the queued answer block must be about that, not about a
+          // keyword with no topic words in it.
+          const question = String(sameQuestion.source_text || '').trim();
+          try {
+            // A shadow-mode blog run records what it would do and queues
+            // nothing: the refresh it would create may run live.
+            if (run.shadow_mode) {
+              record.refresh = { queued: false, reason: 'shadow_mode' };
+            } else {
+              const refreshQueue = getSameQuestionRefresh();
+              if (!refreshQueue) throw new Error('same_question_refresh_unavailable');
+              record.refresh = await refreshQueue.enqueueOwnerRefresh({
+                owner: sameQuestion.owner,
+                tokens: sameQuestion.tokens,
+                question,
+                sourceOpportunityId: opp.id,
+                sourceRunId: run.id || null,
+              });
+            }
+          } catch (err) {
+            // The block stands (it is deterministic and correct); only the
+            // rewrite is lost, and the replay script can find it again.
+            logger.error(`[autonomous-runner] same-question refresh enqueue failed for ${opp.id}: ${err.message}`);
+            record.refresh = { queued: false, reason: `enqueue_error:${String(err.message).slice(0, 120)}` };
+          }
+          const skipReason = `topic_targeting:${topicGate.CODES?.SAME_QUESTION_LIVE || 'TOPIC_SAME_QUESTION_LIVE'}`;
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: skipReason,
+            reviewer_notes: `${(sameQuestion.findings || []).map((f) => `${f.code}: ${f.message}`).join(' | ')} | owner refresh: ${record.refresh.queued ? 'queued' : record.refresh.reason}`,
+          });
+          await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+          return finalized;
+        }
       }
     }
 

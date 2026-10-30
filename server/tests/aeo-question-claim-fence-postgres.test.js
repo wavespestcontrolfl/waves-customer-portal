@@ -11,7 +11,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // Every lane open: the fence under test is the only thing that can hold a row.
-jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => true }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => true, sameQuestionCheckLive: () => mockSameQuestionLive }));
+let mockSameQuestionLive = true;
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const queue = require('../services/content/opportunity-queue');
@@ -52,6 +53,12 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type'); t.timestamp('composed_at', { useTz: true });
     });
     await migration.up(mockPg);
+    // Columns the same_question_refresh producer inserts (the real table has them all).
+    await mockPg.schema.alterTable('opportunity_queue', (t) => {
+      t.text('query'); t.text('service'); t.text('city'); t.jsonb('score_breakdown'); t.timestamp('created_at', { useTz: true });
+      t.unique(['dedupe_key']); // the real table's ON CONFLICT target
+    });
+    await mockPg.raw('ALTER TABLE opportunity_queue ALTER COLUMN id SET DEFAULT gen_random_uuid()');
   });
   afterAll(async () => {
     if (mockPg) await mockPg.destroy();
@@ -219,6 +226,76 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     expect(await queue.claimNext({ minScore: 0, onlyIds: [] })).toBeNull();
     expect((await mockPg('opportunity_queue').where({ id: outside.id }).first()).status).toBe('pending');
     expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(outside.id);
+  });
+
+  // same_question_refresh (GATE_SAME_QUESTION_CHECK) shares the question fence.
+  const sameQuestionRefresh = (patch = {}) => questionRefresh({
+    bucket: 'same_question_refresh', dedupe_key: `same_question:v1:${SLUG}::${randomUUID()}`,
+    signal_metadata: JSON.stringify({ same_question: { owner_url: `${HUB}${SLUG}` } }), ...patch,
+  });
+
+  test('same_question_refresh waits out the 28-day cooldown after another row wrote its route, and is blocked by an in-flight row', async () => {
+    await mockPg('opportunity_queue').insert([decayRefresh(`${HUB}${SLUG}`, { status: 'done', updated_at: new Date() }), sameQuestionRefresh()]);
+    expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+    await mockPg('opportunity_queue').where({ status: 'done' }).update({ updated_at: new Date(Date.now() - 40 * 86400_000) });
+    expect(await queue.claimNext({ minScore: 0 })).not.toBeNull();
+
+    await mockPg('opportunity_queue').del();
+    await mockPg('opportunity_queue').insert([decayRefresh(`${HUB}${SLUG}`, { status: 'claimed', claimed_at: new Date() }), sameQuestionRefresh()]);
+    expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+  });
+
+  test('same_question_refresh own-run fence: an open PR keeps the row unclaimable until the PR is retired', async () => {
+    const row = sameQuestionRefresh();
+    await mockPg('opportunity_queue').insert(row);
+    await mockPg('autonomous_runs').insert({ id: randomUUID(), opportunity_id: row.id, action_type: 'refresh_existing_page',
+      claimed_at: new Date(), astro_pr_url: 'https://github.com/example/content/pull/12' });
+    expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+    await mockPg('autonomous_runs').update({ astro_pr_retired_at: new Date() });
+    expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(row.id);
+  });
+
+  test('enqueueOwnerRefresh writes one pending row, is idempotent, yields to another edit of the page, and never reopens a frozen row', async () => {
+    const refresh = require('../services/content/same-question-refresh');
+    const protectedPages = { isProtected: jest.fn().mockResolvedValue({ protected: false }) };
+    const args = { owner: { url: SLUG, title: 'Large Patch Fungus' }, tokens: ['patch', 'fungus'], question: 'large patch fungus lakewood ranch', sourceOpportunityId: 5 };
+
+    const first = await refresh.enqueueOwnerRefresh(args, { protectedPages });
+    expect(first).toMatchObject({ queued: true, reason: 'queued' });
+    const row = await mockPg('opportunity_queue').where({ bucket: 'same_question_refresh' }).first();
+    expect(row).toMatchObject({ action_type: 'refresh_existing_page', status: 'pending', page_url: `${HUB}${SLUG}`, query: null });
+    expect(row.signal_metadata.unanswered_queries[0].query).toBe('large patch fungus lakewood ranch');
+
+    // Same question again: the pending row is "already queued", no second row.
+    expect((await refresh.enqueueOwnerRefresh(args, { protectedPages })).reason).toBe('already_queued');
+    expect((await mockPg('opportunity_queue').where({ bucket: 'same_question_refresh' }).count('* as n').first()).n).toBe('1');
+
+    // The claim honors it, and once it is done the same question is never reopened.
+    expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(row.id);
+    await mockPg('opportunity_queue').where({ id: row.id }).update({ status: 'done' });
+    expect((await refresh.enqueueOwnerRefresh(args, { protectedPages })).reason).toMatch(/already_handled|page_edit_in_flight/);
+    expect((await mockPg('opportunity_queue').where({ id: row.id }).first()).status).toBe('done');
+
+    // A different question for a page that has another edit pending: no row.
+    await mockPg('opportunity_queue').del();
+    await mockPg('opportunity_queue').insert(decayRefresh(`${HUB}${SLUG}`));
+    const blocked = await refresh.enqueueOwnerRefresh({ ...args, tokens: ['fungus'], question: 'fungus on st augustine' }, { protectedPages });
+    expect(blocked).toMatchObject({ queued: false, reason: 'page_edit_in_flight' });
+    expect((await mockPg('opportunity_queue').where({ bucket: 'same_question_refresh' }).count('* as n').first()).n).toBe('0');
+  });
+
+  test('rollback: with GATE_SAME_QUESTION_CHECK off a pending same_question_refresh row stops reserving its page (claimed / review rows still do)', async () => {
+    const refreshAudit = require('../services/seo/refresh-audit');
+    const find = () => refreshAudit.findInflightPageEdit(mockPg, { path: SLUG.replace(/\/$/, ''), targetDomain: 'wavespestcontrol.com' });
+    try {
+      await mockPg('opportunity_queue').insert(sameQuestionRefresh());
+      mockSameQuestionLive = true;
+      expect(await find()).toBeTruthy();
+      mockSameQuestionLive = false;
+      expect(await find()).toBeUndefined();
+      await mockPg('opportunity_queue').update({ status: 'claimed', claimed_at: new Date() });
+      expect(await find()).toBeTruthy();
+    } finally { mockSameQuestionLive = true; }
   });
 
   test('unrelated routes and rows without a question are unaffected', async () => {

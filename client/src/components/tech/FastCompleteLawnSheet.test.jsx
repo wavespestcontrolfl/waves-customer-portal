@@ -2163,7 +2163,7 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByText('On the sheet · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
   });
 
-  // Owner 2026-10-09: every lawn product is in the search; only a limit that was read keeps one out.
+  // Owner 2026-10-09: every lawn product is in the search. Owner 2026-10-30: a yearly limit is a warning, never a block, so a limit keeps none out.
   test('the search lists the weed group too: the entry adds the mix, the search adds one product', async () => {
     await open(weedContext(MIX({
       productIds: [P_LEAD, P_CERT], note: 'Surfactant left out: it is 90°F or hotter.',
@@ -2176,16 +2176,16 @@ describe('weed spots and the spot area', () => {
     }
   });
 
-  test('a member at its own yearly limit while the lead stays open is not in the search', async () => {
+  test('a member at its own yearly limit while the lead stays open is still in the search (a limit only warns)', async () => {
     await open(weedContext(MIX({ productIds: [P_LEAD], blockedIds: [P_CERT], surfactant: null, note: 'Cert yearly limit reached; left out.' })));
     const search = await screen.findByLabelText('Search products');
     fireEvent.change(search, { target: { value: 'Lead WG' } });
     expect(await screen.findByRole('button', { name: /^Lead WG/ })).toBeTruthy();
     fireEvent.change(search, { target: { value: 'Cert Herbicide' } });
-    expect(screen.queryByRole('button', { name: /^Cert Herbicide/ })).toBeNull();
+    expect(await screen.findByRole('button', { name: /^Cert Herbicide/ })).toBeTruthy();
   });
 
-  test('lead at its yearly limit: the search leaves out the lead only; the replacement and the members with no limit of their own are listed', async () => {
+  test('lead at its yearly limit: the search lists the lead too, with the replacement and the members (a limit only warns)', async () => {
     await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
     const search = await screen.findByLabelText('Search products');
     for (const name of ['Blind Herbicide', 'Tank Surfactant']) {
@@ -2193,7 +2193,7 @@ describe('weed spots and the spot area', () => {
       expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
     }
     fireEvent.change(search, { target: { value: 'Lead WG' } });
-    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
+    expect(await screen.findByRole('button', { name: /^Lead WG/ })).toBeTruthy();
   });
 
   test('when the limits could not be read the search lists the weed products again', async () => {
@@ -3347,7 +3347,9 @@ describe('suggested from this lawn', () => {
         const note = 'The yearly weed-spray limit is reached for this lawn.';
         guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note, blockedIds: [P_LEAD, P_CERT, P_BLIND] }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
+        // The picks stay blocked here (the answer's blockedProductIds: a hold). The weed group and the chinch rungs are only at a
+        // limit (a warning): the entries are lines, and the search keeps the products.
+      }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
       ['answered, no finding and nothing blocked', async () => {
         guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
@@ -3360,7 +3362,7 @@ describe('suggested from this lawn', () => {
         guideAnswer = UNREADABLE_ANSWER();
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
-      // Per rung: Arena's limit was READ (blocked, stays hidden), Talak's own read failed (released to the
+      // Per rung: Arena's limit was READ (a warning: it stays in the search), Talak's own read failed (released to the
       // search and the list, with the note); nothing is offered.
       ['answered, one rung blocked and one unreadable', async () => {
         guideAnswer = {
@@ -3368,7 +3370,7 @@ describe('suggested from this lawn', () => {
           unreadableProductIds: [P_BIF], unreadableNote: UNREADABLE,
         };
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
       ['failed on the first read, context weed mix unavailable', async () => {
         guideAnswer = refusal(500, 'boom', 'Internal error');
         await mxOpen(mxContext({ plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE }, chinch: UNREAD_CHINCH }) }));
@@ -3388,6 +3390,18 @@ describe('suggested from this lawn', () => {
       expect(await probe()).toEqual(expected);
     });
 
+    // Owner 2026-10-30: a limit warns, never blocks. With the guide off a capped weed member is in the search; its row still
+    // carries the limit's words, from the context's own weed decision.
+    test('guide off: a weed product at its yearly limit is added through the search with the limit warning on its row', async () => {
+      const capped = 'Lead WG: 3/3 applications this year — LIMIT REACHED.';
+      await mxOpen(mxContext({ treatmentGuide: false, plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], limitMessages: { [P_LEAD]: capped } } }) }));
+      await analyze();
+      expect(await searchState('Lead WG', /^Lead WG/)).toBe('addable');
+      fireEvent.click(screen.getAllByRole('button', { name: /^Lead WG/ })[0]);
+      const row = await screen.findByRole('group', { name: 'Lead WG' });
+      expect(within(row).getByText(`${capped} You can still complete. The office gets an alert.`)).toBeTruthy();
+    });
+
     test('a failed guide request keeps the context\'s rungs governed: the search lists them, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
       await mxOpen();
@@ -3402,22 +3416,27 @@ describe('suggested from this lawn', () => {
       expect(present('Arena 50 WDG')).toBe(true);
     });
 
-    test('a failed guide request keeps the context\'s read limits: Arena at its yearly limit stays out of the search, Talak is listed', async () => {
+    test('a failed guide request keeps the context\'s read limits as warnings: Arena at its yearly limit and Talak are both listed', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
-      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA] };
+      const interval = 'Arena 50 WDG: last applied 20 days ago; the label needs 56 days between applications.';
+      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA], limitedIds: [P_ARENA], limitMessages: { [P_ARENA]: interval } };
       await mxOpen(mxContext({ plannedProducts: mxPlanned({ chinch }) }));
       await analyze();
       await waitFor(() => expect(guideCalls()).toHaveLength(1));
       await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
-      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
       expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('addable');
+      // The row added through the search carries the context decision's own words (the interval), not the generic yearly line.
+      fireEvent.click(screen.getAllByRole('button', { name: /^Arena 50 WDG/ })[0]);
+      const row = await screen.findByRole('group', { name: 'Arena 50 WDG' });
+      expect(within(row).getByText(`${interval} You can still complete. The office gets an alert.`)).toBeTruthy();
     });
 
-    test('weed members are judged one by one: the member read as capped stays out of the search, its sibling is released', async () => {
+    test('weed members are judged one by one: the member read as capped is listed (a warning), its sibling is released', async () => {
       const weedMix = { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE, blockedIds: [P_LEAD] };
       guideAnswer = { ...answerOf([], weedMix, CLEAN_CHINCH, [P_LEAD]), unreadableProductIds: [P_CERT, P_BLIND], unreadableNote: UNREADABLE };
       await mxOpen(); await analyze(); await suggested();
-      expect(await searchState('Lead WG', /^Lead WG/)).toBe('hidden');
+      expect(await searchState('Lead WG', /^Lead WG/)).toBe('addable');
       expect(await searchState('Cert Herbicide', /^Cert Herbicide/)).toBe('addable');
     });
 
@@ -3509,23 +3528,32 @@ describe('suggested from this lawn', () => {
       expect(footerNote()).not.toMatch(/not offered for this lawn|Wait for the lawn guide/);
     });
 
-    test('answered unreadable, then blocked: the rows go with "The limits changed."; a generic row stays', async () => {
+    test('answered unreadable, then held and limited: the held pick goes with "The limits changed."; a row at a limit stays with its warning; a generic row stays', async () => {
       guideAnswer = UNREADABLE_ANSWER();
       await mxOpen(); await analyze(); await suggested();
       // The tech records what he applied: a pick from the list, a weed product from the search.
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add Art Fungicide' }));
+      fireEvent.click(within(addons()).getByRole('button', { name: 'Add Disp Wetting Agent' }));
       fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Lead WG' } });
       fireEvent.click(await screen.findByRole('button', { name: /^Lead WG/ }));
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add Vel Fungicide' }));
-      for (const name of ['Art Fungicide', 'Lead WG', 'Vel Fungicide']) expect(present(name)).toBe(true);
+      for (const name of ['Art Fungicide', 'Disp Wetting Agent', 'Lead WG', 'Vel Fungicide']) expect(present(name)).toBe(true);
       await retake();
-      // Now the read succeeds and forbids them.
-      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], blockedIds: [P_LEAD, P_CERT, P_BLIND] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
+      // Now the read succeeds: the city holds Art; Disp and the lead are only at a yearly limit (a warning, never a block).
+      guideAnswer = {
+        ...answerOf([], { ...MX_WEED, mode: 'none', productIds: [], blockedIds: [P_LEAD, P_CERT, P_BLIND] }, CLEAN_CHINCH, [P_ART]),
+        limitWarned: { [P_DISP]: 'Disp: 3/3 applications in 2026 — LIMIT REACHED.' },
+      };
       await analyze();
-      await screen.findByText('Removed: Art Fungicide, Lead WG. The limits changed.');
+      await screen.findByText('Removed: Art Fungicide. The limits changed.');
       expect(present('Art Fungicide')).toBe(false);
-      expect(present('Lead WG')).toBe(false);
+      expect(present('Lead WG')).toBe(true);
+      expect(present('Disp Wetting Agent')).toBe(true);
       expect(present('Vel Fungicide')).toBe(true);
+      // The rows at a limit say so in the limit's own words and promise the office an alert; Complete is not held by the guide.
+      expect(screen.getByText('Disp: 3/3 applications in 2026 — LIMIT REACHED. You can still complete. The office gets an alert.')).toBeTruthy();
+      expect(screen.getByText('A yearly limit is reached for this product. You can still complete. The office gets an alert.')).toBeTruthy();
+      expect(footerNote()).not.toMatch(/not offered for this lawn|Wait for the lawn guide/);
     });
 
     test('an unreadable product is never silent: the weed entry, the chinch entry and an unreadable pick all carry the one wording', async () => {

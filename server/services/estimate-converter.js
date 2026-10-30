@@ -7169,6 +7169,23 @@ const EstimateConverter = {
             if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
               throw palmCatalogMissingError();
             }
+            // LIVE line map: a same-trip program whose line has its own technician does
+            // not copy the reserved visit's hour or technician (a combined capacity
+            // member keeps today's copy: its offer already needed one technician on
+            // every line). Same day, no time: never one slot for two programs. The
+            // note is customer-visible, so it says it in plain words.
+            if (sameTrip && !combinedCapacity) {
+              const own = await require('./scheduling/promoted-unit-line').ownLineTechnicianForPromotedUnit(database, { row: standaloneRow, unit, unitDate, reservedStart });
+              if (own) {
+                delete standaloneRow.window_start;
+                delete standaloneRow.window_end;
+                delete standaloneRow.technician_id;
+                if (own.technicianId) standaloneRow.technician_id = own.technicianId;
+                standaloneRow.notes = `${standaloneRow.notes} ${own.technicianId
+                  ? 'This program has its own technician, so we will set its time separately.'
+                  : 'We will set the time for this program separately.'}`;
+              }
+            }
             // Promoted lawn/palm parents get the converter FAMILY duration
             // (codex r7 P2): the identity-only skip above correctly refuses
             // the lawn catalog's contradictory 45-minute default, but a
