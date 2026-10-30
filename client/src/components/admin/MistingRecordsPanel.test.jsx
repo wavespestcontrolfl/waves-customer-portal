@@ -176,6 +176,14 @@ describe("MistingRecordsPanel", () => {
     expect(screen.getAllByRole("button", { name: "Void" })).toHaveLength(2);
   });
 
+  it("an earlier calibration says where it was installed (a moved customer's old house)", async () => {
+    await openPanel(records({
+      calibrations: [calibration({ id: "c-moved", isCurrent: false, model: "Old house model", installedAddress: "1 Old Lane, Parrish, FL 34219" })],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /Earlier calibrations \(1\)/ }));
+    expect(screen.getByText(/Old house model.*Installed at 1 Old Lane, Parrish, FL 34219\./)).toBeInTheDocument();
+  });
+
   it("voids an earlier (superseded) calibration with an inline reason", async () => {
     await openPanel(records({
       calibrations: [calibration(), calibration({ id: "c-earlier", isCurrent: false, model: "Earlier model", createdAt: "2026-02-01T15:00:00.000Z" })],

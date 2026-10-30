@@ -582,7 +582,7 @@ export default function MistingRecordsPanel({ customerId }) {
                     <li key={c.id} className={cn("text-ui-body", c.voidedAt && "text-ink-secondary")}>
                       <div className={cn(c.voidedAt && "line-through")}>
                         {dayOf(c.createdAt)}: {c.vendor} {c.model}, {c.nozzleCount} nozzles, {c.riserCount} risers, {c.productName}, {c.concentrateFlOzPerTank} fl oz per {c.tankGallons} gal. {ozLine(c)}
-                        {propertyName(c.propertyId) ? ` ${propertyName(c.propertyId)}.` : ""} By {c.recordedBy?.name || "staff"}.
+                        {propertyName(c.propertyId) ? ` ${propertyName(c.propertyId)}.` : ""}{c.installedAddress ? ` Installed at ${c.installedAddress}.` : ""} By {c.recordedBy?.name || "staff"}.
                       </div>
                       {c.voidedAt ? <div className="text-ui-label">Voided {dayOf(c.voidedAt)}: {c.voidReason}</div> : voidLink("calibration", c.id)}
                       {voidBox("calibration", c.id)}
