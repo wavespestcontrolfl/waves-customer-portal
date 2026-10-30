@@ -10,6 +10,7 @@ jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
   haversine: () => 1,
   fallbackLegMetrics: () => ({ minutes: 20 }),
+  milesToDriveMinutes: () => 15,
   createSchedulingTravel: () => ({ lookup: () => ({ minutes: 20, source: 'conservative_model', reason: null }) }),
 }));
 
@@ -161,6 +162,58 @@ describe('gate on: arrival_window names the stop', () => {
     expect(fit.warning).toMatch(/^Route on 2027-03-01: Stop 2 \(8–10 AM window\) would already arrive \d+(:\d\d)? PM, \d+ min late without this visit\.$/);
     // The day without the visit: A 8:20-12:20, B arrives 12:40 (160 min past its 10 AM close).
     expect(fit.warning).toContain('12:40 PM, 160 min late');
+  });
+
+  // Codex pre-push P1: the stop under way is not in the simulated order, but it keeps its number, so every
+  // later stop is one higher. Today's route, picker road check on (fromActiveStop), the stop continued from.
+  describe('numbering with a stop under way', () => {
+    const NOW = new Date(`${DATE}T10:00:00-05:00`);
+    const live = (status, stamps) => ({ prospective: false, now: NOW, activeStop: { id: 'U', ...stamps } });
+    const under = (status) => stop('U', '08:00', 60, { status, route_order: 1 });
+
+    test('on site: the saved visit at route_order 2 is "Stop 2", not "Stop 1"', () => {
+      const fit = run([under('on_site')], stop('T', '08:00', 60, { route_order: 2 }), { detail: true },
+        live('on_site', { arrived_at: `${DATE}T08:30:00-05:00` }));
+      expect(fit.reason).toBe('arrival_window');
+      expect(fit.warning).toBe(`Route on ${DATE}: Stop 2 (8–10 AM window) is this visit and would arrive 10:20 AM, 20 min late, so it cannot keep its own window.`);
+    });
+
+    test('en route: the same numbering', () => {
+      const fit = run([under('en_route')], stop('T', '08:00', 60, { route_order: 2 }), { detail: true },
+        live('en_route', { en_route_at: `${DATE}T09:50:00-05:00` }));
+      expect(fit.reason).toBe('arrival_window');
+      expect(fit.warning).toMatch(/^Route on 2027-03-01: Stop 2 \(8–10 AM window\) is this visit and would arrive/);
+    });
+
+    test('a stop made late after the active stop and a completed one is numbered behind both', () => {
+      const done = stop('D', '07:00', 30, { status: 'completed', route_order: 1, actual_end_time: `${DATE}T07:40:00-05:00` });
+      const rows = [done, stop('U', '08:00', 60, { status: 'on_site', route_order: 2 }), stop('B', '10:00', 60, { route_order: 4 })];
+      const fit = run(rows, stop('T', '10:00', 120, { route_order: 3 }), { detail: true },
+        live('on_site', { arrived_at: `${DATE}T08:30:00-05:00` }));
+      expect(fit.reason).toBe('arrival_window');
+      expect(fit.warning).toMatch(/^Route on 2027-03-01: Stop 4 \(10 AM–12 PM window\) would arrive/);
+    });
+
+    test('the tight later stop is numbered the same way', () => {
+      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+      const fit = run([stop('U', '07:00', 30, { status: 'on_site', route_order: 1 }), stop('B', '10:00', 60, { route_order: 2 })],
+        candidate('08:00', 210), { detail: true, durationMinutes: 210 }, { now: new Date(`${DATE}T07:00:00-05:00`), activeStop: { id: 'U', arrived_at: `${DATE}T06:50:00-05:00` } });
+      expect(fit.reason).toBe('arrival_margin');
+      expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (10 AM–12 PM window) would arrive 11:50 AM, only 10 min before its window closes. Choose another window.`);
+    });
+
+    test('an unverified cause counts the stop under way too: the pinless stop behind it is "Stop 2"', () => {
+      const rows = [under('on_site'), stop('P', '10:00', 60, { lat: null, route_order: 2 })];
+      const fit = run(rows, stop('T', '13:00', 60, { route_order: 3 }), { detail: true },
+        live('on_site', { arrived_at: `${DATE}T08:30:00-05:00` }));
+      expect(fit.reason).toBe('route_unverified');
+      expect(fit.warning).toBe(`Route on ${DATE}: Stop 2 (10 AM–12 PM window) has no map pin. Fix the address pin to check the route.`);
+    });
+
+    test('no stop under way: numbering is unchanged', () => {
+      const fit = run([], stop('T', '08:00', 60, { route_order: 1 }), { detail: true, departureMin: 11 * 60 }, { prospective: false });
+      expect(fit.warning).toContain('Stop 1 (8–10 AM window) is this visit');
+    });
   });
 
   test('a day already late in several places: at most two stops are named', () => {
