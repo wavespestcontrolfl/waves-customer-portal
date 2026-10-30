@@ -806,7 +806,7 @@ describe('rescheduleSeries — one recorded operation', () => {
   });
 
   test('the technician pin passes when the locked anchor is still that technician\'s, and is inert when not supplied', async () => {
-    const { updates } = wireSeriesMocks([sib('svc-1', BASE, { technician_id: 'tech-1' }), sib('svc-2', SIB1)]);
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE, { technician_id: 'tech-1' }), sib('svc-2', SIB1, { technician_id: 'tech-1' })]);
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', technician_id: 'tech-1' },
     });
@@ -816,6 +816,39 @@ describe('rescheduleSeries — one recorded operation', () => {
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00' },
     })).resolves.toMatchObject({ rescheduledOccurrences: expect.any(Array) });
+  });
+
+  test('technician pin: a mixed-assignee series (a later occurrence belongs to ANOTHER technician) is refused before any write', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE, { technician_id: 'tech-1' }), sib('svc-2', SIB1, { technician_id: 'tech-2' })]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', technician_id: 'tech-1' },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    for (const u of updates) expect(u.update).not.toHaveBeenCalled();
+  });
+
+  test('technician pin: an all-own series still shifts; the same mixed series without the pin (admin) is unchanged', async () => {
+    const own = wireSeriesMocks([sib('svc-1', BASE, { technician_id: 'tech-1' }), sib('svc-2', SIB1, { technician_id: 'tech-1' })]);
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', technician_id: 'tech-1' },
+    });
+    expect(result.rescheduledOccurrences).toHaveLength(2);
+    expect(own.updates.length).toBeGreaterThan(1);
+    wireSeriesMocks([sib('svc-1', BASE, { technician_id: 'tech-1' }), sib('svc-2', SIB1, { technician_id: 'tech-2' })]);
+    const admin = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00' },
+    });
+    expect(admin.rescheduledOccurrences).toHaveLength(2);
+  });
+
+  test('technician pin helper: a carried visit partner assigned to another technician refuses; own partners and no pin pass', () => {
+    const check = SmartRebooker.assertSeriesWriteSetOwnedBy;
+    const own = { id: 'a', technician_id: 'tech-1' };
+    const other = { id: 'b', technician_id: 'tech-2' };
+    expect(() => check({ technician_id: 'tech-1' }, [own, other])).toThrow(expect.objectContaining({ statusCode: 409, code: 'SLOT_TAKEN' }));
+    expect(() => check({ technician_id: 'tech-1' }, [own, { id: 'c', technician_id: null }])).toThrow(/concurrently/);
+    expect(() => check({ technician_id: 'tech-1' }, [own, { id: 'd', technician_id: 'tech-1' }])).not.toThrow();
+    expect(() => check({ scheduled_date: BASE }, [own, other])).not.toThrow();
+    expect(() => check(undefined, [other])).not.toThrow();
   });
 
   test('a repeated operation_key replays the committed result without re-running the sweep', async () => {

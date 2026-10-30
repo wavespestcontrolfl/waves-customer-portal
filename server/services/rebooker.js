@@ -479,6 +479,25 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
 // that technician too (the anchor row's after-snapshot) and the anchor must
 // still be assigned to them — a move that landed with another tech is not
 // this request's result.
+// Technician-initiated series move (expectAnchor.technician_id, set only by the
+// tech-portal Quick Move): the shift writes every swept future occurrence and
+// every carried visit partner, so EVERY one of those locked rows must belong
+// to the requesting technician — a technician moves their OWN visits, never
+// another technician's follower in a mixed-assignee series. Judged on the
+// locked rows, before any write. No pin (every admin/customer caller) = inert.
+// Refusal is the same 409 SLOT_TAKEN the anchor pin throws, so the caller's
+// single-visit fallback moves the technician's own anchor alone.
+function assertSeriesWriteSetOwnedBy(expectAnchor, writeRows) {
+  if (!expectAnchor || !Object.prototype.hasOwnProperty.call(expectAnchor, 'technician_id')) return;
+  const owner = String(expectAnchor.technician_id || '');
+  if (writeRows.every((row) => String(row.technician_id || '') === owner)) return;
+  throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+    statusCode: 409,
+    isOperational: true,
+    code: 'SLOT_TAKEN',
+  });
+}
+
 function priorStillCurrent(prior, service, technician = null) {
   const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
     || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
@@ -3494,6 +3513,10 @@ class SmartRebooker {
           if (carry.partnerIds.length) probeExcludeIds = [...sweptIds, ...carry.partnerIds];
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
+          assertSeriesWriteSetOwnedBy(options.expectAnchor, [
+            ...siblings.filter((x) => sweptIds.some((id) => String(id) === String(x.id))),
+            ...[...carry.byVisit.values()].flatMap((entry) => entry.partners || []),
+          ]);
           // The acknowledged set: a surface confirmed exactly the previewed
           // occurrences — the locked sweep must be that same set (ids, not a
           // count: a cancel plus an auto-extend keeps the count while moving
@@ -5008,6 +5031,7 @@ module.exports.makeSeriesProjector = makeSeriesProjector;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.assertSeriesWriteSetOwnedBy = assertSeriesWriteSetOwnedBy;
 module.exports.replaySeriesMoveCleanup = replaySeriesMoveCleanup;
 module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;

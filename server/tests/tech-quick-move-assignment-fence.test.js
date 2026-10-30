@@ -106,9 +106,11 @@ function wireReads(...rows) {
 // The live row the writer's atomic UPDATE sees; the stub applies the same
 // technician_id predicate rebooker.reschedule applies to options.expect.
 let liveTechnicianId;
+let liveFollowerTechnicians = [];
 beforeEach(() => {
   jest.clearAllMocks();
   liveTechnicianId = 'tech-1';
+  liveFollowerTechnicians = [];
   SmartRebooker.reschedule.mockImplementation(async (id, _date, _window, _reason, _by, options = {}) => {
     const expected = options.expect && options.expect.technician_id;
     if (expected && String(expected) !== String(liveTechnicianId)) {
@@ -120,7 +122,10 @@ beforeEach(() => {
   // judged on the live row.
   SmartRebooker.rescheduleSeries.mockImplementation(async (id, date, window, _reason, _by, options = {}) => {
     const expected = options.expectAnchor && options.expectAnchor.technician_id;
-    if (expected && String(expected) !== String(liveTechnicianId)) {
+    // Locked write set: the anchor plus every later occurrence (rebooker
+    // assertSeriesWriteSetOwnedBy).
+    const writeSet = [liveTechnicianId, ...liveFollowerTechnicians];
+    if (expected && writeSet.some((t) => String(expected) !== String(t))) {
       throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, code: 'SLOT_TAKEN', isOperational: true });
     }
     return { rescheduledOccurrences: [
@@ -203,6 +208,35 @@ describe('technician Quick Move assignment fence', () => {
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
       // Series-handled stop: the route does not double-emit.
       expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+    });
+
+    test('mixed-assignee series (a later occurrence belongs to tech-2): the series is refused, only the technician\'s own anchor moves, nothing extra is sent', async () => {
+      liveFollowerTechnicians = ['tech-2'];
+      wireReads(REC, REC);
+      const r = await moveVisit({ notifyCustomer: false });
+
+      expect(r.status).toBe(200);
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      // The fenced single move lands the anchor alone; no series effects run.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule.mock.calls[0][5]).toEqual(expect.objectContaining({
+        seriesPolicy: 'single', expect: expect.objectContaining({ technician_id: 'tech-1' }),
+      }));
+      expect(applySeriesMoveEffects).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
+      expect(AppointmentReminders.handleReschedule.mock.calls[0][0]).toBe('svc-1');
+      expect(emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
+      expect(emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'svc-1' }));
+    });
+
+    test('all-own series: still shifts', async () => {
+      liveFollowerTechnicians = ['tech-1', 'tech-1'];
+      wireReads(REC, REC);
+      const r = await moveVisit({ notifyCustomer: false });
+      expect(r.status).toBe(200);
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
     });
 
     test('reassigned between the ownership read and the series write: refused with 409, series untouched, nothing sent', async () => {
