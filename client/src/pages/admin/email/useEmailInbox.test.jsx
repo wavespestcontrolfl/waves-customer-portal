@@ -139,3 +139,33 @@ describe("useEmailInbox reclassify and attachment feedback", () => {
     expect(result.current.actionFeedback).toEqual({ error: true, message: "Could not download the attachment. Try again.", source: "attachment" });
   });
 });
+
+describe("useEmailInbox opening a linked email", () => {
+  const flush = async () => { await act(async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve(); }); };
+  afterEach(() => { cleanup(); adminFetch.mockReset(); });
+
+  // GET /message/:id marks the email read in Gmail first and answers the
+  // state it reached. An email Gmail would not mark comes back unread: the
+  // hook's own read request retries it, and its failure is shown.
+  it.each([
+    ["Gmail marked it read", true, 0],
+    ["Gmail would not mark it", false, 1],
+  ])("%s on open", async (_label, isRead, readPosts) => {
+    adminFetch.mockImplementation((path, options) => {
+      if (path.startsWith("/api/admin/email/oauth/status")) return json({ connected: true });
+      if (path.startsWith("/api/admin/email/inbox")) return json({ emails: [], total: 0 });
+      if (path === "/api/admin/email/message/m1") return json({ id: "m1", gmail_thread_id: "t1", is_read: isRead });
+      if (path === "/api/admin/email/message/m1/read" && options?.method === "POST") {
+        return Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ error: "Gmail did not accept the change. Try again." }) });
+      }
+      return json({ thread: [] });
+    });
+    const wrapper = ({ children }) => <MemoryRouter initialEntries={["/admin/communications?id=m1"]}>{children}</MemoryRouter>;
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    const posts = adminFetch.mock.calls.filter(([path, options]) => path === "/api/admin/email/message/m1/read" && options?.method === "POST");
+    expect(result.current.selectedEmail?.id).toBe("m1");
+    expect(posts).toHaveLength(readPosts);
+    expect(result.current.actionFeedback).toEqual(isRead ? null : { error: true, message: "The email could not be marked as read.", source: "read" });
+  });
+});
