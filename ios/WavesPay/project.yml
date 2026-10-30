@@ -35,12 +35,13 @@ targets:
     deploymentTarget: "16.7"
     sources:
       - path: Sources
+      - path: Resources/Assets.xcassets
     info:
       path: Resources/Info.plist
       properties:
-        CFBundleDisplayName: WavesPay
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleDisplayName: Waves Admin
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         LSRequiresIPhoneOS: true
         UILaunchScreen:
           UIColorName: ""
@@ -54,12 +55,16 @@ targets:
           - CFBundleURLName: com.wavespestcontrol.wavespay
             CFBundleURLSchemes:
               - wavespay
-        NSLocationWhenInUseUsageDescription: "Tap to Pay on iPhone requires location access to authenticate card-present transactions."
+        NSLocationWhenInUseUsageDescription: "Waves Admin uses your location for Tap to Pay on iPhone, which needs it to approve card payments, and for field tools."
+        # The staff pages upload photos and videos with the camera and library.
+        NSCameraUsageDescription: "Take photos and videos for service reports."
+        NSMicrophoneUsageDescription: "Record sound with service report videos."
+        NSPhotoLibraryUsageDescription: "Attach photos and videos to service reports."
         # Stripe Terminal iOS 5.x validateInfoPlistForDiscoveryConfiguration
         # aborts unless these keys exist even for Tap-to-Pay-only apps. Empty
         # UIBackgroundModes array + a Bluetooth usage string satisfy the check
         # without enabling any actual background behavior.
-        NSBluetoothAlwaysUsageDescription: "Bluetooth is not used by WavesPay, but the Stripe Terminal SDK requires this key."
+        NSBluetoothAlwaysUsageDescription: "Bluetooth is not used by Waves Admin, but the Stripe Terminal SDK requires this key."
         UIBackgroundModes: []
         # Override per environment if needed. Leave empty to use the default
         # baked into API.swift (https://portal.wavespestcontrol.com/api).
@@ -74,9 +79,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Resources/WavesPay.entitlements
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
-        CURRENT_PROJECT_VERSION: 1
-        MARKETING_VERSION: "1.0"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CURRENT_PROJECT_VERSION: 2
+        MARKETING_VERSION: "1.1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
     dependencies:
       - package: StripeTerminal

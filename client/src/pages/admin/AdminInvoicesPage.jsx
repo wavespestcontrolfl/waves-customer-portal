@@ -2902,7 +2902,24 @@ function InvoiceList({
                             <Button
                               onClick={async () => {
                                 try {
-                                  await launchTapToPay(inv.id);
+                                  const outcome = await launchTapToPay(inv.id);
+                                  if (outcome?.status === "succeeded") {
+                                    showToast("Payment collected");
+                                    // Stripe's webhook marks the invoice paid a
+                                    // moment after the tap: read the list now
+                                    // and once more after it lands.
+                                    load();
+                                    onRefresh();
+                                    setTimeout(() => {
+                                      load();
+                                      onRefresh();
+                                    }, 4000);
+                                  } else if (outcome?.status === "failed") {
+                                    showToast(
+                                      `Tap to Pay failed: ${outcome.message || "try again"}`,
+                                      "error",
+                                    );
+                                  }
                                 } catch (e) {
                                   showToast(
                                     `Tap to Pay failed: ${e.message}`,
