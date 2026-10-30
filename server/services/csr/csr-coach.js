@@ -290,6 +290,7 @@ function normalizeFollowUpTask(task) {
 const CSR_CORE_POINTS = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'source_question', 'set_expectations', 'strong_close'];
 const CSR_RESCUE_POINTS = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
 const CSR_MAX_SCORE = CSR_CORE_POINTS.length + CSR_RESCUE_POINTS.length;
+const CSR_MAX_SCORE_BEFORE_SOURCE_QUESTION = 15;
 function csrPoint(v) {
   if (v === 1 || v === true || v === '1') return 1;
   if (v === 0 || v === false || v === '0') return 0;
@@ -318,6 +319,18 @@ function normalizePointDetails(raw) {
 }
 
 const sumPoints = (details, keys) => keys.reduce((n, key) => n + details[key], 0);
+
+function storedPointDetails(row) {
+  return (typeof row.point_details === 'string' ? JSON.parse(row.point_details) : row.point_details) || {};
+}
+
+// A row scored before source_question existed was out of 15. Averages put each
+// row on the current scale by its own maximum, so a CSR with more older calls
+// is not ranked down for a point those calls could not earn.
+function totalOnCurrentScale(row) {
+  const rowMax = storedPointDetails(row).source_question === undefined ? CSR_MAX_SCORE_BEFORE_SOURCE_QUESTION : CSR_MAX_SCORE;
+  return row.total_score * CSR_MAX_SCORE / rowMax;
+}
 
 function normalizeCsrScore(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -755,7 +768,7 @@ Return JSON:
         byCSR[name].firstCalls++;
         if (s.call_outcome === 'booked') byCSR[name].firstCallBooked++;
       }
-      if (s.total_score != null) { byCSR[name].totalScore += s.total_score; byCSR[name].scored++; }
+      if (s.total_score != null) { byCSR[name].totalScore += totalOnCurrentScale(s); byCSR[name].scored++; }
     }
 
     // Follow-up rates
@@ -796,6 +809,7 @@ Return JSON:
     // Revenue impact of fixable losses
     const fixableLosses = scores.filter(s => s.loss_reason === 'csr_missed_script' && s.estimated_job_value);
     const fixableRevenue = fixableLosses.reduce((sum, s) => sum + parseFloat(s.estimated_job_value || 0), 0);
+    const totaled = scores.filter(s => s.total_score != null);
 
     return {
       csrStats,
@@ -803,7 +817,7 @@ Return JSON:
         calls: scores.length,
         booked: scores.filter(s => s.call_outcome === 'booked').length,
         bookingRate: scores.length > 0 ? Math.round(scores.filter(s => s.call_outcome === 'booked').length / scores.length * 100) : 0,
-        avgScore: scores.filter(s => s.total_score != null).length > 0 ? Math.round(scores.reduce((s, r) => s + (r.total_score || 0), 0) / scores.filter(s => s.total_score != null).length * 10) / 10 : 0,
+        avgScore: totaled.length > 0 ? Math.round(totaled.reduce((sum, r) => sum + totalOnCurrentScale(r), 0) / totaled.length * 10) / 10 : 0,
       },
       lossReasons: Object.entries(lossReasons).map(([reason, count]) => ({
         reason, count, pct: Math.round(count / totalLosses * 100),
@@ -826,7 +840,6 @@ Return JSON:
     }
 
     const pointNames = CSR_CORE_POINTS;
-    const detailsOf = (s) => (typeof s.point_details === 'string' ? JSON.parse(s.point_details) : s.point_details) || {};
 
     let bestRec = null;
     let bestImpact = 0;
@@ -835,9 +848,9 @@ Return JSON:
       // A row scored before this point joined the rubric (source_question,
       // 2026-10-30) has no key for it: it says nothing about the point, so it
       // is left out here rather than counted as a miss.
-      const rated = allScores.filter(s => detailsOf(s)[point] !== undefined);
-      const withPoint = rated.filter(s => (detailsOf(s)[point] || 0) >= 1);
-      const withoutPoint = rated.filter(s => (detailsOf(s)[point] || 0) < 1);
+      const rated = allScores.filter(s => storedPointDetails(s)[point] !== undefined);
+      const withPoint = rated.filter(s => (storedPointDetails(s)[point] || 0) >= 1);
+      const withoutPoint = rated.filter(s => (storedPointDetails(s)[point] || 0) < 1);
 
       if (withPoint.length < 2 || withoutPoint.length < 2) continue;
 
