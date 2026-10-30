@@ -583,6 +583,42 @@ describe('could not find it: the tech form and the service report (owner 2026-10
     expect(result.bodySource).toBe('technician_report');
   });
 
+  test('the tech\'s text that claims a find is not published on a not-found visit, unless the tech confirmed it (Codex #7066 r1)', () => {
+    const claim = 'We found and removed the dead rodent from the attic.';
+    const screened = report(NOT_FOUND, { technicianReportBody: claim });
+    expect(screened.headline).toBe('We searched for the dead rodent today but could not find it.');
+    expect(screened.body).not.toContain(claim);
+    expect(screened.bodySource).toBeUndefined();
+    expect(screened.body).toContain('within 14 days, call us and we will come back once at no charge.');
+    // The pre-submit reconciliation prompt names it, and a confirmed override keeps the text the person reviewed.
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    expect(typedBodyContradictions('rodent_sanitation', NOT_FOUND, null, claim)).toContain('story_contradiction');
+    expect(report(NOT_FOUND, { technicianReportBody: claim, reconcileConfirmed: true }).body).toContain(claim);
+  });
+
+  test.each([
+    'We searched the attic but could not find the dead rat. We removed rodent droppings near the hatch.',
+    'The dead rodent was not found. We treated the odor where it was strongest.',
+    'We removed rat droppings and nesting near the hatch.',
+  ])('a not-found body that denies a find or names droppings is not a contradiction: %s', (body) => {
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    expect(typedBodyContradictions('rodent_sanitation', NOT_FOUND, null, body)).not.toContain('story_contradiction');
+    expect(report(NOT_FOUND, { technicianReportBody: body }).bodySource).toBe('technician_report');
+  });
+
+  test('a found visit is never screened for a find claim', () => {
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    const found = { ...NOT_FOUND, sanitation_work_completed: 'Removed dead rodent, Deodorized affected areas' };
+    expect(typedBodyContradictions('rodent_sanitation', found, null, 'We found and removed the dead rodent.')).not.toContain('story_contradiction');
+  });
+
+  test('severe contamination keeps the office follow-up line on a not-found visit (Codex #7066 r1)', () => {
+    const result = report({ ...NOT_FOUND, contamination_level: 'Severe — office review needed' });
+    expect(result.headline).toBe('We searched for the dead rodent today but could not find it.');
+    expect(result.body).toContain('Because of the contamination level, our office will follow up with you on next steps.');
+    expect(report(NOT_FOUND).body).not.toMatch(/our office will follow up/);
+  });
+
   test('a removal that found it keeps the existing report', () => {
     const result = report({ ...NOT_FOUND, sanitation_work_completed: 'Removed dead rodent, Deodorized affected areas' });
     expect(result.headline).toBe('Light rodent contamination was cleaned and sanitized today.');

@@ -3150,6 +3150,18 @@ const REPAIRS_DONE_CLAIM_RE = /\brepairs?\s+(?:was|were)\s+(?:completed|performe
 // True when a reviewed body contradicts the recorded story facts of an
 // exclusion/inspection section — used by the first-visit story branches
 // AND the gauge branch their trend visits land in (codex r53).
+// Dead rodent removal searched and not found (owner 2026-10-30): a body saying the dead rodent was found or removed
+// contradicts the recorded outcome (Codex #7066 r1). Negated clauses ("could not find the dead rat") are stripped
+// first, and a rodent word followed by droppings, nesting, urine and the like is not the animal itself.
+const DEAD_RODENT_SRC = `(?:dead\\s+(?:${RODENT_NOUN_SRC}|animal)|carcass(?:es)?|(?:${RODENT_NOUN_SRC}\\s+|animal\\s+)?remains`
+  + `|the\\s+${RODENT_NOUN_SRC}(?!\\s+(?:droppings|nest(?:s|ing)?|urine|feces|activity|entry|evidence|damage|smell|odou?r)))`;
+const DEAD_RODENT_FOUND_CLAIM_RE = new RegExp(
+  `\\b(?:found|located|removed|retrieved|took\\s+out|pulled\\s+out|bagged|disposed\\s+of)\\b[^.!?]{0,60}?${DEAD_RODENT_SRC}`
+  + `|${DEAD_RODENT_SRC}[^.!?]{0,40}?\\b(?:was|were|has\\s+been|have\\s+been)\\s+(?:found|located|removed|retrieved|bagged)\\b`,
+  'i',
+);
+const NEGATED_CLAUSE_RE = /\b(?:could\s*not|couldn['’]t|cannot|can['’]t|did\s*not|didn['’]t|unable\s+to|was\s+not|wasn['’]t|were\s+not|weren['’]t|never|no\s+sign\s+of)\b[^.!?]*?(?=\bbut\b|[.!?]|$)/gi;
+
 function rodentStoryBodyContradiction(projectType, values = {}, text = '') {
   const body = String(text || '');
   if (!body.trim()) return false;
@@ -3167,6 +3179,11 @@ function rodentStoryBodyContradiction(projectType, values = {}, text = '') {
     return recorded === 'Yes'
       ? NO_ACTIVITY_CLAIM_RE.test(body)
       : ACTIVITY_FOUND_CLAIM_RE.test(body.replace(new RegExp(NO_ACTIVITY_CLAIM_RE.source, 'gi'), ''));
+  }
+  if (projectType === 'rodent_sanitation') {
+    const work = String(values.sanitation_work_completed || '').split(',').map((s) => s.trim());
+    if (!work.includes('Rodent not found after search')) return false;
+    return DEAD_RODENT_FOUND_CLAIM_RE.test(body.replace(NEGATED_CLAUSE_RE, ''));
   }
   return false;
 }
@@ -3500,16 +3517,18 @@ function buildTodaysResult({
     const sanitationBand = LEVEL_CLAIM_BANDS[level] || null;
     const sanitationReportBody = technicianReportBody
       && (reconcileConfirmed
-        || !activityLevelContradictions(technicianReportBody, sanitationBand).length)
+        || (!activityLevelContradictions(technicianReportBody, sanitationBand).length
+          && !rodentStoryBodyContradiction('rodent_sanitation', values, technicianReportBody)))
       ? technicianReportBody
+      : null;
+    const severeFollowUp = String(values.contamination_level).startsWith('Severe')
+      ? 'Because of the contamination level, our office will follow up with you on next steps.'
       : null;
     const mandated = [
       limitations.length
         ? `Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`
         : 'No limitations were encountered during the cleanup.',
-      String(values.contamination_level).startsWith('Severe')
-        ? 'Because of the contamination level, our office will follow up with you on next steps.'
-        : null,
+      severeFollowUp,
       nextStep,
     ].filter(Boolean);
     const descriptive = sanitationReportBody
@@ -3537,6 +3556,7 @@ function buildTodaysResult({
           'A dead rodent\'s smell usually fades within two to four weeks.',
           'If flies or a stronger smell show where it is within 14 days, call us and we will come back once at no charge.',
           ...(limitations.length ? [`Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`] : []),
+          severeFollowUp,
           nextStep,
         ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
         nextStep,
