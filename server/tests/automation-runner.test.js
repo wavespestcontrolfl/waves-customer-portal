@@ -92,6 +92,26 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   return q;
 }
 
+// Records the clauses a query builds; nested where / orWhere callbacks run
+// against the same recorder, so a group shows as '(' ... ')'.
+function recordingQuery(first) {
+  const calls = [];
+  const q = { first: jest.fn(async () => first) };
+  ['where', 'orWhere', 'whereNotNull', 'orWhereRaw'].forEach((method) => {
+    q[method] = jest.fn((...args) => {
+      if (typeof args[0] !== 'function') {
+        calls.push([method, ...args]);
+        return q;
+      }
+      calls.push([method, '(']);
+      args[0](q);
+      calls.push([')']);
+      return q;
+    });
+  });
+  return { q, calls };
+}
+
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
@@ -562,6 +582,97 @@ describe('automation runner suppression guardrails', () => {
 
     await expect(sendStep('enrollment-r')).resolves.toMatchObject({ sent: true, done: true });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
+
+  // OWNER RULING (2026-10-29, "fix estimate email"): the estimate_sent
+  // follow-up stops once the customer accepts. Checked at delivery, so every
+  // accept path counts.
+  const ENROLLED_AT = new Date('2026-10-29T16:33:00Z');
+  function estimateFollowUpQueues({ enrollment: overrides = {}, acceptedRow, sendUpdate = chain(), enrollmentUpdate = chain() } = {}) {
+    const enrollment = {
+      id: 'enrollment-e', template_key: 'estimate_sent', customer_id: 'cust-e', status: 'active',
+      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+      enrolled_at: ENROLLED_AT, metadata: { estimate_id: 'est-1' }, ...overrides,
+    };
+    const estimates = recordingQuery(acceptedRow);
+    setDbQueues({
+      // A customer-linked step re-reads its row under the prep-send lock.
+      automation_enrollments: enrollment.customer_id
+        ? [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate]
+        : [chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'estimate_sent', name: 'Estimate Sent', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'A quick note on your Waves estimate, {{first_name}}',
+        html_body: '<p>Any questions?</p>', text_body: 'Any questions?',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-e' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+      estimates: [estimates.q],
+    });
+    return { sendUpdate, enrollmentUpdate, clauses: estimates.calls };
+  }
+
+  test('an estimate_sent follow-up is cancelled, not sent, once the customer has accepted', async () => {
+    const { sendUpdate, enrollmentUpdate, clauses } = estimateFollowUpQueues({ acceptedRow: { id: 'est-1' } });
+
+    await expect(sendStep('enrollment-e')).resolves.toEqual({
+      sent: false, blocked: true, reason: 'The customer accepted the estimate',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'The customer accepted the estimate',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled',
+      next_send_at: null,
+      metadata: { sql: expect.stringContaining('{cancel_reason}'), bindings: [JSON.stringify('estimate_accepted')] },
+    }));
+    // The estimate whose send enrolled this episode (accepted at any time, so
+    // mid-send too), or any estimate for this customer or address accepted
+    // since the episode began.
+    expect(clauses).toEqual([
+      ['whereNotNull', 'accepted_at'],
+      ['where', '('],
+      ['orWhere', 'id', 'est-1'],
+      ['orWhere', '('],
+      ['where', 'accepted_at', '>=', ENROLLED_AT],
+      ['where', '('],
+      ['orWhere', 'customer_id', 'cust-e'],
+      ['orWhereRaw', 'lower(trim(customer_email)) = ?', ['customer@example.com']],
+      [')'],
+      [')'],
+      [')'],
+    ]);
+  });
+
+  test('an estimate_sent follow-up with no accepted estimate still sends', async () => {
+    estimateFollowUpQueues({ acceptedRow: undefined });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-estimate' });
+
+    await expect(sendStep('enrollment-e')).resolves.toMatchObject({ sent: true, done: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unstamped lead enrollment (queued before the stamp, or a manual trigger) matches its own address since it was queued', async () => {
+    const { clauses } = estimateFollowUpQueues({
+      enrollment: { customer_id: null, metadata: {} },
+      acceptedRow: { id: 'est-2' },
+    });
+
+    await expect(sendStep('enrollment-e')).resolves.toMatchObject({
+      blocked: true, reason: 'The customer accepted the estimate',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(clauses).toEqual([
+      ['whereNotNull', 'accepted_at'],
+      ['where', '('],
+      ['orWhere', '('],
+      ['where', 'accepted_at', '>=', ENROLLED_AT],
+      ['where', '('],
+      ['orWhereRaw', 'lower(trim(customer_email)) = ?', ['customer@example.com']],
+      [')'],
+      [')'],
+      [')'],
+    ]);
   });
 });
 
@@ -1061,6 +1172,27 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     setDbQueues({ ...queues(), automation_enrollments: [chain({ first: { id: 'enr-1', status: 'completed', email: 'pat@example.com', metadata: { recipient_role: 'service_contact' } } }), reactivateUpdate] });
     await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'pat@example.com' } });
     expect(reactivateUpdate.update.mock.calls[0][0].metadata).toEqual({ sql: expect.stringContaining("- 'recipient_role'"), bindings: [JSON.stringify({})] });
+  });
+
+  test('context.estimateId stamps metadata.estimate_id for the estimate_sent delivery check; a context-free reactivation drops a prior episode\'s', async () => {
+    const queues = () => ({
+      automation_templates: [chain({ first: { key: 'estimate_sent', name: 'Estimate Sent', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 2, enabled: true }] })],
+    });
+    const insertChain = chain({ returning: [{ id: 'enr-new' }] });
+    setDbQueues({ ...queues(), automation_enrollments: [chain({ first: undefined }), insertChain] });
+    await enrollCustomer({ templateKey: 'estimate_sent', customer: { email: 'lead@example.com', first_name: 'Sam' }, context: { estimateId: 'est-1' } });
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBe(JSON.stringify({ estimate_id: 'est-1' }));
+
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({ ...queues(), automation_enrollments: [
+      chain({ first: { id: 'enr-1', status: 'cancelled', email: 'lead@example.com', metadata: { estimate_id: 'est-old' } } }),
+      reactivateUpdate,
+    ] });
+    await enrollCustomer({ templateKey: 'estimate_sent', customer: { email: 'lead@example.com' } });
+    expect(reactivateUpdate.update.mock.calls[0][0].metadata).toEqual({ sql: expect.stringContaining("- 'estimate_id'"), bindings: [JSON.stringify({})] });
   });
 
   test('no context.leadId leaves metadata untouched (byte-identical to every pre-existing enroll site)', async () => {

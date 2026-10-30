@@ -162,6 +162,26 @@ test('one row per date, empty days carry a status, hours in clock order', async 
   expect(body.rejections_by_date).toBeUndefined();
 });
 
+test('an already-late day (GATE_ROUTE_CHECK_LATE_DAYS) keeps its hours, flags them, and the day row says already_late; other days carry no flag', async () => {
+  const arrival = (date, start, over = {}) => slot(date, start, 3, { route_mode: 'arrival_windows', ...over });
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      arrival('2026-09-01', '15:00', { day_already_late: true }), arrival('2026-09-01', '16:00', { day_already_late: true }),
+      arrival('2026-09-03', '10:00'),
+    ],
+    evaluated: 10, rejections: {}, rejections_by_date: { '2026-09-02': { arrival_window: 11 } },
+  });
+  const body = await (await post({ ...BASE, summary: true })).json();
+  const byDate = Object.fromEntries(body.summary.days.map((day) => [day.date, day]));
+  expect(byDate['2026-09-01']).toMatchObject({ status: 'open', already_late: true });
+  expect(byDate['2026-09-01'].hours.map((hour) => [hour.start_time, hour.day_already_late])).toEqual([['15:00', true], ['16:00', true]]);
+  expect(byDate['2026-09-03']).not.toHaveProperty('already_late');
+  expect(byDate['2026-09-03'].hours[0]).not.toHaveProperty('day_already_late');
+  // A day with nothing to offer is still "full": the flag only rides on listed hours.
+  expect(byDate['2026-09-02']).toMatchObject({ status: 'full', hours: [] });
+  expect(byDate['2026-09-02']).not.toHaveProperty('already_late');
+});
+
 test('gap mode lists every start in a multi-hour gap, vetoing only the occupied hours', async () => {
   // The gap engine emits ONE candidate per route gap: earliest start plus
   // latest_start_min. A free 09:00–13:00 gap fits a one-hour visit at 9, 10,

@@ -6356,7 +6356,10 @@ admin composer stamps that when the office inserts the reschedule link inside
 the window, owner 2026-10-06, and any move ends it); no offered target/destination starts within the
 BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
 visit with 409 code
-`SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
+`SELF_SERVE_NOTICE`. The find-slots refusal for the same visit keeps its
+existing 409 `{ error, reason: 'self_serve_notice' }` shape (no code added);
+the page treats that reason as a state change and reloads, so the old times
+leave the page, as Confirm's `SELF_SERVE_NOTICE` handling already does. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
@@ -6461,7 +6464,12 @@ never bills the monthly rate; re-service catalog service_id; card-capture
 step + ad attribution skipped; `/booking/confirm` pins the option null
 after the body spread). The lane dedupe is re-checked INSIDE the commit
 transaction under a customer+lane advisory lock, so parallel commits
-cannot double-book a lane's free visit. Because the commit runs through the
+cannot double-book a lane's free visit. The commit also passes the exact
+pin its single-day availability rebuild resolved as
+`callbackVisit.expectedLocation`, so `createSelfBooking`'s existing
+expected-location fence refuses (409 `LOCATION_CHANGED_RETRY`, mapped to the
+same `LOCATION_REVIEW_REQUIRED` recovery below) a pin or address that changed
+after the rebuild, even with route capacity off; nothing is booked or sent. Because the commit runs through the
 SAME `createSelfBooking` transaction, it gets the SAME commit-time capacity
 re-check under `GATE_BOOK_CAPACITY_COMMIT` (see the `GATE_SCHEDULING_CAPACITY`
 paragraph above) — a tech-bound re-service slot that a later booking made

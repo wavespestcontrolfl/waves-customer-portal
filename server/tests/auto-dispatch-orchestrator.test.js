@@ -1831,8 +1831,6 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
   let checkMove;
   beforeEach(() => {
     checkMove = jest.spyOn(moveCheck, 'checkMove');
-    // The run's end closes stored notices the run settled: a raw column expression on the fake store.
-    db.raw = (sql) => sql;
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
   });
   afterEach(() => jest.restoreAllMocks());
@@ -1869,16 +1867,11 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     await applyMode(async () => {
       checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      raiseAdminAlert.mockClear();
       checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: false });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
-    });
-  });
-
-  test('a held visit whose notice could not be written ends the run completed_with_errors', async () => {
-    await applyMode(async () => {
-      checkMove.mockImplementation(async ({ run }) => { run.proofreader.notices.set('k', { key: 'k', id: 's1', date: '2026-08-04' }); return stop('PROOFREADER_UNSURE', 'unknown'); });
-      jest.spyOn(audit, 'withinRingBudget').mockImplementation(() => { throw new Error('store down'); });
-      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      // The visit stays and nobody is asked about it (owner 2026-10-29).
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
   });
 
@@ -1946,20 +1939,16 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
-  test('preferences changed under an unsure answer: superseded, and the queued notice is discarded', async () => {
+  test('preferences changed under an unsure answer: superseded, and the run is green', async () => {
     await applyMode(async () => {
       const preferences = require('../services/auto-dispatch/preferences');
       const before = await preferences.getCustomerSchedulingPreferences();
-      let state;
-      checkMove.mockImplementation(async ({ run, service }) => {
-        state = run.proofreader;
-        state.notices.set(moveCheck.noticeKey(service.id, '2026-08-04', '09:00:t1'), { id: service.id });
+      checkMove.mockImplementation(async () => {
         preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
         return stop('PROOFREADER_UNSURE', 'unknown');
       });
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
       expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
-      expect(state.notices.size).toBe(0);
     });
   });
 

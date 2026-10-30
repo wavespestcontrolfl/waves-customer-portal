@@ -3917,6 +3917,23 @@ async function createAppointment(input, actionContext = {}) {
   let overlapAdvisory = null;
   let routeAdvisories = [];
   try {
+  // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's booking buys them BEFORE the transaction, so the
+  // route number and route check below read the same Google road times the
+  // Edit dialog's check does. A technician's Intelligence Bar never buys.
+  // A named property books at the card's property stamp (lockedBookingProperty
+  // re-reads the same one), so its pin is the one priced; else the customer's.
+  const namedProperty = input.property_id !== undefined && input.property_id !== null && input.property_id !== '';
+  const bookingPin = namedProperty ? input._booking_property : { lat: customer?.latitude, lng: customer?.longitude };
+  if (actionContext.isAdmin === true && actionContext.technicianId && technician_id && win.start
+    && bookingPin?.lat != null && bookingPin?.lng != null) {
+    await require('../scheduling/save-road-buy').buyRoadsBeforeSave({
+      spender: actionContext.technicianId, date: dateStr, technicianId: technician_id,
+      windowStart: win.start, windowEnd,
+      prospective: { lat: bookingPin.lat, lng: bookingPin.lng,
+        estimated_duration_minutes: 60, service_type },
+    });
+  }
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -4474,6 +4491,16 @@ async function rescheduleAppointment(input, actionContext = {}) {
     return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
   let thrownRefusal = null;
+  // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
+  // runs): an ADMIN's move buys them BEFORE the transaction, so the route
+  // number and route check below read the same Google road times the Edit
+  // dialog's check does. A technician's Intelligence Bar never buys.
+  if (actionContext.isAdmin === true && actionContext.technicianId && probeWindowStart && probeWindowEnd) {
+    await require('../scheduling/save-road-buy').buyRoadsForVisitSave({
+      spender: actionContext.technicianId, serviceId: appointment_id,
+      changes: { scheduled_date: dateStr, window_start: probeWindowStart, window_end: probeWindowEnd },
+    });
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the

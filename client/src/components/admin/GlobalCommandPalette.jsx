@@ -465,11 +465,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
+        // Cmd/Ctrl+K is the page finder for every login. Before the staff
+        // session is verified there is no destination list, so it does
+        // nothing; the assistant opens from its own button.
+        if (!canFindPages) return;
         rememberOpener();
-        if (canFindPages) {
-          setOpen(false);
-          setNavigationOpen((prev) => !prev);
-        } else setOpen((prev) => !prev);
+        setOpen(false);
+        setNavigationOpen((prev) => !prev);
       }
       // useModalFocus owns Escape for real key events (it stops the shared
       // modal stack from handing it to an underlying record drawer); this

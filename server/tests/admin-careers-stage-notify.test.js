@@ -306,6 +306,48 @@ describe('PATCH /:id/status', () => {
     expect(mockSendStageComms).not.toHaveBeenCalled();
   });
 
+  test('a stage decision made on a stale status (another admin rejected while the Interview preview was open) -> 409, rejection kept, no token, nothing sent (audit R1)', async () => {
+    const rejection = { from: 'reviewed', to: 'rejected', note: 'Not licensed', by: 'tech-2', at: '2027-01-02T00:00:00.000Z' };
+    mockDb.__setRows([appRow({ status: 'rejected', status_history: [rejection] })]);
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', expected_status: 'reviewed', notify: { sms: true, email: true },
+    });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/now 'rejected', not 'reviewed'/);
+    expect(body.application.status).toBe('rejected');
+    expect(body.application.interview_token).toBeUndefined();
+    const row = mockDb.__rows()[0];
+    expect(row.status).toBe('rejected');
+    expect(row.status_history).toEqual([rejection]);
+    expect(row.interview_token).toBeNull();
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+  });
+
+  test('a stale "move without notifying" is refused the same way (audit R1)', async () => {
+    mockDb.__setRows([appRow({ status: 'rejected' })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', expected_status: 'reviewed', note: 'move anyway' });
+    expect(status).toBe(409);
+    expect(mockDb.__rows()[0].status).toBe('rejected');
+    expect(mockDb.__rows()[0].status_history).toHaveLength(0);
+  });
+
+  test('expected_status matching the locked row transitions and sends as before (audit R1)', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', expected_status: 'reviewed', notify: { sms: true, email: true },
+    });
+    expect(status).toBe(200);
+    expect(body.application.status).toBe('interview');
+    expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
+  });
+
+  test('an unknown expected_status is refused with 400 before any write (audit R1)', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', expected_status: 'bogus' });
+    expect(status).toBe(400);
+    expect(mockDb.__rows()[0].status).toBe('reviewed');
+  });
+
   test('applicant BOOKED between commit and send -> the "pick a time" invite is stale (Codex r28 P2): bound to the booking snapshot, not just status+token', async () => {
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
     const originalTableApi = mockDb.getMockImplementation();

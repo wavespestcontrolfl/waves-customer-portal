@@ -525,6 +525,8 @@ const NotificationService = {
               category,
               triggerKey: metadata?.triggerKey || null,
               options: { bell, bellDefault },
+              // A composed alert's declared customer contact / promise (GATE_CUSTOMER_ALERTS_RING reads it).
+              declared: { contact: metadata?.contact === true, promise: metadata?.promise === true },
             });
             if (!allowed) {
               // Category + triggerKey only — titles/bodies carry customer

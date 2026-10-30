@@ -149,6 +149,65 @@ describe("AdminLayoutV2", () => {
     expect(tabs).toEqual(["Dashboard", "Schedule", "Customers", "Messages", "Settings"]);
   });
 
+  // A top-level menu row is a link (workspace with a default page) or a
+  // button (workspace that only expands); either counts as "shown".
+  const hasMenuRow = (root, name) =>
+    within(root).queryAllByRole("link", { name }).length + within(root).queryAllByRole("button", { name }).length > 0;
+
+  it("gives a technician login the grouped menu with only technician pages (no flat sidebar)", async () => {
+    adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
+    render(<MemoryRouter initialEntries={["/admin/customers"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/customers" element={<div>Customers content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText("Customers content");
+    expect(screen.queryByRole("navigation", { name: "Admin sections" })).not.toBeInTheDocument();
+    const sidebar = document.getElementById("admin-sidebar");
+    expect(within(sidebar).getByRole("navigation", { name: "Admin workspaces" })).toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: "Search pages" })).toBeInTheDocument();
+    for (const name of ["Schedule", "Customers", "Communications", "Operations", "Team", "Settings"]) {
+      expect(hasMenuRow(sidebar, name), name).toBe(true);
+    }
+    for (const name of ["Dashboard", "Sales", "Billing", "Marketing", "Accounting", "Agents"]) {
+      expect(hasMenuRow(sidebar, name), name).toBe(false);
+    }
+  });
+
+  it("gives an admin login the same grouped menu, with every workspace", async () => {
+    render(<MemoryRouter initialEntries={["/admin/customers"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/customers" element={<div>Customers content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText("Customers content");
+    expect(screen.queryByRole("navigation", { name: "Admin sections" })).not.toBeInTheDocument();
+    const sidebar = document.getElementById("admin-sidebar");
+    expect(within(sidebar).getByRole("navigation", { name: "Admin workspaces" })).toBeInTheDocument();
+    for (const name of ["Dashboard", "Schedule", "Customers", "Sales", "Communications", "Billing", "Operations", "Marketing", "Team", "Accounting", "Agents", "Settings"]) {
+      expect(hasMenuRow(sidebar, name), name).toBe(true);
+    }
+  });
+
+  it.each([
+    ["admin", { id: 1, name: "Admin", role: "admin" }],
+    ["technician", { id: 2, name: "Fixture technician", role: "technician" }],
+  ])("renders the mobile tab labels at 14px for a %s login", async (_label, profile) => {
+    viewport.mobile = true;
+    adminFetch.mockResolvedValue(profile);
+    render(<MemoryRouter initialEntries={["/admin/schedule"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText("Schedule content");
+    const links = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link");
+    expect(links).toHaveLength(5);
+    for (const link of links) {
+      const labelSpan = [...link.querySelectorAll("span")].find((el) => el.textContent === link.textContent && !el.querySelector("span"));
+      expect(labelSpan, link.textContent).toBeTruthy();
+      expect(labelSpan.style.fontSize).toBe("14px");
+    }
+    // The phone top bar always offers page search and the assistant.
+    expect(screen.getAllByRole("button", { name: "Search pages" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Ask Waves" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Open Intelligence Bar" })).not.toBeInTheDocument();
+  });
+
   it("explicit sign-out clears local Email recovery and invalidates pending callbacks", async () => {
     const session = loadEmailDrafts(1);
     updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Private unsent edit" } }));
