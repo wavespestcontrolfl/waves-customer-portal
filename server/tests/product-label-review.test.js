@@ -5,12 +5,15 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/epa-product-label', () => ({
   ...jest.requireActual('../services/epa-product-label'),
-  findEpaLabel: jest.fn(), currentEpaSourceStatus: jest.fn(),
+  findEpaLabel: jest.fn(), checkEpaSource: jest.fn(),
 }));
 const db = require('../models/db');
 const { recordAuditEvent } = require('../services/audit-log');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { findEpaLabel, currentEpaSourceStatus } = require('../services/epa-product-label');
+const { findEpaLabel, checkEpaSource } = require('../services/epa-product-label');
+// EPA's answer now, as checkEpaSource gives it (reads and approval both go through epa-label-check-keep.js).
+const epa = (status) => ({ status, checkedAt: Date.now() });
+const keep = require('../services/epa-label-check-keep')._test;
 const { extractionError, getLabelReview, extractLabelReview, decideLabelReview, revokeLabelReview } = require('../services/product-label-review');
 const { labelProductSnapshot, reviewedWeather } = require('../services/product-label-weather');
 
@@ -35,7 +38,9 @@ beforeEach(() => {
   });
   db.transaction = async fn => fn(db);
   findEpaLabel.mockResolvedValue({ source: { registration: '123-456', productName: row.name, filename: '000123-00456-20260101.pdf', url: 'https://www3.epa.gov/pesticides/chem_search/ppls/000123-00456-20260101.pdf' }, bytes: Buffer.from('%PDF-test'), pageCount: 3, sha256: 'source-hash' });
-  currentEpaSourceStatus.mockResolvedValue('current');
+  // Inventory's read of an approved review goes through the kept check (epa-label-check-keep.js); no answer kept yet.
+  checkEpaSource.mockResolvedValue(epa('current'));
+  keep.seen.clear();
   dispatchWithFallback.mockResolvedValue({ ok: true, json: extraction() });
 });
 afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
@@ -84,9 +89,9 @@ test('review responses distinguish stored approval from currently effective evid
 test('source changes or product changes block approval', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   const body = { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true };
-  currentEpaSourceStatus.mockResolvedValueOnce('superseded');
+  checkEpaSource.mockResolvedValueOnce(epa('superseded'));
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, body)).rejects.toMatchObject({ statusCode: 409 });
-  currentEpaSourceStatus.mockResolvedValue('current');
+  checkEpaSource.mockResolvedValue(epa('current'));
   row.epa_reg_number = '123-457';
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, body)).rejects.toMatchObject({ statusCode: 409 });
   expect(row.label_weather_review.active).toBeUndefined();
@@ -100,22 +105,34 @@ test('stale extraction never overwrites a concurrent catalog edit', async () => 
 
 test('a newly published EPA filename blocks approval even when the old PDF checksum still matches', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
-  currentEpaSourceStatus.mockResolvedValueOnce('superseded');
+  checkEpaSource.mockResolvedValueOnce(epa('superseded'));
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true })).rejects.toMatchObject({ statusCode: 409 });
-  expect(currentEpaSourceStatus).toHaveBeenCalledWith(review.draft.source, { refresh: true });
+  expect(checkEpaSource).toHaveBeenCalledWith(review.draft.source, { refresh: true });
 });
 
 test('EPA unavailability during uncached approval returns a retryable error without activating', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
-  currentEpaSourceStatus.mockResolvedValueOnce('unavailable');
+  checkEpaSource.mockResolvedValueOnce(epa('unavailable'));
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true })).rejects.toMatchObject({ statusCode: 502, isOperational: true });
   expect(row.label_weather_review.active).toBeUndefined();
 });
 
-test.each(['superseded', 'unavailable'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
+test('a cancelled registration or a removed label refuses approval with its reason', async () => {
+  const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  checkEpaSource.mockResolvedValueOnce(epa('inactive'));
+  await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true }))
+    .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/cancelled/) });
+  expect(row.label_weather_review.active).toBeUndefined();
+  expect(reviewedWeather({ ...row, label_weather_review: { active: { status: 'approved', productSnapshot: labelProductSnapshot(row) } } }, 'inactive').reason)
+    .toBe('EPA registration cancelled or label removed — review the product');
+});
+
+test.each(['superseded', 'unavailable', 'inactive'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true });
-  currentEpaSourceStatus.mockResolvedValue(status);
+  // No earlier answer kept (memory cleared, no stored row): an outage reads unverified too.
+  keep.seen.clear();
+  checkEpaSource.mockResolvedValue(epa(status));
   const result = await getLabelReview(PRODUCT_ID);
   expect(result.review.active.status).toBe('approved');
   expect(result.activeCurrent).toBe(false);

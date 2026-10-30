@@ -759,6 +759,15 @@ function wavesRainRule(serviceTypes) {
   return strictest;
 }
 
+// The rain rules' inputs, on the card and in the tank search alike: each product's Waves rule and the services whose
+// lines name it (a label line for one kind of job, Cyper TC's termite wind line, reads the same services).
+function rainRulesFor(products, servicesOf) {
+  return {
+    waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(servicesOf(p))])),
+    services: Object.fromEntries(products.map((p) => [p.id, servicesOf(p)])),
+  };
+}
+
 function productLimits(product) {
   const num = (v) => (v == null || v === '' ? null : Number(v));
   return {
@@ -798,6 +807,9 @@ const SITE_TEXT = {
   maxTempF: (v, at, l) => `${v}°F at ${at} — over the ${l}°F limit`,
   maxWindMph: (v, at, l) => `wind ${v} mph at ${at} — over the ${l} mph limit`,
 };
+// A label's heavy-rain line (owner 2026-10-30): the forecast gives no rain amount, so heavy rain is the start hour's
+// own words. NWS writes "Showers And Thunderstorms Likely"; the Open-Meteo backup gives no words and is not judged.
+const HEAVY_RAIN_WORDS = /\b(heavy rain|thunderstorms?|t-storms?)\b/i;
 const hourLabel = (row) => formatETTime(new Date(row.startTime)).replace(':00', '').toLowerCase();
 // The worst reading past a limit among the rows, with its hour (the lowest for a minimum, else the highest).
 function worstBreach(rows, key, breaks, low = false) {
@@ -879,9 +891,10 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     limits.rainFreeHours != null && rainCheck({ hours: limits.rainFreeHours, holdAbove: RAIN_HOLD_PCT - 1, cautionAbove: Infinity, text: () => `rain likely inside ${limits.rainFreeHours} h` }),
   ].filter(Boolean);
 
-  // GATE_SPRAY_RAIN_RULES (rainRules = { waves: { [productId]: rule } }, sprayRainRulesMode()): the verified
-  // limits, the product's label rain rule (config/label-rain-rules.js), else the Waves rule of its service for
-  // a tank spray, all rain on one odds table (D1 = A). Every tier is a caution that keeps the dose (owner 2026-10-29).
+  // GATE_SPRAY_RAIN_RULES (rainRules = { waves: { [productId]: rule }, services: { [productId]: [serviceType] } },
+  // sprayRainRulesMode()): the verified limits, the product's label rain rule (config/label-rain-rules.js), else the
+  // Waves rule of its service for a tank spray, all rain on one odds table (D1 = A). Every tier is a caution that
+  // keeps the dose (owner 2026-10-29).
   const startRow = (Array.isArray(hourly) ? hourly : []).find((h) => {
     const t = Date.parse(h.startTime);
     return Number.isFinite(t) && t <= start && start < t + 3600000;
@@ -897,22 +910,32 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
   });
   const siteComplete = siteFrom != null && Array.from({ length: SITE_HOURS }, (_, i) => siteFrom + i * 3600000)
     .every((t) => siteRows.some((h) => Date.parse(h.startTime) === t));
-  // One table: a label heat line (Celsius: no adjuvant above 90°F) first, then the catalog limits. When both
-  // temperature rows fire, the caution keeps the first of a kind, so the label's words show.
-  const siteLimitChecks = (limits, heat) => [
-    ...(heat ? [{ key: 'temperatureF', kind: 'temperature', source: 'label', action: heat.action, value: heat.aboveF, breaks: (v, l) => v > l, text: (v, at) => `${v}°F at ${at} — label: ${heat.text}` }] : []),
-    ...LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
-      ...c, source: 'product limit', value: limits[c.limit], low: c.limit === 'minTempF', text: (v, at) => SITE_TEXT[c.limit](v, at, limits[c.limit]),
-    })),
-  ].map((c) => ({
-    rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: c.source, action: c.action,
-    tier: (known) => (known.some((v) => c.breaks(v, c.value)) ? 'hold' : null),
-    // Called only once the tier fired, so a reading past the limit is always there to name.
-    reason: (known, rows) => {
-      const worst = worstBreach(rows, c.key, (v) => c.breaks(v, c.value), c.low);
-      return c.text(worst.value, worst.at);
-    },
-  }));
+  // One table: a label heat line (Celsius: no adjuvant above 90°F) and a label wind line first, then the catalog
+  // limits. When two rows of a kind fire, the caution keeps the first, so the label's words show. A wind line for
+  // one kind of job (Cyper TC: on-grade termite sprays) needs a service on the visit that names it.
+  const siteLimitChecks = (limits, rule, productId) => {
+    const { heat } = rule || {};
+    const services = rainRules.services?.[productId] || [];
+    const wind = rule?.wind && (!rule.wind.services || services.some((s) => rule.wind.services.test(s))) ? rule.wind : null;
+    return [
+      ...(heat ? [{ key: 'temperatureF', kind: 'temperature', source: 'label', action: heat.action, value: heat.aboveF, breaks: (v, l) => v > l, text: (v, at) => `${v}°F at ${at} — label: ${heat.text}` }] : []),
+      ...(wind ? [{ key: 'windMph', kind: 'wind', source: 'label', value: wind.mph, breaks: wind.orMore ? (v, l) => v >= l : (v, l) => v > l, text: (v, at) => `wind ${v} mph at ${at} — label: ${wind.text || `no spraying above ${wind.mph} mph`}` }] : []),
+      ...LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
+        ...c, source: 'product limit', value: limits[c.limit], low: c.limit === 'minTempF', text: (v, at) => SITE_TEXT[c.limit](v, at, limits[c.limit]),
+      })),
+    ].map((c) => ({
+      rows: siteRows, complete: siteComplete, key: c.key, label: c.kind, kind: c.kind, source: c.source, action: c.action,
+      tier: (known) => (known.some((v) => c.breaks(v, c.value)) ? 'hold' : null),
+      // Called only once the tier fired, so a reading past the limit is always there to name.
+      reason: (known, rows) => {
+        const worst = worstBreach(rows, c.key, (v) => c.breaks(v, c.value), c.low);
+        return c.text(worst.value, worst.at);
+      },
+    }));
+  };
+  // A label's heavy-rain line judges the start hour only when its forecast words say so (no row or no words: no storm);
+  // its gap is not "unknown".
+  const startStorm = HEAVY_RAIN_WORDS.test(String(startRow?.shortForecast));
   const rainRuleChecks = (product, limits) => {
     const rule = labelRainRuleFor(product);
     const dry = rule?.dryBeforeRain?.hours;
@@ -924,9 +947,13 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
       || /\badjuvant\b/i.test(String(product.category));
     const waves = !dry && !rule?.waterIn && limits.rainFreeHours == null && isTankMixable(product) && !notSpray ? rainRules.waves[product.id] : null;
     return [
-      ...siteLimitChecks(limits, rule?.heat),
+      ...siteLimitChecks(limits, rule, product.id),
       // "Do not make applications during rain": the hour the work starts (now, once the window opened).
       rule?.duringRain && rainCheck({ rows: startRows, complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
+      rule?.heavyRain && startStorm && rainCheck({
+        rows: startRows, complete: true, gapIsUnknown: false, label: 'rain', source: 'label', at: startAt, action: 'Apply it after the storm passes, or on another day.',
+        text: (pct) => `rain ${pct}% at ${startAt}, ${startRow.shortForecast.toLowerCase()} — label: do not apply if heavy rain is expected`,
+      }),
       // A label's own dry time reaches the Warning level above 80%, like every other rain rule (owner page 2026-10-29;
       // label audit 2026-10-30: it was capped at a caution while the Waves rule could warn).
       dry && rainCheck({ hours: dry, source: 'label advice', gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
@@ -1878,9 +1905,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // every caution stay countable (owner 2026-10-29). A product's Waves rule comes from the services whose
   // lines name it (an add-on's line is its add-on's).
   const rainMode = sprayRainRulesMode();
-  const rainRules = rainMode === 'off' ? null : {
-    waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(lines.filter((l) => l.product.id === p.id).map((l) => l.source || facts.serviceType))])),
-  };
+  const rainRules = rainMode === 'off' ? null : rainRulesFor(products, (p) => lines.filter((l) => l.product.id === p.id).map((l) => l.source || facts.serviceType));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules: rainMode === 'true' ? rainRules : null });
   if (rainMode !== 'off' && isToday && lines.length) {
     const shadow = rainMode === 'true' ? sprayCheck : buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
@@ -2097,7 +2122,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // The Waves rule of the services whose lines name the product, as on the card: a lawn plan's
     // product is the visit's, and so is a product no line names.
     const services = planned || !owners.length ? [svc.service_type, ...owners] : owners;
-    const rainRules = sprayRainRulesMode() === 'true' ? { waves: { [product.id]: wavesRainRule(services) } } : null;
+    const rainRules = sprayRainRulesMode() === 'true' ? rainRulesFor([product], () => services) : null;
     const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, rainRules, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
     sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason, ...(sprayVerdict.level ? { level: sprayVerdict.level } : {}), ...(sprayVerdict.action ? { action: sprayVerdict.action } : {}) };
   }
@@ -2289,5 +2314,5 @@ module.exports = {
   resolveVisitProducts,
   mergeProductLines,
   resolveVisitLines,
-  _test: { fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };
