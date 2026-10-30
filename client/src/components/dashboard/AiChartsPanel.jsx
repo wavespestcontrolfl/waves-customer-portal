@@ -253,13 +253,23 @@ function AiChart({ chartType, spec, rows, fields }) {
   );
 }
 
-export default function AiChartsPanel() {
+// `active` is false while the mobile dashboard shows another section: the
+// panel stays mounted (hidden) so a prompt, a preview or a request in flight
+// survives the switch, and a live dictation ends instead of listening unseen.
+export default function AiChartsPanel({ active = true }) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null); // { spec, rows, fields }
   const [error, setError] = useState(null);
   const [widgets, setWidgets] = useState([]);
+  // "loading" until the list first answers. "failed" keeps any charts already
+  // on screen and says the list could not load, so an outage never reads as
+  // "no pinned charts".
+  const [widgetsStatus, setWidgetsStatus] = useState("loading");
   const [pinning, setPinning] = useState(false);
+  // The chart an unpin is deleting, and the last unpin the server refused.
+  const [unpinningId, setUnpinningId] = useState(null);
+  const [unpinFailure, setUnpinFailure] = useState(null); // { id, message }
   const [images, setImages] = useState([]); // [{ data, mimeType, name, preview }]
   const fileInputRef = useRef(null);
 
@@ -280,10 +290,12 @@ export default function AiChartsPanel() {
   const loadWidgets = useCallback(async () => {
     try {
       const data = await aiFetch("/admin/dashboard/widgets");
-      setWidgets(data.widgets || []);
+      if (!Array.isArray(data?.widgets)) throw new Error("Pinned charts response is malformed.");
+      setWidgets(data.widgets);
+      setWidgetsStatus("ready");
     } catch (e) {
-      // a failed list shouldn't break the panel — just show none
       console.error("[ai-charts] load widgets", e);
+      setWidgetsStatus("failed");
     }
   }, []);
 
@@ -317,6 +329,9 @@ export default function AiChartsPanel() {
         body: JSON.stringify({ title: preview.spec.title, prompt: prompt.trim(), sql: preview.spec.sql, chartSpec: preview.spec }),
       });
       setPreview(null); setPrompt(""); setImages([]);
+      // Until the list comes back with the new chart, say so — not "No pinned
+      // charts yet" on a list that was empty before the pin.
+      setWidgetsStatus("loading");
       await loadWidgets();
     } catch (e) {
       setError(e.message);
@@ -326,13 +341,22 @@ export default function AiChartsPanel() {
   };
 
   const onUnpin = async (id) => {
+    if (unpinningId) return;
+    setUnpinningId(id);
+    setUnpinFailure(null);
     try {
       await aiFetch(`/admin/dashboard/widgets/${id}`, { method: "DELETE" });
       setWidgets((w) => w.filter((x) => x.id !== id));
     } catch (e) {
-      console.error("[ai-charts] unpin", e);
+      // The chart stays until the server confirms the delete.
+      setUnpinFailure({ id, message: e.message });
+    } finally {
+      setUnpinningId(null);
     }
   };
+
+  const emptyText = widgetsStatus === "ready" ? "No pinned charts yet — describe one above."
+    : widgetsStatus === "loading" ? "Loading pinned charts…" : null;
 
   return (
     <ChartCard title="Ask for a chart" sub="Describe a metric — the AI builds it from your data">
@@ -350,6 +374,7 @@ export default function AiChartsPanel() {
           palette={{ accent: "#18181B", muted: "#A1A1AA", red: "#C8312F", card: "#FFFFFF" }}
           title="Dictate"
           size={44}
+          disabled={!active}
         />
         <input
           ref={fileInputRef}
@@ -422,8 +447,16 @@ export default function AiChartsPanel() {
         </Card>
       )}
 
+      {widgetsStatus === "failed" && (
+        <ActionFeedback error onRetry={loadWidgets} className="mb-3">
+          {widgets.length
+            ? "Pinned charts could not be refreshed. Showing the last loaded charts."
+            : "Pinned charts could not be loaded."}
+        </ActionFeedback>
+      )}
+
       {widgets.length === 0 && !preview ? (
-        <EmptyState>No pinned charts yet — describe one above.</EmptyState>
+        emptyText && <EmptyState>{emptyText}</EmptyState>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {widgets.map((w) => (
@@ -431,10 +464,24 @@ export default function AiChartsPanel() {
               <CardBody>
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="truncate pr-2 text-14 font-medium text-ink-primary">{w.title}</div>
-                <Button type="button" onClick={() => onUnpin(w.id)} title="Unpin" aria-label="Unpin" variant="ghost" className="ui-icon-action">
+                <Button
+                  type="button"
+                  onClick={() => onUnpin(w.id)}
+                  disabled={unpinningId != null}
+                  aria-busy={unpinningId === w.id || undefined}
+                  title="Unpin"
+                  aria-label="Unpin"
+                  variant="ghost"
+                  className="ui-icon-action"
+                >
                   <X size={16} aria-hidden />
                 </Button>
               </div>
+              {unpinFailure?.id === w.id && (
+                <ActionFeedback error onRetry={() => onUnpin(w.id)} className="mb-3">
+                  Could not unpin this chart — {unpinFailure.message}
+                </ActionFeedback>
+              )}
               {w.error
                 ? <EmptyState>{w.error}</EmptyState>
                 : <AiChart chartType={w.chartSpec?.chartType} spec={w.chartSpec} rows={w.rows} fields={w.fields} />}
