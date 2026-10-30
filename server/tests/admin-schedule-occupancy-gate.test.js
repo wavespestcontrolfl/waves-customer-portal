@@ -399,6 +399,19 @@ describe('PUT /:id/update-details — arrival warnings for partial route edits',
     } finally { buySpy.mockRestore(); }
   });
 
+  // Codex #7043 r1: a reassignment is applied after the purchase (assignScheduleJobs),
+  // so the purchase must carry the requested technician, not the stored one.
+  test('an edit that moves the hour AND reassigns buys road times for the requested technician', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const roadBuy = require('../services/scheduling/save-road-buy');
+    const buySpy = jest.spyOn(roadBuy, 'buyRoadsForVisitSave').mockResolvedValue({ lookups: 0 });
+    try {
+      await put(SVC.id, { windowStart: '13:00', technicianId: 'tech-new' });
+      expect(buySpy).toHaveBeenCalledTimes(1);
+      expect(buySpy.mock.calls[0][0].changes).toMatchObject({ window_start: '13:00', technician_id: 'tech-new' });
+    } finally { buySpy.mockRestore(); }
+  });
+
   test('the kill switch keeps route-only edits on the legacy path', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'false';
     const { status, body } = await put(SVC.id, { routeOrder: 2 });

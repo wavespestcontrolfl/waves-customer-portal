@@ -15049,10 +15049,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // bought BEFORE the transaction, so the save's route check and route
     // number read the same Google road times the Edit dialog's slot check
     // does (this route is requireAdmin: the staff user pays). A save that
-    // changes the visit's address keeps today's cache-only read.
+    // changes the visit's address keeps today's cache-only read. A reassignment
+    // is applied later (assignScheduleJobs), so the requested technician joins
+    // the purchase here: the buy prices the destination route the check reads.
     if (useArrivalWindows && occupancyRouteTouched && !addressPlan) {
       await require('../services/scheduling/save-road-buy').buyRoadsForVisitSave({
-        spender: req.technicianId, serviceId: req.params.id, changes: updates,
+        spender: req.technicianId, serviceId: req.params.id,
+        changes: requestedTechnicianId === undefined ? updates : { ...updates, technician_id: requestedTechnicianId },
       });
     }
     let addressUpdatedIds = [];
