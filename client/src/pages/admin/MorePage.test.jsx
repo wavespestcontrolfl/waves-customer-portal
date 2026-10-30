@@ -80,10 +80,12 @@ describe("MorePage — the mobile Settings tab", () => {
     expect(screen.queryByRole("link", { name: /^Settings$/ })).not.toBeInTheDocument();
     // Standalone leaves that only the old mobile Settings index linked survive…
     expect(screen.getByRole("link", { name: /Features/ })).toHaveAttribute("href", "/admin/_design-system/flags");
-    // …while destinations already in the Workspaces list are not repeated.
+    // …while destinations already in the Workspaces list are not repeated: the
+    // Billing row opens Invoices, and its group lists only the other pages.
     fireEvent.click(screen.getByRole("button", { name: "Expand Billing", exact: true }));
-    expect(screen.getAllByRole("link", { name: /^Invoices$/ })).toHaveLength(1);
-    expect(screen.getByRole("link", { name: /^Invoices$/ })).toHaveAttribute("href", "/admin/invoices");
+    expect(screen.getByRole("link", { name: /^Billing$/ })).toHaveAttribute("href", "/admin/invoices");
+    expect(screen.queryByRole("link", { name: /^Invoices$/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link").filter((link) => link.getAttribute("href") === "/admin/invoices")).toHaveLength(1);
     expect(screen.queryByRole("link", { name: /^Payments$/ })).not.toBeInTheDocument();
     // The flat per-section list is gone: only the grouped Workspaces list renders.
     expect(screen.getByRole("heading", { level: 2, name: "Workspaces" })).toBeInTheDocument();
