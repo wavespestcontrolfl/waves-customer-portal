@@ -566,9 +566,26 @@ function customerBillingPin(customer = {}) {
 // The booked visits a caller anchored the prepay term and coverage on (the call-prepay-choice card), as one
 // string: the fields the term start and coverage were derived from. Pure: the caller pins the rows it checked,
 // and the accept re-reads them in its own transaction (pin 'bookedVisits' below).
-const BOOKED_VISIT_PIN_FIELDS = ['id', 'customer_id', 'scheduled_date', 'window_start', 'status', 'service_type', 'source_estimate_id'];
+// Every field the caller's eligibility read uses (owner, property, date, window, status, service, cadence,
+// setup fee, link).
+const BOOKED_VISIT_PIN_FIELDS = [
+  'id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'status', 'service_type',
+  'is_recurring', 'recurring_pattern', 'recurring_interval_days', 'pending_setup_fee', 'source_estimate_id',
+];
 function bookedVisitsPinOf(rows = []) {
   return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');
+}
+
+// Whether any booked visit carries an add-on line (annual prepay cannot cover one). A savepoint, so an
+// environment without the table (no add-on line can exist there) never aborts the accept.
+async function bookedVisitsHaveAddons(trx, ids) {
+  const read = (conn) => conn('scheduled_service_addons').whereIn('scheduled_service_id', ids).first('id');
+  try {
+    return !!(await (trx.isTransaction ? trx.transaction((sp) => read(sp)) : read(trx)));
+  } catch (e) {
+    if (e.code === '42P01') return false;
+    throw e;
+  }
 }
 
 // Each pin the card may send, checked by one loop (checkCardPins). A phase
@@ -643,7 +660,8 @@ const CARD_PIN_CHECKS = [
       const ids = Array.isArray(expected.bookedVisits.ids) ? [...new Set(expected.bookedVisits.ids.map(String))] : [];
       if (!ids.length) return false;
       const rows = await trx('scheduled_services').whereIn('id', ids).select(BOOKED_VISIT_PIN_FIELDS);
-      return rows.length === ids.length && bookedVisitsPinOf(rows) === expected.bookedVisits.pin;
+      if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== expected.bookedVisits.pin) return false;
+      return !(expected.bookedVisits.noAddons === true && await bookedVisitsHaveAddons(trx, ids));
     },
   },
 ];
@@ -1414,7 +1432,7 @@ async function markEstimateManuallyAccepted({
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
   // customerId, customerVersion, customerBilling, ledgerPin, planRows,
   // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }), or the call-prepay-choice
-  // card's ({ estimateVersion, estimateStatus, customerId, bookedVisits: { ids, pin } }); null for every other
+  // card's ({ estimateVersion, estimateStatus, customerId, bookedVisits: { ids, pin, noAddons } }); null for every other
   // caller. effectsKey is the fingerprint of the approved effect list: the
   // accept builds its own list under the locks and refuses (preview_changed)
   // when it differs. membershipEmail ('send' | 'skip') is the approved email

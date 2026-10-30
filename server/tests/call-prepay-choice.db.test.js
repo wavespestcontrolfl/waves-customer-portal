@@ -260,16 +260,22 @@ describeDb('call prepay choice (PostgreSQL)', () => {
   });
 
   describe('Accept as annual prepay (POST /:id/accept-call-prepay)', () => {
+    // The card as the list shows it, with the terms token the tap must send back (preview_token).
+    async function tokenOf(cardId) {
+      const { items } = await (await fetch(`${base}/admin/triage?status=open`)).json();
+      return items.find((i) => i.id === cardId)?.call_prepay?.preview_token || null;
+    }
     async function filed() {
       const ctx = await booked();
       await runCallPrepayChoiceSweep();
       const card = await cardsFor(ctx.callLogId).first();
-      return { ...ctx, card };
+      return { ...ctx, card, token: await tokenOf(card.id) };
     }
 
     test('runs the form\'s accept (prepay_annual, term anchored to the booked date, coverage from the booked series), links the visit, resolves the card', async () => {
-      const { est, callLogId, visitId, card } = await filed();
-      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      const { est, callLogId, visitId, card, token } = await filed();
+      expect(token).toMatch(/^[0-9a-f]{32}$/);
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
       expect(out.status).toBe(200);
       expect(out.body).toMatchObject({ ok: true, status: 'resolved', invoice_id: 'inv-sample-1' });
       expect(acceptSpy).toHaveBeenCalledTimes(1);
@@ -280,7 +286,7 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       });
       // Pre-push audit P0: the estimate row and the booked visits are pinned, and re-checked inside the accept.
       expect(acceptSpy.mock.calls[0][0].expected).toMatchObject({
-        estimateStatus: 'sent', customerId: est.customer_id, bookedVisits: { ids: [visitId], pin: expect.any(String) },
+        estimateStatus: 'sent', customerId: est.customer_id, bookedVisits: { ids: [visitId], pin: expect.any(String), noAddons: true },
       });
       expect(acceptSpy.mock.calls[0][0].expected.bookedVisits.pin).toContain(String(visitId));
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
@@ -340,28 +346,45 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       expect(acceptSpy).not.toHaveBeenCalled();
     });
 
+    test('terms that changed after the list loaded (or no token at all) are refused before the accept runs', async () => {
+      const { est, card, token } = await filed();
+      // The estimate row moves (an edit, a re-price) after the admin's screen loaded the card.
+      await trx('estimates').where({ id: est.id }).update({ updated_at: new Date(Date.now() + 60 * 1000) });
+      const stale = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ code: 'preview_changed', error: expect.stringMatching(/Reload to see the new terms/) });
+      const missing = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      expect(missing.body).toMatchObject({ code: 'preview_changed' });
+      expect(acceptSpy).not.toHaveBeenCalled();
+      expect((await trx('triage_items').where({ id: card.id }).first()).status).toBe('open');
+      // A fresh look carries the new token, and that one goes through.
+      const fresh = await tokenOf(card.id);
+      expect(fresh).not.toBe(token);
+      expect((await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: fresh })).status).toBe(200);
+    });
+
     test('a record that changed inside the accept (preview_changed) is a plain refusal; the card stays open', async () => {
-      const { card } = await filed();
+      const { card, token } = await filed();
       acceptSpy.mockRejectedValueOnce(Object.assign(new Error('changed'), { statusCode: 409, code: 'preview_changed' }));
-      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
       expect(out.status).toBe(409);
       expect(out.body).toMatchObject({ code: 'changed_since_check' });
       expect((await trx('triage_items').where({ id: card.id }).first()).status).toBe('open');
     });
 
     test('another session won the accept: the answer says so, the visit is not linked, the card stays for the sweep to close', async () => {
-      const { visitId, card } = await filed();
+      const { visitId, card, token } = await filed();
       acceptSpy.mockResolvedValueOnce({ alreadyAccepted: true });
-      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
       expect(out.status).toBe(409);
       expect(out.body).toMatchObject({ code: 'already_accepted' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
     });
 
     test('an accept that throws leaves the estimate, the visit and the card as they were', async () => {
-      const { visitId, card } = await filed();
+      const { visitId, card, token } = await filed();
       acceptSpy.mockRejectedValueOnce(Object.assign(new Error('boom'), { statusCode: 500 }));
-      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at });
+      const out = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at, preview_token: token });
       expect(out.status).toBe(409);
       expect(out.body).toMatchObject({ code: 'accept_failed' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();

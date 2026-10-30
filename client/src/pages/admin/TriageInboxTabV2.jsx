@@ -1162,7 +1162,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/accept-call-prepay`, {
       method: "POST",
-      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+      // preview_token: the terms this card shows; a price or visit change since the list loaded is refused.
+      body: JSON.stringify({ expected_updated_at: item.updated_at, preview_token: item.call_prepay?.preview_token || null }),
     })
       .then((res) => {
         setActioning(null);

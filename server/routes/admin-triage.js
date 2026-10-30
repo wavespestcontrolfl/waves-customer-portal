@@ -1916,13 +1916,13 @@ async function stampCallPrepayActions(items, isAdmin = false) {
   if (!isAdmin || !require('../config/feature-gates').callPrepayChoiceLive()) return;
   const cards = items.filter((i) => i.reason_code === 'call_prepay_choice' && OPEN_STATES.includes(i.status));
   if (!cards.length) return;
-  const { evaluateCallPrepay } = require('../services/call-prepay-choice');
+  const { evaluateCallPrepay, previewTokenOf } = require('../services/call-prepay-choice');
   for (const item of cards) {
     try {
       const payload = parseCardPayload(item) || {};
       const ev = await evaluateCallPrepay({ callLogId: item.call_log_id, customerId: item.customer_id, estimateId: payload.estimate_id || null });
       item.call_prepay = ev.ok
-        ? { can_accept: true, amount: ev.amount, consumer_notice: ev.consumerNotice === true, message: null }
+        ? { can_accept: true, amount: ev.amount, consumer_notice: ev.consumerNotice === true, preview_token: previewTokenOf(ev), message: null }
         : { can_accept: false, amount: payload.invoice_total ?? null, message: ev.message };
     } catch (err) {
       logger.warn(`[admin-triage] call prepay read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
@@ -2055,7 +2055,7 @@ router.post('/:id/new-customer', familyCardRoute('start the new customer', async
   return res.json({ ok: true, id: item.id, status: 'resolved', reprocess: { started, customer_created: created, reason: started ? null : [out.reason, out.error, 'not_completed'].find(Boolean) } });
 }));
 
-// POST /api/admin/triage/:id/accept-call-prepay   { expected_updated_at }
+// POST /api/admin/triage/:id/accept-call-prepay   { expected_updated_at, preview_token }
 // Accept as annual prepay (GATE_CALL_PREPAY_CHOICE, call_prepay_choice cards): the caller chose annual prepay on a call the pipeline booked.
 // Runs the SAME accept the New appointment form runs for "Billing on acceptance: Annual prepay" (markEstimateManuallyAccepted, billingTerm
 // prepay_annual, the term anchored to the booked visit, coverage from the booked series), links the booked visits to the estimate, then
@@ -2073,7 +2073,9 @@ router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
     must(item.reason_code === 'call_prepay_choice' && item.call_log_id, 400, 'Not an annual-prepay card');
     must(req.body?.expected_updated_at && new Date(req.body.expected_updated_at).getTime() === new Date(item.updated_at).getTime(),
       409, 'Card changed since it was displayed — reload and review the latest', 'STALE_CARD_VERSION');
-    const out = await require('../services/call-prepay-choice').acceptCallPrepayChoice({ item, adminUserId: req.technicianId || null });
+    const out = await require('../services/call-prepay-choice').acceptCallPrepayChoice({
+      item, adminUserId: req.technicianId || null, previewToken: typeof req.body?.preview_token === 'string' ? req.body.preview_token : null,
+    });
     if (!out.ok) return res.status(409).json({ error: out.message, code: out.reason });
     // The accept is done: close the card. Another admin who closed it first leaves it closed, and the answer still says the accept ran.
     const result = await transitionCore({

@@ -2146,7 +2146,7 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
     customerBilling: 'per_application|49||active_customer|',
   };
-  function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [] } = {}) {
+  function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [], addon = null } = {}) {
     const made = makeDb(estimate);
     const inner = made.database;
     const database = jest.fn((table) => {
@@ -2159,6 +2159,7 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
         };
         return q;
       }
+      if (table === 'scheduled_service_addons') return { whereIn: () => ({ first: async () => addon }) };
       return builder;
     });
     database.fn = inner.fn;
@@ -2216,17 +2217,31 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
   describe('bookedVisits pin (call-prepay-choice)', () => {
     const { bookedVisitsPinOf } = require('../services/estimate-manual-acceptance');
     const visit = (overrides = {}) => ({
-      id: 'svc-booked-1', customer_id: 'customer-pins', scheduled_date: '2026-11-05', window_start: '10:00:00',
-      status: 'pending', service_type: 'Quarterly Pest Control Service', source_estimate_id: null, ...overrides,
+      id: 'svc-booked-1', customer_id: 'customer-pins', property_id: 'property-1', scheduled_date: '2026-11-05', window_start: '10:00:00',
+      status: 'pending', service_type: 'Quarterly Pest Control Service', is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_interval_days: null, pending_setup_fee: 0, source_estimate_id: null, ...overrides,
     });
-    const pinFor = (rows) => ({ bookedVisits: { ids: rows.map((r) => r.id), pin: bookedVisitsPinOf(rows) } });
+    const pinFor = (rows) => ({ bookedVisits: { ids: rows.map((r) => r.id), pin: bookedVisitsPinOf(rows), noAddons: true } });
 
-    test('the pin is order-free and moves with the date, window, status, owner and link', () => {
+    test('the pin is order-free and moves with every field the eligibility read uses', () => {
       const a = visit(); const b = visit({ id: 'svc-booked-2', scheduled_date: '2027-02-05' });
       expect(bookedVisitsPinOf([a, b])).toBe(bookedVisitsPinOf([b, a]));
-      for (const change of [{ scheduled_date: '2026-11-09' }, { window_start: '13:00:00' }, { status: 'cancelled' }, { customer_id: 'customer-other' }, { source_estimate_id: 'estimate-other' }]) {
+      for (const change of [
+        { scheduled_date: '2026-11-09' }, { window_start: '13:00:00' }, { status: 'cancelled' }, { customer_id: 'customer-other' },
+        { source_estimate_id: 'estimate-other' }, { property_id: 'property-2' }, { pending_setup_fee: 99 },
+        { is_recurring: false }, { recurring_pattern: 'monthly' }, { recurring_pattern: 'custom', recurring_interval_days: 42 },
+      ]) {
         expect(bookedVisitsPinOf([visit(change)])).not.toBe(bookedVisitsPinOf([visit()]));
       }
+    });
+
+    test('an add-on line added to a booked visit after the check refuses (annual prepay cannot cover it)', async () => {
+      const rows = [visit()];
+      const { database, updates } = dbWith(estimateRow(), customerRow(), { bookedRows: rows, addon: { id: 'addon-late' } });
+      const converter = { convertEstimate: jest.fn() };
+      await expect(accept(database, converter, pinFor(rows))).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+      expect(updates).toEqual([]);
+      expect(converter.convertEstimate).not.toHaveBeenCalled();
     });
 
     test('the same booked visits accept', async () => {
@@ -2241,6 +2256,9 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
       ['rescheduled', [visit({ scheduled_date: '2026-11-09' })]],
       ['cancelled', [visit({ status: 'cancelled' })]],
       ['deleted', []],
+      ['moved to another property', [visit({ property_id: 'property-2' })]],
+      ['given a setup fee', [visit({ pending_setup_fee: 99 })]],
+      ['put on another cadence', [visit({ recurring_pattern: 'monthly' })]],
     ])('a visit %s after the check refuses with preview_changed, before any invoice or term', async (_name, liveRows) => {
       const { database, updates, inserts } = dbWith(estimateRow(), customerRow(), { bookedRows: liveRows });
       const converter = { convertEstimate: jest.fn() };

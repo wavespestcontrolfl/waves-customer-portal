@@ -92,6 +92,7 @@ const REFUSALS = {
   term_overlap: 'This customer already has an annual prepay term covering this date. Nothing was accepted.',
   already_accepted: 'Someone already accepted this estimate. Nothing was accepted.',
   changed_since_check: 'The estimate or the booked visit changed while this was being accepted. Nothing was accepted. Try again.',
+  preview_changed: 'The estimate, the price or the visit changed since this card was shown. Reload to see the new terms. Nothing was accepted.',
   accept_failed: 'The accept did not go through. Nothing was accepted.',
 };
 const refusal = (reason, extra = {}) => ({ ok: false, reason, message: REFUSALS[reason] || REFUSALS.not_eligible, ...extra });
@@ -383,13 +384,30 @@ async function runCallPrepayChoiceSweep({ now = new Date() } = {}) {
   return { scanned: calls.length, filed, closed };
 }
 
+// The booked rows this evaluation derived the term start and coverage from.
+function bookedRowsOf(evaluation) {
+  const ids = new Set(evaluation.bookedIds.map(String));
+  return evaluation.rows.filter((r) => ids.has(String(r.id)));
+}
+
+// What the card showed, as one opaque token: the estimate row version, the booked visits, the amount, the
+// coverage, the term start and whether the termite notice goes. The list stamps it and the tap sends it back.
+function previewTokenOf(evaluation) {
+  const { estimateRowPin, bookedVisitsPinOf } = require('./estimate-manual-acceptance');
+  const facts = [
+    estimateRowPin(evaluation.estimate), bookedVisitsPinOf(bookedRowsOf(evaluation)), evaluation.amount,
+    evaluation.coverage, evaluation.termStart, evaluation.consumerNotice === true,
+  ];
+  return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
+}
+
 /**
  * The tap on an open card. The caller (the route) has checked the gate, the admin, the card and its version.
  * Re-reads the call, the visits and the estimate, then runs the same accept the form runs. Sends no invoice; the
  * accept's Mark accepted step sends the state termite notice when it applies (consumerNoticeWouldSend).
  * @returns {{ok:true, invoiceId, amount, warnings}|{ok:false, reason, message}}
  */
-async function acceptCallPrepayChoice({ item, adminUserId = null, now = new Date() }) {
+async function acceptCallPrepayChoice({ item, adminUserId = null, previewToken = null, now = new Date() }) {
   const payload = parseJson(item.payload);
   const call = await db('call_log').where({ id: item.call_log_id }).first('id', 'customer_id');
   if (!call?.customer_id) return refusal('no_customer');
@@ -397,17 +415,21 @@ async function acceptCallPrepayChoice({ item, adminUserId = null, now = new Date
   const evaluation = await evaluateCallPrepay({ callLogId: call.id, customerId: call.customer_id, estimateId: payload.estimate_id || null, now });
   if (!evaluation.ok) return evaluation;
 
+  // The card the admin tapped must still show these terms: a price, cadence or visit change since the list
+  // loaded asks for a fresh look rather than accepting terms nobody saw.
+  if (!previewToken || previewToken !== previewTokenOf(evaluation)) return refusal('preview_changed');
+
   const { markEstimateManuallyAccepted, estimateRowPin, bookedVisitsPinOf } = require('./estimate-manual-acceptance');
   let result;
   try {
     result = await markEstimateManuallyAccepted({
       estimateId: evaluation.estimate.id,
       // Pins checked inside the accept's own transaction: the estimate row and the booked visits this
-      // evaluation derived the term start and coverage from. An edit, reschedule or cancel since refuses
-      // (preview_changed) before any invoice or term exists.
+      // evaluation derived the term start and coverage from, still with no add-on line. An edit, reschedule
+      // or cancel since refuses (preview_changed) before any invoice or term exists.
       expected: {
         ...estimateRowPin(evaluation.estimate),
-        bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(evaluation.rows.filter((r) => evaluation.bookedIds.map(String).includes(String(r.id)))) },
+        bookedVisits: { ids: evaluation.bookedIds, pin: bookedVisitsPinOf(bookedRowsOf(evaluation)), noAddons: true },
       },
       bookedAppointmentIds: evaluation.bookedIds,
       adminUserId,
@@ -456,4 +478,5 @@ module.exports = {
   acceptCallPrepayChoice,
   closeMootCards,
   cardSummary,
+  previewTokenOf,
 };

@@ -1238,7 +1238,7 @@ describe('call_prepay_choice card', () => {
       flag: 'call_prepay_choice', billing_choice: 'annual_prepay', service_type: 'Quarterly Pest Control Service', cadence: 'quarterly',
       covered_visits: 4, first_visit_date: '2026-11-10', invoice_total: 472,
     }),
-    call_prepay: { can_accept: true, amount: 472, message: null },
+    call_prepay: { can_accept: true, amount: 472, message: null, preview_token: 'tok-terms-1' },
   };
   const load = (item = prepayCard) => adminFetch.mockImplementation(async (url) => (
     String(url).startsWith('/admin/triage?')
@@ -1256,7 +1256,7 @@ describe('call_prepay_choice card', () => {
     expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
     fireEvent.click(within(el).getByRole('button', { name: 'Accept as annual prepay ($472)' }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/pp/accept-call-prepay', {
-      method: 'POST', body: JSON.stringify({ expected_updated_at: prepayCard.updated_at }),
+      method: 'POST', body: JSON.stringify({ expected_updated_at: prepayCard.updated_at, preview_token: 'tok-terms-1' }),
     }));
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
   });
