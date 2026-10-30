@@ -1776,6 +1776,13 @@ describe('preflightLawnFastCompletion', () => {
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'back' })] })).toBeNull();
     });
 
+    // The mix help is gone (2026-10-30): a sheet opened before that still sending gallons sprayed is refused, correctable, not recorded.
+    test('a row still carrying sprayedGallons: 400 lawn_gallons_unavailable naming the product; an empty value passes', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '2', areaValue: 1900 })] }))
+        .toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_HERB } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '' })] })).toBeNull();
+    });
+
     test('a row with a place, and a whole-lawn row without one, pass the preflight', async () => {
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front' }), { productId: P_GRAN, applicationMethod: 'granular_broadcast' }] })).toBeNull();
     });
