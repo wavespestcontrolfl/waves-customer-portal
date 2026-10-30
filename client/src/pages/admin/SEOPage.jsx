@@ -550,39 +550,72 @@ function SyncHealthCard() {
 function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const canRunSeoActions = isAdminUser();
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/advisor")
-      .then((d) => {
-        setReport(d.report);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then((d) => setReport(d.report))
+      .catch((e) => setLoadError(e.message || "Advisor report failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading SEO advisor...
       </div>
     );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`SEO advisor unavailable: ${loadError}`}
+      </ActionFeedback>
+    );
   const generate = async () => {
     if (!canRunSeoActions) return;
     setGenerating(true);
+    setGenerateError(null);
+    // The sync resolves { synced: false, error } on failure; say so instead
+    // of presenting a report built on stale data as fresh.
+    const sync = await adminPost("/admin/seo/sync", { daysBack: 28 }).catch(
+      (e) => ({ synced: false, error: e.message }),
+    );
+    const syncFailure = sync?.synced
+      ? null
+      : `GSC sync failed: ${sync?.error || "Search Console is not configured"}.`;
     try {
-      await adminPost("/admin/seo/sync", { daysBack: 28 }).catch(() => {});
       const r = await adminPost("/admin/seo/advisor/generate", {});
       if (r.report) setReport(r.report);
-    } catch {
-      /* failed */
+      if (syncFailure)
+        setGenerateError(
+          r.report
+            ? `${syncFailure} The report uses data stored before this sync.`
+            : syncFailure,
+        );
+    } catch (e) {
+      setGenerateError(
+        `${syncFailure ? `${syncFailure} ` : ""}Report generation failed: ${e.message}`,
+      );
     }
     setGenerating(false);
   };
+  const generateFeedback = generateError && (
+    <ActionFeedback error>{generateError}</ActionFeedback>
+  );
   if (!report)
     return (
       <div className="flex flex-col [gap:20px]">
         {" "}
         <SyncHealthCard />{" "}
+        {generateFeedback}
         <UiCard className="[padding:40px] text-center">
           {" "}
           <div className="text-ink-secondary [margin-bottom:16px]">
@@ -613,6 +646,7 @@ function AdvisorTab() {
     <div className="flex flex-col [gap:20px]">
       {" "}
       <SyncHealthCard />{" "}
+      {generateFeedback}
       <UiCard className="p-6">
         {" "}
         <div className="flex items-center [gap:20px]">
@@ -808,11 +842,19 @@ function GeoGridTab() {
   }, []);
   const loadHeat = () => {
     if (!office || !keyword) return;
+    // Commit only while this office+keyword is still selected: a slow
+    // Bradenton response must not paint over Sarasota.
+    const stillSelected = () =>
+      selRef.current.office === office && selRef.current.keyword === keyword;
     adminFetch(
       `/admin/seo/geo-grid/heatmap?office=${encodeURIComponent(office)}&keyword=${encodeURIComponent(keyword)}`,
     )
-      .then(setHeat)
-      .catch(() => setHeat(null));
+      .then((d) => {
+        if (stillSelected()) setHeat(d);
+      })
+      .catch(() => {
+        if (stillSelected()) setHeat(null);
+      });
   };
   // Current selection mirror — so an in-flight scan poll doesn't write results
   // for a selection the user has since changed away from.
@@ -1127,19 +1169,31 @@ function GeoGridTab() {
 function RankingsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/rankings?days=7")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "Rankings failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading rankings...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Rankings unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data?.rankings?.length)
     return (
@@ -2533,14 +2587,16 @@ function BacklinksTab() {
   const [llmScanning, setLlmScanning] = useState(false);
   const citationEditor = useCitationEditor(() => adminFetch("/admin/seo/backlinks").then(setData));
   const canRunSeoActions = isAdminUser();
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/backlinks")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "Backlink data failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
 
   // Lazy-load citation evidence the first time the
   // LLM Mentions sub-tab is opened.
@@ -2581,6 +2637,16 @@ function BacklinksTab() {
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading backlinks...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Backlinks unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -5845,19 +5911,31 @@ function BacklinkAgentPanel() {
 function ContentQATab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/qa")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "QA scores failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading QA scores...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Content QA unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data || data.total === 0)
     return (
@@ -6275,19 +6353,31 @@ function RefreshAuditTab() {
 function AIOverviewTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/ai-overview")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "AI Overview data failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`AI Overview unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -6316,19 +6406,31 @@ function AIOverviewTab() {
 function FunnelTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/funnel?days=30")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "Funnel data failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Funnel unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -6373,20 +6475,31 @@ function BySiteTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     setLoading(true);
+    setLoadError(null);
     adminFetch(`/admin/seo/site-rollup?days=${days}`)
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [days]);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "Site rollup failed to load."))
+      .finally(() => setLoading(false));
+  }, [days, reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading site rollup...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Site rollup unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -7155,15 +7268,17 @@ function SiteAuditTab() {
   const [running, setRunning] = useState(false);
   const [filter, setFilter] = useState("all"); // all, critical, warning, healthy
   const [expandedPage, setExpandedPage] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const canRunSeoActions = isAdminUser();
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/seo/audit")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+      .then(setData)
+      .catch((e) => setLoadError(e.message || "Site audit failed to load."))
+      .finally(() => setLoading(false));
+  }, [reloadKey]);
   const runAudit = async () => {
     if (!canRunSeoActions) return;
     setRunning(true);
@@ -7182,6 +7297,16 @@ function SiteAuditTab() {
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading site audit...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`Site audit unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data?.hasData)
     return (
@@ -7672,13 +7797,20 @@ function UrlIntelTab({ domain }) {
   const [subTab, setSubTab] = useState("overview");
   const [diagnosisFilter, setDiagnosisFilter] = useState("");
   const [scanPage, setScanPage] = useState(0);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const canRefresh = isAdminUser();
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch(`/admin/seo/url-intelligence/dashboard?domain=${domain}`)
       .then(setData)
-      .catch(() => setData(null))
+      .catch((e) => {
+        setData(null);
+        setLoadError(e.message || "URL Intelligence failed to load.");
+      })
       .finally(() => setLoading(false));
-  }, [domain]);
+  }, [domain, reloadKey]);
   useEffect(() => {
     if (subTab === "diagnosis" || subTab === "priority") {
       const diag = subTab === "priority" ? "" : diagnosisFilter;
@@ -7700,6 +7832,16 @@ function UrlIntelTab({ domain }) {
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading URL Intelligence...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback
+        error
+        onRetry={() => setReloadKey((n) => n + 1)}
+        className="justify-center [padding:40px] text-center"
+      >
+        {`URL Intelligence unavailable: ${loadError}`}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -8183,32 +8325,76 @@ function ActionsTab({ domain }) {
   const [summary, setSummary] = useState(null);
   const [actions, setActions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
   const canAdmin = isAdminUser();
+  // Only the newest load may write: a slow Experiments read must not land
+  // in Queue after the operator switches back (its ids are not action ids).
+  const loadRequest = useRef(0);
   const loadData = () => {
+    const request = ++loadRequest.current;
+    const current = () => request === loadRequest.current;
     setLoading(true);
+    setLoadError(null);
     Promise.all([
       adminFetch(`/admin/seo/actions/summary?domain=${domain}`),
       subTab === "drafts"
         ? adminFetch(`/admin/seo/actions?domain=${domain}&type=rewrite_title_meta&limit=50`)
         : subTab === "progress"
-        ? adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=in_progress&limit=50`)
-          .then((d) => d.length > 0 ? d : adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=done&limit=25`))
+        ? Promise.all([
+          // Approved but not done: queued, manual work, or a failed run.
+          adminFetch(`/admin/seo/actions?domain=${domain}&approval_status=approved&execution_status=queued,in_progress,manual_required,failed&limit=50`),
+          adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=done&limit=25`),
+        ]).then(([open, done]) => [...open, ...done])
         : subTab === "experiments"
         ? adminFetch(`/admin/seo/url-intelligence/experiments?limit=50`)
         : adminFetch(`/admin/seo/actions?domain=${domain}&approval_status=pending&limit=50`),
     ])
-      .then(([s, a]) => { setSummary(s); setActions(Array.isArray(a) ? a : []); })
-      .catch(() => { setSummary(null); setActions([]); })
-      .finally(() => setLoading(false));
+      .then(([s, a]) => {
+        if (!current()) return;
+        setSummary(s);
+        setActions(Array.isArray(a) ? a : []);
+      })
+      .catch((e) => {
+        if (!current()) return;
+        setSummary(null);
+        setActions([]);
+        setLoadError(e.message || "Actions failed to load.");
+      })
+      .finally(() => {
+        if (current()) setLoading(false);
+      });
   };
 
   useEffect(loadData, [domain, subTab]);
-  function handleAction(id, verb) {
+  function changeSubTab(key) {
+    if (key === subTab) return;
+    // Clear the old tab's rows in the same render that switches tabs.
+    setActions([]);
+    setLoading(true);
+    setActionNotice(null);
+    setSubTab(key);
+  }
+  // Every mutation shows its failure (or a 200 { error }) and reloads on success.
+  function reportMutation(pending, { failure, notice = null }) {
     setActionError(null);
-    adminPost(`/admin/seo/actions/${id}/${verb}`, {})
-      .then(loadData)
-      .catch((e) => setActionError(e.message || "Action failed."));
+    setActionNotice(null);
+    pending
+      .then((result) => {
+        if (result?.error) setActionError(result.error);
+        else if (notice) setActionNotice(notice(result));
+        loadData();
+      })
+      .catch((e) => setActionError(e.message || failure));
+  }
+  function handleAction(id, verb) {
+    reportMutation(adminPost(`/admin/seo/actions/${id}/${verb}`, {}), {
+      failure: "Action failed.",
+      notice: verb === "approve"
+        ? () => "Approved. The action stays in Progress until it is done."
+        : null,
+    });
   }
   const subTabs = [
     {
@@ -8241,7 +8427,7 @@ function ActionsTab({ domain }) {
           {subTabs.map((st) => (
             <Button
               key={st.key}
-              onClick={() => setSubTab(st.key)}
+              onClick={() => changeSubTab(st.key)}
               variant={subTab === st.key ? "primary" : "secondary"}
             >
               {st.label}
@@ -8252,18 +8438,21 @@ function ActionsTab({ domain }) {
           <div className="flex flex-wrap justify-end [gap:8px]">
             <Button
               onClick={() =>
-                adminPost("/admin/seo/actions/generate", { domain }).then(loadData)
+                reportMutation(adminPost("/admin/seo/actions/generate", { domain }), {
+                  failure: "Action generation failed.",
+                })
               }
             >
               Generate Actions
             </Button>
             <Button
-              onClick={() => {
-                setActionError(null);
-                adminPost("/admin/seo/actions/auto-approve", { domain })
-                  .then(loadData)
-                  .catch((e) => setActionError(e.message || "Auto-approve failed."));
-              }}
+              onClick={() =>
+                reportMutation(adminPost("/admin/seo/actions/auto-approve", { domain }), {
+                  failure: "Auto-approve failed.",
+                  notice: (r) =>
+                    `Auto-approved ${fmt(r?.auto_approved)}. Approved actions stay in Progress until they are done.`,
+                })
+              }
               variant="secondary"
             >
               Auto-Approve
@@ -8273,11 +8462,27 @@ function ActionsTab({ domain }) {
         {canAdmin && subTab === "drafts" && (
           <Button
             onClick={() =>
-              adminPost("/admin/seo/actions/generate-drafts", {}).then(loadData)
+              reportMutation(adminPost("/admin/seo/actions/generate-drafts", {}), {
+                failure: "Draft generation failed.",
+              })
             }
             className="self-end"
           >
             Generate Drafts
+          </Button>
+        )}
+        {canAdmin && subTab === "progress" && (
+          <Button
+            onClick={() =>
+              reportMutation(adminPost("/admin/seo/actions/auto-execute", { domain }), {
+                failure: "Auto-execute failed.",
+                notice: (r) =>
+                  `Auto-execute: ${fmt(r?.auto_executed)} done, ${fmt(r?.manual_required)} need manual work, ${fmt(r?.failed)} failed.`,
+              })
+            }
+            className="self-end"
+          >
+            Run Auto-Execute
           </Button>
         )}
       </div>
@@ -8287,6 +8492,7 @@ function ActionsTab({ domain }) {
           {actionError}
         </div>
       )}
+      {actionNotice && <ActionFeedback>{actionNotice}</ActionFeedback>}
 
       {summary && (
         <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">
@@ -8312,6 +8518,14 @@ function ActionsTab({ domain }) {
         <div className="text-ink-secondary [padding:40px] text-center">
           Loading...
         </div>
+      ) : loadError ? (
+        <ActionFeedback
+          error
+          onRetry={loadData}
+          className="justify-center [padding:40px] text-center"
+        >
+          {`SEO actions unavailable: ${loadError}`}
+        </ActionFeedback>
       ) : (
         <UiCard className="p-6">
           {subTab === "queue" && (
@@ -8449,7 +8663,13 @@ function ActionsTab({ domain }) {
                               {draft.reasoning}
                             </div>
                           )}
-                          {canAdmin && (
+                          {a.approval_status !== "pending" ? (
+                            <div className="text-ui-body text-ink-secondary [margin-top:12px]">
+                              {a.approval_status === "approved"
+                                ? `Approved. ${a.execution_status === "done" ? "Done." : "Track it in Progress."}`
+                                : `Status: ${a.approval_status}`}
+                            </div>
+                          ) : canAdmin && (
                             <div className="flex [gap:8px] [margin-top:12px]">
                               <Button
                                 onClick={() => handleAction(a.id, "approve")}
@@ -8481,7 +8701,7 @@ function ActionsTab({ domain }) {
           {subTab === "progress" && (
             <>
               <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
-                Execution Status
+                Approved Actions — not done first
               </div>
               {actions.length > 0 ? (
                 <div className="overflow-x-auto">
@@ -8494,6 +8714,7 @@ function ActionsTab({ domain }) {
                         <TH>Executor</TH>
                         <TH>Completed</TH>
                         <TH>Notes</TH>
+                        {canAdmin && <TH>Next step</TH>}
                       </TR>
                     </THead>
                     <TBody>
@@ -8519,7 +8740,7 @@ function ActionsTab({ domain }) {
                               }}
                               className="[padding:2px_8px] rounded-sm text-ui-body"
                             >
-                              {a.execution_status}
+                              {a.execution_status.replace(/_/g, " ")}
                             </span>
                           </TD>
                           <TD className="u-nums">{a.executor || "—"}</TD>
@@ -8531,6 +8752,22 @@ function ActionsTab({ domain }) {
                           <TD className="text-ui-body [max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
                             {a.execution_notes || "—"}
                           </TD>
+                          {canAdmin && (
+                            <TD className="u-nums">
+                              {a.execution_status !== "done" && (
+                                <Button
+                                  onClick={() =>
+                                    reportMutation(adminPost(`/admin/seo/actions/${a.id}/execute`, {}), {
+                                      failure: "Could not mark the action done.",
+                                    })
+                                  }
+                                  variant="secondary"
+                                >
+                                  Mark done
+                                </Button>
+                              )}
+                            </TD>
+                          )}
                         </TR>
                       ))}
                     </TBody>
@@ -8538,7 +8775,7 @@ function ActionsTab({ domain }) {
                 </div>
               ) : (
                 <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
-                  No actions in progress.
+                  No approved actions yet. Approve actions in Queue.
                 </div>
               )}
             </>
@@ -8641,27 +8878,51 @@ function IndexationTab({ domain }) {
   const [inspectData, setInspectData] = useState(null);
   const [inspectLoading, setInspectLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const loadRequest = useRef(0);
   useEffect(() => {
-    if (subTab === "gap") {
-      setLoading(true);
-      adminFetch(`/admin/seo/url-intelligence/indexation-gap?domain=${domain}`)
-        .then(setGapData)
-        .catch(() => setGapData(null))
-        .finally(() => setLoading(false));
-    } else if (subTab === "conflicts") {
-      setLoading(true);
-      adminFetch(`/admin/seo/url-intelligence/canonical-conflicts?domain=${domain}`)
-        .then(setConflictsData)
-        .catch(() => setConflictsData(null))
-        .finally(() => setLoading(false));
-    } else if (subTab === "crawled") {
-      setLoading(true);
-      adminFetch(`/admin/seo/url-intelligence/scan?diagnosis=indexation_problem&domain=${domain}&limit=50`)
-        .then(setCrawledNotIndexed)
-        .catch(() => setCrawledNotIndexed(null))
-        .finally(() => setLoading(false));
-    }
-  }, [subTab, domain]);
+    const read =
+      subTab === "gap"
+        ? adminFetch(`/admin/seo/url-intelligence/indexation-gap?domain=${domain}`)
+        : subTab === "conflicts"
+          ? adminFetch(`/admin/seo/url-intelligence/canonical-conflicts?domain=${domain}`)
+          : subTab === "crawled"
+            ? adminFetch(`/admin/seo/url-intelligence/scan?diagnosis=indexation_problem&domain=${domain}&limit=50`)
+            : null;
+    if (!read) return;
+    const setResult = {
+      gap: setGapData,
+      conflicts: setConflictsData,
+      crawled: setCrawledNotIndexed,
+    }[subTab];
+    // Only the newest read may set the shared loading/error state.
+    const request = ++loadRequest.current;
+    const current = () => request === loadRequest.current;
+    setLoading(true);
+    setLoadError(null);
+    read
+      .then((d) => {
+        if (current()) setResult(d);
+      })
+      .catch((e) => {
+        if (!current()) return;
+        setResult(null);
+        setLoadError(e.message || "Indexation data failed to load.");
+      })
+      .finally(() => {
+        if (current()) setLoading(false);
+      });
+  }, [subTab, domain, reloadKey]);
+  const loadFailure = loadError && (
+    <ActionFeedback
+      error
+      onRetry={() => setReloadKey((n) => n + 1)}
+      className="justify-center [padding:40px] text-center"
+    >
+      {`Indexation data unavailable: ${loadError}`}
+    </ActionFeedback>
+  );
   function handleInspect() {
     if (!inspectUrl.trim()) return;
     setInspectLoading(true);
@@ -8717,7 +8978,7 @@ function IndexationTab({ domain }) {
             Loading...
           </div>
         ) : (
-          gapData && (
+          loadFailure || gapData && (
             <UiCard className="p-6">
               <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:20px]">
                 Indexation Gap — {gapData.domain}
@@ -8788,7 +9049,7 @@ function IndexationTab({ domain }) {
           <div className="text-ink-secondary [padding:40px] text-center">
             Loading...
           </div>
-        ) : (
+        ) : loadFailure || (
           <UiCard className="p-6">
             <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Canonical Conflicts — Hub / Spoke
@@ -8860,7 +9121,7 @@ function IndexationTab({ domain }) {
           <div className="text-ink-secondary [padding:40px] text-center">
             Loading...
           </div>
-        ) : (
+        ) : loadFailure || (
           <UiCard className="p-6">
             <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Not Indexed — Priority URLs
