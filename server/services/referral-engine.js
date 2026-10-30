@@ -389,7 +389,16 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   // submits could both pass the monthly cap and the duplicate-phone check
   // (referrals audit 10-29, F6). Locking the promoter row makes check + insert
   // one step per promoter: a second submit waits, then sees the first row.
+  // Lock order is customer, then promoter, the same as enrollPromoter: the
+  // referral insert's foreign key takes a key-share lock on the referrer's
+  // customer row, so taking it after the promoter lock could deadlock with
+  // an enroll that holds the customer and waits on the promoter.
   const { promoter, referral } = await db.transaction(async (trx) => {
+    const unlocked = await trx('referral_promoters').where({ id: promoterId }).first('customer_id');
+    if (!unlocked) throw new Error('Promoter not found');
+    if (unlocked.customer_id) {
+      await trx('customers').where({ id: unlocked.customer_id }).forKeyShare().first('id');
+    }
     const promoter = await trx('referral_promoters').where({ id: promoterId }).forUpdate().first();
     if (!promoter) throw new Error('Promoter not found');
 

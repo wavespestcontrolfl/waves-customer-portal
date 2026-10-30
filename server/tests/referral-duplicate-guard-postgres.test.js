@@ -80,7 +80,8 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
     });
     await s().createTable('referrals', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('referrer_customer_id').notNullable();
+      // Prod's FK: the insert takes a key-share lock on the referrer's customer row.
+      t.uuid('referrer_customer_id').notNullable().references('id').inTable('customers');
       t.string('referee_name', 100).notNullable();
       t.string('referee_phone', 20).notNullable();
       t.string('referee_email', 150);
@@ -195,6 +196,26 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
       }
       expect(await count('referrals')).toBe(2);
       expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    test('a submit and an enroll holding the customer row do not deadlock', async () => {
+      mockSend.mockImplementation(sent(0));
+      // enrollPromoter's lock order: the customer row, then the promoter row.
+      const enroll = await db.transaction();
+      try {
+        await enroll('customers').where({ id: promoter.customer_id }).forUpdate().first();
+        const submitting = submit('+19415550123');
+        await new Promise((r) => setTimeout(r, 300));
+        // Promoter-first submits held this lock and then waited on the
+        // customer row (the referral FK), so Postgres aborted one side.
+        await enroll('referral_promoters').where({ customer_id: promoter.customer_id }).forUpdate().first();
+        await enroll.commit();
+        await expect(submitting).resolves.toMatchObject({ status: 'contacted' });
+      } catch (err) {
+        if (!enroll.isCompleted()) await enroll.rollback().catch(() => {});
+        throw err;
+      }
+      expect(await count('referrals')).toBe(1);
     });
 
     test('a refused submit writes nothing and leaves the promoter unlocked', async () => {
