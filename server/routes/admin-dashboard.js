@@ -1972,9 +1972,16 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Custom lookback: an operator-chosen START date through today (?from=YYYY-MM-DD).
 // Window end is always today, so every "as of now" metric stays valid — no
 // historical end. Null unless `from` is a valid ET date not in the future.
+// A supplied `from` must be a real calendar date: one that only looks like a
+// date (2026-09-31) would reach the date binds of every query on the route.
+// The picker only sends real dates, so this guards the API boundary; the
+// operational error reaches the shared error handler as a 400.
 function parseCustomRange(query) {
-  const from = typeof query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : null;
-  if (!from) return null;
+  if (query.from === undefined) return null;
+  const from = validCalendarDate(query.from);
+  if (!from) {
+    throw Object.assign(new Error('from must be a valid YYYY-MM-DD calendar date'), { statusCode: 400, isOperational: true });
+  }
   const today = etDateString();
   return { from: from > today ? today : from };
 }
