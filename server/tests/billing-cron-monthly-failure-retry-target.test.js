@@ -5,7 +5,10 @@
  * "the newest failed WaveGuard Monthly row since the month started", so an older month's retry rung that failed
  * in that gap got this month's retry_count/next_retry_at, and this month's failed row was left with no retry.
  * The failed row charge() recorded for the attempt rides the error as err.paymentRecord; that row is armed. The
- * query stays only as a fallback for a failure with no recorded row, held to this month's billed_month stamp.
+ * query stays only for a charge whose failed row could not be recorded (charge() throws with paymentRecord: null),
+ * held to this month's billed_month stamp and to rows no rung superseded. An error from outside the charge (no
+ * paymentRecord property at all: the customer read, the lock, the bookkeeping after a charge that succeeded) arms
+ * nothing, so no "payment failed" retry notice goes to a customer whose charge may have gone through.
  *
  * Harness mirrors billing-cron-billing-mode.test.js.
  */
@@ -15,6 +18,7 @@ let mockPaymentUpdates = [];
 // The payments.first() answer: a function of the billed_month the query asked for (null = no stamp filter).
 let mockFailedRowFor = () => null;
 let mockAskedMonths = [];
+let mockLookupNulls = [];
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn, firstFn, table) {
@@ -32,6 +36,8 @@ jest.mock('../models/db', () => {
       return b;
     };
     b.whereRaw = (sql, bindings) => { b.__raw.push({ sql, bindings }); return b; };
+    b.__nulls = [];
+    b.whereNull = (col) => { b.__nulls.push(col); return b; };
     b.update = async (patch) => {
       if (table === 'payments') mockPaymentUpdates.push({ id: b.__id, patch });
       return 1;
@@ -51,6 +57,7 @@ jest.mock('../models/db', () => {
         if (!q.__failed || !q.__monthlyMarker) return null;
         const stamp = q.__raw.find((r) => /billed_month/.test(r.sql));
         if (stamp) mockAskedMonths.push(stamp.bindings[0]);
+        mockLookupNulls.push(...q.__nulls);
         return mockFailedRowFor(stamp ? stamp.bindings[0] : null);
       }, table);
     }
@@ -104,6 +111,7 @@ beforeEach(() => {
   mockCustomers = [{ ...customer }];
   mockPaymentUpdates = [];
   mockAskedMonths = [];
+  mockLookupNulls = [];
   // Without a stamp filter the newest failed row is the older month's rung (the race).
   mockFailedRowFor = (month) => (month === null ? olderMonthRung : null);
   jest.clearAllMocks();
@@ -120,17 +128,28 @@ describe('processMonthlyBilling — monthly failure retry target', () => {
     expect(mockAskedMonths).toEqual([]); // no lookup when the attempt row is known
   });
 
-  test('no recorded attempt row: the fallback only takes a row stamped with this month, so the older rung stays untouched', async () => {
-    StripeService.chargeMonthly.mockRejectedValue(new Error('declined'));
+  test('a charge whose failed row could not be recorded: the lookup asks for this month and unsuperseded rows only, so the older rung stays untouched', async () => {
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), { paymentRecord: null }));
     await BillingCron.processMonthlyBilling();
     expect(mockAskedMonths).toEqual([thisEtMonth()]);
+    expect(mockLookupNulls).toContain('superseded_by_payment_id');
     expect(armedIds()).toEqual([]);
   });
 
-  test("no recorded attempt row but this month's failed row exists: the fallback arms it", async () => {
+  test("a charge whose failed row could not be recorded, with this month's failed row present: that row is armed", async () => {
     mockFailedRowFor = (month) => (month === thisEtMonth() ? { id: 'this-month-row', status: 'failed' } : olderMonthRung);
-    StripeService.chargeMonthly.mockRejectedValue(new Error('declined'));
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), { paymentRecord: null }));
     await BillingCron.processMonthlyBilling();
     expect(armedIds()).toEqual(['this-month-row']);
+  });
+
+  test('an error from outside the charge (no paymentRecord at all) arms nothing and looks nothing up', async () => {
+    mockFailedRowFor = () => ({ id: 'this-month-row', status: 'failed' });
+    StripeService.chargeMonthly.mockRejectedValue(new Error('connection reset'));
+    await BillingCron.processMonthlyBilling();
+    expect(mockAskedMonths).toEqual([]);
+    expect(armedIds()).toEqual([]);
+    const { warn } = require('../services/logger');
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/failed outside the charge itself \(connection reset\)/));
   });
 });
