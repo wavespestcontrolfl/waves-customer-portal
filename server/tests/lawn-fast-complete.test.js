@@ -786,7 +786,6 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
       expect('spotTargets' in ctx).toBe(false);
-      expect('mixHelp' in ctx.plannedProducts).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
       expect(v13VisitLimits).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.arrayContaining([expect.objectContaining({ product: expect.objectContaining({ id: P_ARENA }) })]), expect.anything(), expect.anything());
     });
@@ -1775,6 +1774,13 @@ describe('preflightLawnFastCompletion', () => {
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required', error: 'Pick where on the lawn Test Weed Spray went.' } });
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [''] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'back' })] })).toBeNull();
+    });
+
+    // The mix help is gone (2026-10-30): a sheet opened before that still sending gallons sprayed is refused, correctable, not recorded.
+    test('a row still carrying sprayedGallons: 400 lawn_gallons_unavailable naming the product; an empty value passes', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '2', areaValue: 1900 })] }))
+        .toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_HERB } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front', sprayedGallons: '' })] })).toBeNull();
     });
 
     test('a row with a place, and a whole-lawn row without one, pass the preflight', async () => {

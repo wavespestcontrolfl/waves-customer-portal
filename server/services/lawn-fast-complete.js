@@ -823,8 +823,6 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
       ...await group11HeldContext({ loaded, sheet, svc, knex }),
-      // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
-      ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -1259,7 +1257,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, propertyServiceArea = null, actor = null } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1361,13 +1359,23 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   }
   // GATE_LAWN_NEW_SOD_NOTE: an empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
-  // GATE_LAWN_TROUBLE_AREAS: every spot row names a place, and the place the yearly limits forbid is refused
-  // (lawn-trouble-areas.js preflightPlaces; null while the gate is off).
-  // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
+  // a row still carrying gallons sprayed is refused (legacyGallonsRefusal), then
+  // GATE_LAWN_TROUBLE_AREAS: every spot row names a closed-list place (lawn-trouble-areas.js preflightPlaces; a yearly limit
+  // there warns, never refuses; null while the gate is off).
   return require('./lawn-sod-sheet').checkNoProductNote({
     knex, svc, products, technicianNotes,
-    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan, propertyServiceArea, actor }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
+    next: () => legacyGallonsRefusal(products) || require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products }),
   });
+}
+
+// Gallons sprayed left the sheet with the mix help (2026-10-30). A sheet opened before that can still send `sprayedGallons` beside an
+// area the old sheet capped to the lawn and the staged rate; nothing converts it any more, and recording that pair would understate the
+// ledger rate. Refuse it, correctable, as the mix help did while its gate was off.
+function legacyGallonsRefusal(products) {
+  const row = (Array.isArray(products) ? products : []).find((p) => p && p.sprayedGallons !== undefined && p.sprayedGallons !== null && p.sprayedGallons !== '');
+  return row
+    ? { status: 400, payload: { error: 'Gallons sprayed is no longer on this sheet. Enter the amount used instead.', code: 'lawn_gallons_unavailable', productId: row.productId } }
+    : null;
 }
 
 // The visit type re-judged INSIDE the completion transaction, beside the main flow's
