@@ -126,6 +126,25 @@ describe("timesheet tab", () => {
     expect(screen.queryByTestId("day-lunch-panel")).not.toBeInTheDocument();
   });
 
+  it("opens and closes a day from a named button, so the keyboard reaches it", async () => {
+    stubTimesheet({ autoLunch: true, rows: [day({ unpaid_meal_minutes: "30.00" })] });
+    await mount();
+    const button = screen.getByRole("button", {
+      name: "Field Tech, Mon 2026-10-26: 10.0 hours, lunch -0.5",
+    });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Field Tech, Tue 2026-10-27: no time" })).toBeInTheDocument();
+
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    expect(await screen.findByText("Entries for 2026-10-26")).toBeInTheDocument();
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(button);
+    expect(screen.queryByText("Entries for 2026-10-26")).not.toBeInTheDocument();
+    expect(button).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("sets No lunch with a required reason and reloads", async () => {
     const calls = stubTimesheet({ autoLunch: true, rows: [day({ unpaid_meal_minutes: "30.00" })] });
     await mount();

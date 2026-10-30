@@ -188,3 +188,44 @@ describe('TimeTrackingPage office-only leaves', () => {
     expect(resolveStaffTab('documents', false, 'technician')).toBe('documents');
   });
 });
+
+describe('TimeTrackingPage team edit form names', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'admin-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'admin-1', role: 'admin' }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('gives every edit field the name of its visible label', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => apiResponse({
+      technicians: [{
+        id: 'tech-1',
+        name: 'River Tech',
+        role: 'technician',
+        active: true,
+        employment_status: 'active',
+        pay_rate: '22.50',
+      }],
+    })));
+    render(<TeamTab showToast={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    // A pay rate on the row opens the payroll section with the form.
+    expect(screen.getByRole('textbox', { name: 'Name *' })).toHaveValue('River Tech');
+    for (const name of ['Phone', 'Email', 'Job title', 'Address', 'SSN (last 4)',
+      'Emergency contact name', 'Emergency contact phone']) {
+      expect(screen.getByRole('textbox', { name })).toBeInTheDocument();
+    }
+    for (const name of ['Employment', 'Tech line', 'Employment type']) {
+      expect(screen.getByRole('combobox', { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('spinbutton', { name: 'Pay rate ($/hr)' })).toHaveValue(22.5);
+    expect(screen.getByLabelText('Hire date')).toHaveAttribute('type', 'date');
+    expect(screen.getByLabelText('Date of birth')).toHaveAttribute('type', 'date');
+  });
+});
