@@ -235,7 +235,9 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
   );
 }
 
-const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE;
+// A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
+const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
+const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
 
 function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
@@ -275,6 +277,13 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         setNote(data.bid.decision_note || "");
       }
     } catch (err) {
+      // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
+      // instead of replacing the detail with an error (whose Retry would reload without the drafts).
+      if (keepDrafts) {
+        setState((s) => (s.bid ? { ...s, loading: false } : { loading: false, error: err.message, bid: null, emails: [], extras: null }));
+        setMessage(RELOAD_FAILED_MESSAGE);
+        return;
+      }
       setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
     }
   }, [bidId]);

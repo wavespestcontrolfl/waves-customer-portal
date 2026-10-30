@@ -404,3 +404,31 @@ it("shows a note changed on the server when its field has focus but no typing, a
   await act(async () => {});
   expect(notePatches).toEqual([]);
 });
+
+it("keeps the bid and every unsaved field on screen when the read after a lost reply fails too", async () => {
+  let reads = 0;
+  adminFetch.mockImplementation((path, options = {}) => {
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
+    if (path === "/admin/bid-desk/b1") {
+      reads += 1;
+      if (reads === 1) return reply(detail());
+      return Promise.reject(new TypeError("Failed to fetch")); // the connection is still down
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  renderPage();
+  const note = await screen.findByLabelText("Note");
+  fireEvent.change(note, { target: { value: "Ask the prime about the chemical scope" } });
+  fireEvent.change(screen.getByLabelText("How it is judged"), { target: { value: "scored" } });
+  fireEvent.change(screen.getByLabelText("Due date (Eastern time)"), { target: { value: "2026-11-04T14:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  await waitFor(() => expect(reads).toBe(2));
+  await act(async () => {});
+  expect(screen.getByRole("heading", { name: "Fictional audit bid" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Note")).toHaveValue("Ask the prime about the chemical scope");
+  expect(await screen.findByText(/Could not confirm the save, and the bid could not be reloaded/)).toBeInTheDocument();
+  expect(screen.getByLabelText("How it is judged")).toHaveValue("scored");
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-11-04T14:00");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save decision" })).not.toBeDisabled());
+});
