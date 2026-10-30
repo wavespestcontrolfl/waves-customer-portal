@@ -183,7 +183,7 @@ function post(baseUrl, extra = {}, { role = 'admin' } = {}) {
   return fetch(`${baseUrl}/admin/leads/${LEAD_ID}/schedule-appointment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-test-role': role },
-    body: JSON.stringify({ date: '2027-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
+    body: JSON.stringify({ date: '2094-01-15', time: '10:00', serviceType: 'Pest Control', ...extra }),
   });
 }
 
@@ -779,7 +779,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       const first = calls[calls.findIndex((c) => c.op === 'trx-begin') + 1];
       expect(first.op).toBe('raw');
       expect(first.args[0]).toMatch(/pg_advisory_xact_lock\(hashtext/);
-      expect(first.args[1][1]).toBe('occupancy:2027-01-15');
+      expect(first.args[1][1]).toBe('occupancy:2094-01-15');
       const commsIdx = calls.findIndex((c) => c.op === 'raw' && /customer-comms/.test(String(c.args[1]?.[0])));
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       expect(commsIdx).toBeGreaterThan(0);
@@ -787,8 +787,8 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
-  const ownBooking = { id: 'appt-existing', customer_id: 'cust-linked', technician_id: 'tech-1', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Pest Control' };
-  const otherBooking = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
+  const ownBooking = { id: 'appt-existing', customer_id: 'cust-linked', technician_id: 'tech-1', scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Pest Control' };
+  const otherBooking = { id: 'appt-other', customer_id: 'cust-other', technician_id: null, scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending', service_type: 'Lawn' };
 
   it('ordering: retry after commit with its OWN booking on the schedule → LEAD_ALREADY_CONVERTED, not SLOT_CONFLICT', async () => {
     const calls = [];
@@ -838,7 +838,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       const json = await res.json();
       // The overlap no longer refuses the booking — it commits and the
       // response carries the advisory warning naming the date.
-      expect(json.warnings).toEqual([expect.stringContaining('2027-01-15')]);
+      expect(json.warnings).toEqual([expect.stringContaining('2094-01-15')]);
       expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
       // Probe still runs, tech-blind with the shared admin exclusion set
       // (freed terminal rows never draw a false overlap note).
@@ -891,7 +891,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     install(makeKnex(makeResolver({
       preLead: linkedLead(),
       lockedLead: lockedLinked,
-      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { rebook: true });
@@ -903,7 +903,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // The dedupe lookup excludes inactive visits and ran under the locks.
       const lookup = calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
       expect(lookup.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]);
-      expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', service_type: 'Pest Control' });
+      expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', service_type: 'Pest Control' });
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       expect(calls.indexOf(lookup)).toBeGreaterThan(forUpdateIdx);
     });
@@ -914,10 +914,10 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     install(makeKnex(makeResolver({
       preLead: linkedLead(),
       lockedLead: lockedLinked,
-      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-existing', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { rebook: true, date: '2027-01-22' });
+      const res = await post(baseUrl, { rebook: true, date: '2094-01-22' });
       expect(res.status).toBe(200);
       expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(1);
     });
@@ -1356,7 +1356,7 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
     install(makeKnex(makeResolver({
       preLead: baseLead({ customer_id: 'cust-linked', converted_at: null }),
       lockedLead: { customer_id: 'cust-linked', converted_at: null, status: 'new' },
-      existingVisits: [{ id: 'appt-first', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending' }],
+      existingVisits: [{ id: 'appt-first', customer_id: 'cust-linked', scheduled_date: '2094-01-15', window_start: '10:00', window_end: '11:00', status: 'pending' }],
     }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
@@ -1407,7 +1407,7 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
 describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_SAVES', () => {
   const routeCheck = require('../services/scheduling/staff-save-route-check');
   const arrivalRoute = require('../services/scheduling/arrival-route');
-  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2027-01-15. Review the route before driving it.';
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2094-01-15. Review the route before driving it.';
   let warningsSpy;
   let placeSpy;
   let realPlaceSpy;
@@ -1439,7 +1439,7 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
       expect(warningsSpy).toHaveBeenCalledTimes(1);
       const [conn, args] = warningsSpy.mock.calls[0];
       expect(conn.isTransaction).toBe(true);
-      expect(args).toMatchObject({ serviceId: 'appt-1', date: '2027-01-15', windowStart: '10:00', technicianId: null });
+      expect(args).toMatchObject({ serviceId: 'appt-1', date: '2094-01-15', windowStart: '10:00', technicianId: null });
       expect(placeSpy).toHaveBeenCalledTimes(1);
       expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
       expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', source: 'lead_appointment' });
@@ -1505,7 +1505,7 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_SAVE_ROAD_BUY', ()
     const knex = await run({ technicianId: 'tech-1' }, { linkedCustomer: located });
     expect(buySpy).toHaveBeenCalledTimes(1);
     expect(buySpy.mock.calls[0][0]).toMatchObject({
-      spender: 'admin-1', date: '2027-01-15', technicianId: 'tech-1', windowStart: '10:00',
+      spender: 'admin-1', date: '2094-01-15', technicianId: 'tech-1', windowStart: '10:00',
       prospective: { lat: '27.5', lng: '-82.4' },
     });
     expect(buySpy.mock.invocationCallOrder[0]).toBeLessThan(knex.transaction.mock.invocationCallOrder[0]);
