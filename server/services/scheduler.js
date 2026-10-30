@@ -7281,7 +7281,7 @@ function initScheduledJobs() {
     try {
       const SocialMediaService = require('./social-media');
       const result = await SocialMediaService.checkAndPublish();
-      logger.info(`RSS social media check done: ${result.processed} new post(s) published`);
+      logger.info(`RSS social media check done: ${result.published || 0} published, ${result.failed || 0} failed, ${result.processed} checked`);
     } catch (err) {
       logger.error(`RSS social media check failed: ${err.message}`);
     }
