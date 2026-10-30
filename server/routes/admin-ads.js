@@ -478,9 +478,9 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
       reason: `Held ${mode} until ${until} from the portal`,
     };
     // One locked operation: setMode checks the campaign, pushes the mode to
-    // Google first, then saves the mode AND the hold in the same commit (a
-    // campaign already in the held mode saves only the hold). A failed push or
-    // save leaves no hold, and the 2-hour job cannot run between the steps.
+    // Google first (always, even when already in the held mode), then saves the
+    // mode AND the hold in the same commit. A failed push or save leaves no
+    // hold, and the 2-hour job cannot run between the steps.
     const applied = await applyLive(
       () => getBudgetManager().setMode(campaign.id, mode, `Hold: ${mode} until ${until} (set in the portal)`, { requireLivePush: true, requireActive: true, trigger: 'manual', hold }),
       res,
