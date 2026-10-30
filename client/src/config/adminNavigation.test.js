@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  ADMIN_DESKTOP_NAV_SECTIONS,
   ADMIN_MOBILE_MORE_SECTIONS,
   ADMIN_MOBILE_TABS,
   ADMIN_NAV_ITEMS,
+  ADMIN_WORKSPACE_DESTINATIONS,
+  getAdminMobileTabs,
   isAdminNavItemActive,
   isAdminNavItemEnabled,
   isPathAdminOnly,
@@ -73,16 +74,16 @@ describe("grouped workspaces", () => {
   });
 });
 
-function compactSections(sections) {
-  return sections.map(({ section, items }) => ({
-    section,
-    itemIds: items.map(({ id }) => id),
-  }));
-}
-
 function sectionItems(sections) {
   return sections.flatMap(({ items }) => items);
 }
+
+describe("getAdminMobileTabs", () => {
+  it("gives each login its own bottom tabs: Dashboard for the owner, Today for a technician", () => {
+    expect(getAdminMobileTabs("admin").map(({ id }) => id)).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
+    expect(getAdminMobileTabs("technician").map(({ id }) => id)).toEqual(["today", "schedule", "customers", "communications", "more"]);
+  });
+});
 
 describe("isAdminNavItemEnabled", () => {
   it("needs the flag, or any one of the anyFlag list, and fails closed", () => {
@@ -96,24 +97,47 @@ describe("isAdminNavItemEnabled", () => {
     expect(isAdminNavItemEnabled(any, { bid_kit: true })).toBe(true);
     expect(isAdminNavItemEnabled(any, { bid_desk: false, bid_kit: false })).toBe(false);
   });
-  it("carries anyFlag onto the desktop and mobile More rows", () => {
-    expect(sectionItems(ADMIN_DESKTOP_NAV_SECTIONS).find(({ id }) => id === "bids")).toMatchObject({ path: "/admin/bids", label: "Bids", adminOnly: true, flag: null, anyFlag: ["bid_desk", "bid_kit"] });
+  it("carries anyFlag onto the grouped workspace and mobile More rows", () => {
+    expect(ADMIN_WORKSPACE_DESTINATIONS.find(({ id }) => id === "bids")).toMatchObject({ path: "/admin/bids", label: "Bids", adminOnly: true, anyFlag: ["bid_desk", "bid_kit"] });
     expect(sectionItems(ADMIN_MOBILE_MORE_SECTIONS).find(({ id }) => id === "bids")?.anyFlag).toEqual(["bid_desk", "bid_kit"]);
   });
 });
 
 describe("admin navigation registry", () => {
   it("uses the consolidated admin taxonomy", () => {
-    expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
-      { section: "Overview", itemIds: ["dashboard"] },
-      { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bids", "priceMatch", "contracts"] },
-      { section: "Communications", itemIds: ["communications"] },
-      { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
-      { section: "People", itemIds: ["staff", "recruiting"] },
-      { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
-      { section: "System", itemIds: ["agents", "toolHealth", "settings"] },
+    const owner = getAdminWorkspaceGroups("admin", { agent_estimate: true, bid_desk: true, bid_kit: true });
+    expect(owner.map(({ id, items }) => ({ id, itemIds: items.map((item) => item.id) }))).toEqual([
+      { id: "dashboard", itemIds: ["dashboard"] },
+      { id: "schedule", itemIds: ["today", "schedule"] },
+      { id: "customers", itemIds: ["customers", "contracts", "gateCodes"] },
+      { id: "sales", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate", "bids"] },
+      { id: "communications", itemIds: ["communications"] },
+      { id: "billing", itemIds: ["invoices", "recovery", "payers"] },
+      { id: "operations", itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+      { id: "marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
+      { id: "team", itemIds: ["staff", "recruiting"] },
+      { id: "accounting", itemIds: ["banking", "taxes"] },
+      { id: "agents", itemIds: ["agents"] },
+      { id: "settings", itemIds: ["settings", "toolHealth"] },
     ]);
+  });
+
+  it("gives a technician login the grouped menu with only technician pages", () => {
+    // Every login gets the grouped menu; the role filter alone decides what shows.
+    const flags = { agent_estimate: true, bid_desk: true, bid_kit: true };
+    const tech = getAdminWorkspaceGroups("technician", flags);
+    expect(tech.map(({ id, items }) => ({ id, itemIds: items.map((item) => item.id) }))).toEqual([
+      { id: "schedule", itemIds: ["today", "schedule"] },
+      { id: "customers", itemIds: ["customers"] },
+      { id: "communications", itemIds: ["communications"] },
+      { id: "operations", itemIds: ["jobs", "assessments", "equipment", "inventory", "knowledge"] },
+      { id: "team", itemIds: ["staff"] },
+      { id: "settings", itemIds: ["settings"] },
+    ]);
+    const groupIds = tech.map(({ id }) => id);
+    for (const hidden of ["dashboard", "sales", "billing", "marketing", "accounting", "agents"]) {
+      expect(groupIds).not.toContain(hidden);
+    }
   });
 
   it("keeps the five task-focused mobile tabs per role (Today replaces Dashboard for technicians)", () => {
@@ -138,8 +162,8 @@ describe("admin navigation registry", () => {
     ]);
   });
 
-  it("gives desktop and mobile access to the same destinations", () => {
-    const desktopIds = sectionItems(ADMIN_DESKTOP_NAV_SECTIONS).map(({ id }) => id);
+  it("gives the grouped menu and mobile Settings the same destinations", () => {
+    const desktopIds = Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== "more");
     const mobileIds = [
       ...ADMIN_MOBILE_TABS.filter(({ id }) => id !== "more").map(({ id }) => id),
       ...sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id),
@@ -156,15 +180,14 @@ describe("admin navigation registry", () => {
   it("defines Today as a non-owner-only first Operations destination", () => {
     expect(ADMIN_NAV_ITEMS.today).toMatchObject({ id: "today", path: "/admin/today", label: "Today" });
     expect(ADMIN_NAV_ITEMS.today.adminOnly).toBeFalsy();
-    expect(ADMIN_DESKTOP_NAV_SECTIONS.find(({ section }) => section === "Operations").items[0].id).toBe("today");
+    expect(getAdminWorkspaceGroups("technician").find(({ id }) => id === "schedule").items[0].id).toBe("today");
     expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.today, "/admin/today/tools")).toBe(true);
   });
 
-  it("uses canonical labels and routes on both navigation surfaces", () => {
-    const desktopItems = sectionItems(ADMIN_DESKTOP_NAV_SECTIONS);
+  it("uses canonical labels and routes on the mobile Settings rows", () => {
     const moreItems = sectionItems(ADMIN_MOBILE_MORE_SECTIONS);
 
-    for (const item of [...desktopItems, ...moreItems]) {
+    for (const item of moreItems) {
       expect(item.label).toBe(ADMIN_NAV_ITEMS[item.id].label);
       if (item.id === "assessments" && moreItems.includes(item)) {
         expect(item.path).toBe("/admin/lawn-assessments?tab=field");
@@ -184,7 +207,9 @@ describe("admin navigation registry", () => {
   });
 
   it("renders every destination exactly once per navigation surface", () => {
-    const desktopIds = sectionItems(ADMIN_DESKTOP_NAV_SECTIONS).map(({ id }) => id);
+    const desktopIds = getAdminWorkspaceGroups("admin", { agent_estimate: true, bid_desk: true, bid_kit: true })
+      .flatMap(({ items }) => items.map(({ id }) => id))
+      .filter((id) => id !== "estimates"); // a Sales subview, not a canonical destination
     const moreIds = sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id);
     const canonicalDestinationIds = Object.keys(ADMIN_NAV_ITEMS).filter(
       (id) => id !== "more",

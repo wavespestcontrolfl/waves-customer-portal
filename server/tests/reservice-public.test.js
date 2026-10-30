@@ -1220,6 +1220,32 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     expect(coords).toHaveBeenCalled();
   });
 
+  test('the commit passes the pin its availability rebuild resolved as expectedLocation', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1', start_label: '9:00 AM', end_label: '9:20 AM' }],
+      }],
+    });
+    const create = jest.spyOn(booking, 'createSelfBooking').mockResolvedValue({
+      ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123' },
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.34, lng: -82.53 });
+  });
+
   test('a customer change during commit reloads the token and never refreshes slots from the stale row', async () => {
     setReview(null);
     const booking = require('../routes/booking')._internals;

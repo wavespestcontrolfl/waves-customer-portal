@@ -1927,6 +1927,74 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     expect(unambiguousDictationTarget(card({ created_at: FRESH, call_created_at: oldCall }), { now: NOW })).toBeNull();
   });
 
+  // GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED: a clearly spelled address files a
+  // card with NO candidates — only a confidence and the release target.
+  describe('spelled address, no candidates (GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED)', () => {
+    const spelledCard = (payloadOver = {}, over = {}) => {
+      const c = card(over);
+      c.payload = { flag: 'email_unverified', confidence: 0.95, on_file_address: null, scheduling_status: 'requested', email_release_target: 'pat.lee@example.com', ...payloadOver };
+      return c;
+    };
+    const on = () => true;
+    const off = () => false;
+    test('gate off: a no-candidate card returns null, a missing or empty candidate list alike', () => {
+      expect(unambiguousDictationTarget(spelledCard(), { now: NOW, spelled: off })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ email_candidates: [] }), { now: NOW, spelled: off })).toBeNull();
+    });
+    test('the gate is read from the environment at call time, strictly === "true"', () => {
+      const OLD = process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+      try {
+        delete process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+        expect(unambiguousDictationTarget(spelledCard(), { now: NOW })).toBeNull();
+        process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = '1';
+        expect(unambiguousDictationTarget(spelledCard(), { now: NOW })).toBeNull();
+        process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = 'true';
+        expect(unambiguousDictationTarget(spelledCard(), { now: NOW })).toBe('pat.lee@example.com');
+      } finally {
+        if (OLD === undefined) delete process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+        else process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = OLD;
+      }
+    });
+    test('gate on: confidence 0.95 and a valid release target qualifies (missing or empty candidates)', () => {
+      expect(unambiguousDictationTarget(spelledCard(), { now: NOW, spelled: on })).toBe('pat.lee@example.com');
+      expect(unambiguousDictationTarget(spelledCard({ email_candidates: [] }), { now: NOW, spelled: on })).toBe('pat.lee@example.com');
+      expect(unambiguousDictationTarget(spelledCard({ confidence: 0.9 }), { now: NOW, spelled: on })).toBe('pat.lee@example.com');
+    });
+    test('gate on: confidence below 0.9, missing or non-numeric confidence does not qualify', () => {
+      expect(unambiguousDictationTarget(spelledCard({ confidence: 0.85 }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ confidence: '0.95' }), { now: NOW, spelled: on })).toBeNull();
+      const c = spelledCard(); delete c.payload.confidence;
+      expect(unambiguousDictationTarget(c, { now: NOW, spelled: on })).toBeNull();
+    });
+    test('gate on: an email_invalid card, an email disagreement, or a bad / missing target does not qualify', () => {
+      expect(unambiguousDictationTarget(spelledCard({}, { reason_code: 'email_invalid' }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ email_disagreement: { v1: 'pat.lee@example.com', v2: 'patlee@example.com' } }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ email_disagreement: true }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ email_release_target: 'not-an-email' }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({ email_release_target: null }), { now: NOW, spelled: on })).toBeNull();
+    });
+    test('gate on: every other check still applies (arbiter doubt, V1/V2 disagreement, mismatch flag, age, archived customer)', () => {
+      expect(unambiguousDictationTarget(spelledCard({ arbiter: { verdict: 'review' } }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { call_extraction_v1: V1('pat.lee77@example.com') }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { call_extraction: V2('patlee@example.com') }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { call_extraction: V2('pat.lee@example.com', ['name_email_mismatch']) }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { created_at: OLD_8D }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { customer_deleted_at: '2026-09-19T00:00:00Z' }), { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(spelledCard({}, { call_customer_id: null }), { now: NOW, spelled: on })).toBeNull();
+    });
+    test('gate on: the candidate paths behave exactly as today (one candidate qualifies, two do not)', () => {
+      expect(unambiguousDictationTarget(card(), { now: NOW, spelled: on })).toBe('pat.lee@example.com');
+      const low = card(); low.payload.email_candidates = [{ value: 'pat.lee@example.com', confidence: 0.6 }];
+      // A low-confidence candidate is not rescued by a high card confidence.
+      low.payload.confidence = 0.95;
+      expect(unambiguousDictationTarget(low, { now: NOW, spelled: on })).toBeNull();
+      const two = card(); two.payload.email_candidates = [{ value: 'pat.lee@example.com', confidence: 0.5 }, { value: 'pat.lee@example.org', confidence: 0.5 }];
+      two.payload.confidence = 0.95;
+      expect(unambiguousDictationTarget(two, { now: NOW, spelled: on })).toBeNull();
+      expect(unambiguousDictationTarget(two, { now: NOW, spelled: off })).toBeNull();
+    });
+  });
+
   // The loader's external checks, with a stub connection + injected predicates.
   // Each loader case uses its own domain: MX verdicts are cached process-wide.
   let n = 0;
@@ -1985,6 +2053,44 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     expect(await run(fakeConn(), { dnsDeps: dns(async () => [{ exchange: '.', priority: 0 }]) })).toEqual([]);
     expect(await run(fakeConn(), { dnsDeps: dns(notFound) })).toEqual([]);
     expect(await run(fakeConn(), { dnsDeps: dns(async () => { const e = new Error('timeout'); e.code = 'ETIMEOUT'; throw e; }) })).toEqual([]);
+  });
+  test('loader: a spelled no-candidate card passes the same MX check — MX releases, a domain with no MX stays unreleased', async () => {
+    const OLD = process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+    process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = 'true';
+    try {
+      const runSpelled = async (dnsDeps) => {
+        const flags = [];
+        const email = nextEmail(); fakeConn.current = email;
+        const c = cardFor(email);
+        c.payload = { flag: 'email_unverified', confidence: 0.95, email_release_target: email };
+        await loadUnambiguousEmailEvidence(fakeConn(), [c], (id, key) => flags.push([id, key]), {
+          now: NOW, dnsDeps, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true,
+        });
+        return flags;
+      };
+      expect(await runSpelled(mx)).toEqual([['t1', 'email_unambiguous']]);
+      expect(await runSpelled(dns(notFound))).toEqual([]); // NXDOMAIN
+      expect(await runSpelled(dns(async () => [{ exchange: '.', priority: 0 }]))).toEqual([]); // null MX
+    } finally {
+      if (OLD === undefined) delete process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+      else process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = OLD;
+    }
+  });
+  test('loader: with the spelled gate off, the same no-candidate card yields no evidence', async () => {
+    const flags = [];
+    const email = nextEmail(); fakeConn.current = email;
+    const c = cardFor(email);
+    c.payload = { flag: 'email_unverified', confidence: 0.95, email_release_target: email };
+    const OLD = process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+    delete process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED;
+    try {
+      await loadUnambiguousEmailEvidence(fakeConn(), [c], (id, key) => flags.push([id, key]), {
+        now: NOW, dnsDeps: mx, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true,
+      });
+    } finally {
+      if (OLD !== undefined) process.env.GATE_FIRST_TOUCH_AUTO_RELEASE_SPELLED = OLD;
+    }
+    expect(flags).toEqual([]);
   });
   test('loader: an apex A record (implicit MX) is deliverable, as the intake arbiter already rules', async () => {
     expect(await run(fakeConn(), { dnsDeps: { resolveMx: notFound, resolve4: async () => ['203.0.113.10'], resolve6: notFound } })).toEqual([['t1', 'email_unambiguous']]);

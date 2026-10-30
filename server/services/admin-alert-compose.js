@@ -112,12 +112,26 @@ function ruleError(violations, message = `Admin alert breaks docs/admin-notifica
   return Object.assign(new Error(message), { code: RULE_CODE, violations });
 }
 
+// A customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1): `contact: true` = a customer
+// reached us, `promise: true` = a follow-up we owe a customer. Absent = neither; the two never go together.
+function customerDeclaration({ contact, promise } = {}) {
+  return { ...(contact === true ? { contact: true } : {}), ...(promise === true ? { promise: true } : {}) };
+}
+function customerDeclarationViolations({ contact, promise } = {}) {
+  const v = [];
+  if (contact !== undefined && contact !== true) v.push('contact_invalid');
+  if (promise !== undefined && promise !== true) v.push('promise_invalid');
+  if (contact === true && promise === true) v.push('contact_and_promise');
+  return v;
+}
+
 function composeAdminAlert(spec = {}) {
   const { area, action, why, severity, link, subject, doneWhen, who, buttons } = spec;
   const v = [];
   if (!AREAS.includes(area)) v.push('area_invalid');
   if (!SEVERITIES.includes(severity)) v.push('severity_invalid');
   if (!WHO.includes(who)) v.push('who_invalid');
+  v.push(...customerDeclarationViolations(spec));
   if (!SUBJECT_TYPES.includes(subject?.type)) v.push('subject_type_invalid');
   const id = subject?.id;
   if (!((typeof id === 'string' && id.trim()) || (typeof id === 'number' && Number.isFinite(id)))) v.push('subject_id_invalid');
@@ -143,7 +157,7 @@ function composeAdminAlert(spec = {}) {
   if (v.length) throw ruleError(v);
   return {
     headline, why: whyText, link: link || null,
-    metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who, ...(buttons != null ? { buttons: normalizedButtons(buttons) } : {}) },
+    metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who, ...customerDeclaration(spec), ...(buttons != null ? { buttons: normalizedButtons(buttons) } : {}) },
   };
 }
 
@@ -160,6 +174,8 @@ function validStructuredFields(spec = {}) {
     ...(SUBJECT_TYPES.includes(subject?.type) && idOk ? { subject: { type: subject.type, id } } : {}),
     ...(typeof doneWhen === 'string' && DONE_WHEN.test(doneWhen) ? { doneWhen } : {}),
     ...(WHO.includes(who) ? { who } : {}),
+    // A copy violation must not cost a customer alert its ring (GATE_CUSTOMER_ALERTS_RING).
+    ...(customerDeclarationViolations(spec).length ? {} : customerDeclaration(spec)),
     ...(buttons != null && !buttonViolations(buttons).length ? { buttons: normalizedButtons(buttons) } : {}),
   };
 }

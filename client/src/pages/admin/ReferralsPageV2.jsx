@@ -43,10 +43,22 @@ function af(path, opts = {}) {
     },
     ...opts,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // Show the server's own reason (a 400 names the bad field) instead of "HTTP 400".
+      return r
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          throw new Error(body?.error || `HTTP ${r.status}`);
+        });
+    }
     return r.json();
   });
 }
+
+// Customer search rows are camelCase (mapCustomerListRow); a missing part must not print "undefined".
+const customerDisplayName = (c) =>
+  [c.firstName, c.lastName].filter(Boolean).join(" ");
 
 const fc = (c) => "$" + (c / 100).toFixed(2);
 const fd = (d) => "$" + parseFloat(d || 0).toFixed(2);
@@ -1698,11 +1710,12 @@ export default function ReferralsPageV2() {
                               upd(
                                 f.key,
                                 f.type === "number"
-                                  ? parseInt(e.target.value) || 0
+                                  ? Math.max(0, parseInt(e.target.value) || 0)
                                   : e.target.value,
                               )
                             }
                             disabled={!isEditing}
+                            {...(f.type === "number" ? { min: 0, step: 1 } : {})}
                             style={{ ...inputSt, opacity: isEditing ? 1 : 0.6 }}
                           />
                         )}
@@ -1977,7 +1990,7 @@ export default function ReferralsPageV2() {
                         key={c.id}
                         onClick={() => {
                           setConvertModal((m) => ({ ...m, customerId: c.id }));
-                          setCustSearch(`${c.first_name} ${c.last_name}`);
+                          setCustSearch(customerDisplayName(c));
                           setCustResults([]);
                         }}
                         style={{
@@ -1988,7 +2001,7 @@ export default function ReferralsPageV2() {
                           color: D.text,
                         }}
                       >
-                        {c.first_name} {c.last_name}{" "}
+                        {customerDisplayName(c)}{" "}
                         <span style={{ color: D.muted }}>({c.phone})</span>{" "}
                       </div>
                     ))}
@@ -2138,7 +2151,7 @@ export default function ReferralsPageV2() {
                       color: D.text,
                     }}
                   >
-                    {c.first_name} {c.last_name}{" "}
+                    {customerDisplayName(c)}{" "}
                     <span style={{ color: D.muted }}>({c.phone})</span>{" "}
                   </div>
                 ))}

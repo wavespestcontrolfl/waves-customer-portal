@@ -77,7 +77,7 @@ async function staffSaveRouteWarnings(conn, { serviceId, date, windowStart, wind
 async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
   if (!conn || !serviceId) return null;
   if (!routeCheckLive()) return null;
-  return require('./arrival-route').placeMovedVisit(conn, { serviceId, staffSave: true, ...(source ? { source } : {}) });
+  return require('./arrival-route').placeMovedVisit(conn, { serviceId, staffSave: true, lateDays: true, ...(source ? { source } : {}) });
 }
 
 /**

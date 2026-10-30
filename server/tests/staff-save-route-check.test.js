@@ -124,7 +124,7 @@ describe('placeStaffSavedVisit', () => {
     gateOn();
     const trx = jest.fn();
     expect(await routeCheck.placeStaffSavedVisit(trx, { serviceId: 'svc-1', source: 'bulk_reschedule' })).toEqual([1]);
-    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, source: 'bulk_reschedule' });
+    expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, lateDays: true, source: 'bulk_reschedule' });
   });
 });
 

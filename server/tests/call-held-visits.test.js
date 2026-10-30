@@ -4,7 +4,7 @@
 // exclusions) and the gate-off no-op. All identities are synthetic.
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('db must not be touched'); }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), callPrepayChoiceLive: jest.fn(() => false) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const db = require('../models/db');

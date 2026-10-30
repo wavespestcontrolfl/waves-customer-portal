@@ -195,6 +195,7 @@ async function raiseLeadBell({ customer, leadId, requestId, why, actions = null,
     subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
     doneWhen: 'lead_contacted',
     who: 'person',
+    contact: true,
   };
   for (const delay of delaysMs) {
     if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });

@@ -26,6 +26,7 @@ import {
   DialogFooter,
   Textarea,
   Input,
+  Field,
   Checkbox,
   UiSurface,
   Tabs,
@@ -48,14 +49,16 @@ async function adminFetch(path, options = {}) {
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
+    let body = null;
     try {
-      const d = await r.clone().json();
-      message = d.error || d.message || message;
+      body = await r.clone().json();
+      message = body.error || body.message || message;
     } catch {
       /* noop */
     }
     const err = new Error(message);
     err.status = r.status;
+    err.body = body;
     throw err;
   }
   return r.json();
@@ -219,7 +222,7 @@ function MessagesList({ history, replyMedia }) {
                 {entry.body && (
                   <button
                     type="button"
-                    className="text-13 text-zinc-500 underline u-focus-ring min-h-11 md:min-h-0"
+                    className="text-14 text-zinc-500 underline u-focus-ring min-h-11 md:min-h-0"
                     onClick={() => setOpenKey(open ? null : key)}
                   >
                     {open ? "Hide" : "Show"}
@@ -247,6 +250,42 @@ function MessagesList({ history, replyMedia }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function stageChangeLabel(entry) {
+  const to = STATUS_LABEL[entry.to] || entry.to;
+  if (!entry.from || entry.from === entry.to) return to;
+  return `${STATUS_LABEL[entry.from] || entry.from} → ${to}`;
+}
+
+// status_history is append-only, newest last — reverse for display. It holds
+// every stage change with the note typed into the stage dialog (recruiting
+// audit R2), plus the applicant's own booking and withdrawal entries.
+function StatusHistoryList({ history }) {
+  if (!history?.length) return null;
+  const items = [...history].reverse();
+  return (
+    <div className="mb-4">
+      <div className="text-ui-caption font-medium text-ink-secondary mb-1.5">
+        History
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {items.map((entry, i) => (
+          <div key={`${entry.at}-${i}`} className="border-hairline border rounded p-2">
+            <div className="text-14 text-zinc-600">
+              {formatETDateTime(entry.at)} · {stageChangeLabel(entry)}
+              {entry.by === "applicant" ? " · Applicant" : ""}
+            </div>
+            {entry.note && (
+              <div className="mt-1 text-14 text-zinc-800 whitespace-pre-wrap">
+                {entry.note}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -288,18 +327,19 @@ function StageChangeForm({
 
   return (
     <>
-      <Textarea
-        value={note}
-        onChange={(e) => onNoteChange(e.target.value)}
-        placeholder="Optional note for this status change…"
-        rows={2}
-        className="mb-4"
-      />
+      <Field label="Note" className="mb-4">
+        <Textarea
+          value={note}
+          onChange={(e) => onNoteChange(e.target.value)}
+          placeholder="Optional note for this status change…"
+          rows={2}
+        />
+      </Field>
 
       {templated && (
         <div className="flex flex-col gap-3 border-hairline border rounded p-3">
           {!preview.sending_enabled && (
-            <div className="text-13 text-zinc-500">
+            <div className="text-14 text-zinc-500">
               Sending is off (GATE_RECRUITING_COMMS)
             </div>
           )}
@@ -313,13 +353,15 @@ function StageChangeForm({
           />
           {smsChecked && !moveWithoutNotifying && (
             <div>
-              <Textarea
-                value={smsBody}
-                onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
-                rows={3}
-                maxLength={320}
-              />
-              <div className="text-13 text-zinc-400 text-right mt-0.5">
+              <Field label="Text message">
+                <Textarea
+                  value={smsBody}
+                  onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
+                  rows={3}
+                  maxLength={320}
+                />
+              </Field>
+              <div className="text-14 text-zinc-400 text-right mt-0.5">
                 {smsBody.length}/320
               </div>
             </div>
@@ -334,18 +376,22 @@ function StageChangeForm({
           />
           {emailChecked && !moveWithoutNotifying && (
             <div className="flex flex-col gap-2">
-              <Input
-                value={emailSubject}
-                onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
-                maxLength={150}
-                placeholder="Subject"
-              />
-              <Textarea
-                value={emailBody}
-                onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
-                rows={6}
-                maxLength={4000}
-              />
+              <Field label="Subject">
+                <Input
+                  value={emailSubject}
+                  onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
+                  maxLength={150}
+                  placeholder="Subject"
+                />
+              </Field>
+              <Field label="Email message">
+                <Textarea
+                  value={emailBody}
+                  onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
+                  rows={6}
+                  maxLength={4000}
+                />
+              </Field>
             </div>
           )}
 
@@ -394,6 +440,7 @@ function StageChangeDialog({
   onMoveWithoutNotifyingChange,
   sendResult,
   busy,
+  stale,
   error,
   onConfirm,
   onClose,
@@ -451,7 +498,7 @@ function StageChangeDialog({
             <Button
               size="sm"
               onClick={onConfirm}
-              disabled={busy || previewLoading || !preview}
+              disabled={busy || previewLoading || !preview || stale}
             >
               {busy ? "Sending…" : "Confirm"}
             </Button>
@@ -494,7 +541,10 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     async (status, { resend = false } = {}) => {
       if (!detail) return;
       const seq = ++previewSeq.current;
-      setStageDialog({ status, resend });
+      // fromStatus = the stage the operator SAW on the detail, not whatever
+      // the preview read later: Confirm is refused if it changed since
+      // (recruiting audit R1).
+      setStageDialog({ status, resend, fromStatus: detail.status });
       setPreview(null);
       setPreviewError(null);
       setSendResult(null);
@@ -537,7 +587,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     setBusy(true);
     setStageError(null);
     try {
-      const body = { status: stageDialog.status };
+      const body = { status: stageDialog.status, expected_status: stageDialog.fromStatus };
       if (note.trim()) body.note = note.trim();
       if (stageDialog.resend) body.resend = true;
       const wantsNotify =
@@ -563,7 +613,15 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       setNote("");
       await load(tab);
     } catch (err) {
-      if (seq === submitSeq.current) setStageError(err.message);
+      if (seq !== submitSeq.current) return;
+      // 409 = the stage changed while this dialog was open; nothing was
+      // written or sent. Show the newer state under the dialog so the owner
+      // reviews it before deciding again (recruiting audit R1).
+      if (err.status === 409 && err.body?.application) {
+        onApplicationUpdated(err.body.application);
+        load(tab); // not awaited: nothing is sending, so no "Sending…" while the list reloads
+      }
+      setStageError(err.message);
     } finally {
       if (seq === submitSeq.current) setBusy(false);
     }
@@ -598,9 +656,15 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       : `Move to ${STATUS_LABEL[stageDialog.status] || stageDialog.status}`
     : "";
 
+  // After a 409 the detail shows the newer stage; this dialog was opened on
+  // the old one, so Confirm could only be refused again. The owner closes
+  // it and decides from the refreshed detail.
+  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
+
   return {
     stageDialog,
     title,
+    stale,
     preview,
     previewLoading,
     previewError,
@@ -690,8 +754,8 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
 }
 
 // The applicant detail dialog's content: contact links, the AI screen
-// summary, submitted answers, the interview-scheduling block, message
-// history, and the per-stage action buttons. A substantive component in its
+// summary, submitted answers, the interview-scheduling block, the stage
+// history with its notes, message history, and the per-stage action buttons. A substantive component in its
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
@@ -779,6 +843,8 @@ function ApplicationDetailContent({ detail, replyMedia, onOpenStageDialog, onClo
 
         <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} />
 
+        <StatusHistoryList history={detail.status_history} />
+
         <MessagesList history={detail.comms_history} replyMedia={replyMedia} />
       </DialogBody>
       <DialogFooter>
@@ -808,6 +874,10 @@ export default function RecruitingPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState("new");
   const [applications, setApplications] = useState([]);
+  // The status whose rows `applications` holds. A failed read for another
+  // tab must not show the previous tab's cards under it, or an empty state
+  // that no read confirmed (recruiting audit R3).
+  const [loadedStatus, setLoadedStatus] = useState(null);
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -833,6 +903,7 @@ export default function RecruitingPage() {
             ? [...prev, ...(data.applications || [])]
             : data.applications || [],
         );
+        if (!append) setLoadedStatus(status);
         setCounts(data.counts || {});
       } catch (err) {
         if (seq === requestSeq.current) setError(err.message);
@@ -916,7 +987,11 @@ export default function RecruitingPage() {
       </Tabs>
 
       {error && (
-        <ActionFeedback error className="mb-3">
+        <ActionFeedback
+          error
+          className="mb-3"
+          onRetry={!loading && loadedStatus !== tab ? () => load(tab) : undefined}
+        >
           {error}
         </ActionFeedback>
       )}
@@ -924,7 +999,7 @@ export default function RecruitingPage() {
         <div className="text-14 text-zinc-500 p-8 text-center">
           Loading applications…
         </div>
-      ) : applications.length === 0 ? (
+      ) : loadedStatus !== tab ? null : applications.length === 0 ? (
         <Card>
           <CardBody>
             <div className="text-14 text-zinc-500 text-center py-6">
@@ -1046,6 +1121,7 @@ export default function RecruitingPage() {
         onMoveWithoutNotifyingChange={stageWorkflow.setMoveWithoutNotifying}
         sendResult={stageWorkflow.sendResult}
         busy={stageWorkflow.busy}
+        stale={stageWorkflow.stale}
         error={stageWorkflow.error}
         onConfirm={stageWorkflow.confirmStage}
         onClose={stageWorkflow.closeStageDialog}
