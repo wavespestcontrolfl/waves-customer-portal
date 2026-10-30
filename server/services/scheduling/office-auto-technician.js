@@ -76,8 +76,10 @@ async function resolveOfficeAutoTechnician({
 
     const picker = require('./pick-technician');
     if (!picker.pickTechnicianActive()) return unassigned('several_assignable');
+    // The catalog identity rides along: the pick reads the line (and capability) catalog
+    // first, as step 1 did; by name alone a lawn catalog row such as "Top Dress" reads general.
     const pick = await picker.pickTechnicianForVisit({
-      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, serviceType, customerId,
+      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, serviceType, serviceId, serviceKey, customerId,
     });
     if (!pick.active) return unassigned('several_assignable');
     const pickedId = pick.technician?.id || null;

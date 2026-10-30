@@ -89,6 +89,17 @@ describe('resolveOfficeAutoTechnician — service-line map live', () => {
     expect(await resolveOfficeAutoTechnician(input())).toEqual({ technicianId: 'tech-b', result: 'assigned', reason: 'scheduling_pick' });
   });
 
+  test('the scheduling-pick fallback keeps the catalog identity (a lawn catalog row named "Top Dress" must not read general by name)', async () => {
+    mockState.linePick = { mapped: false, line: 'lawn', technicianId: null, reason: 'no_map' };
+    mockState.pickerActive = true;
+    mockState.pick = { active: true, technician: A, reason: 'closest_route' };
+    const topDress = { ...input(), serviceId: 'svc-top', serviceKey: 'top_dress_x', serviceType: 'Top Dress' };
+    expect(await resolveOfficeAutoTechnician(topDress)).toEqual({ technicianId: 'tech-a', result: 'assigned', reason: 'scheduling_pick' });
+    expect(picker.pickTechnicianForVisit).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'svc-top', serviceKey: 'top_dress_x', serviceType: 'Top Dress',
+    }));
+  });
+
   test('nobody assignable: none_assignable, the line is not asked', async () => {
     mockState.techs = [];
     expect(await resolveOfficeAutoTechnician(input())).toMatchObject({ reason: 'none_assignable' });
