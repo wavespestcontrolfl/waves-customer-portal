@@ -349,13 +349,15 @@ router.post('/message/:id/trash', async (req, res) => {
   }
 });
 
-// The replied-to email's RFC Message-ID. A failed lookup, or a row synced
-// before the header was captured, only loses the threading headers: the
-// reply still goes with its thread id (scheduled-email-sender's rule).
-async function sourceMessageId(replyEmailId) {
+// The replied-to email's RFC Message-ID, from a row in the reply's own
+// thread (headers from another conversation would contradict the thread
+// id). A failed lookup, or a row synced before the header was captured,
+// only loses the threading headers: the reply still goes with its thread id
+// (scheduled-email-sender's rule).
+async function sourceMessageId(replyEmailId, threadId) {
   if (typeof replyEmailId !== 'string') return null;
   try {
-    const source = await db('emails').where({ id: replyEmailId }).first('message_id');
+    const source = await db('emails').where({ id: replyEmailId, ...(threadId ? { gmail_thread_id: threadId } : {}) }).first('message_id');
     return source?.message_id || null;
   } catch (err) {
     logger.warn(`[email] reply source lookup failed (${err.code || 'error'})`);
@@ -374,7 +376,7 @@ router.post('/send', async (req, res) => {
     // In-Reply-To / References as well as the thread id (Gmail's threading
     // rules). The page sends the replied-to row's id; the header comes from
     // the stored row, as the scheduled send resolves it.
-    const inReplyTo = req.body.inReplyTo || (replyEmailId ? await sourceMessageId(replyEmailId) : undefined);
+    const inReplyTo = req.body.inReplyTo || (replyEmailId ? await sourceMessageId(replyEmailId, threadId) : undefined);
     const { status, json } = await sendEmailMessage({ to, subject, body, threadId, inReplyTo });
     res.status(status).json(json);
   } catch (err) {

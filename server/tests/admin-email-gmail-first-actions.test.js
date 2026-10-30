@@ -70,7 +70,7 @@ function chainFor(table, preds = []) {
 
 function installDb() {
   tables = {
-    emails: [{ id: 'email-1', gmail_id: 'gmail-1', message_id: '<source-1@mail.example>', is_read: false, is_starred: false, is_archived: false }],
+    emails: [{ id: 'email-1', gmail_id: 'gmail-1', gmail_thread_id: 'thread-1', message_id: '<source-1@mail.example>', is_read: false, is_starred: false, is_archived: false }],
     email_attachments: [],
     blocked_email_senders: [],
   };
@@ -177,6 +177,11 @@ describe('a reply carries the source Message-ID', () => {
     await call('post', '/send', { body: { ...reply, replyEmailId: 'email-1' } });
     await call('post', '/send', { body: { ...reply, replyEmailId: 'missing-row' } });
     expect(gmail.sendMessage.mock.calls.map((args) => args[4])).toEqual([null, null]);
+  });
+
+  test('a row from another thread gives no header (it would contradict the thread id)', async () => {
+    await call('post', '/send', { body: { ...reply, threadId: 'thread-2', replyEmailId: 'email-1' } });
+    expect(gmail.sendMessage).toHaveBeenCalledWith(reply.to, reply.subject, reply.body, 'thread-2', null);
   });
 
   test('a failed lookup only loses the header; the reply still goes', async () => {
