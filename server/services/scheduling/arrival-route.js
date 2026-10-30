@@ -683,16 +683,20 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
  *  arrival promise, baselineLate = stops late without the new visit): an order wins only when
  *  the new visit keeps its OWN window, no stop that is on time without it becomes late, and no
  *  stop that is already late arrives more than INSERTION_MARGIN_MINUTES (15) later than it does
- *  without the new visit (its smallest baseline lateness across the orders tried, so the cap is
- *  strict). A late stop after the new visit is not held to the insertion margin. Null = not a
- *  day that is already late, or no order qualifies: the refusal stands. */
+ *  without the new visit. A stop counts as already late only when it is late in EVERY baseline
+ *  tried (stored order and clock order under stale numbering), and its cap is its smallest
+ *  lateness across them; a stop that is on time in any baseline may not become late. A late stop
+ *  after the new visit is not held to the insertion margin. Null = no stop is late in every
+ *  baseline (not an already-late day), or no order qualifies: the refusal stands. */
 function lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive, ...selectArgs }) {
   const baselineLists = sequencers.map(sequence => lateStopMinutes(simulate, sequence(groupedPending)));
-  if (baselineLists.some(list => !list?.size)) return null;
-  const baselineLate = new Map();
-  for (const list of baselineLists) {
-    for (const [id, minutes] of list) baselineLate.set(id, Math.min(minutes, baselineLate.get(id) ?? Infinity));
-  }
+  if (baselineLists.some(list => !list)) return null;
+  // A stop is "already late" only when it is late in EVERY baseline tried (stored order and clock order when
+  // the numbering is stale); its allowance is its smallest lateness across them. A stop that is on time in any
+  // baseline gets none: it may not become late. No stop late in every baseline: not an already-late day.
+  const baselineLate = new Map([...baselineLists[0]].filter(([id]) => baselineLists.every(list => list.has(id)))
+    .map(([id]) => [id, Math.min(...baselineLists.map(list => list.get(id)))]));
+  if (!baselineLate.size) return null;
   const tolerantSimulate = (order, usedLegs, extra = {}) => {
     const simulation = simulate(order, usedLegs, { ...extra, reportLate: true });
     return simulation && simulation.arrivals.every(arrival => !(arrival.lateMinutes > 0)

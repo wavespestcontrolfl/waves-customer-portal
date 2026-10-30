@@ -9,8 +9,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
-  haversine: () => 1,
-  fallbackLegMetrics: () => ({ minutes: 20 }),
+  // A test may switch driving off (zero minutes a leg) for the duration of one case.
+  haversine: () => (globalThis.__zeroLegs ? 0 : 1),
+  fallbackLegMetrics: (distance) => ({ minutes: distance === 0 ? 0 : 20 }),
   createSchedulingTravel: () => ({ lookup: () => ({ minutes: 20, source: 'conservative_model', reason: null }) }),
 }));
 
@@ -186,5 +187,34 @@ describe('the detour on a late day is measured against the same travel source (G
     withRoads({ lateDays: true, collectLegs: legs });
     // Baseline legs (home to A, A to B, B to home) are asked for as well as the candidate's.
     expect(legs.length).toBeGreaterThanOrEqual(7);
+  });
+});
+
+describe('stale numbering: a stop is already late only when it is late in every baseline tried', () => {
+  // Stored order (route numbers) and clock order disagree, so both baselines are tried.
+  afterEach(() => { globalThis.__zeroLegs = false; });
+  const twoWay = () => [
+    // A is numbered first; B has no number and was created earlier, so the clock order is B then A.
+    stop('A', '08:00', 120, { route_order: 1 }),
+    stop('B', '08:00', 120, { created_at: '2019-01-01T12:00:00Z' }),
+  ];
+
+  test('Codex reproduction: A is late only in B-then-A, B only in A-then-B; N, A, B is refused (no stop is late in both)', () => {
+    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+    globalThis.__zeroLegs = true;
+    // Two 120-minute stops promised 08:00-10:00, no driving, the van leaves at 09:55: whichever stop goes
+    // second is 115 minutes late, so each stop is late in one baseline and on time in the other.
+    const fit = evaluate(twoWay(), '09:00', 10, { lateDays: true, departureMin: 9 * 60 + 55 });
+    expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
+    expect(fit).not.toHaveProperty('dayAlreadyLate');
+  });
+
+  test('a stop that is late in every baseline still opens the day, as before', () => {
+    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+    // B (promised 08:30, by 10:30) is late behind A's four hours in the stored order and in the clock order.
+    const rows = [stop('A', '08:00', 240, { route_order: 1 }), stop('B', '08:30', 60)];
+    const fit = evaluate(rows, '15:00', 60, { lateDays: true });
+    expect(fit).toMatchObject({ feasible: true, dayAlreadyLate: true });
+    expect(fit.arrivals.map((a) => a.id)).toEqual(['A', 'B', '__candidate__']);
   });
 });
