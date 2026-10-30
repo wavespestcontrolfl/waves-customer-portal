@@ -2618,8 +2618,17 @@ function generateEstimate(input) {
     .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const manualOneTimeEligibleItems = oneTimeItems.filter(isManualOneTimeDiscountEligible);
   const manualSpecialtyEligibleItems = specialtyItems.filter(isManualOneTimeDiscountEligible);
-  const manualDiscountableOneTime = manualOneTimeEligibleItems
+  const manualOneTimeEligibleGross = manualOneTimeEligibleItems
     .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  // The negative rodent package line is not itself discountable, but it
+  // lowers what the customer owes, so a manual discount applies to the
+  // package net of its savings (not to the full component total).
+  const rodentPackageSavingsOneTime = oneTimeItems
+    .filter((i) => i.service === 'rodent_bundle_discount')
+    .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  const manualDiscountableOneTime = manualOneTimeEligibleGross > 0
+    ? Math.max(0, roundMoney(manualOneTimeEligibleGross + rodentPackageSavingsOneTime))
+    : 0;
   const manualDiscountableSpecialty = manualSpecialtyEligibleItems
     .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
   const manualDiscountableTotal = roundMoney(
@@ -2901,7 +2910,8 @@ function generateEstimate(input) {
       }
     }
   };
-  stampOneTimeManualFinal(manualOneTimeEligibleItems, manualDiscountableOneTime, manualDiscountOneTimeAmount);
+  // Stamp against the gross eligible lines: the package line carries its own savings.
+  stampOneTimeManualFinal(manualOneTimeEligibleItems, manualOneTimeEligibleGross, manualDiscountOneTimeAmount);
   stampOneTimeManualFinal(manualSpecialtyEligibleItems, manualDiscountableSpecialty, manualDiscountSpecialtyAmount);
 
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;

@@ -875,6 +875,25 @@ describe('rodent package discount sees the V2 exclusion section rows (owner 2026
     jest.dontMock('../services/pricing-engine/service-pricing');
   });
 
+  test('a manual percent discount applies to the package net of its savings (pre-push P0)', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      manualDiscount: { type: 'PERCENT', value: 10 },
+    }));
+    // 10% of $2,330 = $233, not 10% of the $2,500 component total.
+    expect(estimate.summary.manualDiscount.amount).toBe(233);
+    expect(estimate.summary.oneTimeTotal).toBe(2097);
+  });
+
+  test('a manual fixed discount stacks on the package total without double counting', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { rodentTrapping: { plan: 'standard' }, exclusion: v2Exclusion },
+      manualDiscount: { type: 'FIXED', value: 100 },
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBe(100);
+    expect(estimate.summary.oneTimeTotal).toBe(2230);
+  });
+
   test('commercial property gets no rodent package discount', () => {
     const commercial = generateEstimate(baseInput({
       propertyType: 'commercial',
