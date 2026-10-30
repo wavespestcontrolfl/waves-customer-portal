@@ -243,7 +243,15 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
   (await currentQuery(knex, customerId)).forEach((row) => {
     if (!seenProperty.has(row.property_id)) { seenProperty.add(row.property_id); currentIds.add(row.id); }
   });
-  const calibrations = calRows.map((row) => {
+  // The history limit applies to past rows only: a current calibration past the newest LIST_LIMIT rows (another
+  // property with many newer records, voided ones included) is still listed, or the panel would offer a new
+  // install where a refill belongs.
+  const listedIds = new Set(calRows.map((row) => row.id));
+  const missingCurrent = [...currentIds].filter((id) => !listedIds.has(id));
+  const extraRows = missingCurrent.length
+    ? await calibrationRows(knex).whereIn('c.id', missingCurrent)
+    : [];
+  const calibrations = [...extraRows, ...calRows].map((row) => {
     const payload = toCalibration(row);
     payload.isCurrent = currentIds.has(payload.id);
     return payload;
@@ -262,7 +270,10 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
 
 // ── Writes ───────────────────────────────────────────────────────────────
 
-const lockCustomer = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`misting-records:${customerId}`]);
+// Keyed on the canonical (lowercase) uuid: Postgres reads an uppercase id as the same customer, so a
+// case-sensitive key would let two writers for one customer run at once.
+const lockKey = (customerId) => `misting-records:${String(customerId).toLowerCase()}`;
+const lockCustomer = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey(customerId)]);
 
 // "Current" is defined here once. A current calibration is a non-voided row at an ACTIVE customer_properties
 // row of THIS customer, newest first (created_at, then id). A NULL property (deleted row) and a retired
@@ -583,4 +594,5 @@ module.exports = {
   toCalibration,
   toRefill,
   knownProduct,
+  _test: { lockKey },
 };
