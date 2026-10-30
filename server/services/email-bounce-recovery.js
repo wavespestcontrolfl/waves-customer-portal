@@ -93,15 +93,15 @@ function isHardBounceEvent(ev) {
  * address, so the webhook sends it to people instead (the bounced-contact
  * alert and the recording re-check card), never to an automatic correction
  * or resend (recovery and the rescue both can repair a domain on their own).
- * A temporary DNS failure is not one (call-email-checks.js
+ * Only the blocked events the retry rail would claim: a hard bounce keeps
+ * its own path. A temporary DNS failure is not one (call-email-checks.js
  * isNoMailServerReason). Suppression is not widened:
  * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
  */
 function isNoMailServerEvent(ev) {
   const { callEmailChecksLive, isNoMailServerReason } = require('./call-email-checks');
   if (!callEmailChecksLive()) return false;
-  const event = String(ev?.event || '').trim().toLowerCase();
-  if (event !== 'bounce' && event !== 'blocked') return false;
+  if (!require('./transactional-email-provider-retry').isProviderBlockedEvent(ev)) return false;
   return isNoMailServerReason(ev?.reason || ev?.response || '');
 }
 

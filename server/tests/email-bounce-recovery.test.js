@@ -93,6 +93,11 @@ describe('isNoMailServerEvent (GATE_CALL_EMAIL_CHECKS, owner 2026-10-29)', () =>
     expect(recovery.isNoMailServerEvent({ event: 'delivered', reason: 'unable to get mx info' })).toBe(false);
     expect(recovery.isNoMailServerEvent({})).toBe(false);
   });
+  test('gate on: a hard bounce with a no-domain reason keeps the hard-bounce path', () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(recovery.isNoMailServerEvent({ event: 'bounce', type: 'bounce', reason: '550 5.1.2 Host or domain name not found' })).toBe(false);
+    expect(recovery.isNoMailServerEvent({ event: 'bounce', reason: 'DNS lookup failed: NXDOMAIN' })).toBe(false);
+  });
   test('suppression is not widened: the hard-bounce test still says no for it', () => {
     process.env.GATE_CALL_EMAIL_CHECKS = 'true';
     expect(recovery.isHardBounceEvent(DEAD)).toBe(false);

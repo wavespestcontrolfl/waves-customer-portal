@@ -204,8 +204,9 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
 
 // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
 // this domain" as a blocked bounce. Gate off it stays on the sender-retry rail;
-// gate on it is a bad address and takes the bounce recovery lane (its alert and
-// the call re-check card) instead. Another template than the rate review letter.
+// gate on it is a bad address and goes to people only (the bounced-contact
+// alert and the recording re-check card), never to recovery, rescue or a
+// resend. Another template than the rate review letter.
 describe('SendGrid event webhook → a blocked bounce for a domain with no mail server', () => {
   const deadDomainBounce = () => event({ type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' });
   afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
@@ -223,9 +224,11 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
   });
 
   test.each([
-    ['gate off: the sender-retry rail, nothing else', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
-    ['gate on: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
-  ])('%s', async (_label, gate, want) => {
+    ['tracked, gate off: the sender-retry rail, nothing else', 'appointment.confirmation', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
+    ['tracked, gate on: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'appointment.confirmation', 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+    ['untracked send, gate off: nothing (not a hard bounce)', null, undefined, { retry: 0, alert: 0, rescue: 0, recheck: 0 }],
+    ['untracked send, gate on: the same people-only path', null, 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+  ])('%s', async (_label, templateKey, gate, want) => {
     if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
     const recovery = require('../services/email-bounce-recovery');
     const rescue = require('../services/email-bounce-rescue');
@@ -237,7 +240,7 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
     const recheck = jest.spyOn(reverify, 'reverifyBouncedEmailFromCall').mockResolvedValue(null);
     const retryAlert = jest.spyOn(providerRetry, 'alertIfProviderRetriesExhausted').mockResolvedValue(null);
     try {
-      mockState.message = { ...MESSAGE, template_key: 'appointment.confirmation' };
+      mockState.message = templateKey ? { ...MESSAGE, template_key: templateKey } : null;
       expect((await post([deadDomainBounce()])).status).toBe(200);
       await new Promise((r) => setTimeout(r, 20));
       expect(retryAlert).toHaveBeenCalledTimes(want.retry);

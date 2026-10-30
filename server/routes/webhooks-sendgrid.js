@@ -330,15 +330,21 @@ async function handleEvent(ev) {
   // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
   // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
   const alertUntrackedHardBounce = ({ rescue = true } = {}) => {
-    const hard = bounceRecovery.isHardBounceEvent(ev);
-    // GATE_CALL_EMAIL_CHECKS: a domain with no mail server gets the alert
-    // only. The rescue can apply a mechanical repair on its own, and a
-    // call-captured address is never auto-corrected (AGENTS.md call-pipeline rule).
-    const deadDomain = !hard && bounceRecovery.isNoMailServerEvent(ev);
-    if (!hard && !deadDomain) return;
+    const deadDomain = bounceRecovery.isNoMailServerEvent(ev);
+    if (!deadDomain && !bounceRecovery.isHardBounceEvent(ev)) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
-    if (deadDomain) return;
+    if (deadDomain) {
+      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce for a domain with no mail
+      // server goes to people only, on every send path: the alert above and
+      // the recording re-check card. No rescue: it can apply a repair on its
+      // own, and a call-captured address is never auto-corrected (AGENTS.md
+      // call-pipeline rule). The re-check claims one open card per call, so
+      // a redelivery or a sibling send's bounce adds no second card.
+      require('../services/email-bounce-reverify').reverifyBouncedEmailFromCall({ bouncedEmail: email })
+        .catch((err) => logger.error(`[sendgrid-webhook] bounce re-check failed: ${err.message}`));
+      return;
+    }
     // Untracked bounces have no email_messages row for domain recovery, but
     // the transcript rescue only needs the address — same fire-and-forget
     // contract; the rescue ledger's UNIQUE(bounced_email) absorbs replays.
@@ -429,13 +435,10 @@ async function handleEvent(ev) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
-        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people,
-        // never to an automatic correction or resend (AGENTS.md call-pipeline
-        // rule; attemptRecovery and the rescue can both repair a domain on
-        // their own): the bounced-contact alert and the recording re-check card.
+        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people
+        // (the alert and the recording re-check card), never to
+        // attemptRecovery, which can repair a domain and resend on its own.
         alertUntrackedHardBounce();
-        require('../services/email-bounce-reverify').reverifyBouncedEmailFromCall({ bouncedEmail: email })
-          .catch((err) => logger.error(`[sendgrid-webhook] bounce re-check failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
         // A rate review letter is reconciled on its notice above, with its own alert that a
         // delivered re-send closes: the generic recovery (and its "needs a correct address"
