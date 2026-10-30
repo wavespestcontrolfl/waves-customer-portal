@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Gavel } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -10,7 +10,7 @@ import { useAdminTableViews } from "../../hooks/useAdminTableViews";
 import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
-import BidChecklistPanel from "./BidChecklistPanel";
+import BidChecklistPanel, { UNCONFIRMED_MESSAGE } from "./BidChecklistPanel";
 
 // Bid Desk (GATE_BID_DESK, dark). Bid invites the email sync stored, filed by a job. The page only reads them and
 // records the operator's decisions; nothing here sends a message to a buyer or a contractor.
@@ -206,6 +206,7 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
                   variant="secondary"
                   className="bid-desk-open-record h-auto min-h-11 max-w-full justify-start whitespace-normal px-3 py-2 text-left"
                   onClick={() => onSelect(bid.id)}
+                  data-bid-open={bid.id}
                   aria-label={`Open ${titleOf(bid)}`}
                 >
                   <span className="min-w-0 break-words">{titleOf(bid)}</span>
@@ -234,6 +235,8 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
   );
 }
 
+const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE;
+
 function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
@@ -244,6 +247,8 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const headingRef = useRef(null);
+  const arrived = useRef(false);
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, loading: true, error: "" }));
@@ -264,6 +269,18 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   }, [bidId]);
   useEffect(() => { setMessage(""); load(); }, [load]);
 
+  // The detail renders below the whole list, so when it first loads (after an Open, or from a ?bid= link) it is
+  // scrolled to and its heading takes focus. A reload of the same bid does not move the page again.
+  useEffect(() => {
+    if (!state.bid || arrived.current) return;
+    arrived.current = true;
+    const heading = headingRef.current;
+    if (!heading) return;
+    const card = heading.closest("[data-bid-detail]");
+    if (card && card.scrollIntoView) card.scrollIntoView({ block: "start", behavior: "instant" });
+    heading.focus({ preventScroll: true });
+  }, [state.bid]);
+
   const save = async (body, done) => {
     setBusy(true);
     setMessage("");
@@ -282,7 +299,14 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       onChanged();
       return true;
     } catch (err) {
-      setMessage(`Not saved: ${err.message}`);
+      if (err instanceof ApiError) {
+        setMessage(`Not saved: ${err.message}`);
+      } else {
+        // No answer arrived (the network dropped): the server may have written the change, so show what it has.
+        setMessage(UNCONFIRMED_MESSAGE);
+        onChanged();
+        load();
+      }
       return false;
     } finally {
       setBusy(false);
@@ -295,11 +319,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   if (!bid) return null;
 
   return (
-    <Card>
+    <Card data-bid-detail>
       <CardBody>
         <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <h2 className="break-words text-ui-body font-medium text-zinc-900">{titleOf(bid)}</h2>
+            <h2 ref={headingRef} tabIndex={-1} className="break-words text-ui-body font-medium text-zinc-900 outline-none">{titleOf(bid)}</h2>
             <div className="text-ui-body text-ink-secondary">
               {[buyerOf(bid), SOURCE_LABEL[bid.source], bid.location].filter(Boolean).join(" · ")}
             </div>
@@ -348,7 +372,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
           <Button disabled={busy} onClick={() => save({ status, decision_note: note }, "Decision saved")}>Save decision</Button>
         </div>
 
-        {message && <ActionFeedback error={message.startsWith("Not saved")} className="mb-3">{message}</ActionFeedback>}
+        {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
           <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
@@ -384,7 +408,10 @@ function MarkEmail({ onMarked }) {
       setEmailId("");
       onMarked(data.bid_id);
     } catch (err) {
-      setMessage({ text: err.status === 404 ? "No email has that id" : "Enter the id from the email's address bar link (the id= part)", error: true });
+      const text = err.status === 404 ? "No email has that id"
+        : err.status === 400 ? "Enter the id from the email's address bar link (the id= part)"
+          : `Could not mark it: ${err.message}. Try again.`;
+      setMessage({ text, error: true });
     } finally {
       setBusy(false);
     }
@@ -534,6 +561,16 @@ export default function BidDeskPage({ embedded = false }) {
     setBids((rows) => rows.map((row) => (row.id === id ? { ...row, checklist_progress: { checked: progress.checked, required: progress.required } } : row)));
   }, []);
 
+  // Closing a bid puts focus back on its Open button, so the operator keeps their place in the list.
+  const returnFocusTo = useRef("");
+  useEffect(() => {
+    if (selectedId || !returnFocusTo.current) return;
+    const id = returnFocusTo.current;
+    returnFocusTo.current = "";
+    const button = Array.from(document.querySelectorAll("[data-bid-open]")).find((node) => node.dataset.bidOpen === id);
+    if (button) button.focus({ preventScroll: true });
+  }, [selectedId]);
+
   const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
 
   const shown = useMemo(() => {
@@ -641,7 +678,7 @@ export default function BidDeskPage({ embedded = false }) {
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} onProgress={setProgress} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => { returnFocusTo.current = selectedId; select(""); }} onProgress={setProgress} />
             </div>
           )}
         </>
