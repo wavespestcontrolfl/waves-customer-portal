@@ -108,6 +108,8 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
+      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => summaryHour({ ...h, date: day.date }, scopedToTech)),
     })),
     // The best-times rows (owner 2026-10-06): 4 hours on the picked date, 4
@@ -146,6 +148,8 @@ export function normalizeOpenTimes(data, { date }) {
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
+      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => ({ ...summaryHour({ ...h, date: day.date }, false), rainTier: h.rain_tier ?? null })),
     })),
     best: null,
@@ -171,6 +175,7 @@ function summaryHour(h, scopedToTech) {
     stopsThatDay: h.stops_that_day ?? null,
     technicianId: h.technician?.id || null,
     technicianName: scopedToTech ? null : (h.technician?.name || null),
+    ...(h.day_already_late === true ? { dayAlreadyLate: true } : {}),
   };
 }
 

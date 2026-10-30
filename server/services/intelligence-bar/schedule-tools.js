@@ -2368,6 +2368,8 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   const slotCount = new Map();
   for (const slot of allSlots) slotCount.set(slot.date, (slotCount.get(slot.date) || 0) + 1);
   const slots = allSlots.slice(0, topN).map((slot, i) => ({ ...slot, rank: i + 1, day_label: slotDayLabel(slot.date) }));
+  // GATE_ROUTE_CHECK_LATE_DAYS: days whose existing stops already arrive late, listed by hours that add no new late stop.
+  const lateDates = new Set(allSlots.filter((slot) => slot.day_already_late === true).map((slot) => slot.date));
   const searchedDates = result.searched_dates || [];
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   const { dateOnlyString } = require('../../utils/datetime-et');
@@ -2401,6 +2403,10 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
     const row = { date, day_label: slotDayLabel(date), stops_booked: byDay ? Number(day?.stops || 0) : null,
       unassigned_stops: byDay ? Number(day?.unassigned || 0) : null,
       first_start: day?.first_start || null, last_end: day?.last_end || null, feasible_slots: feasible };
+    if (lateDates.has(date)) {
+      row.already_late = true;
+      row.note = 'Stops already booked on this day arrive after their windows. The slots listed add no new late stop.';
+    }
     if (feasible) return row;
     // Only the engine's own rejection counts are a reason; without them (the
     // legacy path keeps none) the row says so instead of inventing one.

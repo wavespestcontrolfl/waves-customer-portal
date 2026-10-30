@@ -773,6 +773,59 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     gateSpy.mockRestore();
     bellPolicy.clearOverrideCache();
   });
+
+  // GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1): a bundle quote request is declared a customer contact.
+  // Its 'estimate' category is muted by the bell policy; with the gate on it passes, and its bell write carries
+  // bell: true so NotificationService.create's own check (category + trigger key only) agrees.
+  test.each([[undefined, false], ['true', true]])('GATE_CUSTOMER_ALERTS_RING=%p: a bundle quote request rings: %p', async (mode, rings) => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const prefsChain = {
+      where: jest.fn(() => prefsChain),
+      join: jest.fn(() => prefsChain),
+      select: jest.fn(() => Promise.resolve([])),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences' ? prefsChain
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    if (mode) process.env.GATE_CUSTOMER_ALERTS_RING = mode;
+    try {
+      const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
+      expect(Boolean(stats.policySilenced)).toBe(!rings);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rings ? 1 : 0);
+      if (rings) {
+        expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('estimate');
+        expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
+      }
+    } finally {
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      gateSpy.mockRestore();
+      bellPolicy.clearOverrideCache();
+    }
+  });
+
+  test('GATE_CUSTOMER_ALERTS_RING on: an undeclared type keeps today\'s answer and its bell write gets no bell tag', async () => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(true);
+    NotificationService.notifyAdmin.mockClear();
+    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
+    try {
+      await triggerNotification('dashboard_alert', { title: 'x', body: 'y' });
+      expect(allowSpy).toHaveBeenCalledWith(expect.objectContaining({ triggerKey: 'dashboard_alert', declared: TRIGGER_REGISTRY.dashboard_alert.rule }));
+      expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('bell');
+    } finally {
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      gateSpy.mockRestore(); allowSpy.mockRestore();
+    }
+  });
 });
 
 describe('payment failure settlement recheck', () => {

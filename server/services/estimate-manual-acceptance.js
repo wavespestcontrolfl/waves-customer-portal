@@ -357,7 +357,9 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
 // after, so a rejection at markEstimateManuallyAccepted (which DOES see the
 // now-linked customer_id) leaves a booked-but-unlinked appointment. Ignored
 // once estimate.customer_id is set (that value always wins).
-async function prepayBookingEligibility(estimate = {}, database = db, prospectiveCustomerId = null) {
+// excludeRowIds (optional): visits to leave out of the live-plan check, for a caller that runs this AFTER the
+// visits were booked (the call-prepay-choice card: the accept's own bookedAppointmentIds rule, applied up front).
+async function prepayBookingEligibility(estimate = {}, database = db, prospectiveCustomerId = null, excludeRowIds = []) {
   const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return ineligible('no_recurring_annual');
@@ -401,7 +403,7 @@ async function prepayBookingEligibility(estimate = {}, database = db, prospectiv
     // preservation predicate — see customerHasLiveRecurringPlan.
     let hasLivePlan = false;
     try {
-      hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null);
+      hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null, excludeRowIds);
     } catch (e) {
       // FAIL CLOSED (codex round-3 P2): reached only when the membership
       // check above did NOT already resolve the shape (preservesMembership
@@ -561,6 +563,32 @@ function customerBillingPin(customer = {}) {
   return CUSTOMER_BILLING_PIN_FIELDS.map((k) => (customer[k] == null ? '' : String(customer[k]))).join('|');
 }
 
+// The booked visits a caller anchored the prepay term and coverage on (the call-prepay-choice card), as one
+// string: the fields the term start and coverage were derived from. Pure: the caller pins the rows it checked,
+// and the accept re-reads them in its own transaction (pin 'bookedVisits' below).
+// Every field the caller's eligibility read uses (owner, property and stamped service address, date, window,
+// status, service, cadence, setup fee, recorded payment, link).
+const BOOKED_VISIT_PIN_FIELDS = [
+  'id', 'customer_id', 'property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+  'scheduled_date', 'window_start', 'status', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days',
+  'pending_setup_fee', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'source_estimate_id',
+];
+function bookedVisitsPinOf(rows = []) {
+  return rows.map((r) => BOOKED_VISIT_PIN_FIELDS.map((k) => (r[k] == null ? '' : versionText(r[k]))).join('|')).sort().join(',');
+}
+
+// Whether any booked visit carries an add-on line (annual prepay cannot cover one). A savepoint, so an
+// environment without the table (no add-on line can exist there) never aborts the accept.
+async function bookedVisitsHaveAddons(trx, ids) {
+  const read = (conn) => conn('scheduled_service_addons').whereIn('scheduled_service_id', ids).first('id');
+  try {
+    return !!(await (trx.isTransaction ? trx.transaction((sp) => read(sp)) : read(trx)));
+  } catch (e) {
+    if (e.code === '42P01') return false;
+    throw e;
+  }
+}
+
 // Each pin the card may send, checked by one loop (checkCardPins). A phase
 // reads its locked row once: 'estimate' right after the customer-comms lock
 // (before the already-accepted return), 'customer' after the call-linkage
@@ -622,6 +650,20 @@ const CARD_PIN_CHECKS = [
   },
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
+  // The booked visits the term start and coverage came from (call-prepay-choice): an early, unlocked check so
+  // a change since the card's read refuses before the conversion runs. The authority is the caller's
+  // beforeCommit step, which re-checks under locks held only until the commit.
+  {
+    phase: 'customer',
+    key: 'bookedVisits',
+    holds: async ({ trx, expected }) => {
+      const ids = Array.isArray(expected.bookedVisits.ids) ? [...new Set(expected.bookedVisits.ids.map(String))] : [];
+      if (!ids.length) return false;
+      const rows = await trx('scheduled_services').whereIn('id', ids).select(BOOKED_VISIT_PIN_FIELDS);
+      if (rows.length !== ids.length || bookedVisitsPinOf(rows) !== expected.bookedVisits.pin) return false;
+      return !(expected.bookedVisits.noAddons === true && await bookedVisitsHaveAddons(trx, ids));
+    },
+  },
 ];
 
 // The lawn profile values the accept's lawn writes read (customer_turf_profiles
@@ -1308,6 +1350,9 @@ async function acceptInTransaction(trx, ctx) {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
   await recordTableChanges(trx, ctx, updatedEstimate);
+  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link). A throw rolls the
+  // whole accept back: no invoice, no term.
+  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate });
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,
@@ -1389,7 +1434,8 @@ async function markEstimateManuallyAccepted({
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
   // customerId, customerVersion, customerBilling, ledgerPin, planRows,
-  // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }); null for every other
+  // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }), or the call-prepay-choice
+  // card's ({ estimateVersion, estimateStatus, customerId, bookedVisits: { ids, pin, noAddons } }); null for every other
   // caller. effectsKey is the fingerprint of the approved effect list: the
   // accept builds its own list under the locks and refuses (preview_changed)
   // when it differs. membershipEmail ('send' | 'skip') is the approved email
@@ -1398,6 +1444,10 @@ async function markEstimateManuallyAccepted({
   // Run every step in the accept's own transaction, collect the effects, roll
   // back and return them. Nothing commits and nothing is sent.
   dryRun = false,
+  // async (trx, { estimate }) => void: the caller's last step inside the accept's transaction, after the
+  // conversion and before the commit. A throw rolls the whole accept back. Null for every caller but the
+  // call-prepay-choice card.
+  beforeCommit = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
@@ -1408,7 +1458,7 @@ async function markEstimateManuallyAccepted({
     estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
-    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService,
+    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit,
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
@@ -1446,5 +1496,8 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,
   estimateRowPin,
+  bookedVisitsPinOf,
+  bookedVisitsHaveAddons,
+  BOOKED_VISIT_PIN_FIELDS,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

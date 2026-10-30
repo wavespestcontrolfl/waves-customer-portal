@@ -79,6 +79,7 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import { summarizeQuickMoveResult } from '../../lib/quickMoveResult';
 import {
   closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
   stationMapKnownOff,
@@ -1271,11 +1272,18 @@ export default function TechHomePage({ section = 'today' }) {
       {rainOutService && (
         <RainOutSheet
           service={rainOutService}
+          stopName={(id) => customerNameOf(schedule.find((r) => String(r.id) === String(id)))}
           onClose={() => setRainOutService(null)}
-          onDone={(summary) => {
-            setRainOutService(null);
-            setRainOutResult(summary);
+          onDone={(result) => {
+            // Some stops moved: refresh the route either way.
             fetchSchedule();
+            // A result that needs attention (a failed stop, a customer not
+            // texted, a stop moved onto an occupied slot) stays on screen in
+            // the sheet until the tech dismisses it; the six-second banner is
+            // only for a clean move.
+            if (result.needsAttention) return;
+            setRainOutService(null);
+            setRainOutResult(result.summary);
             clearBannerLater(() => setRainOutResult(''), 6000);
           }}
         />
@@ -1580,6 +1588,10 @@ const EXTRA_REASONS = [
   { code: 'gate_locked', label: "Can't access gate" },
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
+// A schedule row's customer name (snake or camel case), '' when it has none.
+const customerNameOf = (row) => row?.customer_name || row?.customerName || '';
+// Reasons that move this stop only (the server rejects a route scope for them).
+const SINGLE_STOP_REASONS = new Set(['customer_noshow', 'gate_locked']);
 
 // Friendly copy for the server's structured rejections.
 const EXTRA_REASON_ERROR_COPY = {
@@ -1588,7 +1600,7 @@ const EXTRA_REASON_ERROR_COPY = {
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
 };
 
-function RainOutSheet({ service, onClose, onDone }) {
+function RainOutSheet({ service, stopName, onClose, onDone }) {
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
   const [reason, setReason] = useState('weather_rain');
@@ -1596,6 +1608,12 @@ function RainOutSheet({ service, onClose, onDone }) {
   const [scope, setScope] = useState('job');
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+  // A move that COMMITTED but needs follow-up (failed stop, customer not texted,
+  // advisory overlap): the result stays here until dismissed, and the Move
+  // button stays locked — a retry would re-move the already-moved visit and
+  // text the customer again. Same rule as the dispatch Quick Move sheet.
+  const [attention, setAttention] = useState(null);
+  const committed = !!attention;
 
   useEffect(() => {
     let cancelled = false;
@@ -1635,6 +1653,9 @@ function RainOutSheet({ service, onClose, onDone }) {
   };
   const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
+  // One lock for the Move button: no slot picked, a move in flight, or a move
+  // that already committed and is showing its result.
+  const moveLocked = !selected || busy || committed;
 
   // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
   // pure clock offsets, so they can land on another booked stop — the
@@ -1679,7 +1700,7 @@ function RainOutSheet({ service, onClose, onDone }) {
   // scope); running late may hide the highlighted same-day preset.
   const pickReason = (code) => {
     setReason(code);
-    if (code === 'customer_noshow' || code === 'gate_locked') setScope('job');
+    if (SINGLE_STOP_REASONS.has(code)) setScope('job');
     if (selectedKey) {
       const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
       if (!stillVisible) {
@@ -1690,7 +1711,7 @@ function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const handleCommit = async () => {
-    if (!selected || busy) return;
+    if (!selected || busy || committed) return;
     setBusy(true);
     setError('');
     try {
@@ -1711,26 +1732,15 @@ function RainOutSheet({ service, onClose, onDone }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(EXTRA_REASON_ERROR_COPY[data.error] || data.error || `HTTP ${res.status}`);
-      const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
-      // Overlaps are advisory on staff surfaces: the stop moved, but onto an
-      // occupied slot — name it so the tech / office checks the route.
-      const overlapWarnings = Array.isArray(data.overlapWarnings)
-        ? data.overlapWarnings
-        : (data.results || []).flatMap((r) => (r.ok && Array.isArray(r.warnings) ? r.warnings : []));
-      // One warning per clashing date (a series shift can name several) —
-      // surface the dates, not a bare count.
-      const overlapDates = [...new Set(overlapWarnings.map((w) => (String(w).match(/\d{4}-\d{2}-\d{2}/) || [])[0]).filter(Boolean))];
-      const overlaps = overlapWarnings.length
-        ? `, overlaps another job${overlapDates.length ? ` on ${overlapDates.join(', ')}` : ''} — check the route`
-        : '';
-      // Report what actually HAPPENED, not the request flag — a disabled
-      // template or missing phone moves the visit without an SMS.
-      const movedCount = data.movedCount || 0;
-      const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
-      const notifyClause = !notify ? ''
-        : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
-          : `, ${texted}/${movedCount} texted — follow up on the rest`;
-      onDone(`Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}${failures}${overlaps}`);
+      // Shared reading of the commit result (lib/quickMoveResult.js, the same
+      // one the dispatch sheet uses): report what actually HAPPENED, not the
+      // request flag, and name the stops that need follow-up.
+      const result = summarizeQuickMoveResult(data, { notify, display: selected.display, stopName });
+      if (result.needsAttention) {
+        setAttention(result);
+        setBusy(false);
+      }
+      onDone(result);
     } catch (err) {
       setError(err.message || 'Quick Move failed');
       setBusy(false);
@@ -1771,7 +1781,7 @@ function RainOutSheet({ service, onClose, onDone }) {
           }}>×</button>
         </div>
         <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 14 }}>
-          {(service.customer_name || service.customerName || 'Customer')}
+          {customerNameOf(service) || 'Customer'}
           {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
         </div>
 
@@ -1781,6 +1791,38 @@ function RainOutSheet({ service, onClose, onDone }) {
             background: '#fcebeb', border: '1px solid #a32d2d', color: '#a32d2d',
           }}>
             {error}
+          </div>
+        )}
+
+        {attention && (
+          <div
+            role="alert"
+            data-testid="quick-move-result"
+            style={{
+              marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 4,
+              background: 'rgba(133, 77, 14, .1)', border: '1px solid #854d0e', color: '#854d0e',
+            }}
+          >
+            <div>{attention.message}</div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {attention.followUps.map((stop) => (
+                <li key={stop.id} style={{ marginTop: 8 }}>
+                  <strong style={{ fontWeight: 500 }}>{stop.name}</strong>
+                  {': '}
+                  {stop.issues.join('; ')}
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                marginTop: 10, padding: '8px 14px', borderRadius: 4, fontSize: 14, fontWeight: 500,
+                border: '1px solid #854d0e', background: 'transparent', color: '#854d0e', cursor: 'pointer',
+              }}
+            >
+              Done
+            </button>
           </div>
         )}
 
@@ -1861,7 +1903,7 @@ function RainOutSheet({ service, onClose, onDone }) {
               </div>
             )}
 
-            {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && (
+            {options.remainingRouteCount > 0 && !SINGLE_STOP_REASONS.has(reason) && (
               <>
                 <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
@@ -1883,14 +1925,14 @@ function RainOutSheet({ service, onClose, onDone }) {
             <button
               type="button"
               onClick={handleCommit}
-              disabled={!selected || busy}
+              disabled={moveLocked}
               style={{
                 width: '100%', padding: '13px 0', borderRadius: 6, border: 'none',
                 background: FIELD.ink, color: '#fff', fontSize: 15, fontWeight: 500,
-                cursor: busy ? 'wait' : 'pointer', opacity: (!selected || busy) ? 0.6 : 1,
+                cursor: busy ? 'wait' : 'pointer', opacity: moveLocked ? 0.6 : 1,
               }}
             >
-              {busy ? 'Moving…' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`}
+              {busy ? 'Moving…' : committed ? 'Moved' : `Move ${scope === 'route' ? `${options.remainingRouteCount + 1} stops` : 'this stop'}${notify ? ' & text' : ''}`}
             </button>
           </>
         )}
