@@ -584,6 +584,8 @@ router.get('/', async (req, res) => {
       }
     }
 
+    flagTypedEmailConfirm(items, req.techRole);
+
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
     const nameCards = items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code));
@@ -1457,6 +1459,34 @@ async function resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch,
   }
 }
 
+// Applies to a card with an actual unresolved disagreement. With
+// GATE_CALL_EMAIL_CHECKS on (owner 2026-10-29) it applies to every email
+// read-back card: the office types the right address in place instead of
+// resolving the held one or editing the customer record on another screen.
+// The route already admits only email read-back cards.
+function confirmEmailApplies(livePayload) {
+  return !!livePayload?.email_disagreement || require('../config/feature-gates').callEmailChecksLive?.() === true;
+}
+
+// 'candidate' when the address is one the card offered (a disagreement
+// spelling, or a plain card's held address), else 'operator_typed'.
+function confirmedSourceFor(livePayload, typedEmail) {
+  const candidates = Array.isArray(livePayload?.email_candidates) ? livePayload.email_candidates : [];
+  if (candidates.some((c) => String(c?.value || '').trim().toLowerCase() === typedEmail)) return 'candidate';
+  const heldTarget = String(livePayload?.email_release_target || '').trim().toLowerCase();
+  return !livePayload?.email_disagreement && !!heldTarget && heldTarget === typedEmail ? 'candidate' : 'operator_typed';
+}
+
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): every email read-back card gets
+// the in-place "Confirm email" form, for an admin only, like its route.
+function flagTypedEmailConfirm(items, techRole) {
+  if (techRole !== 'admin' || require('../config/feature-gates').callEmailChecksLive?.() !== true) return;
+  const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+  for (const item of items) {
+    if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) item.email_typed_confirm = true;
+  }
+}
+
 // One attempt: plan the target unlocked, then lock and revalidate
 // (lockConfirmEmailScope), then write. Every refusal is thrown so the
 // attempt rolls back — nothing an early exit leaves behind can commit.
@@ -1482,15 +1512,8 @@ async function runConfirmEmailAttempt({ id, item, typedEmail, expectedUpdatedAt,
     const livePayload = typeof live.payload === 'string'
       ? (() => { try { return JSON.parse(live.payload); } catch { return null; } })()
       : live.payload;
-    // Applies only to a card with an actual unresolved disagreement — a
-    // plain single-candidate email card already has a working Resolve
-    // path and needs none of this.
-    if (!livePayload?.email_disagreement) throw new ConfirmEmailRefusal('not_applicable');
-    const candidates = Array.isArray(livePayload.email_candidates) ? livePayload.email_candidates : [];
-    const isListedCandidate = candidates.some(
-      (c) => String(c?.value || '').trim().toLowerCase() === typedEmail,
-    );
-    confirmedSource = isListedCandidate ? 'candidate' : 'operator_typed';
+    if (!confirmEmailApplies(livePayload)) throw new ConfirmEmailRefusal('not_applicable');
+    confirmedSource = confirmedSourceFor(livePayload, typedEmail);
 
     // Codex round-7 P1: with no customer at all, the confirmation requires
     // an authoritative lead — the hold ledger is a first-touch send record,

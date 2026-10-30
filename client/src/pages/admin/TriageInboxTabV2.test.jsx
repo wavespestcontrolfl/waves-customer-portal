@@ -246,6 +246,43 @@ describe('email-disagreement confirm form', () => {
   });
 });
 
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the server flags every email
+// read-back card for an admin (item.email_typed_confirm), and a plain card gets
+// the same form: the held address, or a typed correction.
+describe('typed email confirm on a plain email card', () => {
+  const plainCard = { ...ordinary, id: 'email-2', first_name: 'Email', last_name: 'Plain',
+    feedback_verdict: null, reason_code: 'email_unverified',
+    payload: JSON.stringify({ flag: 'email_unverified', email_release_target: 'heard@example.com' }) };
+
+  it('a flagged plain card shows the held address and a typed correction, and sends the typed value', async () => {
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) {
+        return { items: [{ ...plainCard, email_typed_confirm: true }], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-2/confirm-email') {
+        expect(JSON.parse(opts.body)).toEqual({ email: 'right@example.com', expected_updated_at: plainCard.updated_at });
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Email Plain')).closest('.py-4');
+    expect(within(card).getByLabelText('heard@example.com')).toBeInTheDocument();
+    fireEvent.change(within(card).getByPlaceholderText(/type the correct address/i), { target: { value: 'right@example.com' } });
+    fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/email-2/confirm-email', expect.anything()));
+  });
+
+  it('without the flag (gate off) a plain card shows no confirm form', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [plainCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Email Plain')).closest('.py-4');
+    expect(within(card).queryByRole('button', { name: /confirm email/i })).not.toBeInTheDocument();
+  });
+});
+
 describe('follow-up card Resolve path', () => {
   it('"Follow-up booked" sends the card version and reloads on STALE_CARD_VERSION', async () => {
     const stale = { ...ordinary, id: 'fu', first_name: 'Follow', last_name: 'Up', feedback_verdict: null,

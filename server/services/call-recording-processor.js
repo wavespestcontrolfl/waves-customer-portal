@@ -139,6 +139,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
+const { callEmailChecksLive, screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled, callApplicantHandlingLive } = require('../config/feature-gates');
@@ -1823,8 +1824,21 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
 // itself never went through those adopt paths, so it is checked here before
 // the read-back card (and with it the first-touch hold) is dropped. Fails
 // closed: a failed lookup keeps the card.
-async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
-  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): when the dictation decoder left no
+// result at all (it did not run, or every model failed), the same rule is read
+// straight from the transcripts — callEmailCheck.spelled_match, computed before
+// the upserts. It never overrides a decoder that ran and found the spelling
+// ambiguous, and a domain-typo correction that would change the address keeps
+// the card, as in spelledEmailSettled.
+function spelledLettersSettled({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck }) {
+  if (dictationEmailPayload || callEmailCheck?.spelled_match !== true) return false;
+  const saved = String(extracted.email || '').trim().toLowerCase();
+  return !!saved && (!correctedEmail || String(correctedEmail).trim().toLowerCase() === saved);
+}
+
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck = null }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)
+    && !spelledLettersSettled({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck })) return false;
   // No customer is exempt: the canonical customer is not known yet (Step 3
   // can still reassign a shared-phone call), so ANY record already holding
   // the address keeps the read-back card.
@@ -1832,6 +1846,27 @@ async function spelledEmailTrusted({ extracted, dictationEmailPayload, corrected
     .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
     .catch(() => true);
   return !ownedByAnyone;
+}
+
+// GATE_CALL_EMAIL_CHECKS: an address whose domain has no mail server was set
+// aside before the upserts (email_raw). Its read-back reason becomes
+// email_invalid, and the card carries the domain and the question to ask, so
+// the office sees why instead of a plain "check this email". Mutates `reasons`.
+function applyDeadDomainReason(reasons, callEmailCheck) {
+  if (!callEmailCheck?.dead_domain) return reasons;
+  const at = reasons.indexOf('email_unverified');
+  if (at !== -1) reasons.splice(at, 1);
+  if (!reasons.includes('email_invalid')) reasons.push('email_invalid');
+  return reasons;
+}
+
+function callEmailCheckCardPayload(callEmailCheck) {
+  const dead = callEmailCheck?.dead_domain;
+  if (!dead?.domain) return {};
+  return {
+    email_domain_check: { domain: dead.domain, deliverable: false, dns_error: dead.dns_error || null },
+    confirmation_question: deadDomainQuestion(dead.domain),
+  };
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -13028,6 +13063,7 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    let callEmailCheck = null;
     // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
     // the pass like the transcript write above, and a THROWN fence write escapes to the outer
     // processing-failure path instead of marking the call processed with the late transcript
@@ -13157,6 +13193,19 @@ const CallRecordingProcessor = {
       extracted = held.extracted;
       dictationEmailPayload = held.dictationEmailPayload;
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
+    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): two deterministic checks on the
+    // address this pass is about to save, after every adopt and hold above. A
+    // domain with no mail server is set aside exactly like an unconfirmed
+    // dictation (email_raw), so no write or send path can use it. Otherwise the
+    // spelled-letter match is noted for the 10-05 trust rule below. A DNS
+    // hiccup is unknown, never a block.
+    if (extracted.email && callEmailChecksLive()) {
+      callEmailCheck = await screenCallEmail(extracted, { transcripts: [transcription, contactPassTranscript] });
+      if (callEmailCheck?.dead_domain) {
+        logger.info(`[call-proc] Set aside a call email whose domain has no mail server for ${maskSid(callSid)}`);
+      }
     }
 
     // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
@@ -14016,10 +14065,11 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
         // and it is the address being saved — no read-back card, no hold.
-        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail, callEmailCheck })) {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
+        applyDeadDomainReason(needsConfirmation, callEmailCheck);
         // GATE_CALL_APPLICANT_HANDLING: an applicant / vendor call files no customer-only
         // review card (address, name, email read-back, consent). Removed in place, like
         // the settled-email reasons above, so every later reader of needsConfirmation
@@ -14198,7 +14248,7 @@ const CallRecordingProcessor = {
               // + the address the run adopted at filing time (the release
               // target the evidence sweep may verify); null when the
               // dictation demoted it — then only a human can settle it.
-              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+              extraPayload: { ...(dictationEmailPayload || {}), ...callEmailCheckCardPayload(callEmailCheck), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
             })),
           // Codex P1 (round 3): this cycle's single agreed address (or
           // null) — lets the mint reconcile a STALE open disagreement card
@@ -14245,10 +14295,11 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
         // shadow branch.
-        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail, callEmailCheck })) {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
         }
+        applyDeadDomainReason(emailReasons, callEmailCheck);
         // GATE_CALL_APPLICANT_HANDLING: no email read-back card for an applicant / vendor call.
         {
           const applicantDropped = new Set(thirdPartyCustomerOnlyCards(
@@ -14309,7 +14360,7 @@ const CallRecordingProcessor = {
             extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
             severity: 'advisory',
             // Same filing-time release-target snapshot as the shadow branch.
-            extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+            extraPayload: { ...(dictationEmailPayload || {}), ...callEmailCheckCardPayload(callEmailCheck), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
           })),
           resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
         });
@@ -25983,6 +26034,9 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 CallRecordingProcessor.recordingTooShortForWords = recordingTooShortForWords;
+CallRecordingProcessor.spelledLettersSettled = spelledLettersSettled;
+CallRecordingProcessor.applyDeadDomainReason = applyDeadDomainReason;
+CallRecordingProcessor.callEmailCheckCardPayload = callEmailCheckCardPayload;
 
 // Callback-spam parent settlement: on the module surface for its live-PG
 // suite (callback-spam-closes-parent.test.js), which drives it directly.

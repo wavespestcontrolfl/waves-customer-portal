@@ -1,0 +1,136 @@
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29, after the call-agent audit): the
+// deterministic checks on an email heard on a call. Fixtures are synthetic;
+// the phrasings mirror real transcripts (hyphen-joined letters, "G as in good",
+// digits said as a number, a word said between two spelled stretches).
+const {
+  callEmailChecksLive, spelledRuns, spelledEmailMatches, checkEmailDomain, screenCallEmail,
+  deadDomainQuestion, isNoMailServerReason,
+} = require('../services/call-email-checks');
+
+const dnsError = (code) => Object.assign(new Error(code), { code });
+const liveDomain = { resolveMx: async () => [{ exchange: 'mx1.example.net', priority: 10 }] };
+const deadDomain = {
+  resolveMx: async () => { throw dnsError('ENOTFOUND'); },
+  resolve4: async () => { throw dnsError('ENOTFOUND'); },
+  resolve6: async () => { throw dnsError('ENOTFOUND'); },
+};
+const flakyDns = { resolveMx: async () => { throw dnsError('ETIMEOUT'); } };
+
+describe('callEmailChecksLive', () => {
+  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
+  test('off unless exactly "true"', () => {
+    expect(callEmailChecksLive()).toBe(false);
+    process.env.GATE_CALL_EMAIL_CHECKS = '1';
+    expect(callEmailChecksLive()).toBe(false);
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    expect(callEmailChecksLive()).toBe(true);
+  });
+});
+
+describe('spelledRuns', () => {
+  test.each([
+    ['hyphen-joined letters across a space', 'It is B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com', ['brightonkayla']],
+    ['letters then a number', 'D-R-A-Y 22 at yahoo.com', ['dray22']],
+    ['letters and digits all hyphen-joined', 'D-R-A-Y-2-2 at yahoo.com', ['dray22']],
+    ['phonetic markers', 'T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com', ['thebaitshopgm']],
+    ['digit words and a spoken dot', 'J-A-N-E dot D-O-E one two at gmail', ['jane.doe12']],
+    ['a sentence period is not a dot', 'My last name is R-O-W-E. And the email', ['rowe']],
+    ['a whole word ends the run', 'T-A-M-I, Rowe, R-O-W-E, at hotmail.com', ['tami', 'rowe']],
+    ['fewer than three letters is not a spelling', 'J-O at gmail', []],
+  ])('%s', (_label, text, runs) => {
+    expect(spelledRuns(text)).toEqual(runs);
+  });
+});
+
+describe('spelledEmailMatches — the 2026-10-05 rule without AI', () => {
+  test.each([
+    ['spelled letter by letter on gmail', ['Okay, B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com.'], 'brightonkayla@gmail.com', true],
+    ['spelled with a number on yahoo', ['D-R-A-Y 22 at yahoo.com'], 'dray22@yahoo.com', true],
+    ['phonetic markers on iCloud', ['T-H-E-B-A-I-T S-H-O-P, G as in good, M as in Mary, at iCloud.com'], 'thebaitshopgm@icloud.com', true],
+    ['only one of two transcripts needs the spelling', ['my email is the bait shop gm at icloud', 'T-H-E-B-A-I-T-S-H-O-P-G-M at iCloud.com'], 'thebaitshopgm@icloud.com', true],
+    ['said, not spelled', ['My email is jane.doe@gmail.com'], 'jane.doe@gmail.com', false],
+    ['a word between the spelled parts', ['T-A-M-I, Rowe, R-O-W-E, at hotmail.com'], 'tamirowe@hotmail.com', false],
+    ['a custom domain is never trusted this way', ['J-A-Y at J-D-O-E dot me'], 'jay@jdoe.me', false],
+    ['the provider was never named on the call', ['S-M-I-T-H-Y and then the rest'], 'smithy@gmail.com', false],
+    ['the spelled letters are a different address', ['S-M-Y-T-H-E at gmail'], 'smithe@gmail.com', false],
+  ])('%s', (_label, transcripts, email, want) => {
+    expect(spelledEmailMatches({ transcripts, email })).toBe(want);
+  });
+
+  test('a near-miss spelling in either transcript means the letters are not settled', () => {
+    expect(spelledEmailMatches({
+      transcripts: ['S-M-I-T-H-Y at gmail', 'S-M-I-T-H-Y-J at gmail'],
+      email: 'smithy@gmail.com',
+    })).toBe(false);
+  });
+
+  test('no email, or no transcript, is never a match', () => {
+    expect(spelledEmailMatches({ transcripts: ['B-R-I-G-H-T at gmail'], email: null })).toBe(false);
+    expect(spelledEmailMatches({ transcripts: [], email: 'bright@gmail.com' })).toBe(false);
+  });
+});
+
+describe('checkEmailDomain', () => {
+  test('a domain with a mail server is deliverable', async () => {
+    await expect(checkEmailDomain('a@example.net', liveDomain)).resolves.toMatchObject({ domain: 'example.net', deliverable: true });
+  });
+  test('an authoritative "no such domain" on every lookup is not deliverable', async () => {
+    await expect(checkEmailDomain('jay@nosuchdomain.me', deadDomain)).resolves.toMatchObject({ domain: 'nosuchdomain.me', deliverable: false });
+  });
+  test('a null MX record is not deliverable', async () => {
+    await expect(checkEmailDomain('a@nomail.example', { resolveMx: async () => [{ exchange: '.', priority: 0 }] }))
+      .resolves.toMatchObject({ deliverable: false, dns_error: 'NULL_MX' });
+  });
+  test('a resolver hiccup is unknown, never a block', async () => {
+    await expect(checkEmailDomain('a@example.net', flakyDns)).resolves.toMatchObject({ deliverable: null });
+  });
+  test('a malformed address is not checked', async () => {
+    await expect(checkEmailDomain('not-an-email', liveDomain)).resolves.toBeNull();
+  });
+});
+
+describe('screenCallEmail', () => {
+  test('a dead domain is set aside to email_raw and reported', async () => {
+    const extracted = { email: 'jay@nosuchdomain.me' };
+    const note = await screenCallEmail(extracted, { transcripts: ['J-A-Y'], deps: deadDomain });
+    expect(extracted).toEqual({ email: null, email_raw: 'jay@nosuchdomain.me' });
+    expect(note.dead_domain).toMatchObject({ domain: 'nosuchdomain.me', deliverable: false });
+  });
+  test('an email_raw already present is kept', async () => {
+    const extracted = { email: 'jay@nosuchdomain.me', email_raw: 'as heard' };
+    await screenCallEmail(extracted, { deps: deadDomain });
+    expect(extracted.email_raw).toBe('as heard');
+  });
+  test('a live domain keeps the address and notes the spelled match', async () => {
+    const extracted = { email: 'brightonkayla@gmail.com' };
+    const note = await screenCallEmail(extracted, { transcripts: ['B-R-I-G-H-T-O-N K-A-Y-L-A at gmail dot com'], deps: liveDomain });
+    expect(extracted.email).toBe('brightonkayla@gmail.com');
+    expect(note).toEqual({ spelled_match: true, domain_deliverable: true });
+  });
+  test('a resolver hiccup keeps the address (unknown is never a block)', async () => {
+    const extracted = { email: 'brightonkayla@gmail.com' };
+    const note = await screenCallEmail(extracted, { transcripts: [], deps: flakyDns });
+    expect(extracted.email).toBe('brightonkayla@gmail.com');
+    expect(note).toEqual({ spelled_match: false, domain_deliverable: null });
+  });
+  test('no email, nothing to check', async () => {
+    await expect(screenCallEmail({ email: null })).resolves.toBeNull();
+  });
+});
+
+describe('isNoMailServerReason', () => {
+  test.each([
+    ['unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address', true],
+    ['550 5.1.2 Host or domain name not found. Name service error', true],
+    ['DNS lookup failed: NXDOMAIN', true],
+    ['550 5.1.1 The email account that you tried to reach does not exist', false],
+    ['554 5.7.1 Service unavailable; client host blocked using a DNS block list', false],
+    ['', false],
+  ])('%s', (reason, want) => {
+    expect(isNoMailServerReason(reason)).toBe(want);
+  });
+});
+
+test('deadDomainQuestion names the domain and the ask', () => {
+  expect(deadDomainQuestion('nosuchdomain.me')).toBe('No mail server answers for "nosuchdomain.me". Ask the caller to spell the whole email again.');
+});

@@ -322,7 +322,7 @@ async function handleEvent(ev) {
   // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
   // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
   const alertUntrackedHardBounce = ({ rescue = true } = {}) => {
-    if (!bounceRecovery.isHardBounceEvent(ev)) return;
+    if (!bounceRecovery.isHardBounceEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev)) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
     // Untracked bounces have no email_messages row for domain recovery, but
@@ -409,10 +409,13 @@ async function handleEvent(ev) {
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew && attemptMatched) {
-      if (providerRetry.isProviderBlockedEvent(ev)) {
+      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
+      // server is a bad address, not a sender block — no retry rail for it.
+      const noMailServer = bounceRecovery.isNoMailServerEvent(ev);
+      if (providerRetry.isProviderBlockedEvent(ev) && !noMailServer) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
-      } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
+      } else if ((noMailServer || bounceRecovery.isHardBounceEvent(ev)) && !isRateReview) {
         // A rate review letter is reconciled on its notice above, with its own alert that a
         // delivered re-send closes: the generic recovery (and its "needs a correct address"
         // alert, which nothing would close) is not run for it.

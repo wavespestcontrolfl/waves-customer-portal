@@ -201,3 +201,33 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect(mockHandle).not.toHaveBeenCalled();
   });
 });
+
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// this domain" as a blocked bounce. Gate off it stays on the sender-retry rail;
+// gate on it is a bad address and takes the bounce recovery lane (its alert and
+// the call re-check card) instead. Another template than the rate review letter.
+describe('SendGrid event webhook → a blocked bounce for a domain with no mail server', () => {
+  const deadDomainBounce = () => event({ type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' });
+  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
+
+  test.each([
+    ['gate off: the sender-retry rail, no recovery', undefined, { retry: 1, recovery: 0 }],
+    ['gate on: the bounce recovery lane, no retry alert', 'true', { retry: 0, recovery: 1 }],
+  ])('%s', async (_label, gate, want) => {
+    if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
+    const recovery = require('../services/email-bounce-recovery');
+    const providerRetry = require('../services/transactional-email-provider-retry');
+    const attempt = jest.spyOn(recovery, 'attemptRecovery').mockResolvedValue({ resent: false });
+    const retryAlert = jest.spyOn(providerRetry, 'alertIfProviderRetriesExhausted').mockResolvedValue(null);
+    try {
+      mockState.message = { ...MESSAGE, template_key: 'appointment.confirmation' };
+      expect((await post([deadDomainBounce()])).status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(retryAlert).toHaveBeenCalledTimes(want.retry);
+      expect(attempt).toHaveBeenCalledTimes(want.recovery);
+    } finally {
+      attempt.mockRestore();
+      retryAlert.mockRestore();
+    }
+  });
+});
