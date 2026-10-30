@@ -204,7 +204,7 @@ const { isOpenLeadRow } = require('../services/lead-statuses');
 // the offer (buildAvailabilityForLead) and the commit (callbackVisit).
 const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
-const { parseRawAddress } = require('../utils/address-normalizer');
+const { parseRawAddress, leadAddressFields } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
 
 // Per-lead advisory-lock namespace for the commit's provisioning/booking
@@ -275,7 +275,7 @@ function buildLeadPayload(lead, custRow) {
   const hasAddress = !!(custRow?.address_line1 || lead.address);
   const addressDisp = custRow?.address_line1
     ? addressDisplay({ line1: custRow.address_line1, city: custRow.city, zip: custRow.zip })
-    : (lead.address ? addressDisplay({ line1: lead.address, city: lead.city, zip: lead.zip }) : null);
+    : (lead.address ? addressDisplay(leadAddressFields(lead)) : null);
   return {
     first_name: lead.first_name || null,
     phone_masked: maskPhone(lead.phone),
@@ -602,10 +602,9 @@ function storedAddressCandidates(lead, custRow) {
     });
   }
   if (lead?.address) {
-    candidates.push({
-      source: 'lead',
-      address: { line1: lead.address, line2: null, city: lead.city || null, state: 'FL', zip: lead.zip || null },
-    });
+    // The form's one-line address split into its parts, so the customer this
+    // creates keys as the same house the form's own customer does.
+    candidates.push({ source: 'lead', address: leadAddressFields(lead) });
   }
   return candidates;
 }

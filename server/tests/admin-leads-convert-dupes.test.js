@@ -221,6 +221,20 @@ describe('POST /admin/leads/:id/schedule-appointment — no duplicate customers'
     });
   });
 
+  it("a form lead's one-line address is saved split into street, city, state and ZIP", async () => {
+    const calls = [];
+    const preLead = baseLead({ address: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish', zip: null });
+    const knex = makeKnex(makeResolver({ preLead, lockedLead: { customer_id: null, converted_at: null } }), calls);
+    db.mockImplementation(knex);
+    Object.assign(db, { raw: knex.raw, transaction: knex.transaction });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl);
+      expect(res.status).toBe(200);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0]).toMatchObject({ address_line1: '12 Sample Ct East', city: 'Parrish', state: 'FL', zip: '34219' });
+    });
+  });
+
   it('second/concurrent convert: locked re-read shows converted → 409, no customer insert', async () => {
     const calls = [];
     const knex = makeKnex(makeResolver({
