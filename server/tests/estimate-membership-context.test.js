@@ -7,10 +7,12 @@
 // real test-env behavior (all gates dark); the extension suite flips ONLY
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
+let mockExtendPickGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
+    if (gate === 'waveguardExtendPick') return mockExtendPickGate;
     if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
     return false;
   },
@@ -18,7 +20,9 @@ jest.mock('../config/feature-gates', () => ({
 
 const {
   computeMembershipContext,
+  currentServiceTierOffer,
   loadCurrentServiceSpendContext,
+  membershipScopeArgs,
   publicMembershipView,
 } = require('../services/estimate-membership-context');
 
@@ -54,6 +58,11 @@ function fakeDb({
   cadenceQueryThrows = false,
   // knex_migrations row for the rodent realignment — the rollout instant.
   migrationRow = null,
+  // The creating estimate a tick-list margin reads (estimates .first()).
+  marginEstimate = null,
+  // 'waveguard_tier_extension_applied' audit rows (activity_log).
+  extensionAudits = [],
+  extensionAuditsThrows = false,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -98,6 +107,7 @@ function fakeDb({
         if (table === 'customers') return customer;
         if (table === 'annual_prepay_terms') return prepaidTerm;
         if (table === 'knex_migrations') return migrationRow;
+        if (table === 'estimates') return marginEstimate;
         return null;
       },
       select: async (...cols) => {
@@ -146,6 +156,10 @@ function fakeDb({
         if (table === 'scheduled_service_addons') {
           if (addonQueryThrows) throw new Error('relation does not exist');
           return addonRows;
+        }
+        if (table === 'activity_log') {
+          if (extensionAuditsThrows) throw new Error('relation does not exist');
+          return extensionAudits;
         }
         return [];
       },
@@ -2900,5 +2914,183 @@ describe('existing-service tier extension snapshot', () => {
     ]) {
       expect(json).not.toContain(staffMarker);
     }
+  });
+});
+
+// Staff pick (GATE_WAVEGUARD_EXTEND_PICK, owner 2026-10-30 option B): the
+// estimate tool lists the member's current services at the new tier and only
+// the ticked ones freeze — from ANY starting tier, at the old-rate-to-new-rate
+// price, never 5 more points off an already-discounted contract.
+describe('staff-picked tier extension (option B)', () => {
+  afterEach(() => {
+    mockExtendExistingGate = false;
+    mockExtendPickGate = false;
+  });
+
+  // Pest + lawn on the account (Silver); the estimate adds mosquito (Gold).
+  const silverRows = () => [
+    ...futurePestRows(),
+    { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+  ];
+  const mosquitoEstimate = () => ({
+    result: {
+      recurring: {
+        discount: 0.15,
+        annualBeforeDiscount: 500,
+        annualAfterDiscount: 425,
+        services: [{ name: 'Mosquito Treatment', mo: 41.67 }],
+      },
+    },
+  });
+
+  test('a Silver start freezes only the ticked service, moved from the Silver rate to the Gold rate', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: ['lawn_care'] },
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
+    // $120 at Silver is $133.33 before discount; Gold is $113.33 — not the
+    // $114 that 5 more points off $120 would give.
+    expect(ctx.existingServices).toEqual([expect.objectContaining({
+      key: 'pest_control', currentPerVisit: 120, newPerVisit: 113.33, perVisitSavings: 6.67,
+    })]);
+    expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
+    expect(ctx.extensionKeptKeys).toEqual(['lawn_care']);
+  });
+
+  test('no pick sent (an older tab): a Silver start stays plan-less and a Bronze start keeps its automatic plan', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const silver = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+    });
+    expect(silver.existingServices).toEqual([]);
+    expect(silver).not.toHaveProperty('extensionKeptKeys');
+    const bronze = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
+    });
+    expect(bronze.existingServices.map((svc) => [svc.key, svc.newPerVisit])).toEqual([['pest_control', 108]]);
+  });
+
+  test('a Bronze start honors an empty pick: nothing freezes and the unticked service is kept, not reviewed', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData(),
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
+    });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.extensionKeptKeys).toEqual(['pest_control']);
+  });
+
+  test('a service the list never showed is never recorded as kept — it stays on the office review path', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // Lawn was not on the list staff saw (say its next visit was already
+    // invoiced), so it is neither ticked nor unticked.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control'], unticked: [] },
+    });
+    expect(ctx.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    expect(ctx.extensionKeptKeys).toEqual([]);
+  });
+
+  test('a pick on a quote that raises no tier freezes and keeps nothing', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    // The quote re-prices pest only: no new family, no tier change.
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: futurePestRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true,
+      estData: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }] } } },
+      extensionPick: { ticked: [], unticked: ['pest_control'] },
+    });
+    expect(ctx.upgrade).toBeNull();
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx).not.toHaveProperty('extensionKeptKeys');
+  });
+
+  test('appointments an earlier extension already covered never freeze, so the card never shows a price the accept parks', async () => {
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const pick = { extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] } };
+    const freeze = (database) => computeMembershipContext(database, {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(), ...pick,
+    });
+    // A Bronze-to-Silver accept already repriced s1 and s2.
+    const covered = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: JSON.stringify({ estimateId: 'est-old', families: ['pest_control'], appliedRowIds: ['s1', 's2'] }) }],
+    }));
+    expect(covered.existingServices.map((svc) => [svc.key, svc.rowIds])).toEqual([['lawn_care', ['l1']], ['pest_control', ['s3']]]);
+    // An audit without appointment ids covers its whole family, as the converter reads it.
+    const wholeFamily = await freeze(fakeDb({
+      scheduledRows: silverRows(),
+      extensionAudits: [{ metadata: { estimateId: 'est-old', families: ['lawn_care'] } }],
+    }));
+    expect(wholeFamily.existingServices.map((svc) => svc.key)).toEqual(['pest_control']);
+    // An unreadable audit trail freezes nothing.
+    const unreadable = await freeze(fakeDb({ scheduledRows: silverRows(), extensionAuditsThrows: true }));
+    expect(unreadable.existingServices).toEqual([]);
+  });
+
+  test('pick gate off: a sent pick changes nothing', async () => {
+    mockExtendExistingGate = true;
+    const ctx = await computeMembershipContext(fakeDb({ scheduledRows: silverRows() }), {
+      customerId: 'cust-1', freezeExtensionPlan: true, estData: mosquitoEstimate(),
+      extensionPick: { ticked: ['pest_control', 'lawn_care'], unticked: [] },
+    });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx).not.toHaveProperty('extensionKeptKeys');
+  });
+
+  test('the tick list offers each eligible service with a margin from the estimate that set it up', async () => {
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    const stamped = (row) => ({
+      ...row, source_estimate_id: 'est-setup', service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34285',
+    });
+    const database = fakeDb({
+      scheduledRows: silverRows().map(stamped),
+      // The setup estimate's engine lines: list per-visit price and list margin.
+      marginEstimate: {
+        estimate_data: {
+          engineResult: {
+            lineItems: [
+              { service: 'pest_control', perApp: 133.33, margin: 0.6, annual: 533.32 },
+              { service: 'lawn_care', perApp: 88.89, margin: 0.2, annual: 800 },
+            ],
+          },
+        },
+      },
+    });
+    const scope = { groupedEstimate: false, perPropertyStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey } };
+    expect(await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope })).toBeNull();
+    mockExtendExistingGate = true;
+    mockExtendPickGate = true;
+    const offer = await currentServiceTierOffer(database, { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(offer).toMatchObject({ fromTierLabel: 'Silver', tierLabel: 'Gold', tierDiscountPct: 15 });
+    // Cost per visit = list price x (1 - list margin): pest $53.33 against
+    // $113.33 (52.9%); lawn $71.11 against $75.56 (5.9%).
+    expect(offer.services.map((svc) => [svc.key, svc.currentPerVisit, svc.newPerVisit, svc.marginPct])).toEqual([
+      ['lawn_care', 80, 75.56, 5.9],
+      ['pest_control', 120, 113.33, 52.9],
+    ]);
+    // No single creating estimate = no margin, never a guess.
+    const unknown = await currentServiceTierOffer(fakeDb({
+      scheduledRows: silverRows().map((row) => ({ ...stamped(row), source_estimate_id: null })),
+    }), { customerId: 'cust-1', estData: mosquitoEstimate(), ...scope });
+    expect(unknown.services.map((svc) => svc.marginPct)).toEqual([null, null]);
+  });
+
+  test('the save and the tick list share one property scope', () => {
+    const scope = { estimateStreet: 'a', customerPrimaryStreet: 'b' };
+    expect(membershipScopeArgs({ groupedEstimate: true, perPropertyStreetScope: scope }))
+      .toEqual({ streetScope: scope, freezeExtensionPlan: true });
+    expect(membershipScopeArgs({ groupedEstimate: true })).toEqual({ excludeExistingRows: true, freezeExtensionPlan: false });
+    expect(membershipScopeArgs({ perPropertyStreetScope: scope })).toEqual({ extensionStreetScope: scope, freezeExtensionPlan: true });
+    expect(membershipScopeArgs({})).toEqual({ freezeExtensionPlan: false });
   });
 });

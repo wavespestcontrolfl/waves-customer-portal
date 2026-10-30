@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_WAVEGUARD_EXTEND_PICK=true (owner 2026-10-30, option B: when an estimate moves a linked member up a WaveGuard tier from any starting tier, the estimate tool lists each current service at the new tier price (current price / (1 - old tier %) x (1 - new tier %)) with an estimated margin and a tick box. Only ticked services show on the customer's estimate and reprice on accept; works only while GATE_WAVEGUARD_EXTEND_EXISTING is on. Off = the Bronze-start-only automatic card)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
@@ -3887,6 +3888,11 @@ const gates = {
   // unset or any non-'true' value — estimates and accepts revert to the
   // 2026-08-05 review-bell behavior.
   waveguardExtendExisting: process.env.GATE_WAVEGUARD_EXTEND_EXISTING === 'true',
+  // Staff pick which current services take the new tier (owner 2026-10-30,
+  // option B), from ANY starting tier — Silver to Gold included. Rides on
+  // waveguardExtendExisting (both must be on). Money surface — fail-closed
+  // ==='true'. Off: the Bronze-start-only automatic extension above.
+  waveguardExtendPick: process.env.GATE_WAVEGUARD_EXTEND_PICK === 'true',
 
   // Bank Import (2026-08-13): statement-CSV staging + expense reconciliation
   // under /admin/tax. Staff-only and read-mostly, but OFF in every

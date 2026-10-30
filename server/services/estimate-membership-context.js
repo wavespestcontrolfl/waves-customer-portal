@@ -1480,6 +1480,12 @@ async function computeMembershipContext(database, {
   // the global streetScope instead (their pricing scoped the same way), and
   // this bound is then redundant.
   extensionStreetScope = null,
+  // Option B (GATE_WAVEGUARD_EXTEND_PICK): { ticked, unticked } family keys
+  // from the estimate tool's list — only ticked families freeze, from any
+  // starting tier; unticked ones are the staff's keep-price choice. Absent
+  // (an older tab, an agent lane) or the gate off: the Bronze-start-only
+  // automatic plan.
+  extensionPick,
 } = {}) {
   try {
     if (!customerId) return null;
@@ -1556,13 +1562,15 @@ async function computeMembershipContext(database, {
     //
     // Two deliberate exclusions keep every displayed number exactly
     // billable (codex #3338 r3+r4):
-    //  - BRONZE-ORIGIN upgrades only (current tier discount 0%). Above
-    //    Bronze, delta-points math on an already-discounted contracted
-    //    price does not equal the advertised tier rate off the original
-    //    basis ($90 Silver-priced at Gold: −5pp gives $85.50, base math
-    //    gives $85), and the original basis is unknowable for legacy
-    //    contracts — those upgrades stay on the review-bell path until the
-    //    owner rules on the math.
+    //  - BRONZE-ORIGIN upgrades only (current tier discount 0%) unless
+    //    staff pick the services (GATE_WAVEGUARD_EXTEND_PICK, owner
+    //    2026-10-30 option B). Above Bronze the new price is the
+    //    contracted price moved from the old tier rate to the new one
+    //    (price / (1 − old) × (1 − new): $90 Silver-priced at Gold gives
+    //    $85, the Gold rate off the $100 basis), never −5pp off the
+    //    contracted price ($85.50). Staff see each figure and tick which
+    //    services take it, so a legacy contract whose basis is unknown is
+    //    a staff call, never an automatic reprice.
     //  - Monthly-lane members bill customers.monthly_rate, which row
     //    repricing never touches — an "applied automatically" card would
     //    diverge from the charge, so they stay on the review-bell path
@@ -1574,7 +1582,12 @@ async function computeMembershipContext(database, {
       const { customerPreservesMonthlyMembership } = require('./billing-cadence');
       return customerPreservesMonthlyMembership(customer);
     })();
-    if (upgraded && oldTier.discount === 0 && !monthlyLaneMember
+    // Staff pick (option B): ignored with the pick gate off, so the
+    // Bronze-start-only automatic plan stays exactly as is.
+    const pickedKeys = Array.isArray(extensionPick?.ticked) && isEnabled('waveguardExtendPick')
+      ? new Set(extensionPick.ticked.map(String))
+      : null;
+    if (upgraded && (oldTier.discount === 0 || pickedKeys) && !monthlyLaneMember
       && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
       const today = etDateString();
@@ -1604,12 +1617,22 @@ async function computeMembershipContext(database, {
       //  - the PERSISTED price is the rounded tier rate; the savings figure
       //    derives from it (codex #3338 r20 — never an extra half-cent of
       //    discount from rounding the savings first).
+      // Appointments an earlier accepted extension already repriced or
+      // credited park at accept (the converter's at-most-once audit check),
+      // so they never freeze here either — the card must not advertise a
+      // price the apply refuses (a Silver-to-Gold quote after a Bronze-to-
+      // Silver extension, say).
+      const priorCovered = await priorExtensionCoverage(database, customerId);
       for (const [familyKey, familyRows] of existingByKey) {
         // A family this estimate re-quotes is already a priced line of the
-        // estimate itself — never also listed as an existing extension.
-        if (newKeys.includes(familyKey)) continue;
+        // estimate itself — never also listed as an existing extension; a
+        // family staff left unticked is not frozen either, nor one a prior
+        // audit covers without naming its appointments.
+        if (newKeys.includes(familyKey) || (pickedKeys && !pickedKeys.has(familyKey))
+          || priorCovered.families.has(familyKey)) continue;
         let eligibleRows = familyRows.filter((row) => {
           if (planEligibleIds && !planEligibleIds.has(String(row.id))) return false;
+          if (priorCovered.rowIds.has(String(row.id))) return false;
           if (isCallbackServiceRow(row)) return false;
           const day = visitDateKey(row.scheduled_date);
           if (!day || day < today) return false;
@@ -1711,7 +1734,9 @@ async function computeMembershipContext(database, {
           basisRows = simpleRows.filter((row) => sameCents(row.estimated_price, basis));
         }
         const frozenRows = basisRows;
-        const newPerVisit = round2(basis * (1 - delta));
+        // Old tier rate → new tier rate on the contracted price. A Bronze
+        // start (old 0%) is exactly the former basis × (1 − delta).
+        const newPerVisit = round2((basis * (1 - combinedTier.discount)) / (1 - oldTier.discount));
         const perVisitSavings = round2(basis - newPerVisit);
         if (!(perVisitSavings > 0)) continue;
         const upcomingVisitDates = [...new Set(frozenRows.map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort();
@@ -1788,6 +1813,15 @@ async function computeMembershipContext(database, {
       currentServices: currentSpend.currentServices,
       currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,
+      // Current services staff saw on the list and unticked (option B): the
+      // accept keeps their contracted price without asking the office to
+      // review them. A service the list never showed (parked, re-quoted) is
+      // never kept — it stays on the review path — and a quote that raises
+      // no tier keeps nothing (there is no tier to review). Staff-side only
+      // (never in publicMembershipView).
+      ...(pickedKeys && upgraded
+        ? { extensionKeptKeys: existingKeys.filter((key) => extensionPick.unticked.includes(key) && !pickedKeys.has(key)) }
+        : {}),
       newServices,
     };
   } catch (err) {
@@ -1897,6 +1931,120 @@ function publicMembershipView(snapshot, { committed = false } = {}) {
   };
 }
 
+// What earlier accepted extensions already covered, read from the same
+// 'waveguard_tier_extension_applied' audit rows the converter's at-most-once
+// check reads: their appointment ids, and the whole family for an audit that
+// names none (the converter blocks those families too). FAIL CLOSED: an
+// unreadable audit trail covers every family, so nothing freezes.
+async function priorExtensionCoverage(database, customerId) {
+  const covered = { rowIds: new Set(), families: new Set() };
+  try {
+    const audits = await database('activity_log')
+      .where({ customer_id: customerId, action: 'waveguard_tier_extension_applied' })
+      .select('metadata');
+    for (const audit of audits) {
+      let meta = null;
+      try {
+        meta = typeof audit.metadata === 'string' ? JSON.parse(audit.metadata) : audit.metadata;
+      } catch { /* unreadable row: nothing to read */ }
+      if (Array.isArray(meta?.appliedRowIds)) meta.appliedRowIds.forEach((id) => covered.rowIds.add(String(id)));
+      else (Array.isArray(meta?.families) ? meta.families : []).forEach((key) => covered.families.add(key));
+    }
+  } catch (probeErr) {
+    logger.warn(`[membership-context] prior-extension audit probe failed — no extension plan: ${probeErr.message}`);
+    Object.keys(SERVICE_LABEL).forEach((key) => covered.families.add(key));
+  }
+  return covered;
+}
+
+// The property scope a save gives computeMembershipContext (codex #3338 r8
+// and r22), from resolveCustomerQualifyingEvidence: grouped estimates scope
+// to the quoted street (none when it could not be parsed); the primary-
+// address lane keeps account-wide tier context but bounds the frozen PLAN to
+// the quoted street; no parsed street = no plan. Shared with the estimate
+// tool's tick-list preview so it lists exactly the rows a save would freeze.
+function membershipScopeArgs({ groupedEstimate = false, perPropertyStreetScope = null } = {}) {
+  const scope = groupedEstimate
+    ? (perPropertyStreetScope ? { streetScope: perPropertyStreetScope } : { excludeExistingRows: true })
+    : (perPropertyStreetScope ? { extensionStreetScope: perPropertyStreetScope } : {});
+  return { ...scope, freezeExtensionPlan: !!perPropertyStreetScope };
+}
+
+// Estimated margin (percent, one decimal) at the new price for one offered
+// family: the per-visit cost the pricing engine stated on the estimate that
+// set the family up (that line's list per-visit price × (1 − its list
+// margin)). null when the frozen rows trace to no single creating estimate
+// or that estimate's engine line carries no margin — the tool shows none.
+async function offeredFamilyMarginPct(database, service) {
+  const rowIds = Array.isArray(service?.rowIds) ? service.rowIds : [];
+  if (!rowIds.length || !(Number(service.newPerVisit) > 0)) return null;
+  // Children of a recurring series may carry no estimate stamp; their root does.
+  const rows = await database('scheduled_services').whereIn('id', rowIds)
+    .select('id', 'recurring_parent_id', 'source_estimate_id');
+  const parentIds = [...new Set(rows.map((row) => row.recurring_parent_id).filter(Boolean).map(String))];
+  const parents = parentIds.length
+    ? await database('scheduled_services').whereIn('id', parentIds).select('id', 'source_estimate_id')
+    : [];
+  const parentEstimate = new Map(parents.map((row) => [String(row.id), row.source_estimate_id]));
+  const estimateIds = new Set(rows
+    .map((row) => row.source_estimate_id || parentEstimate.get(String(row.recurring_parent_id)))
+    .filter(Boolean).map(String));
+  if (estimateIds.size !== 1) return null;
+  const estimate = await database('estimates').where({ id: [...estimateIds][0] }).first('estimate_data');
+  const estData = estimate ? parseEstimateData(estimate) : null;
+  const line = (estData?.engineResult?.lineItems || []).find((item) => toQualifyingKey(item?.service) === service.key);
+  const margin = Number(line?.margin);
+  const visits = estimateVisitsFor(estData, service.key);
+  const listPerVisit = Number(line?.perApp) > 0
+    ? Number(line.perApp)
+    : (Number(line?.annual) > 0 && visits > 0 ? Number(line.annual) / visits : 0);
+  if (!(listPerVisit > 0) || !Number.isFinite(margin)) return null;
+  return Math.round((1 - (listPerVisit * (1 - margin)) / Number(service.newPerVisit)) * 1000) / 10;
+}
+
+// The estimate tool's tick list (GATE_WAVEGUARD_EXTEND_PICK, owner
+// 2026-10-30 option B): each current service this quote would move up a
+// tier, at the new price, with an estimated margin, under the same property
+// scope a save uses. Staff-only and read-only; null when either extension
+// gate is off, the quote raises no tier, or nothing is eligible.
+async function currentServiceTierOffer(database, { customerId, estData, groupedEstimate, perPropertyStreetScope }) {
+  if (!isEnabled('waveguardExtendPick') || !isEnabled('waveguardExtendExisting')) return null;
+  const ctx = await computeMembershipContext(database, {
+    customerId,
+    estData,
+    ...membershipScopeArgs({ groupedEstimate, perPropertyStreetScope }),
+    // Every WaveGuard family ticked: the list is every service a save could
+    // freeze, and staff untick from it.
+    extensionPick: { ticked: Object.keys(SERVICE_LABEL), unticked: [] },
+  });
+  if (!ctx?.upgrade || !ctx.existingServices?.length) return null;
+  const services = [];
+  for (const svc of ctx.existingServices) {
+    let marginPct = null;
+    try {
+      marginPct = await offeredFamilyMarginPct(database, svc);
+    } catch (err) {
+      logger.warn(`[membership-context] tick-list margin skipped for ${svc.key}: ${err.message}`);
+    }
+    services.push({
+      key: svc.key,
+      label: svc.label,
+      currentPerVisit: svc.currentPerVisit,
+      newPerVisit: svc.newPerVisit,
+      perVisitSavings: svc.perVisitSavings,
+      remainingVisits: svc.remainingVisits,
+      prepaid: svc.prepaid,
+      marginPct,
+    });
+  }
+  return {
+    fromTierLabel: ctx.upgrade.fromLabel,
+    tierLabel: ctx.tierLabel,
+    tierDiscountPct: ctx.tierDiscountPct,
+    services,
+  };
+}
+
 // View-time accessor. Returns the membership snapshot that was frozen onto the
 // estimate at save time (estimate_data.membershipSnapshot), so the card can
 // NEVER diverge from the price saved/charged with the estimate. Estimates
@@ -1916,7 +2064,9 @@ function buildEstimateMembershipContext(estimate) {
 module.exports = {
   buildEstimateMembershipContext,
   computeMembershipContext,
+  currentServiceTierOffer,
   loadCurrentServiceSpendContext,
+  membershipScopeArgs,
   publicMembershipView,
 };
 
