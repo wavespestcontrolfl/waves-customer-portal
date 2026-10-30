@@ -368,11 +368,11 @@ describe('answers', () => {
       absent(answer, 'side gate', '4455', 'free text reason', 'tok_secret', 'example.test/pay', 'because', 'changed hands', 'Read only', 'Processing invoices', 'total_due adds up');
     });
 
-    test('get_invoice_detail keeps lines, payments and plans, not titles, references, labels or processor ids', async () => {
+    test('get_invoice_detail keeps line amounts, payments and plans, not line text, titles, references, labels or processor ids', async () => {
       const answer = await run('get_invoice_detail', {
         invoice: { ...invoiceItem(), service_type: 'pest', viewed_at: '2026-10-02T09:00:00.000Z', subtotal: 130, discount_amount: 10, discount_label: 'Neighbor said 10% off', tax_rate: 0.07, tax_amount: 0, payment_method: 'card', payment_reference: 'chk 4411 Pat', payment_recorded_by: 'Virginia', payment_recorded_at: '2026-10-03T09:00:00.000Z', stripe_payment_intent_id: 'pi_123' },
         customer: { id: 'c-1', name: 'Pat Example', phone_last4: '0101' },
-        line_items: [{ description: 'Quarterly pest service', quantity: 1, unit_price: 130, amount: 130, category: 'Pest, enter via side door', is_discount: false }, { description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, category: null, is_discount: true }],
+        line_items: [{ description: 'Quarterly pest service, side gate code 4455', quantity: 1, unit_price: 130, amount: 130, category: 'Pest, enter via side door', is_discount: false }, { description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, category: null, is_discount: true }],
         line_items_truncated: false,
         discounts: { document_discount: { amount: 10, label: 'Neighbor said 10% off' }, discount_lines: [{ description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, category: null, is_discount: true }], discount_lines_truncated: false, account_credit_applied: 20 },
         recorded_payments: [
@@ -388,10 +388,10 @@ describe('answers', () => {
       const { data } = answer;
       expect(data.invoice).toMatchObject({ id: 'i-1', invoice_number: 'INV-1042', service_type: 'pest', subtotal: 130, discount_amount: 10, tax_rate: 0.07, balance_due: 100, payment_method: 'card', payment_recorded_at: '2026-10-03T09:00:00.000Z' });
       expect(data.line_items).toEqual([
-        { description: 'Quarterly pest service', quantity: 1, unit_price: 130, amount: 130, is_discount: false },
-        { description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, is_discount: true },
+        { quantity: 1, unit_price: 130, amount: 130, is_discount: false },
+        { quantity: 1, unit_price: -10, amount: -10, is_discount: true },
       ]);
-      expect(data.discounts).toEqual({ document_discount: { amount: 10 }, discount_lines: [{ description: 'Loyalty credit', quantity: 1, unit_price: -10, amount: -10, is_discount: true }], discount_lines_truncated: false, account_credit_applied: 20 });
+      expect(data.discounts).toEqual({ document_discount: { amount: 10 }, discount_lines: [{ quantity: 1, unit_price: -10, amount: -10, is_discount: true }], discount_lines_truncated: false, account_credit_applied: 20 });
       expect(data.recorded_payments[0]).toEqual({ id: 'pay-1', date: '2026-10-03', recorded_at: '2026-10-03T09:00:00.000Z', amount: 50, status: 'paid', method: 'card visa', refunded_amount: 0, refund_status: null, funded_by_payer: { id: 7, name: 'Acme Property Mgmt' } });
       expect(data.recorded_payments[1].statement_level).toEqual({ statement_id: '55', statement_amount: 300, refunded_amount: 0, refund_status: null });
       expect(data.payment_plan.active).toMatchObject({ id: 'pp-1', plan_start_date: '2026-10-05', total_balance: 100 });

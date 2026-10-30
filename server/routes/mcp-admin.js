@@ -62,7 +62,8 @@ const ITEM_FIELDS = ['id', 'kind', 'area', 'severity', 'who', 'headline', 'why',
 // Left out on purpose: needs_me `detail` (long free text) and `report_link`;
 // every note, instruction, comment and other free text typed by staff,
 // customers or callers (customer and visit notes, tags, property labels, lead
-// service_interest and notes, invoice titles and payment references); gate,
+// service_interest and notes, invoice titles, invoice line descriptions and
+// categories, and payment references); gate,
 // garage and lockbox codes; pay links, tokens and processor ids.
 const fieldsOf = (prefix, fields) => fields.map((field) => `${prefix}.${field}`);
 
@@ -76,7 +77,8 @@ const INVOICE_DUE = [
   'amount_due_after_credit', 'collectible', 'balance_due', 'needs_reconciliation', 'bank_payment_processing', 'payer_billed', 'overdue',
 ];
 const PLAN_ROW = ['id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at'];
-const LINE_ITEM = ['description', 'quantity', 'unit_price', 'amount', 'is_discount'];
+// No description or category: staff type them freely ("side gate code 4455").
+const LINE_ITEM = ['quantity', 'unit_price', 'amount', 'is_discount'];
 
 const TOOL_FIELDS = Object.freeze({
   needs_me: [
