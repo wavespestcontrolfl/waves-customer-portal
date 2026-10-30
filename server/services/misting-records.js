@@ -31,6 +31,7 @@ const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const customerProperties = require('./customer-properties');
+const { premiseStampConflicts } = require('./stamped-address');
 const { computeCalibration, overLabelMessage, roundTo, formatOzPair, capAtMix, mixWithinLabelRange } = require('./misting-calibration-math');
 const PRODUCTS = require('../../shared/misting-products.json').products;
 
@@ -141,6 +142,14 @@ function toCalibration(row) {
     id: row.id,
     customerId: row.customer_id,
     propertyId: row.property_id || null,
+    // Where the system was installed (null on a row saved before the stamp existed).
+    installedAddress: addressOf({
+      address_line1: row.installed_address_line1,
+      address_line2: row.installed_address_line2,
+      city: row.installed_city,
+      state: row.installed_state,
+      zip: row.installed_zip,
+    }),
     installedOn: dateOnly(row.installed_on),
     vendor: row.vendor,
     model: row.model,
@@ -236,13 +245,9 @@ async function listCustomerRecords(customerId, { knex = db } = {}) {
     refillRows(knex).where('r.customer_id', customerId)
       .orderBy([{ column: 'r.refilled_on', order: 'desc' }, { column: 'r.created_at', order: 'desc' }, { column: 'r.id', order: 'desc' }]).limit(LIST_LIMIT),
   ]);
-  // The newest current row per property, from the one definition of "current". Rows at a deleted (NULL) or
-  // retired property are history, grouped under "Removed property" by the panel.
-  const currentIds = new Set();
-  const seenProperty = new Set();
-  (await currentQuery(knex, customerId)).forEach((row) => {
-    if (!seenProperty.has(row.property_id)) { seenProperty.add(row.property_id); currentIds.add(row.id); }
-  });
+  // The current row of each property, from the one definition of "current". Rows at a deleted (NULL) or
+  // retired property, or stamped at an address the property no longer has, are history.
+  const currentIds = new Set((await currentRows(knex, customerId)).map((row) => row.id));
   // The history limit applies to past rows only: a current calibration past the newest LIST_LIMIT rows (another
   // property with many newer records, voided ones included) is still listed, or the panel would offer a new
   // install where a refill belongs.
@@ -276,10 +281,13 @@ const lockKey = (customerId) => `misting-records:${String(customerId).toLowerCas
 const lockCustomer = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey(customerId)]);
 
 // "Current" is defined here once. A current calibration is a non-voided row at an ACTIVE customer_properties
-// row of THIS customer, newest first (created_at, then id). A NULL property (deleted row) and a retired
-// property (active = false, how the office removes one) have no current calibration. The staff service, the
-// list and the customer-app card all build on this query.
-function currentQuery(knex, customerId) {
+// row of THIS customer whose install-address stamp still matches that property's address, newest first
+// (created_at, then id). A NULL property (deleted row) and a retired property (active = false, how the office
+// removes one) have no current calibration. A move edits the SAME property row (syncPrimaryAddress), so a
+// calibration stamped at the old address is history once the row's address changes: premiseStampConflicts
+// (services/stamped-address.js) is the repo's one premise rule, and a missing stamp is unknown, not
+// different. The staff service, the list and the customer-app card all build on currentRows.
+function candidateQuery(knex, customerId) {
   return knex('misting_calibrations as c')
     .join('customer_properties as p', function activeHome() {
       this.on('p.id', 'c.property_id').andOn('p.customer_id', 'c.customer_id');
@@ -288,13 +296,38 @@ function currentQuery(knex, customerId) {
     .where('p.active', true)
     .whereNull('c.voided_at')
     .orderBy([{ column: 'c.created_at', order: 'desc' }, { column: 'c.id', order: 'desc' }])
-    .select('c.*');
+    .select('c.*', 'p.address_line1 as home_line1', 'p.address_line2 as home_line2', 'p.city as home_city', 'p.zip as home_zip');
 }
 
-/** The current calibration at one property (see currentQuery), or undefined. */
+const installStamp = (row) => ({
+  service_address_line1: row.installed_address_line1,
+  service_address_line2: row.installed_address_line2,
+  service_address_city: row.installed_city,
+  service_address_zip: row.installed_zip,
+});
+const homeStamp = (row) => ({
+  service_address_line1: row.home_line1,
+  service_address_line2: row.home_line2,
+  service_address_city: row.home_city,
+  service_address_zip: row.home_zip,
+});
+
+// The current row of each property (newest first), optionally for one property.
+async function currentRows(knex, customerId, propertyId = null) {
+  const query = candidateQuery(knex, customerId);
+  if (propertyId) query.where('c.property_id', propertyId);
+  const seen = new Set();
+  return (await query).filter((row) => {
+    if (seen.has(row.property_id) || premiseStampConflicts(installStamp(row), homeStamp(row))) return false;
+    seen.add(row.property_id);
+    return true;
+  });
+}
+
+/** The current calibration at one property (see currentRows), or undefined. */
 async function currentCalibration(knex, customerId, propertyId) {
   if (!propertyId) return undefined;
-  return currentQuery(knex, customerId).where('c.property_id', propertyId).first();
+  return (await currentRows(knex, customerId, propertyId))[0];
 }
 
 /**
@@ -302,20 +335,20 @@ async function currentCalibration(knex, customerId, propertyId) {
  * that is not scoped to one house (a single home).
  */
 async function currentCalibrationForCustomer(knex, customerId) {
-  return currentQuery(knex, customerId).first();
+  return (await currentRows(knex, customerId))[0];
 }
 
-// The home a new calibration belongs to: always a real, active customer_properties row. A given id must
+// The home a new calibration belongs to (returned as its row): always a real, active customer_properties row. A given id must
 // be one of the customer's active rows; without one, a single active row is used and 2+ must be picked.
 async function resolveProperty(knex, customerId, rawPropertyId) {
   const props = await activeProperties(knex, customerId);
   if (rawPropertyId !== undefined && rawPropertyId !== null && rawPropertyId !== '') {
     const hit = isUuid(rawPropertyId) ? props.find((p) => p.id === String(rawPropertyId).toLowerCase()) : null;
     if (!hit) throw bad('That property is not an active property of this customer.');
-    return hit.id;
+    return hit;
   }
   if (props.length >= 2) throw bad('Pick which property the system is at.');
-  if (props.length === 1) return props[0].id;
+  if (props.length === 1) return props[0];
   throw bad('This customer has no active property.');
 }
 
@@ -398,7 +431,7 @@ async function createCalibration({ customerId, input, actorId = null, knex = db 
   const id = await knex.transaction(async (trx) => {
     await lockCustomer(trx, customerId);
     if (!(await customerExists(trx, customerId))) throw opError(404, 'MISTING_CUSTOMER_NOT_FOUND', 'Customer not found.');
-    const propertyId = await resolveProperty(trx, customerId, input.propertyId);
+    const home = await resolveProperty(trx, customerId, input.propertyId);
 
     if (missing.length) {
       throw opError(422, 'MISTING_CHECKS_INCOMPLETE', `Check every box before saving. Not checked: ${missing.join('; ')}.`);
@@ -411,7 +444,13 @@ async function createCalibration({ customerId, input, actorId = null, knex = db 
 
     const [row] = await trx('misting_calibrations').insert({
       customer_id: customerId,
-      property_id: propertyId,
+      property_id: home.id,
+      // The address the system is installed at: a later move of this property row makes this record history.
+      installed_address_line1: home.address_line1,
+      installed_address_line2: home.address_line2,
+      installed_city: home.city,
+      installed_state: home.state,
+      installed_zip: home.zip,
       installed_on: fields.installedOn,
       vendor: fields.vendor,
       model: fields.model,
@@ -485,9 +524,10 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
         throw opError(409, 'MISTING_PROPERTY_RETIRED', 'This property was removed from the customer. Re-add it before logging a refill.');
       }
     }
-    const current = cal.voided_at ? null : await currentCalibration(trx, customerId, cal.property_id);
+    // currentCalibration never returns a voided row, so a voided calibration is refused here as not current.
+    const current = await currentCalibration(trx, customerId, cal.property_id);
     if (!current || current.id !== cal.id) {
-      throw opError(409, 'MISTING_CALIBRATION_NOT_CURRENT', 'This calibration has been replaced. Reload and log the refill against the current one.');
+      throw opError(409, 'MISTING_CALIBRATION_NOT_CURRENT', "This calibration is no longer current: it was replaced, or the property's address changed. Reload, and record a new calibration if the address changed.");
     }
 
     const installedOn = dateOnly(cal.installed_on);
@@ -519,7 +559,7 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
     const [row] = await trx('misting_refills').insert({
       customer_id: customerId,
       calibration_id: cal.id,
-      property_id: cal.property_id || null,
+      property_id: cal.property_id,
       refilled_on: fields.refilledOn,
       product_name: cal.product_name,
       epa_reg_no: cal.epa_reg_no,
@@ -529,11 +569,11 @@ async function createRefill({ customerId, input, actorId = null, knex = db }) {
       counter_reset: fields.counterReset,
       notes: fields.notes,
       source: 'staff',
-      recorded_by: actorId || null,
+      recorded_by: actorId,
       created_at: trx.raw('clock_timestamp()'),
       updated_at: trx.raw('clock_timestamp()'),
     }).returning('id');
-    return row.id || row;
+    return row.id;
   });
   return toRefill(await refillRows(knex).where('r.id', id).first());
 }

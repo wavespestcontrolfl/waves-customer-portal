@@ -13,9 +13,14 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockEnsurePrimary = jest.fn();
-jest.mock('../services/customer-properties', () => ({ ensurePrimaryProperty: (...a) => mockEnsurePrimary(...a) }));
+// Only the lazy primary creation is faked; the address helpers the premise rule uses stay real.
+jest.mock('../services/customer-properties', () => ({
+  ...jest.requireActual('../services/customer-properties'),
+  ensurePrimaryProperty: (...a) => mockEnsurePrimary(...a),
+}));
 
 const migration = require('../models/migrations/20261030120000_misting_records');
+const addressMigration = require('../models/migrations/20261030150000_misting_calibration_install_address');
 const svc = require('../services/misting-records');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -95,6 +100,7 @@ postgres('misting records service (PostgreSQL)', () => {
     });
     await app.schema.createTable('technicians', (t) => { t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()')); t.string('name'); });
     await migration.up(app);
+    await addressMigration.up(app);
   });
 
   beforeEach(async () => {
@@ -255,6 +261,41 @@ postgres('misting records service (PostgreSQL)', () => {
     expect(await code(refill(cal.id))).toMatchObject({ status: 409, code: 'MISTING_CALIBRATION_NOT_CURRENT' });
     // A new calibration at the remaining home is unaffected.
     expect((await create()).propertyId).toBe(homeId);
+  });
+
+  describe('the install address (a move edits the same property row)', () => {
+    test('a calibration is stamped with its property\'s address', async () => {
+      await app('customer_properties').where({ id: homeId }).update({ city: 'Parrish', state: 'FL', zip: '34219' });
+      const cal = await create();
+      expect(cal.installedAddress).toBe('1 Test Lane, Parrish, FL 34219');
+    });
+
+    test('after the address changes, the old system is history: not current, listed with its old address, and takes no refill', async () => {
+      const old = await create();
+      await app('customer_properties').where({ id: homeId }).update({ address_line1: '9 Other Road' });
+      expect(await svc.currentCalibration(app, customerId, homeId)).toBeUndefined();
+      expect(await svc.currentCalibrationForCustomer(app, customerId)).toBeUndefined();
+      const { calibrations } = await svc.listCustomerRecords(customerId, { knex: app });
+      expect(calibrations).toEqual([expect.objectContaining({ id: old.id, isCurrent: false, installedAddress: '1 Test Lane' })]);
+      expect(await code(refill(old.id))).toMatchObject({ status: 409, code: 'MISTING_CALIBRATION_NOT_CURRENT' });
+      // A calibration at the new address is current again.
+      const fresh = await create();
+      expect(fresh.installedAddress).toBe('9 Other Road');
+      expect((await svc.currentCalibration(app, customerId, homeId)).id).toBe(fresh.id);
+    });
+
+    test('a formatting-only edit (Lane -> Ln) keeps the system current', async () => {
+      const cal = await create();
+      await app('customer_properties').where({ id: homeId }).update({ address_line1: '1 Test Ln.' });
+      expect((await svc.currentCalibration(app, customerId, homeId)).id).toBe(cal.id);
+    });
+
+    test('a row saved before the stamp existed (no address) is unknown, not different: still current', async () => {
+      const cal = await create();
+      await app('misting_calibrations').where({ id: cal.id }).update({ installed_address_line1: null, installed_city: null, installed_zip: null });
+      await app('customer_properties').where({ id: homeId }).update({ address_line1: '9 Other Road' });
+      expect((await svc.currentCalibration(app, customerId, homeId)).id).toBe(cal.id);
+    });
   });
 
   test('a current calibration past the 200-row history limit is still listed, as current', async () => {

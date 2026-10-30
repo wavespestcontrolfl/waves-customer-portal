@@ -8,6 +8,7 @@ const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261030120000_misting_records');
+const addressMigration = require('../models/migrations/20261030150000_misting_calibration_install_address');
 
 jest.setTimeout(60000); // schema setup and the first migration are slow on a busy machine
 
@@ -205,5 +206,21 @@ postgres('misting records tables (PostgreSQL)', () => {
     await migration.up(app);
     expect(await app.schema.hasTable(CAL)).toBe(true);
     expect(await app.schema.hasTable(REF)).toBe(true);
+  });
+
+  test('the install-address migration adds five nullable text columns, twice is a no-op, and down() drops them', async () => {
+    const COLUMNS = ['installed_address_line1', 'installed_address_line2', 'installed_city', 'installed_state', 'installed_zip'];
+    await addressMigration.up(app);
+    await addressMigration.up(app);
+    const { rows } = await app.raw(
+      'SELECT column_name, is_nullable, data_type FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ANY(?)',
+      [schema, CAL, COLUMNS],
+    );
+    expect(rows.map((r) => r.column_name).sort()).toEqual([...COLUMNS].sort());
+    rows.forEach((r) => { expect(r.is_nullable).toBe('YES'); expect(r.data_type).toBe('text'); });
+    await addressMigration.down(app);
+    await addressMigration.down(app);
+    for (const column of COLUMNS) expect(await app.schema.hasColumn(CAL, column)).toBe(false);
+    await addressMigration.up(app);
   });
 });
