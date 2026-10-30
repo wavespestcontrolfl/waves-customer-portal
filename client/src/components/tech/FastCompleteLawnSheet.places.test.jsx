@@ -292,7 +292,7 @@ describe('a place on every spot row', () => {
     typeArea(screen.getByRole('group', { name: 'Spot Fungicide' }), '100');
     expect(screen.queryByText('Where on the lawn')).toBeNull();
     await analyzeAndComplete();
-    expect(sent(P_FUNG)).not.toHaveProperty('areaPlace');
+    expect(sent(P_FUNG)).not.toHaveProperty('areaPlaces');
     expect(sent(P_FUNG)).not.toHaveProperty('troubleType');
   });
 
@@ -310,28 +310,50 @@ describe('a place on every spot row', () => {
     fireEvent.click(chipOf(where, 'Left side'));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_FUNG)).toMatchObject({ applicationMethod: 'spot_treatment', areaPlace: 'left_side', areaValue: 100, areaUnit: 'sqft', troubleType: 'fungus', troubleSource: 'tech_tap' });
+    expect(sent(P_FUNG)).toMatchObject({ applicationMethod: 'spot_treatment', areaPlaces: ['left_side'], areaValue: 100, areaUnit: 'sqft', troubleType: 'fungus', troubleSource: 'tech_tap' });
   });
 
   test('a whole-lawn row asks for no place and sends none', async () => {
     await open(placeContext({ planned: [PLANNED[0]] }));
     expect(screen.queryByText('Where on the lawn')).toBeNull();
     await analyzeAndComplete();
-    expect(sent(P_TALAK)).not.toHaveProperty('areaPlace');
+    expect(sent(P_TALAK)).not.toHaveProperty('areaPlaces');
   });
 
-  test('the place can be changed with one tap', async () => {
+  test('the places are a set of chips: tap to add, tap again to remove; the row goes to /complete once with every place, in the list\'s order', async () => {
+    await open(placeContext());
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
+    fireEvent.click(chipOf(where, 'Right side'));
+    expect(pressed(where)).toEqual(['Right side']);
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(pressed(where)).toEqual(['Front', 'Right side']);
+    fireEvent.click(chipOf(where, 'Back'));
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(pressed(where)).toEqual(['Back', 'Right side']);
+    await analyzeAndComplete();
+    // ONE row, both places, in the closed list's order; the old single field is not sent.
+    expect(completeCalls()[0].body.products.filter((p) => p.productId === P_FUNG)).toHaveLength(1);
+    expect(sent(P_FUNG).areaPlaces).toEqual(['back', 'right_side']);
+    expect(sent(P_FUNG)).not.toHaveProperty('areaPlace');
+  });
+
+  test('every place un-tapped: the sheet asks for a place again and holds Complete; a tap brings the row back', async () => {
     await open(placeContext());
     addFungicide();
     const row = placeGroup('Spot Fungicide');
     typeArea(row, '100');
     const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
     fireEvent.click(chipOf(where, 'Front'));
-    expect(pressed(where)).toEqual(['Front']);
-    fireEvent.click(chipOf(where, 'Right side'));
-    expect(pressed(where)).toEqual(['Right side']);
-    await analyzeAndComplete();
-    expect(sent(P_FUNG).areaPlace).toBe('right_side');
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(pressed(where)).toEqual([]);
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    expect(footerNote()).toMatch(/Pick where on the lawn Spot Fungicide went\./);
+    fireEvent.click(chipOf(where, 'Back'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
   });
 });
 
@@ -343,11 +365,11 @@ describe('a known trouble area', () => {
     typeArea(row, '100');
     const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
     expect(pressed(where)).toEqual(['Back · known']);
-    expect(within(where).getByText('Set from the known trouble area. Tap another place to change it.')).toBeTruthy();
+    expect(within(where).getByText('Set from the known trouble area. Tap places to change it.')).toBeTruthy();
     await analyze();
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'fungus' });
+    expect(sent(P_FUNG)).toMatchObject({ areaPlaces: ['back'], troubleType: 'fungus' });
   });
 
   test('two known areas of the type, or one of another type, choose nothing for the tech', async () => {
@@ -415,9 +437,27 @@ describe('the yearly limits warn at a place (never block)', () => {
     await analyze();
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     expect(footerNote()).not.toMatch(/cannot go on/);
-    // The other place carries no warning.
+    // Another place beside it adds no warning of its own: the line still names the Front alone.
     fireEvent.click(chipOf(whereOf(), 'Back'));
+    expect(limitWarnings()).toEqual(['Spot Fungicide, Front: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.']);
+    // Taking the limited place off ends the warning.
+    fireEvent.click(chipOf(whereOf(), 'Front'));
     expect(limitWarnings()).toEqual([]);
+  });
+
+  test('a spray on two places that are both at the limit names both in ONE footer line; two places with different words get a line each', async () => {
+    await open(placeContext({ troubleAreas: areasBlock({ blocked: { [P_FUNG]: { front: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.', back: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.', left_side: 'Spot Fungicide: only 12 days since last app (min 56).' } } }) }));
+    addFungicide();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    const where = whereOf();
+    fireEvent.click(chipOf(where, 'Front'));
+    fireEvent.click(chipOf(where, 'Back'));
+    expect(limitWarnings()).toEqual(['Spot Fungicide, Front, Back: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.']);
+    fireEvent.click(chipOf(where, 'Left side'));
+    expect(limitWarnings()).toEqual([
+      'Spot Fungicide, Front, Back: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.',
+      'Spot Fungicide, Left side: only 12 days since last app (min 56). You can still complete. The office gets an alert.',
+    ]);
   });
 
   test('a known area at a limit-closed place is still the default, with the warning', async () => {
@@ -441,7 +481,7 @@ describe('the yearly limits warn at a place (never block)', () => {
     expect(limitWarnings()).toEqual(['Spot Fungicide, Left side: 2/2 applications this year — LIMIT REACHED. You can still complete. The office gets an alert.']);
     fireEvent.click(completeButton());
     await waitFor(() => expect(completeCalls()).toHaveLength(1));
-    expect(completeCalls()[0].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('left_side');
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_FUNG).areaPlaces).toEqual(['left_side']);
   });
 
   test('a limit message that does not open with the product name still names the product and the place', async () => {
@@ -467,7 +507,7 @@ describe('Weed spots: the entry is one tap per place', () => {
     expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' }).disabled).toBe(true);
     fireEvent.change(within(screen.getByRole('group', { name: 'Weed spots' })).getByLabelText(AREA_LABEL), { target: { value: '500' } });
     await analyzeAndComplete();
-    for (const id of [P_LEAD, P_CERT, P_SURF]) expect(sent(id)).toMatchObject({ areaPlace: 'back', troubleType: 'weeds', troubleSource: 'tech_tap' });
+    for (const id of [P_LEAD, P_CERT, P_SURF]) expect(sent(id)).toMatchObject({ areaPlaces: ['back'], troubleType: 'weeds', troubleSource: 'tech_tap' });
   });
 
   test('a place at the lead\'s limit takes the replacement; the others take the lead; the line says which place', async () => {
@@ -488,11 +528,11 @@ describe('Weed spots: the entry is one tap per place', () => {
     expect(limitWarnings()).toEqual([]);
     fireEvent.click(chipOf(where, 'Front'));
     expect(limitWarnings().length).toBeGreaterThan(0);
-    fireEvent.click(chipOf(where, 'Back'));
+    fireEvent.click(chipOf(where, 'Front'));
     expect(limitWarnings()).toEqual([]);
     expect(within(where).queryByText(/./, { selector: '[role="status"]' })).toBeNull();
     fireEvent.click(chipOf(where, 'Right side'));
-    expect(pressed(where)).toEqual(['Right side']);
+    expect(pressed(where)).toEqual(['Back', 'Right side']);
   });
 
   test('a place at the limit for both is not offered; with every place closed the entry is a line only', async () => {
@@ -520,7 +560,7 @@ describe('Weed spots: the entry is one tap per place', () => {
     fireEvent.click(chipOf(where, 'Front'));
     fireEvent.change(within(screen.getByRole('group', { name: 'Weed spots' })).getByLabelText(AREA_LABEL), { target: { value: '500' } });
     await analyzeAndComplete();
-    expect(sent(P_LEAD).areaPlace).toBe('front');
+    expect(sent(P_LEAD).areaPlaces).toEqual(['front']);
   });
 
   test('the place chips sit inside the Weed spots card, under the area sizes, and inside every other spot row card', async () => {
@@ -579,7 +619,7 @@ describe('Chinch bugs found: the entry is one tap per place', () => {
     typeArea(row, '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_BIF)).toMatchObject({ areaPlace: 'front', troubleType: 'chinch', troubleSource: 'tech_tap' });
+    expect(sent(P_BIF)).toMatchObject({ areaPlaces: ['front'], troubleType: 'chinch', troubleSource: 'tech_tap' });
   });
 
   test('on the sheet at one place, the row can be moved to a place that takes the other product, with a warning there', async () => {
@@ -591,6 +631,8 @@ describe('Chinch bugs found: the entry is one tap per place', () => {
     expect(chipOf(where, 'Right side').disabled).toBe(false);
     fireEvent.click(chipOf(where, 'Front'));
     expect(limitWarnings()).toHaveLength(1);
+    fireEvent.click(chipOf(where, 'Front'));
+    fireEvent.click(chipOf(where, 'Back'));
     fireEvent.click(chipOf(where, 'Left side'));
     expect(pressed(where)).toEqual(['Left side']);
     expect(limitWarnings()).toEqual([]);
@@ -685,7 +727,7 @@ describe('reachability: the front is capped, the back is open', () => {
       expect(chipOf(where, 'Front').disabled).toBe(false);
       fireEvent.click(chipOf(where, 'Front'));
       expect(limitWarnings()).toHaveLength(1);
-      fireEvent.click(chipOf(where, 'Back'));
+      fireEvent.click(chipOf(where, 'Front'));
       expect(limitWarnings()).toEqual([]);
     }
     // The completion carries the back, and nothing at the front.
@@ -693,7 +735,7 @@ describe('reachability: the front is capped, the back is open', () => {
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
     const body = completeCalls()[0].body.products;
-    expect(body.map((p) => p.areaPlace)).toEqual(rowNames.map(() => 'back'));
+    expect(body.map((p) => p.areaPlaces)).toEqual(rowNames.map(() => ['back']));
   });
 
   // The completion's guide record carries the set of the place the tech took (a flat list of the ids added) and the place.
@@ -838,7 +880,7 @@ describe('a planned Arena or Celsius row is judged by the per-place decision', (
     expect(chipOf(arena, 'Back').disabled).toBe(false);
     fireEvent.click(chipOf(arena, 'Front'));
     expect(limitWarnings()).toHaveLength(1);
-    fireEvent.click(chipOf(arena, 'Back'));
+    fireEvent.click(chipOf(arena, 'Front'));
     expect(limitWarnings()).toEqual([]);
     const talak = within(placeGroup('Atticus Talak 7.9 F')).getByRole('group', { name: 'Place for Atticus Talak 7.9 F' });
     expect(chipOf(talak, 'Front').disabled).toBe(false);
@@ -853,7 +895,7 @@ describe('a planned Arena or Celsius row is judged by the per-place decision', (
     expect(chipOf(lead, 'Back').disabled).toBe(false);
     fireEvent.click(chipOf(lead, 'Front'));
     expect(limitWarnings().length).toBeGreaterThan(0);
-    fireEvent.click(chipOf(lead, 'Back'));
+    fireEvent.click(chipOf(lead, 'Front'));
     expect(limitWarnings()).toEqual([]);
   });
 });
@@ -886,7 +928,7 @@ describe('the guide answer carries the fresh per-place limits, shown as warnings
     fireEvent.click(chipOf(chipsOf(), 'Front'));
     expect(limitWarnings()).toHaveLength(1);
     expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
-    fireEvent.click(chipOf(chipsOf(), 'Back'));
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
     expect(limitWarnings()).toEqual([]);
   });
 
@@ -1013,8 +1055,8 @@ describe('the type sent for a chinch-ladder row', () => {
     typeArea(placeGroup('Atticus Talak 7.9 F'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_ARENA)).toMatchObject({ areaPlace: 'back', troubleType: 'chinch' });
-    expect(sent(P_BIF)).toMatchObject({ areaPlace: 'back', troubleType: 'other_insect' });
+    expect(sent(P_ARENA)).toMatchObject({ areaPlaces: ['back'], troubleType: 'chinch' });
+    expect(sent(P_BIF)).toMatchObject({ areaPlaces: ['back'], troubleType: 'other_insect' });
   });
 });
 
@@ -1038,7 +1080,7 @@ describe('places beside the report ties and the spot-area marker', () => {
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
     const body = completeCalls()[0].body;
-    expect(body.products.find((p) => p.productId === P_ARENA)).toMatchObject({ areaPlace: 'back', areaValue: 100, areaUnit: 'sqft', troubleType: 'chinch' });
+    expect(body.products.find((p) => p.productId === P_ARENA)).toMatchObject({ areaPlaces: ['back'], areaValue: 100, areaUnit: 'sqft', troubleType: 'chinch' });
     expect(body.lawnFast.spotAreas).toEqual({ v: 1, productIds: [P_ARENA] });
     expect(body.lawnFast.treatmentGuide.cards).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA], place: 'back' }]);
   });
@@ -1083,7 +1125,7 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'take_all', troubleSource: 'guide_card' });
+    expect(sent(P_FUNG)).toMatchObject({ areaPlaces: ['back'], troubleType: 'take_all', troubleSource: 'guide_card' });
     // The guide record names the card's product AND the mapped area it was applied at (one rule for every card: the place of its own row).
     expect(completeCalls()[0].body.lawnFast.treatmentGuide.cards).toEqual([expect.objectContaining({ kind: 'fungus', taken: true, productIds: [P_FUNG], place: 'back' })]);
   });
@@ -1184,10 +1226,11 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await waitFor(() => expect(chipOf(chips(), 'Front').disabled).toBe(false));
     expect(chipOf(chips(), /^Back/).disabled).toBe(false);
     fireEvent.click(chipOf(chips(), 'Front'));
+    fireEvent.click(chipOf(chips(), /^Back/));
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(completeCalls().at(-1).body.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaPlace: 'front', troubleType: 'take_all', troubleSource: 'tech_tap' });
+    expect(completeCalls().at(-1).body.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaPlaces: ['front'], troubleType: 'take_all', troubleSource: 'tech_tap' });
   });
 
   test('a take-all product added through Search (tech_tap) may take any open place', async () => {
@@ -1198,10 +1241,11 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
     expect(chipOf(chips(), 'Front').disabled).toBe(false);
     fireEvent.click(chipOf(chips(), 'Front'));
+    fireEvent.click(chipOf(chips(), /^Back/));
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'front', troubleType: 'take_all', troubleSource: 'tech_tap' });
+    expect(sent(P_FUNG)).toMatchObject({ areaPlaces: ['front'], troubleType: 'take_all', troubleSource: 'tech_tap' });
   });
 });
 
@@ -1406,7 +1450,7 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 1,000 sq ft/)).toBeTruthy();
     fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
     await analyzeAndComplete();
-    expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlace: 'back' });
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlaces: ['back'] });
   });
 
   test('gallons past the lawn (5,000 sq ft here): the area shown and sent is the lawn\'s, the amount is still what the gallons mixed (the full-tank dose)', async () => {

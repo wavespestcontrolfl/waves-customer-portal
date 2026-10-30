@@ -121,6 +121,29 @@ describe('defaults and withPlace', () => {
     expect(withPlace(row(), { areas: every, chosen: 'back' })).toMatchObject({ place: 'back', placeBlock: null, placeNowhere: null, placeWarning: 'no' });
   });
 
+  test('several places on one row: the list is kept in the closed list\'s order, the first is `place`, each limit warning is named by place, a list (even empty) beats the default', () => {
+    const a = troubleAreasOf(data({ known: [area('a', 'back', 'fungus')], blocked: { p1: { front: 'closed up front', back: 'closed at the back' } } }));
+    const both = withPlace(row(), { areas: a, chosen: ['back', 'front', 'roof', 'front'] });
+    expect(both).toMatchObject({ places: ['front', 'back'], place: 'front', placeDefaulted: false, placeBlock: null, placeWarning: 'closed up front' });
+    expect(both.placeWarnings).toEqual([{ place: 'front', text: 'closed up front' }, { place: 'back', text: 'closed at the back' }]);
+    // One place of the two with a limit: only that one is named.
+    expect(withPlace(row(), { areas: troubleAreasOf(data({ blocked: { p1: { back: 'closed at the back' } } })), chosen: ['front', 'back'] }).placeWarnings).toEqual([{ place: 'back', text: 'closed at the back' }]);
+    // The default is one place; the tech un-tapping everything (an empty list) is his choice, and the row asks for a place again.
+    expect(withPlace(row(), { areas: a, chosen: '' })).toMatchObject({ places: ['back'], place: 'back', placeDefaulted: true });
+    expect(withPlace(row(), { areas: a, chosen: [] })).toMatchObject({ places: [], place: '', placeDefaulted: false, placeWarning: null, placeWarnings: [] });
+    expect(withPlace(row(), { areas: a, chosen: ['roof'] })).toMatchObject({ places: [], place: '' });
+    // The old single string still reads as a list of one.
+    expect(withPlace(row(), { areas: a, chosen: 'front' })).toMatchObject({ places: ['front'], place: 'front' });
+  });
+
+  test('a hold on any picked place holds the row there (the first held place is named); a hold on a place that is not picked does not', () => {
+    const base = troubleAreasOf(data({}));
+    const held = { ...base, refused: { p1: { front: 'Take-all is treated on mapped take-all areas only.' } }, refusedCard: { p1: { front: true } } };
+    const guideRow = row({ troubleSource: 'guide_card' });
+    expect(withPlace(guideRow, { areas: held, chosen: ['back', 'front'] })).toMatchObject({ placeBlock: expect.stringMatching(/mapped take-all/), placeBlockPlace: 'front' });
+    expect(withPlace(guideRow, { areas: held, chosen: ['back'] })).toMatchObject({ placeBlock: null, placeBlockPlace: '' });
+  });
+
   test('a known place closed by a yearly limit is still the default (the limit only warns)', () => {
     const closed = troubleAreasOf(data({ known: [area('a', 'front', 'fungus')], blocked: { p1: { front: 'closed up front' } } }));
     expect(withPlace(row(), { areas: closed, chosen: '' })).toMatchObject({ place: 'front', placeDefaulted: true, placeBlock: null, placeWarning: 'closed up front' });

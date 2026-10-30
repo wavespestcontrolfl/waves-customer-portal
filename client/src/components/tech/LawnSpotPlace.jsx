@@ -3,7 +3,7 @@
 // The place of a spot treatment and the lawn's known trouble areas, for the lawn Fast Complete sheet
 // (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09). The server decides every word and every closed place
 // (lib/lawn-trouble-places.js reads it); this file renders:
-//   - PlaceControl         "Where" with one chip per place of the closed list, under a spot row's area. A place
+//   - PlaceControl         "Where" with one chip per place of the closed list (any number pressed), under a spot row's area. A place
 //                          a hold closes for the row (a take-all row on an unmapped place) is off, with the reason under the chips.
 //                          A yearly limit never closes a chip: its words are a warning on the Complete footer.
 //   - PlaceAddButtons      the place buttons of a one-tap entry (Weed spots, Chinch bugs found): the tap names the
@@ -21,14 +21,19 @@ function placeNote(row) {
   if (row.placeNowhere) return `${row.name} cannot go anywhere on this lawn right now. ${row.placeNowhere}`;
   if (row.placeBlock) return row.placeBlock;
   if (row.placeUnreadable) return 'The limits could not be checked for this place. Record what you applied; the office will review it.';
-  if (row.placeDefaulted) return 'Set from the known trouble area. Tap another place to change it.';
+  if (row.placeDefaulted) return 'Set from the known trouble area. Tap places to change it.';
   return null;
 }
 
-/** "Where on the lawn": one tap among the closed list. `onChange(placeId)`. */
+/**
+ * "Where on the lawn": one chip per place of the closed list, any number of them pressed (one spray on the Front and the Back is one
+ * application at both). `onChange(placeIds)` gets the whole new list, in the closed list's order; [] is allowed (the sheet then asks for a place).
+ */
 export function PlaceControl({ areas, row, title = null, locked, onChange }) {
   const known = knownPlacesOfType(areas, troubleTypeOfRow(row));
   const note = placeNote(row);
+  const current = row.places || [];
+  const toggle = (id) => onChange(areas.places.map((place) => place.id).filter((other) => (other === id ? !current.includes(id) : current.includes(other))));
   return (
     <div role="group" aria-label={title ? `${title} place` : `Place for ${row.name}`} className="tech-spot-area">
       <p className="tech-product-editor-label">Where on the lawn</p>
@@ -36,10 +41,10 @@ export function PlaceControl({ areas, row, title = null, locked, onChange }) {
         {areas.places.map((place) => (
           <Chip
             key={place.id}
-            disabled={locked || !!row.placeHolds?.[place.id]}
+            disabled={locked || (!!row.placeHolds?.[place.id] && !current.includes(place.id))}
             label={known.has(place.id) ? `${place.label} · known` : place.label}
-            pressed={row.place === place.id}
-            onClick={() => onChange(place.id)}
+            pressed={current.includes(place.id)}
+            onClick={() => toggle(place.id)}
           />
         ))}
       </div>

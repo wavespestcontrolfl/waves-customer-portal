@@ -1768,6 +1768,15 @@ describe('preflightLawnFastCompletion', () => {
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
     });
 
+    test('areaPlaces (a list): every id must be on the list and at least one is required; an older client\'s single areaPlace still passes', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'back'] })] })).toBeNull();
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'front', 'left_side', 'right_side', 'back'] })] })).toBeNull();
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: ['front', 'roof'] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required', error: 'Pick where on the lawn Test Weed Spray went.' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlaces: [''] })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'back' })] })).toBeNull();
+    });
+
     test('a row with a place, and a whole-lawn row without one, pass the preflight', async () => {
       expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front' }), { productId: P_GRAN, applicationMethod: 'granular_broadcast' }] })).toBeNull();
     });

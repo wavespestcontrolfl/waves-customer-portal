@@ -48,7 +48,7 @@
 //     the area; the Weed spots and Chinch entries take the place in the same tap that adds
 //     them, and a lawn's single known trouble area of the row's type is the default place).
 //     A place the yearly limits close for the row is off with the limit's words; Complete
-//     waits for a place the way it waits for an area, and goes to /complete as areaPlace.
+//     waits for a place the way it waits for an area, and goes to /complete as areaPlaces (a list: one spray on the Front and the Back is one row).
 //     A "Known trouble areas" line above the guide cards shows the lawn's areas, each with
 //     Clear and one confirm. Lib: lib/lawn-trouble-places.js; parts: LawnSpotPlace.jsx.
 //     With the context's `treatmentGuide` (GATE_LAWN_TREATMENT_GUIDE, owner 2026-10-08),
@@ -1016,15 +1016,15 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
 }
 
 // GATE_LAWN_TROUBLE_AREAS: every spot row (the ones withSpotArea marked) also carries its place: the tech's tap (the weed
-// entry's rows share `weedPlace`), else the lawn's single known trouble area of its type, with the places the yearly limits
+// entry's rows share `weedPlaces`), else the lawn's single known trouble area of its type, with the places the yearly limits
 // close for it. See lib/lawn-trouble-places.js.
 // The places a take-all row from the guide card may go on: the card's own mapped places, else the lawn's known take-all areas.
 const takeAllPlacesOf = (guide, areas) => new Set(((guide?.cards || []).find((card) => Array.isArray(card.allowedPlaces))?.allowedPlaces) || (areas?.known || []).filter((area) => area.type === 'take_all').map((area) => area.place));
 
-function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll, takeAllPlaces }) {
+function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlaces, takeAll, takeAllPlaces }) {
   const weedRows = rows.filter((row) => row.spotRule && row.weedGroup);
   return rows.map((row) => (row.spotRule
-    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
+    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlaces : row.pickedPlaces, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
     : row));
 }
 
@@ -1099,7 +1099,7 @@ function useProductRows(ctx, catalog) {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
       // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
-      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
+      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, ...(place ? { pickedPlaces: [place] } : {}) },
     ]));
   }, [spotRules]);
   const removeRow = useCallback((productId) => {
@@ -1176,18 +1176,24 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
   return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
 }
 
-// The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
-const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
+// A place of a row (its first by default), in the closed list's own words (the label rides the row's chips; the id is the fallback).
+const areaLabelOf = (row, id = row.place) => row.placeLabels?.[id] || id;
 
-// A yearly limit is a warning, never a block (owner 2026-10-30): one line per product and place, in the limit's own words (which
-// open with the product's name), above the Complete button. The completion records the application and the office is told.
+// A yearly limit is a warning, never a block (owner 2026-10-30): one line per product, in the limit's own words (which open with the
+// product's name), above the Complete button. A spray on several places names each place the limit warns at ("Front, Back"); places
+// with different words get a line each. The completion records the application and the office is told.
 function limitWarningsOf(rows) {
-  const lines = rows.filter((row) => row.placeRule && row.placeWarning).map((row) => {
+  const lines = [];
+  for (const row of rows.filter((other) => other.placeRule && other.placeWarnings?.length)) {
     const lead = `${row.name}:`;
-    const message = String(row.placeWarning).trim();
-    const words = message.startsWith(lead) ? message.slice(lead.length).trim() : message;
-    return `${row.name}, ${areaLabelOf(row)}: ${words} ${LIMIT_WARNING_TAIL}`;
-  });
+    const byWords = new Map();
+    for (const { place, text } of row.placeWarnings) {
+      const message = String(text).trim();
+      const words = message.startsWith(lead) ? message.slice(lead.length).trim() : message;
+      byWords.set(words, [...(byWords.get(words) || []), row.placeLabels?.[place] || place]);
+    }
+    for (const [words, labels] of byWords) lines.push(`${row.name}, ${labels.join(', ')}: ${words} ${LIMIT_WARNING_TAIL}`);
+  }
   return [...new Set(lines)];
 }
 
@@ -1209,7 +1215,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
   // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
   // it here; a yearly limit is a warning on the footer (limitWarningsOf).
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
-  const missingPlace = rows.find((row) => row.placeRule && !row.place);
+  const missingPlace = rows.find((row) => row.placeRule && !row.places?.length);
   const [, reason = ''] = [
     // GATE_LAWN_NEW_SOD_NOTE: the rooted tick is being saved, or the holds could not be read again after it.
     [sodWait, sodWait],
@@ -1228,7 +1234,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
     [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
-    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
+    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace, closedPlace.placeBlockPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
@@ -1312,7 +1318,7 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
         // A spot row's area, as the full form sends the plan's treatedSqft (spot rules).
         ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
         // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
-        ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
+        ...(row.placeRule && row.places?.length ? { areaPlaces: row.places, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
         ...targetBodyFields(row, ctx.spotTargets, { chinchTap }),
         // Gallons sprayed in place of an area: the server converts them with the product's staged carrier and records the area.
@@ -1706,7 +1712,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The weed mix's one shared area (spot rules): typed or picked once, it applies to every row of the entry.
   const [weedArea, setWeedArea] = useState('');
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
-  const [weedPlace, setWeedPlace] = useState('');
+  const [weedPlaces, setWeedPlaces] = useState('');
   // GATE_LAWN_MIX_HELP: the shared tank size and the weed entry's gallons sprayed.
   const mix = useMixHelp(sheetCtx.mixHelp, operatorId, submittedVisitArea({ propertyAreas: propertyAreas.data, lawnSqft, ctx }));
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
@@ -1720,10 +1726,10 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const rows = useMemo(
     () => {
       const spotted = products.rows.map((row) => withGallonsArea(withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }), mix));
-      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
+      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlaces, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlace, gov.takeAll, guide],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlaces, gov.takeAll, guide],
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
@@ -1858,7 +1864,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1929,7 +1935,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1963,12 +1969,12 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
             onRemove={() => removeRow(row.productId)}
           >
             <RowMixHelp row={row} mix={mix} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
-            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
+            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(places) => updateRow(row.productId, { pickedPlaces: places })} /> : null}
             <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} chinchTap={chinchTap} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
           </ProductEditor>
           {row === areaHost && (
             <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>
-              {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} /> : null}
+              {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlaces} /> : null}
               <WeedMixHelp mix={mix} rows={rows.filter((other) => other.weedGroup && other.spotRule)} surfactant={surfactantNote} locked={locked} onWeedArea={onWeedArea} />
             </SpotAreaControl>
           )}
