@@ -6,7 +6,8 @@
  * One read, five fields, no ids and nothing about product, chemistry, price or
  * staff:
  *   - mistTimes / installedOn  from the property's CURRENT calibration (the
- *     newest unvoided misting_calibrations row — the table is append-only);
+ *     newest unvoided misting_calibrations row for that exact property — the
+ *     table is append-only; a NULL-property row is history, never current);
  *   - lastRefillOn             the newest unvoided misting_refills row for that
  *     same property;
  *   - nextCheckOn              the customer's next misting service-plan visit
@@ -19,6 +20,7 @@
  */
 const db = require('../models/db');
 const { applyPropertyPredicate } = require('./account-properties');
+const { currentCalibration, currentCalibrationForCustomer } = require('./misting-records');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, UNREVIEWED_VOICE_MOVED_SQL } = require('./call-booking-source-actions');
 const { MISTING_SERVICE_CATALOG_KEY } = require('../utils/mosquito-misting-system');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -40,17 +42,24 @@ function nextMistInstant(mistTimes, now) {
 }
 
 async function getPortalMistingSystem({ customerId, scope, now = new Date(), knex = db }) {
-  // DATE columns are read as text: the pg driver turns a DATE into a Date at
-  // the process's local midnight, which is not the calendar day on every host.
-  const calibrationQuery = knex('misting_calibrations')
-    .where({ 'misting_calibrations.customer_id': customerId })
-    .whereNull('misting_calibrations.voided_at');
-  applyPropertyPredicate(calibrationQuery, scope, 'misting_calibrations');
-  const calibration = await calibrationQuery
-    .select('misting_calibrations.property_id', 'misting_calibrations.mist_times', knex.raw('misting_calibrations.installed_on::text as installed_on'))
-    .orderBy([{ column: 'misting_calibrations.created_at', order: 'desc' }, { column: 'misting_calibrations.id', order: 'desc' }])
+  // "Current" is picked exactly the way the staff service picks it (misting-records.currentCalibration and
+  // currentCalibrationForCustomer): an exact property match, newest unvoided row first. A calibration with
+  // a NULL property (its property row was deleted) or at a retired property is history and is never
+  // current, under any scope. Visits keep their own rule below.
+  let current;
+  if (scope && scope.enabled && scope.scoped) {
+    if (scope.closed || !scope.property) return null;
+    current = await currentCalibration(knex, customerId, scope.property.id);
+  } else {
+    current = await currentCalibrationForCustomer(knex, customerId);
+  }
+  if (!current) return null;
+  // DATE columns are read as text: the pg driver turns a DATE into a Date at the process's local
+  // midnight, which is not the calendar day on every host.
+  const calibration = await knex('misting_calibrations')
+    .where({ id: current.id })
+    .select('property_id', 'mist_times', knex.raw('installed_on::text as installed_on'))
     .first();
-  if (!calibration) return null;
 
   // Same visit rules as GET /api/schedule/next (routes/schedule.js).
   const checkQuery = knex('scheduled_services')
@@ -77,7 +86,7 @@ async function getPortalMistingSystem({ customerId, scope, now = new Date(), kne
   const refill = await knex('misting_refills')
     .where({ customer_id: customerId })
     .whereNull('voided_at')
-    .whereRaw('property_id IS NOT DISTINCT FROM ?', [calibration.property_id ?? null])
+    .where({ property_id: calibration.property_id })
     .select(knex.raw('refilled_on::text as refilled_on'))
     .orderBy([{ column: 'refilled_on', order: 'desc' }, { column: 'created_at', order: 'desc' }])
     .first();

@@ -31,6 +31,7 @@ postgres('misting portal reader against PostgreSQL', () => {
   let customerId;
   let planServiceId;
   let otherServiceId;
+  let home; // the customer's primary customer_properties row
   let sequence;
 
   beforeAll(async () => {
@@ -77,6 +78,7 @@ postgres('misting portal reader against PostgreSQL', () => {
       address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
     const existing = await trx('services').where({ service_key: 'mosquito_misting_service' }).first('id');
     planServiceId = existing ? existing.id : (await trx('services').insert({ service_key: 'mosquito_misting_service', name: 'Synthetic misting plan' }).returning('id'))[0].id;
+    home = await property(true);
     otherServiceId = (await trx('services').insert({ service_key: `synthetic_other_${customerId.slice(0, 8)}`, name: 'Synthetic other service' }).returning('id'))[0].id;
   });
 
@@ -96,7 +98,7 @@ postgres('misting portal reader against PostgreSQL', () => {
   const scopeFor = (property) => ({ customerId, enabled: true, multi: true, scoped: true, closed: false, property });
   const OPEN_SCOPE = () => ({ customerId, enabled: true, multi: false, scoped: false, closed: false, property: null });
   async function calibration(overrides = {}) {
-    const row = { id: randomUUID(), customer_id: customerId, property_id: null, installed_on: '2026-05-02', mist_times: TIMES, voided_at: null, created_at: stamp(), ...overrides };
+    const row = { id: randomUUID(), customer_id: customerId, property_id: home.id, installed_on: '2026-05-02', mist_times: TIMES, voided_at: null, created_at: stamp(), ...overrides };
     await trx('misting_calibrations').insert(row);
     return row;
   }
@@ -178,14 +180,14 @@ postgres('misting portal reader against PostgreSQL', () => {
     expect((await read()).nextCheckOn).toBe('2026-11-05');
   });
 
-  test('two properties: each scope sees only its own system, and a NULL-property calibration belongs to the primary', async () => {
-    const primary = await property(true);
+  test('two properties: each scope sees only its own system; calibrations carry the primary\'s real id', async () => {
+    const primary = home;
     const second = await property(false);
-    const primaryCal = await calibration({ property_id: null, mist_times: ['06:30'] });
+    const primaryCal = await calibration({ property_id: primary.id, mist_times: ['06:30'] });
     const secondCal = await calibration({ property_id: second.id, installed_on: '2026-06-10', mist_times: ['18:00'] });
     await refill(primaryCal, { refilled_on: '2026-10-01' });
     await refill(secondCal, { refilled_on: '2026-10-20' });
-    await visit({ property_id: null, scheduled_date: '2026-11-12' });
+    await visit({ property_id: null, scheduled_date: '2026-11-12' }); // unstamped visits belong to the primary
     await visit({ property_id: second.id, scheduled_date: '2026-11-20' });
 
     expect(await read(scopeFor(primary))).toEqual({
@@ -198,8 +200,43 @@ postgres('misting portal reader against PostgreSQL', () => {
     });
   });
 
+  test('a NULL-property calibration is never current: a newer NULL row is ignored under a scoped primary and an unscoped single home', async () => {
+    await calibration({ property_id: home.id, mist_times: ['07:00'] });
+    await calibration({ property_id: null, mist_times: ['08:00'] }); // newer, its property row was deleted
+    await visit();
+    expect((await read(scopeFor(home))).mistTimes).toEqual(['07:00']);
+    expect((await read(OPEN_SCOPE())).mistTimes).toEqual(['07:00']);
+    // Only a NULL row left: no current calibration at all, so no card.
+    await trx('misting_calibrations').where({ customer_id: customerId }).whereNotNull('property_id').delete();
+    expect(await read(scopeFor(home))).toBeNull();
+    expect(await read(OPEN_SCOPE())).toBeNull();
+  });
+
+  test('a calibration at a retired property shows no card, scoped or not; an older live one still wins', async () => {
+    const retired = await property(false);
+    await trx('customer_properties').where({ id: retired.id }).update({ active: false });
+    await calibration({ property_id: retired.id, mist_times: ['08:00'] });
+    await visit();
+    expect(await read(OPEN_SCOPE())).toBeNull();
+    expect(await read(scopeFor(retired))).toBeNull();
+    // A newer row at the retired property never hides the older one at the live home.
+    await trx('misting_calibrations').where({ property_id: retired.id }).update({ created_at: new Date('2026-12-01T00:00:00Z') });
+    await calibration({ property_id: home.id, mist_times: ['07:00'] });
+    expect((await read(OPEN_SCOPE())).mistTimes).toEqual(['07:00']);
+  });
+
+  test('a refill is matched to the current calibration\'s exact property', async () => {
+    const second = await property(false);
+    const homeCal = await calibration({ property_id: home.id });
+    const secondCal = await calibration({ property_id: second.id });
+    await refill(homeCal, { refilled_on: '2026-10-01' });
+    await refill(secondCal, { refilled_on: '2026-10-25' });
+    await visit();
+    expect((await read(scopeFor(home))).lastRefillOn).toBe('2026-10-01');
+  });
+
   test('a house with no system of its own sees none, and a closed scope sees nothing', async () => {
-    const primary = await property(true);
+    const primary = home;
     const second = await property(false);
     await calibration({ property_id: second.id });
     await visit({ property_id: second.id });
