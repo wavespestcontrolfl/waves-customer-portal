@@ -2398,8 +2398,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
-  // LIVE line map: home before gap at one start, after the collision pass and before the one-per-hour collapse.
-  const sortedPool = applyOnePerHour(applyLineOfferRule(dedupeSlots([...asap, ...classified]), lineRanking, { sameStart: true })).sort(compareCustomerFacingSlots);
+  // LIVE line map: with a ranked list, the home-first choice at one start and the
+  // one-per-hour collapse wait for the customer route check below, so a home slot that
+  // check rejects leaves the gap technician's slot at that start. No ranking: today's
+  // order (collapse first; applyLineOfferRule with no ranking returns its input).
+  const collapseStarts = (slots) => applyOnePerHour(applyLineOfferRule(slots, lineRanking, { sameStart: true }));
+  const mergedPool = dedupeSlots([...asap, ...classified]);
+  const sortedPool = (lineRanking ? mergedPool : collapseStarts(mergedPool)).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
     filterPastSlotsForToday(sortedPool, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -2441,16 +2446,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
-  const funneledBookable = await routeCheckedPool(funneledEligible, {
+  const routeChecked = await routeCheckedPool(funneledEligible, {
     coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
   });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
-  if (funneledBookable !== funneledEligible) {
-    const kept = new Set(funneledBookable);
+  if (routeChecked !== funneledEligible) {
+    const kept = new Set(routeChecked);
     const removed = new Set(funneledEligible.filter((slot) => !kept.has(slot)));
     countedBookable = bookable.filter((slot) => !removed.has(slot));
   }
+  // LIVE line map, ranked lists only: now the home-first choice at one start and the
+  // one-per-hour collapse (deferred above), on the list and on the count alike.
+  const funneledBookable = lineRanking ? collapseStarts(routeChecked) : routeChecked;
+  if (lineRanking) countedBookable = collapseStarts(countedBookable);
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with

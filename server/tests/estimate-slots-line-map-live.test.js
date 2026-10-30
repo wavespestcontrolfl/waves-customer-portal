@@ -27,6 +27,12 @@ jest.mock('../services/scheduling/line-technician', () => ({
   serviceLineFor: jest.fn(async () => ({ line: 'general', lineFrom: 'name' })),
   lineOfferRanking: jest.fn(async () => null),
 }));
+// GATE_CUSTOMER_ROUTE_CHECK stand-in: off unless a test turns it on and names the slots it rejects.
+const mockRouteCheck = { mode: 'off', rejects: () => false };
+jest.mock('../services/scheduling/customer-route-check', () => ({
+  customerRouteCheckMode: () => mockRouteCheck.mode,
+  filterOfferedSlots: jest.fn(async ({ slots }) => ({ slots: slots.filter((s) => !mockRouteCheck.rejects(s)) })),
+}));
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -311,6 +317,26 @@ describe('getAvailableSlots, line map live', () => {
     // The home technician's ASAP slot at 10:00 beats the gap technician's route slot; tech-other is gone.
     expect(ten.map((s) => s.techId)).toEqual(['tech-home']);
     expect(all(result).some((s) => s.techId === 'tech-other')).toBe(false);
+  });
+
+  test('live + route check on: a home slot the check rejects leaves the gap slot at that start (choice runs after the check)', async () => {
+    process.env[GATE] = 'live';
+    lineTechnician.lineOfferRanking.mockResolvedValue(RANKING);
+    mockRouteCheck.mode = 'on';
+    mockRouteCheck.rejects = (s) => s.techId === 'tech-home' && s.date === '2027-05-20' && s.windowStart === '10:00';
+    try {
+      const result = await getAvailableSlots(ESTIMATE_ROW.id, { ...WINDOW, offer: true, maxResults: 80, expanderMaxResults: 0 });
+      const ten = all(result).filter((s) => startKey(s) === '2027-05-20|10:00');
+      expect(ten.map((s) => s.techId)).toEqual(['tech-gap']);
+      // Every other start still goes to the home technician, once.
+      const others = all(result).filter((s) => startKey(s) !== '2027-05-20|10:00');
+      expect(others.length).toBeGreaterThan(0);
+      expect(new Set(others.map((s) => s.techId))).toEqual(new Set(['tech-home']));
+      expect(new Set(all(result).map(startKey)).size).toBe(all(result).length);
+    } finally {
+      mockRouteCheck.mode = 'off';
+      mockRouteCheck.rejects = () => false;
+    }
   });
 
   test('live: a ranked list is not served from, or written to, the 5-minute cache', async () => {
