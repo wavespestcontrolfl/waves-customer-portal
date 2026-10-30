@@ -1017,7 +1017,30 @@ const STAGE_PIN_COLORS = {
   churned: "#C0392B",
 };
 
-function CustomerMap({ customers: _ignored, onSelect }) {
+// A marker needs a real stored coordinate pair. null/undefined must not coerce
+// to 0 and a (0, 0) pair is the "never located" placeholder, not a customer.
+function storedCoordinates(c) {
+  if (c?.lat == null || c?.lng == null || c.lat === "" || c.lng === "") return null;
+  const lat = Number(c.lat);
+  const lng = Number(c.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return { lat, lng };
+}
+
+const NO_MAP_ROWS = [];
+
+function hasMappableAddress(c) {
+  const text = [c?.address, c?.city].filter(Boolean).join(", ");
+  return text.replace(/[,\s]/g, "").length >= 5;
+}
+
+// The Directory loads the rows (every page of its current search/filters, up
+// to its cap) and passes them in; `total` is the server's match count. Markers
+// come from stored coordinates only: this component makes no customer request
+// and no geocoder call, so a customer is "mapped" only when a marker exists.
+function CustomerMap({ customers: rows, total, loading = false, onSelect }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
@@ -1025,18 +1048,13 @@ function CustomerMap({ customers: _ignored, onSelect }) {
   const [mapError, setMapError] = useState(null);
   const [filterTier, setFilterTier] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
-  const [stats, setStats] = useState({ total: 0, mapped: 0, unmapped: 0 });
+  const [stats, setStats] = useState({
+    mapped: 0,
+    notLocated: 0,
+    noAddress: 0,
+  });
   const [selectedPin, setSelectedPin] = useState(null);
-  const [customers, setCustomers] = useState([]);
-
-  // Load ALL customers for the map (not paginated)
-  useEffect(() => {
-    adminFetch("/admin/customers?limit=5000")
-      .then((data) =>
-        setCustomers(Array.isArray(data) ? data : data.customers || []),
-      )
-      .catch(() => {});
-  }, []);
+  const customers = Array.isArray(rows) ? rows : NO_MAP_ROWS;
 
   // Load Google Maps script
   useEffect(() => {
@@ -1091,7 +1109,8 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 
   // Build map + markers
   useEffect(() => {
-    if (!mapReady || !mapRef.current || !window.google?.maps) return;
+    if (!mapReady || !mapRef.current || !window.google?.maps) return undefined;
+    let fitTimer = null;
     try {
       // Init map centered on Bradenton/LWR area
       if (!mapInstance.current) {
@@ -1128,46 +1147,11 @@ function CustomerMap({ customers: _ignored, onSelect }) {
       markersRef.current.forEach((m) => m.setMap(null));
       markersRef.current = [];
 
-      // Geocode + place markers
-      const geocoder = new window.google.maps.Geocoder();
+      // Place markers from stored coordinates only (no geocoding).
       let mapped = 0,
-        unmapped = 0;
+        notLocated = 0,
+        noAddress = 0;
       const bounds = new window.google.maps.LatLngBounds();
-      const infoWindow = new window.google.maps.InfoWindow();
-
-      const mappable = filtered.filter((c) => c.address || c.city);
-
-      mappable.forEach((c, idx) => {
-        const address = [c.address, c.city, c.state, c.zip]
-          .filter(Boolean)
-          .join(", ");
-        if (!address || address.replace(/,\s*/g, "").length < 5) {
-          unmapped++;
-          return;
-        }
-
-        // Use lat/lng if available, otherwise geocode
-        if (c.lat && c.lng) {
-          placeMarker(c, { lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
-          mapped++;
-          bounds.extend({ lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
-        } else if (idx < 200) {
-          // limit geocoding to 200 to avoid quota
-          geocoder.geocode({ address: address + ", FL" }, (results, status) => {
-            if (status === "OK" && results[0]) {
-              const pos = results[0].geometry.location;
-              placeMarker(c, pos);
-              bounds.extend(pos);
-              if (mapped + unmapped >= Math.min(mappable.length, 200)) {
-                mapInstance.current.fitBounds(bounds, 50);
-              }
-            }
-          });
-          mapped++;
-        } else {
-          unmapped++;
-        }
-      });
 
       function placeMarker(c, position) {
         const color =
@@ -1190,17 +1174,28 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 
         marker.addListener("click", () => {
           setSelectedPin(c);
-          infoWindow.close();
         });
 
         markersRef.current.push(marker);
       }
 
-      unmapped += filtered.length - mappable.length;
-      setStats({ total: filtered.length, mapped, unmapped });
+      filtered.forEach((c) => {
+        const position = storedCoordinates(c);
+        if (position) {
+          placeMarker(c, position);
+          mapped++;
+          bounds.extend(position);
+        } else if (hasMappableAddress(c)) {
+          notLocated++;
+        } else {
+          noAddress++;
+        }
+      });
+
+      setStats({ mapped, notLocated, noAddress });
 
       if (mapped > 0) {
-        setTimeout(() => {
+        fitTimer = setTimeout(() => {
           if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
             mapInstance.current.setCenter(bounds.getCenter());
             mapInstance.current.setZoom(14);
@@ -1213,6 +1208,9 @@ function CustomerMap({ customers: _ignored, onSelect }) {
       console.error("[CustomerMap] Error:", e);
       setMapError(e.message);
     }
+    return () => {
+      if (fitTimer) clearTimeout(fitTimer);
+    };
   }, [mapReady, filtered]);
 
   if (!MAPS_KEY) {
@@ -1347,8 +1345,13 @@ function CustomerMap({ customers: _ignored, onSelect }) {
           <option value="at_risk">At Risk</option>{" "}
           <option value="churned">Churned</option>{" "}
         </select>{" "}
-        <div style={{ fontSize: 12, color: D.muted }}>
-          {stats.mapped} mapped · {stats.unmapped} no address
+        <div style={{ fontSize: 14, color: D.muted }}>
+          {loading
+            ? "Loading customers…"
+            : `${stats.mapped} mapped · ${stats.notLocated} not on the map yet · ${stats.noAddress} no address`}
+          {!loading && Number(total) > customers.length
+            ? ` · Showing ${customers.length} of ${total} customers`
+            : ""}
         </div>
         {/* Legend */}
         <div

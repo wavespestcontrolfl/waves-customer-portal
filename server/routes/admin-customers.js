@@ -85,6 +85,9 @@ const TECH_LIST_STRIPPED_FIELDS = [
   // never render plan price, and the server-priced estimate builder doesn't
   // take it from directory rows.
   'monthlyRate',
+  // Stored coordinates are the map's office-only input; a technician already
+  // gets the address text for assigned customers and needs nothing more.
+  'lat', 'lng',
 ];
 
 function techSafeListRow(mapped) {
@@ -1247,6 +1250,12 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   };
 }
 
+function toCoordinate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function mapCustomerListRow(c) {
   return {
     id: c.id, firstName: c.first_name, lastName: c.last_name,
@@ -1265,6 +1274,10 @@ function mapCustomerListRow(c) {
     serviceContact3Phone: c.service_contact3_phone,
     serviceContact3Email: c.service_contact3_email,
     address: formatAddress({ line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip }),
+    // Stored coordinates (customers.latitude/longitude, filled by create/edit
+    // geocoding and the hourly sweep). The Map view places markers from these
+    // only; null means "not located yet". Numeric columns arrive as strings.
+    lat: toCoordinate(c.latitude), lng: toCoordinate(c.longitude),
     tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
     memberSince: c.member_since, active: c.active,
     pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
@@ -1410,7 +1423,9 @@ function applyCustomerListFilters(query, filters, healthColumns) {
         .whereRaw('invoices.customer_id = customers.id')
         .whereIn('status', ['sent', 'viewed', 'overdue'])
         .groupBy('customer_id')
-        .havingRaw('COALESCE(SUM(total), 0) > 0');
+        // Net due, the same expression as the row's balance_owed: an open-status
+        // invoice fully covered by payments or credits is not a balance.
+        .havingRaw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) > 0');
     });
   }
   if (lastVisited && lastVisited !== 'all') {
