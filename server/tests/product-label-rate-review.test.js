@@ -8,12 +8,13 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/epa-product-label', () => ({
   ...jest.requireActual('../services/epa-product-label'),
-  findEpaLabel: jest.fn(), currentEpaSourceStatus: jest.fn(),
+  findEpaLabel: jest.fn(), currentEpaSourceStatus: jest.fn(), checkEpaSource: jest.fn(),
 }));
 const db = require('../models/db');
 const { recordAuditEvent } = require('../services/audit-log');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { findEpaLabel, currentEpaSourceStatus } = require('../services/epa-product-label');
+const { findEpaLabel, currentEpaSourceStatus, checkEpaSource } = require('../services/epa-product-label');
+const keep = require('../services/epa-label-check-keep')._test;
 const { extractionError, getLabelReview, extractLabelReview, decideLabelReview, revokeLabelReview } = require('../services/product-label-review');
 const { reviewedRates, rateFactsError, MAX_DIRECTIONS } = require('../services/product-label-rates');
 
@@ -43,6 +44,9 @@ beforeEach(() => {
   db.transaction = async (fn) => fn(db);
   findEpaLabel.mockResolvedValue({ source: { registration: '123-456', productName: row.name, filename: '000123-00456-20260101.pdf', url: 'https://www3.epa.gov/pesticides/chem_search/ppls/000123-00456-20260101.pdf' }, bytes: Buffer.from('%PDF-test'), pageCount: 3, sha256: 'source-hash' });
   currentEpaSourceStatus.mockResolvedValue('current');
+  // Inventory's read of approved directions goes through the kept check (epa-label-check-keep.js); no answer kept yet.
+  checkEpaSource.mockResolvedValue({ status: 'current', checkedAt: Date.now() });
+  keep.seen.clear();
   dispatchWithFallback.mockResolvedValue({ ok: true, json: extraction() });
 });
 afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; delete process.env.GATE_LABEL_RATE_REVIEW; });
@@ -91,7 +95,9 @@ test.each(['superseded', 'unavailable', 'inactive'])('approved directions are wi
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID, 'rates');
   await approve(review.draft.id);
   expect(reviewedRates(row, status)).toMatchObject({ verified: false, directions: [] });
-  currentEpaSourceStatus.mockResolvedValue(status);
+  // No earlier answer kept (memory cleared, no stored row): an outage reads unverified too.
+  keep.seen.clear();
+  checkEpaSource.mockResolvedValue({ status, checkedAt: Date.now() });
   const result = await getLabelReview(PRODUCT_ID, 'rates');
   expect(result.activeCurrent).toBe(false);
   expect(result.activeReason).toMatch(/EPA/);

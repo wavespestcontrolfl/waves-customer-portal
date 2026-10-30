@@ -230,25 +230,33 @@ async function findEpaLabel(registration) {
   return { source, ...await downloadEpaLabel(source) };
 }
 
-async function currentEpaSourceStatus(source, { refresh = false } = {}) {
+async function sourceStatusNow(source) {
+  try {
+    const latest = await findEpaSource(source?.registration);
+    if (latest.filename !== source.filename) return 'superseded';
+    const document = await downloadEpaLabel(latest);
+    return document.sha256 === source.sha256 ? 'current' : 'superseded';
+  } catch (err) {
+    // 'inactive' is EPA's answer (the registration is cancelled or not active, or its label is no longer listed),
+    // not an outage: the kept last check (epa-label-check-keep.js) never covers it.
+    return err?.inactive ? 'inactive' : 'unavailable';
+  }
+}
+
+// EPA's answer for a reviewed source and the time it came (ms): { status, checkedAt }; status is current, superseded,
+// inactive or unavailable. Cached 60 seconds: a cached answer keeps the time EPA gave it, so it never reads as newer.
+async function checkEpaSource(source, { refresh = false } = {}) {
   const key = `${source?.registration}:${source?.filename}:${source?.sha256}`;
   const cached = sourceChecks.get(key);
   if (!refresh && cached && cached.expiresAt > Date.now()) return cached.promise;
-  const promise = (async () => {
-    try {
-      const latest = await findEpaSource(source?.registration);
-      if (latest.filename !== source.filename) return 'superseded';
-      const document = await downloadEpaLabel(latest);
-      return document.sha256 === source.sha256 ? 'current' : 'superseded';
-    } catch (err) {
-      // 'inactive' is EPA's answer (the registration is cancelled or not active, or its label is no longer listed),
-      // not an outage: the kept last check (epa-label-check-keep.js) never covers it.
-      return err?.inactive ? 'inactive' : 'unavailable';
-    }
-  })();
+  const promise = sourceStatusNow(source).then((status) => ({ status, checkedAt: Date.now() }));
   sourceChecks.set(key, { promise, expiresAt: Date.now() + 60000 });
   if (sourceChecks.size > 128) sourceChecks.delete(sourceChecks.keys().next().value);
   return promise;
 }
 
-module.exports = { findEpaRegistrationByName, findEpaLabel, downloadEpaLabel, selectEpaSource, currentEpaSourceStatus, labelError };
+async function currentEpaSourceStatus(source, options) {
+  return (await checkEpaSource(source, options)).status;
+}
+
+module.exports = { findEpaRegistrationByName, findEpaLabel, downloadEpaLabel, selectEpaSource, checkEpaSource, currentEpaSourceStatus, labelError };

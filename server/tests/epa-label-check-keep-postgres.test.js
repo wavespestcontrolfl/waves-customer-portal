@@ -4,8 +4,8 @@
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => ({}));
-jest.mock('../services/epa-product-label', () => ({ currentEpaSourceStatus: jest.fn() }));
-const { currentEpaSourceStatus } = require('../services/epa-product-label');
+jest.mock('../services/epa-product-label', () => ({ checkEpaSource: jest.fn() }));
+const { checkEpaSource } = require('../services/epa-product-label');
 const { keptEpaSourceStatus, _test } = require('../services/epa-label-check-keep');
 
 postgres('kept EPA label check against migrated PostgreSQL', () => {
@@ -15,6 +15,8 @@ postgres('kept EPA label check against migrated PostgreSQL', () => {
   let now;
   const source = { registration: '123-456', filename: '000123-00456-20400101.pdf', sha256: 'f'.repeat(64) };
   const stored = async () => JSON.parse((await trx('system_settings').where({ key: _test.keyOf(source) }).first()).value);
+  // EPA answers in order, each given at the moment of the call; then no answer.
+  const answers = (...statuses) => checkEpaSource.mockImplementation(async () => ({ status: statuses.shift() || 'unavailable', checkedAt: Date.now() }));
 
   beforeAll(() => {
     const connection = process.env.DATABASE_URL;
@@ -29,7 +31,7 @@ postgres('kept EPA label check against migrated PostgreSQL', () => {
   beforeEach(async () => {
     trx = await database.transaction();
     _test.seen.clear();
-    currentEpaSourceStatus.mockReset();
+    checkEpaSource.mockReset();
     now = Date.parse('2040-01-01T12:00:00Z');
     clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
   });
@@ -40,7 +42,7 @@ postgres('kept EPA label check against migrated PostgreSQL', () => {
   afterAll(async () => { await database?.destroy(); });
 
   test('an answer is stored, a newer one replaces it, and an outage after a deploy reads it back', async () => {
-    currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('inactive').mockResolvedValue('unavailable');
+    answers('current', 'inactive');
     expect(await keptEpaSourceStatus(source, { dbh: trx })).toBe('current');
     expect(await stored()).toMatchObject({ status: 'current', checkedAt: '2040-01-01T12:00:00.000Z' });
     now += 60000;
@@ -53,13 +55,12 @@ postgres('kept EPA label check against migrated PostgreSQL', () => {
   test('a retried older answer from another process never replaces a newer stored one', async () => {
     // Process B stored 'inactive' at 12:05.
     now = Date.parse('2040-01-01T12:05:00Z');
-    currentEpaSourceStatus.mockResolvedValueOnce('inactive');
+    answers('inactive');
     await keptEpaSourceStatus(source, { dbh: trx });
     // Process A got 'current' at 12:00 but could not save it; it retries during an outage at 12:10.
     _test.seen.clear();
     _test.seen.set(_test.keyOf(source), { status: 'current', at: Date.parse('2040-01-01T12:00:00Z'), savedAt: null });
     now = Date.parse('2040-01-01T12:10:00Z');
-    currentEpaSourceStatus.mockResolvedValue('unavailable');
     expect(await keptEpaSourceStatus(source, { dbh: trx })).toBe('inactive');
     expect(await stored()).toMatchObject({ status: 'inactive', checkedAt: '2040-01-01T12:05:00.000Z' });
   });

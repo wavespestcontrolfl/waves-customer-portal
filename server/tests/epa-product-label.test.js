@@ -1,5 +1,5 @@
 const { PDFDocument } = require('pdf-lib');
-const { findEpaLabel, selectEpaSource, downloadEpaLabel, currentEpaSourceStatus, findEpaRegistrationByName } = require('../services/epa-product-label');
+const { findEpaLabel, selectEpaSource, downloadEpaLabel, checkEpaSource, currentEpaSourceStatus, findEpaRegistrationByName } = require('../services/epa-product-label');
 const row = () => ({ eparegno: '123-456', productname: 'Synthetic product', product_status: 'Active', cancel_flag: 'No', pdffiles: [
   { epa_reg_num: '123-456', pdffile: '000123-00456-20250101.pdf' },
   { epa_reg_num: '123-456', pdffile: '000123-00456-20260101.pdf' },
@@ -112,6 +112,17 @@ test('a changed PDF checksum and an unavailable EPA lookup never count as curren
   expect(await currentEpaSourceStatus(source)).toBe('superseded');
   clock.mockReturnValue(3060001); fetched.mockRejectedValue(new Error('EPA unavailable'));
   expect(await currentEpaSourceStatus(source)).toBe('unavailable');
+});
+
+test('a cached answer keeps the time EPA gave it', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(6000000);
+  jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
+  expect(await checkEpaSource(source)).toEqual({ status: 'current', checkedAt: 6000000 });
+  clock.mockReturnValue(6050000);
+  expect(await checkEpaSource(source)).toEqual({ status: 'current', checkedAt: 6000000 });
+  expect(await currentEpaSourceStatus(source)).toBe('current');
 });
 
 test('EPA\'s own record of a cancelled registration or a removed label is "inactive"; an empty answer is an outage', async () => {

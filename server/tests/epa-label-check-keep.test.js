@@ -20,16 +20,18 @@ jest.mock('../models/db', () => {
   db.rows = rows;
   return db;
 });
-jest.mock('../services/epa-product-label', () => ({ currentEpaSourceStatus: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ checkEpaSource: jest.fn() }));
 
 const db = require('../models/db');
-const { currentEpaSourceStatus } = require('../services/epa-product-label');
+const { checkEpaSource } = require('../services/epa-product-label');
 const { keptEpaSourceStatus, _test } = require('../services/epa-label-check-keep');
 
 const source = { registration: '91234-401', filename: '091234-00401-20251216.pdf', sha256: 'a'.repeat(64) };
 const DAY = 24 * 3600000;
 let now;
 let clock;
+// EPA answers in order, each given at the moment of the call; then no answer.
+const answers = (...statuses) => checkEpaSource.mockImplementation(async () => ({ status: statuses.shift() || 'unavailable', checkedAt: Date.now() }));
 beforeEach(() => {
   db.rows.clear();
   db.failing = false;
@@ -41,7 +43,7 @@ beforeEach(() => {
 afterEach(() => clock.mockRestore());
 
 test('a failed check uses the last answer for up to 7 days, then says unavailable', async () => {
-  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValue('unavailable');
+  answers('current');
   expect(await keptEpaSourceStatus(source)).toBe('current');
   const [[key, row]] = [...db.rows];
   expect(key.length).toBeLessThanOrEqual(100); // system_settings.key is varchar(100)
@@ -57,7 +59,7 @@ test('a failed check uses the last answer for up to 7 days, then says unavailabl
 });
 
 test('a changed label stays changed; another label file or checksum never borrows the answer', async () => {
-  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('superseded').mockResolvedValue('unavailable');
+  answers('current', 'superseded');
   await keptEpaSourceStatus(source);
   // A new answer is written at once, inside the hour.
   now += 60000;
@@ -68,7 +70,7 @@ test('a changed label stays changed; another label file or checksum never borrow
 });
 
 test('a cancelled registration is kept too: current, then cancelled, then an outage reads cancelled (pre-push audit P1)', async () => {
-  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('inactive').mockResolvedValue('unavailable');
+  answers('current', 'inactive');
   expect(await keptEpaSourceStatus(source)).toBe('current');
   now += 60000;
   expect(await keptEpaSourceStatus(source)).toBe('inactive');
@@ -76,8 +78,22 @@ test('a cancelled registration is kept too: current, then cancelled, then an out
   expect(await keptEpaSourceStatus(source)).toBe('inactive');
 });
 
+test('a cached answer read again keeps the time EPA gave it, so another process\'s newer answer wins (pre-push audit P1)', async () => {
+  const at1200 = now;
+  checkEpaSource.mockResolvedValue({ status: 'current', checkedAt: at1200 });
+  await keptEpaSourceStatus(source);
+  // Another process stored 'inactive' 30 seconds later.
+  db.rows.set(_test.keyOf(source), { key: _test.keyOf(source), value: JSON.stringify({ ...source, status: 'inactive', checkedAt: new Date(at1200 + 30000).toISOString() }) });
+  // This process reads its cached 'current' again at 12:00:50, then EPA stops answering.
+  now = at1200 + 50000;
+  await keptEpaSourceStatus(source);
+  now = at1200 + 90000;
+  checkEpaSource.mockResolvedValue({ status: 'unavailable', checkedAt: now });
+  expect(await keptEpaSourceStatus(source)).toBe('inactive');
+});
+
 test('the same answer is written at most once an hour', async () => {
-  currentEpaSourceStatus.mockResolvedValue('current');
+  checkEpaSource.mockImplementation(async () => ({ status: 'current', checkedAt: Date.now() }));
   await keptEpaSourceStatus(source);
   await keptEpaSourceStatus(source);
   expect(db).toHaveBeenCalledTimes(1);
@@ -88,7 +104,7 @@ test('the same answer is written at most once an hour', async () => {
 });
 
 test('a newer answer that failed to save still beats the stored older one, and is saved on a later call (pre-push audit P1)', async () => {
-  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('inactive').mockResolvedValue('unavailable');
+  answers('current', 'inactive');
   await keptEpaSourceStatus(source);
   db.failing = true;
   now += 60000;
@@ -105,13 +121,13 @@ test('a newer answer that failed to save still beats the stored older one, and i
 
 test('a database error never fails the check; a source with no checksum is never kept', async () => {
   db.failing = true;
-  currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValueOnce('unavailable');
+  answers('current');
   expect(await keptEpaSourceStatus(source)).toBe('current');
   // This process still has the answer.
   expect(await keptEpaSourceStatus(source)).toBe('current');
   db.failing = false;
   db.mockClear();
-  currentEpaSourceStatus.mockResolvedValue('current');
+  checkEpaSource.mockImplementation(async () => ({ status: 'current', checkedAt: Date.now() }));
   expect(await keptEpaSourceStatus({ registration: '91234-401' })).toBe('current');
   expect(db).not.toHaveBeenCalled();
 });
@@ -126,10 +142,10 @@ test('the job card weather check and the rate check both use it', async () => {
     const product = { id: 'x', name: 'Synthetic WSG', epa_reg_number: '91234-401', formulation: 'WSG' };
     product.label_weather_review = { active: { status: 'approved', productSnapshot: labelProductSnapshot(product), source } };
     product.label_rate_review = { active: { status: 'approved', productSnapshot: rateProductSnapshot(product), source } };
-    currentEpaSourceStatus.mockResolvedValueOnce('current').mockResolvedValue('unavailable');
+    answers('current');
     expect(await checkReviewedWeatherSources([product])).toEqual({ x: 'current' });
     expect(await checkReviewedRateSources([product])).toEqual({ x: 'current' });
-    expect(currentEpaSourceStatus).toHaveBeenCalledWith(source);
+    expect(checkEpaSource).toHaveBeenCalledWith(source);
   } finally {
     delete process.env.GATE_LABEL_PIPELINE;
     delete process.env.GATE_LABEL_RATE_REVIEW;
