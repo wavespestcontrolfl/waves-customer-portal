@@ -51,12 +51,16 @@ No active review (or a disabled gate) retains existing behavior. A revoked or
 stale active review stays UNKNOWN instead of falling back to an older stamp.
 
 Inventory, Job Card, and mix-calculator reads validate active evidence against
-the latest PPLS filename and PDF checksum. A newer document, changed bytes,
-cancelled registration, or unavailable EPA source makes the review inactive and
-the weather verdict UNKNOWN. Checks are coalesced in a bounded 128-entry cache
-for at most 60 seconds; no PDF bytes are retained there. Approval always bypasses
-that cache. Source requests happen outside catalog transactions and perform no
-database writes or model calls.
+the latest PPLS filename and PDF checksum. A newer document, changed bytes, or
+cancelled registration makes the review inactive and the weather verdict UNKNOWN.
+Checks are coalesced in a bounded 128-entry cache for at most 60 seconds; no PDF
+bytes are retained there. Approval always bypasses that cache. An unavailable EPA
+source uses the last check that got an answer for the same filename and checksum,
+up to 7 days old (owner 2026-10-30, `epa-label-check-keep.js`): each answer is
+kept in `system_settings` (`epa_label_check:*`, at most one write an hour while it
+is unchanged), so a deploy does not lose it. With no such answer the review is
+inactive and the verdict UNKNOWN. Approval never uses the kept answer. Source
+requests happen outside catalog transactions and make no model calls.
 
 Conditional restrictions remain UNKNOWN unless another reviewed limit already
 establishes HOLD. If no numeric limit is established, the card stays UNKNOWN.

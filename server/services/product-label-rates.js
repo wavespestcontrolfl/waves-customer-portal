@@ -3,7 +3,7 @@
 // label states for it, with the source quote and page. Nothing here writes
 // label_verified_at, the catalog rate columns, protocols or pricing.
 const { gateEnvValue } = require('../config/feature-gates');
-const { currentEpaSourceStatus } = require('./epa-product-label');
+const { keptEpaSourceStatus } = require('./epa-label-check-keep');
 
 const MAX_DIRECTIONS = 40;
 // Catalog weather columns are not part of rate identity: editing a wind limit
@@ -77,7 +77,8 @@ async function checkReviewedRateSources(products) {
   if (!rateGateOn()) return {};
   const approved = products.filter((product) => product.label_rate_review?.active?.status === 'approved'
     && sameRateProduct(product, product.label_rate_review.active.productSnapshot));
-  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await currentEpaSourceStatus(product.label_rate_review.active.source)])));
+  // The same label check as the weather review's (epa-label-check-keep.js).
+  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await keptEpaSourceStatus(product.label_rate_review.active.source)])));
 }
 
 module.exports = {

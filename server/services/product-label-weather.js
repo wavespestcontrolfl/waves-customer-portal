@@ -1,7 +1,7 @@
 // Weather-evidence reader and source checks shared by Inventory and Job Card.
 // The general label_verified_at stamp and all application rates stay untouched.
 const { gateEnvValue } = require('../config/feature-gates');
-const { currentEpaSourceStatus } = require('./epa-product-label');
+const { keptEpaSourceStatus } = require('./epa-label-check-keep');
 
 const WEATHER_FIELDS = ['minTempF', 'maxTempF', 'maxWindMph', 'rainFreeHours'];
 const SNAPSHOT_FIELDS = ['name', 'epa_reg_number', 'formulation', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rainfast_minutes', 'rain_free_hours'];
@@ -39,7 +39,8 @@ async function checkReviewedWeatherSources(products) {
   if (!gateEnvValue('GATE_LABEL_PIPELINE')) return {};
   const approved = products.filter((product) => product.label_weather_review?.active?.status === 'approved'
     && sameLabelProduct(product, product.label_weather_review.active.productSnapshot));
-  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await currentEpaSourceStatus(product.label_weather_review.active.source)])));
+  // A failed EPA check uses the last check that got an answer, up to 7 days old (epa-label-check-keep.js).
+  return Object.fromEntries(await Promise.all(approved.map(async (product) => [product.id, await keptEpaSourceStatus(product.label_weather_review.active.source)])));
 }
 
 module.exports = { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct, reviewedWeather, checkReviewedWeatherSources };
