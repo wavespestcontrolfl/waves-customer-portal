@@ -3363,6 +3363,18 @@ describe('suggested from this lawn', () => {
       expect(await probe()).toEqual(expected);
     });
 
+    // Owner 2026-10-30: a limit warns, never blocks. With the guide off a capped weed member is in the search; its row still
+    // carries the limit's words, from the context's own weed decision.
+    test('guide off: a weed product at its yearly limit is added through the search with the limit warning on its row', async () => {
+      const capped = 'Lead WG: 3/3 applications this year — LIMIT REACHED.';
+      await mxOpen(mxContext({ treatmentGuide: false, plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], limitMessages: { [P_LEAD]: capped } } }) }));
+      await analyze();
+      expect(await searchState('Lead WG', /^Lead WG/)).toBe('addable');
+      fireEvent.click(screen.getAllByRole('button', { name: /^Lead WG/ })[0]);
+      const row = await screen.findByRole('group', { name: 'Lead WG' });
+      expect(within(row).getByText(`${capped} You can still complete. The office gets an alert.`)).toBeTruthy();
+    });
+
     test('a failed guide request keeps the context\'s rungs governed: the search lists them, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
       await mxOpen();

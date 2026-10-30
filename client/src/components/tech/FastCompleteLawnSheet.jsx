@@ -610,9 +610,11 @@ function limitClosedIds({ weedMix, chinch }) {
 }
 
 // What the sheet says about a product a limit closes, `Map<lowercase id, words>`: the fresh answer's own words first, else the line above.
+// The decisions' own words (limitMessages) stand in when there is no answer, so the guide being off still warns.
 function limitWarnings({ guide, weedMix, chinch }) {
   const words = new Map(Object.entries(guide?.limitWarned || {}).map(([id, message]) => [id.toLowerCase(), message]));
-  for (const id of limitClosedIds({ weedMix, chinch })) if (!words.has(id)) words.set(id, LIMIT_WARNING_FALLBACK);
+  const decided = new Map(Object.entries({ ...(weedMix?.limitMessages || {}), ...(chinch?.limitMessages || {}) }).map(([id, message]) => [id.toLowerCase(), message]));
+  for (const id of limitClosedIds({ weedMix, chinch })) if (!words.has(id)) words.set(id, decided.get(id) || LIMIT_WARNING_FALLBACK);
   return words;
 }
 
@@ -638,7 +640,10 @@ function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) {
     // The guide is off: no cards, no decision. The Group 11 rows the plan passed over are still held (out of the list and the search).
     const held = new Set(lowerIds(ctx.group11HeldProductIds));
-    return held.size ? { ...NO_GOVERNANCE, governed: held, hidden: held } : NO_GOVERNANCE;
+    // A capped weed or chinch product is in the search with the guide off too; the context's own decisions give its warning.
+    const limitWarned = limitWarnings({ guide: null, weedMix: ctx.weedMix, chinch: ctx.chinch });
+    if (!held.size && !limitWarned.size) return NO_GOVERNANCE;
+    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held } : {}) };
   }
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
