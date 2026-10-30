@@ -430,6 +430,16 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(thirdPartyCallMakesNoServiceAsk(vendorCallback)).toBe(false);
     expect(thirdPartyCallMakesNoServiceAsk(applicantCancels)).toBe(false);
   });
+  test('the phone-match branch never backfills an applicant / vendor email or address onto the matched customer (gate on)', () => {
+    // Codex #7034 r2 security P2: the gate drops the email/address review cards, so the
+    // backfill must take the pre-linked path's third-party veto or the write is silent.
+    const at = src.indexOf("source: 'call-extraction-backfill'");
+    expect(at).toBeGreaterThan(-1);
+    const before = src.slice(Math.max(0, at - 700), at);
+    expect(before).toContain('if (!(callApplicantHandlingLive() && v2ThirdPartyCallNature)) {');
+    expect(src.match(/source: 'call-extraction-backfill'/g).length).toBe(1);
+  });
+
   test('the Careers step runs on the main path (after commitments) and on the voicemail exit path', () => {
     expect(src.match(/await fileApplicantCareersRowStep\(/g).length).toBe(2);
     expect(src.match(/await fileApplicantCareersRowStep\(\{ call, callSid, extracted, v2Result, procGeneration \}\)/g).length).toBe(2);

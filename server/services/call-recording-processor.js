@@ -14601,10 +14601,15 @@ const CallRecordingProcessor = {
         customerId = existing.id;
         phoneMatchedThisPass = true;
         // Update with any new info (email + address; shared with the
-        // pre-linked path below).
-        await backfillLinkedCustomerFromExtraction({
-          customerId, existing, extracted, source: 'call-extraction-backfill',
-        });
+        // pre-linked path below). GATE_CALL_APPLICANT_HANDLING: an applicant's or
+        // vendor's email and address are not the matched customer's, and the gate
+        // drops the review cards that would catch the write, so this branch takes
+        // the pre-linked path's third-party veto (prelinkedBackfillGate).
+        if (!(callApplicantHandlingLive() && v2ThirdPartyCallNature)) {
+          await backfillLinkedCustomerFromExtraction({
+            customerId, existing, extracted, source: 'call-extraction-backfill',
+          });
+        }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
