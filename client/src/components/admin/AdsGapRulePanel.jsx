@@ -22,7 +22,6 @@ import { addETDays, etDateString, formatETDateOnly, formatETDateTime } from "../
 // and this panel renders nothing.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const STOP_BUDGET = 0.05;
 
 const SETTING_FIELDS = [
   { key: "weekday_limit", label: "Weekday limit", help: "Stops per technician" },
@@ -113,9 +112,11 @@ function CampaignHold({ campaign, onChanged }) {
   }
 
   const base = Number(campaign.daily_budget_base || 0);
+  // Same 1% floor as budget-manager.js calculateBudget('stop').
+  const stopBudget = Math.max(0.01, Math.round(base) / 100);
   const effect = pending
     ? pending.mode === "stop"
-      ? `Google Ads budget set to ${money(STOP_BUDGET)}/day (1% of budget) until ${shortDate(pending.until)}`
+      ? `Google Ads budget set to ${money(stopBudget)}/day (1% of budget) until ${shortDate(pending.until)}`
       : `Google Ads budget set to ${money(base)}/day until ${shortDate(pending.until)}`
     : "";
 
