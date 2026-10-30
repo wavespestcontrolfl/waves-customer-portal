@@ -284,6 +284,15 @@ describe('proposalTermsDueDate', () => {
     expect(legacy).toContain("proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(");
     expect(legacy).toContain('dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),');
     expect(legacy).toContain('dueDate: proposalTermsDue || serviceDateOnly(record.service_date),');
+    // A failed read mints nothing: the mint's catch releases the closeout for resume on every lane (pre-push Codex P1).
+    expect(legacy).toContain("{ code: 'PROPOSAL_TERMS_UNREAD' }");
+    const handler = legacy.slice(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"));
+    expect(handler.length).toBeGreaterThan(0);
+    expect(handler.slice(0, 900)).toContain('const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+    expect(handler.slice(0, 900)).toContain("code: 'proposal_terms_unread'");
+    // A required lane takes the release in the required-mint branch; every other lane reaches this one.
+    expect(legacy.indexOf("if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {"))
+      .toBeLessThan(legacy.indexOf("if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {"));
     const sheet = read('../services/visit-completion-invoice.js');
     expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date)");
     expect(sheet).toContain('dueDate: proposalTermsDue || dateOnly(visit.scheduled_date)');

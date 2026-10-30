@@ -12225,14 +12225,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on 645ccccaee): a callback or always-free visit is never refused.
         // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
         // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
-        // backlog closeout is never minted overdue). A failed read keeps the usual due date: it moves no money.
+        // backlog closeout is never minted overdue). A failed read mints nothing: the catch below releases the
+        // closeout for resume, so no invoice is ever created due on the wrong date.
         let proposalTermsDue = null;
         try {
           proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
             db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
           );
         } catch (termsErr) {
-          logger.warn(`[dispatch] proposal Net-term read failed for ${svc.id}; the invoice keeps the usual due date: ${termsErr.message}`);
+          throw Object.assign(new Error(`The proposal payment terms could not be read: ${termsErr.message}`), { code: 'PROPOSAL_TERMS_UNREAD' });
         }
         const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
@@ -12831,6 +12832,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The proposal's Net term could not be read before the mint (proposalTermsDueDate): nothing was minted.
+        // Release for resume on EVERY lane (a required lane already took the release above), so the retry bills with the
+        // agreement's due date (pre-push Codex P1).
+        if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: the proposal payment terms could not be read — releasing for resume instead of minting: ${invErr.message}`);
+          const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: termsReleased
+              ? 'The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. Retry the closeout.'
+              : `The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'proposal_terms_unread',
+            ...(termsReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
         }
