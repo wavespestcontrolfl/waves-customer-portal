@@ -10088,6 +10088,7 @@ function CustomerWorkspacePresentation({
 
 function CustomerOverlayPresentation({
   panelRef,
+  dialogRef,
   headerProps,
   activeTab,
   profileContentId,
@@ -10106,13 +10107,21 @@ function CustomerOverlayPresentation({
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
+      {/* The dialog (focus boundary) holds the scrolling panel AND the
+          mobile action bars, which must stay siblings of the overflow-scroll
+          .c360-panel for iOS position:fixed (see CustomerProfileMobileActions).
+          It neither scrolls nor transforms, so the fixed bars are unaffected. */}
       <div
-        ref={panelRef}
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={CUSTOMER_OVERLAY_TITLE_ID}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900 outline-none"
+        className="flex w-full max-w-[900px] h-full outline-none"
+      >
+      <div
+        ref={panelRef}
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
       >
         <CustomerProfileStyles />
         <CustomerOverlayHeader {...headerProps} />
@@ -10153,6 +10162,7 @@ function CustomerOverlayPresentation({
         />
       </div>
       {actions}
+      </div>
       {dialogs}
     </UiSurface>,
     document.body,
@@ -10898,12 +10908,14 @@ function useCustomerProfileNavigation({
     !!refundPayment ||
     !!removePaymentMethod;
   // The shared overlay is a modal dialog: useModalFocus traps Tab inside the
-  // panel, owns Escape, and returns focus to the opener. Nested dialogs
+  // dialog (the scrolling panel plus the mobile action bars), owns Escape, and
+  // returns focus to the opener. Nested dialogs
   // register after it, so the topmost one always receives Escape first; the
   // callback below only runs when the overlay itself is on top. The full-page
   // (embedded) workspace is not a dialog and never traps focus. The hook binds
   // once its panel exists, so it stays off while the loading screen shows.
-  const panelRef = useModalFocus(
+  const panelRef = useRef(null);
+  const dialogRef = useModalFocus(
     !embedded && !loading && !!data?.customer,
     () => {
       if (subModalOpen) return;
@@ -10987,6 +10999,7 @@ function useCustomerProfileNavigation({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11349,6 +11362,7 @@ export default function Customer360ProfileV2({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11719,6 +11733,7 @@ export default function Customer360ProfileV2({
   return (
     <Presentation
       panelRef={panelRef}
+      dialogRef={dialogRef}
       headerPast={headerPast}
       headerProps={{
         c,

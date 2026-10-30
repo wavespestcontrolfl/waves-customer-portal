@@ -227,6 +227,20 @@ describe('Customer360ProfileV2 audit fixes (C04-C09)', () => {
     outside.remove();
   });
 
+  it('keeps the mobile action bars inside the dialog, so Tab can reach Back and More (C08)', async () => {
+    installFetch();
+    await openOverlay('overview');
+    const dialog = screen.getByRole('dialog', { name: /Avery Customer/ });
+    // The bars stay outside the scrolling panel (iOS position:fixed) but inside
+    // the focus boundary. jsdom does not apply the <=768px media rule that shows
+    // them, so look them up including hidden elements.
+    for (const name of ['Back', 'More']) {
+      const control = screen.getByRole('button', { name, hidden: true });
+      expect(dialog.contains(control)).toBe(true);
+      expect(control.closest('.c360-panel')).toBeNull();
+    }
+  });
+
   it('does not trap focus or add dialog semantics in the full-page workspace (C08)', async () => {
     installFetch();
     render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
