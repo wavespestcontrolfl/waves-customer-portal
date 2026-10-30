@@ -955,7 +955,6 @@ export default function TimeGridDays({
     setStatus({ text: 'Refreshing…' });
     try {
       setData(await adminFetch(`/admin/schedule/week?start=${monday}`));
-      setOptimistic(null);
       setStatus(null);
     } catch (err) {
       console.error(err);
@@ -1011,11 +1010,15 @@ export default function TimeGridDays({
     }
 
     // The write committed. From here a failure is a failed REFRESH, never a
-    // failed move: keep the optimistic result on screen, close the
-    // confirmation and tell the parent either way (its own read may also fail).
+    // failed move: promote the committed result into the baseline (a later
+    // drag, or a cancelled one, starts from it; a good refresh replaces it
+    // with server data), close the confirmation and tell the parent either
+    // way (its own read may also fail).
+    setData(optimistic || data);
+    setOptimistic(null);
     setPending(null);
     await reloadWeek();
-  }, [pending, reloadWeek]);
+  }, [pending, optimistic, data, reloadWeek]);
 
   const cancelReschedule = useCallback(() => {
     setOptimistic(null);

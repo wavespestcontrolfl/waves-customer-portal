@@ -140,6 +140,10 @@ export function useDispatchBoard() {
   // refreshSeqRef value when the board was marked possibly-out-of-date; only
   // a read that STARTED after that clears it.
   const staleSinceSeqRef = useRef(0);
+  // Mirrors socketUp for loadBoard: a read STARTED while the socket was down
+  // can never clear the stale flag, because broadcasts after that read are
+  // not guaranteed to reach this tab.
+  const socketUpRef = useRef(true);
 
   // Track the latest techsMap in a ref so the socket handler closure
   // always sees current state without re-subscribing on every render.
@@ -267,6 +271,7 @@ export function useDispatchBoard() {
 
   const loadBoard = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
+    const startedWithSocket = socketUpRef.current;
     latestRefreshPendingRef.current = true;
     pendingSocketRef.current = [];
     try {
@@ -288,7 +293,7 @@ export function useDispatchBoard() {
       hydratedRef.current = true;
       setError(null);
       setLoading(false);
-      if (seq > staleSinceSeqRef.current) setStale(false);
+      if (startedWithSocket && seq > staleSinceSeqRef.current) setStale(false);
     } catch (err) {
       // `error` is reserved for the board never having loaded: whichever
       // request is the LATEST when the board is still unhydrated owns
@@ -466,13 +471,18 @@ export function useDispatchBoard() {
     let needsResync = false;
     function handleDisconnect() {
       needsResync = true;
+      socketUpRef.current = false;
       setSocketUp(false);
       markMaybeStale();
     }
     function handleConnect() {
+      socketUpRef.current = true;
       setSocketUp(true);
       if (needsResync) {
         needsResync = false;
+        // Only a read that starts after THIS connect proves the board is
+        // current again; one begun earlier (even a successful one) does not.
+        markMaybeStale();
         requestResync();
       }
     }

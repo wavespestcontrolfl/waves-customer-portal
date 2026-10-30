@@ -250,4 +250,61 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
+
+  describe('a second drag after a committed move whose refresh failed', () => {
+    const other = { ...service, id: 'svc-2', customerName: 'Second Customer', windowStart: '13:00', windowEnd: '14:00' };
+    const threeDays = (mon, tue, wed) => ({
+      startDate: '2026-11-02',
+      days: [
+        { date: '2026-11-02', dayOfWeek: 'Mon', dayNum: 2, services: mon },
+        { date: '2026-11-03', dayOfWeek: 'Tue', dayNum: 3, services: tue },
+        { date: '2026-11-04', dayOfWeek: 'Wed', dayNum: 4, services: wed },
+      ],
+    });
+    const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
+    const drag = (svc, date) => act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: svc } } },
+      over: { data: { current: { date, slotMin: 600 } } },
+    }));
+    const confirm = () => act(async () => { await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only' }); });
+
+    function stubServer() {
+      let gets = 0;
+      fetch.mockImplementation(async (url, opts = {}) => {
+        if (opts.method === 'POST') return response({ success: true });
+        gets += 1;
+        return gets === 1 ? response(threeDays([service, other], [], [])) : unavailable;
+      });
+    }
+
+    it('keeps the first move when the second drag is cancelled', async () => {
+      stubServer();
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag(service, '2026-11-03');
+      await confirm();
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+
+      await drag(other, '2026-11-04');
+      act(() => { modal.props.onCancel(); });
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(within(column('Mon')).getByText('Second Customer')).toBeInTheDocument();
+    });
+
+    it('shows both moves after a second committed move whose refresh also failed', async () => {
+      stubServer();
+      render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+      await screen.findByText('Synthetic Customer');
+      await drag(service, '2026-11-03');
+      await confirm();
+      await drag(other, '2026-11-04');
+      await confirm();
+      expect(within(column('Tue')).getByText('Synthetic Customer')).toBeInTheDocument();
+      expect(within(column('Wed')).getByText('Second Customer')).toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+      expect(within(column('Mon')).queryByText('Second Customer')).not.toBeInTheDocument();
+    });
+  });
 });
+

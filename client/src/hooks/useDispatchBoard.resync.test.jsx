@@ -175,4 +175,48 @@ describe('board recovery after a missed broadcast', () => {
     await settleDebounce();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+
+  it('a focus read while the socket is down never clears the stale state; reconnect needs its own read', async () => {
+    const { result } = await loaded();
+    vi.useFakeTimers();
+    act(() => { socketHandlers.disconnect('transport close'); });
+    server = board('t2');
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await settleDebounce();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.jobs[0].technician_id).toBe('t2'); // data applied
+    expect(result.current.boardStatus).toBe('reconnecting'); // but not trusted
+
+    // The socket comes back; the recovery read fails. Never report live.
+    fetch.mockResolvedValueOnce({ ok: false, status: 503 });
+    act(() => { socketHandlers.connect(); });
+    expect(result.current.boardStatus).toBe('stale');
+    await settleDebounce();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(result.current.boardStatus).toBe('stale');
+
+    // A later successful read that started with the socket up clears it.
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await settleDebounce();
+    expect(result.current.boardStatus).toBe('live');
+  });
+
+  it('a read that began before the reconnect does not clear the stale state when it lands after', async () => {
+    const { result } = await loaded();
+    vi.useFakeTimers();
+    act(() => { window.dispatchEvent(new Event('offline')); });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    fetch.mockImplementationOnce(async () => ({ ok: true, json: () => gate.then(() => board('t2')) }));
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await settleDebounce(); // read started with the socket up
+    act(() => { socketHandlers.disconnect('transport close'); });
+    act(() => { socketHandlers.connect(); }); // reconnect while that read is in flight
+    fetch.mockResolvedValueOnce({ ok: false, status: 503 });
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.boardStatus).toBe('stale');
+    await settleDebounce(); // the post-connect recovery read fails
+    expect(result.current.boardStatus).toBe('stale');
+  });
 });
+
