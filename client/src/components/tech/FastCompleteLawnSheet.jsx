@@ -133,8 +133,6 @@ import { HeldLines, SodBanner } from './LawnSodParts';
 import { newSodOf, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
 import SpotTargetControl from './LawnSpotTarget';
 import { spotTargetsOf, targetBodyFields } from '../../lib/lawn-spot-target';
-import { RowMixHelp, WeedMixHelp, useMixHelp } from './LawnMixHelp';
-import { gallonsBodyFields, mixHelpOf, withGallonsArea } from '../../lib/lawn-mix-help';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -299,7 +297,7 @@ const SOD_RECORD_STALE_CODES = ['sod_record_changed', 'sod_not_this_home'];
 const SOD_UNSURE_MESSAGE = 'The sheet could not confirm the save. Tap the box again.';
 const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
 // The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
-const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'group11HeldProductIds', 'troubleAreas', 'mixHelp'];
+const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'group11HeldProductIds', 'troubleAreas'];
 // A context re-read the sheet can rebuild from: the visit still takes this sheet, the plan was read, the sod record was checked.
 const sodRereadUsable = (next) => !!next && !next.loadError && !next.handoff && !next.blockedReason && !next.plannedUnavailable && !next.newSod?.unavailable;
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
@@ -403,8 +401,6 @@ function contextFrom(data, service) {
     ...optionalContextFields(data),
     // The closed lists of a spot fungicide / insecticide row's target (lib/lawn-spot-target.js).
     spotTargets: spotTargetsOf(data),
-    // The amount for a full tank of each spot spray, and the gallons entry (GATE_LAWN_MIX_HELP; lib/lawn-mix-help.js).
-    mixHelp: mixHelpOf(data),
   };
 }
 
@@ -951,8 +947,7 @@ function figuringRate(row) {
 // A spot row under the spot rules is figured on the area the tech set for it (spotArea) and on
 // no other: the plan's own spot estimate figures nothing there.
 const figuringArea = (row, lawnSqft) => {
-  // A gallons row held to the lawn (lib/lawn-mix-help.js) is figured on what the gallons cover: the amount is what was mixed.
-  if (row.spotRule) return row.spotFigureArea > 0 ? row.spotFigureArea : (row.spotArea > 0 ? row.spotArea : null);
+  if (row.spotRule) return row.spotArea > 0 ? row.spotArea : null;
   return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
 };
 
@@ -1321,8 +1316,6 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
         ...(row.placeRule && row.places?.length ? { areaPlaces: row.places, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
         ...targetBodyFields(row, ctx.spotTargets, { chinchTap }),
-        // Gallons sprayed in place of an area: the server converts them with the product's staged carrier and records the area.
-        ...gallonsBodyFields(row),
       };
     }),
     ...(skipped.length ? { lawnProtocolCompletion: { skippedProducts: skipped } } : {}),
@@ -1463,12 +1456,12 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
-      <SheetBody operatorId={operatorId} service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
+function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -1487,7 +1480,7 @@ function SheetBody({ operatorId, service, request, catalog, ctx, propertyAreas, 
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm operatorId={operatorId} service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
+  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -1668,7 +1661,7 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, rereads, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
 }
 
-function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
+function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
   const base = `/admin/dispatch/${service?.id}`;
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
@@ -1713,8 +1706,6 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const [weedArea, setWeedArea] = useState('');
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlaces, setWeedPlaces] = useState('');
-  // GATE_LAWN_MIX_HELP: the shared tank size and the weed entry's gallons sprayed.
-  const mix = useMixHelp(sheetCtx.mixHelp, operatorId, submittedVisitArea({ propertyAreas: propertyAreas.data, lawnSqft, ctx }));
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
@@ -1725,11 +1716,11 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const chinchDecision = effectiveChinch(guide, placeCtx);
   const rows = useMemo(
     () => {
-      const spotted = products.rows.map((row) => withGallonsArea(withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }), mix));
+      const spotted = products.rows.map((row) => withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }));
       const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlaces, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlaces, gov.takeAll, guide],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlaces, gov.takeAll, guide],
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
@@ -1864,7 +1855,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1935,7 +1926,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1968,14 +1959,12 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
           >
-            <RowMixHelp row={row} mix={mix} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
             {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(places) => updateRow(row.productId, { pickedPlaces: places })} /> : null}
             <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} chinchTap={chinchTap} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
           </ProductEditor>
           {row === areaHost && (
             <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>
               {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlaces} /> : null}
-              <WeedMixHelp mix={mix} rows={rows.filter((other) => other.weedGroup && other.spotRule)} surfactant={surfactantNote} locked={locked} onWeedArea={onWeedArea} />
             </SpotAreaControl>
           )}
         </React.Fragment>
@@ -2389,7 +2378,7 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
     <>
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
       {/* A weed-mix row reads the entry's shared area; any other spot row asks for its own, here, after the amount. */}
-      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value, spotGallons: '' })} />}
+      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value })} />}
       {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
     </>
