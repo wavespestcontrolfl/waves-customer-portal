@@ -15,7 +15,10 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import AdminInvoicesPage, { buildInvoiceListParams } from "./AdminInvoicesPage";
+import AdminInvoicesPage, {
+  buildInvoiceListParams,
+  receiptDeliveryOutcome,
+} from "./AdminInvoicesPage";
 
 const response = (body, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -533,5 +536,25 @@ describe("finding 6: receipt delivery is reported per channel", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
     expect(await screen.findByText("Receipt sent")).toBeInTheDocument();
+  });
+});
+
+describe("finding 6: receipt outcome wording", () => {
+  it("names an uncertain leg with no error text as an unknown outcome, never 'not sent'", () => {
+    const outcome = receiptDeliveryOutcome(
+      {
+        ok: true,
+        email: { ok: true },
+        sms: { ok: false },
+        delivery: { email: "sent", sms: "unknown" },
+      },
+      { email: true, sms: true },
+    );
+    expect(outcome.uncertain).toEqual(["sms"]);
+    expect(outcome.failed).toEqual([]);
+    expect(outcome.message).toContain(
+      "SMS may have been delivered (outcome unknown).",
+    );
+    expect(outcome.message).not.toMatch(/not sent/);
   });
 });

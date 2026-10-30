@@ -4494,7 +4494,7 @@ export function receiptDeliveryOutcome(res, requested) {
     ) {
       uncertain.push(key);
       notes.push(
-        `${label} may have been delivered (${reason}). Check before sending it again.`,
+        `${label} may have been delivered (${leg?.error || "outcome unknown"}). Check before sending it again.`,
       );
     } else {
       failed.push(key);
