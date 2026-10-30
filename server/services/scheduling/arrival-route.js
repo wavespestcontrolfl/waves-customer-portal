@@ -670,7 +670,7 @@ function explainLateness({ sequencers, groupedPending, simulate, target }) {
  *  without the new visit (its smallest baseline lateness across the orders tried, so the cap is
  *  strict). A late stop after the new visit is not held to the insertion margin. Null = not a
  *  day that is already late, or no order qualifies: the refusal stands. */
-function lateDayWinner(orders, { sequencers, groupedPending, simulate, ...selectArgs }) {
+function lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive, ...selectArgs }) {
   const baselineLists = sequencers.map(sequence => lateStopMinutes(simulate, sequence(groupedPending)));
   if (baselineLists.some(list => !list?.size)) return null;
   const baselineLate = new Map();
@@ -683,7 +683,17 @@ function lateDayWinner(orders, { sequencers, groupedPending, simulate, ...select
       || (baselineLate.has(arrival.id) && arrival.lateMinutes <= baselineLate.get(arrival.id) + INSERTION_MARGIN_MINUTES))
       ? simulation : null;
   };
-  return selectWinningOrder(orders, { ...selectArgs, simulate: tolerantSimulate, marginSkipIds: new Set(baselineLate.keys()) }).winner;
+  // The detour is measured against the baseline drive, which the first pass took from the model when the
+  // already-late baseline could not be simulated: re-take it from the same travel source with lateness allowed.
+  const drives = new Map();
+  const lateOrders = orders.map((entry) => {
+    const baseline = entry.order.filter(row => row.id !== selectArgs.target.id);
+    const key = baseline.map(row => row.id).join('|');
+    if (!drives.has(key)) drives.set(key, baselineDrive(baseline));
+    const drive = drives.get(key);
+    return drive == null ? entry : { ...entry, baselineDrive: drive };
+  });
+  return selectWinningOrder(lateOrders, { ...selectArgs, simulate: tolerantSimulate, marginSkipIds: new Set(baselineLate.keys()) }).winner;
 }
 
 /** Shape the certified winner into evaluateArrivalPlacement's public
@@ -832,8 +842,14 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` };
   }
   if (!winner && lateDays) {
-    const lateWinner = lateDayWinner(orders, { sequencers, groupedPending, simulate, collectLegs, returnByMin, rows, capacity,
-      target, startMin, marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
+    const lateBaselineDrive = (baseline) => {
+      const legs = [];
+      const simulation = simulate(baseline, legs, { reportLate: true });
+      if (collectLegs) collectLegs.push(...legs);
+      return simulation ? simulation.travelMin : null;
+    };
+    const lateWinner = lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive: lateBaselineDrive, collectLegs, returnByMin,
+      rows, capacity, target, startMin, marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
     if (lateWinner) {
       return { ...buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner: lateWinner, origin,
         home: context.home || RouteOptimizer.HQ, roadTravel: !!context.travel }), dayAlreadyLate: true };
@@ -1015,9 +1031,12 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  under way, a missing location, a shared stop) also stays as it was.
  *  Callers hold the tech-day fence; a busy one leaves the numbers to the
  *  writer holding it. A staff save (`staffSave`, GATE_SAVE_ROAD_TIMES)
- *  numbers a road day on the road times its check read. Returns the order
+ *  numbers a road day on the road times its check read. A staff save also
+ *  passes `lateDays`: under GATE_ROUTE_CHECK_LATE_DAYS it certifies a day whose
+ *  existing stops are already late by the same bounded rule the picker listed
+ *  the hour under, and numbers the day in that order. Returns the order
  *  written, or null. */
-async function placeMovedVisit(conn, { serviceId, source, staffSave = false } = {}) {
+async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false } = {}) {
   if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
@@ -1032,8 +1051,11 @@ async function placeMovedVisit(conn, { serviceId, source, staffSave = false } = 
       const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
       if (!context || context.grouped) return null;
       if (staffSave === true) context.travel = staffSaveTravel(date);
+      // `lateDays` (GATE_ROUTE_CHECK_LATE_DAYS, the staff saves' callers only): the save numbers the day in
+      // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
       const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
-        windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true });
+        windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
+        ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
       if (!fit.feasible || !fit.routeOrder) return null;
       const order = await writeRouteOrder(sp, fit, serviceId);
       await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',

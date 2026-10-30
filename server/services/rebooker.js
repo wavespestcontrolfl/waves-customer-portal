@@ -2473,7 +2473,7 @@ class SmartRebooker {
         // placement itself (the check never placed it either).
         // overlapAdvisory = a staff move (the tech-out mover is none): its day is
         // numbered on the road times its picker bought (GATE_SAVE_ROAD_TIMES).
-        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory });
+        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
       }
 
       if (service.status !== landedStatus) {
@@ -4318,7 +4318,7 @@ class SmartRebooker {
           && (useArrivalWindows || options.placeInRoute === true)
           && (sibDateChanges || anchorTechChanges
             || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {
-          await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory });
+          await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
         }
         if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in

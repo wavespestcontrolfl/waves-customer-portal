@@ -144,7 +144,7 @@ describe('the night auto-dispatch search and booking never ask for late days', (
 });
 
 // The option is named only by the staff finder (find-time.js) and the evaluator that honors it. Comments do not count.
-test('only find-time.js passes lateDays to the evaluator, and the customer route check never names it', () => {
+test('lateDays is named only by the staff finder, the evaluator and the staff save writers; the customer route check and the automatic writers never name it', () => {
   const root = path.join(__dirname, '..');
   const named = [];
   const code = (file) => fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
@@ -157,5 +157,8 @@ test('only find-time.js passes lateDays to the evaluator, and the customer route
     }
   };
   walk(root);
-  expect(named.sort()).toEqual(['services/scheduling/arrival-route.js', 'services/scheduling/find-time.js']);
+  expect(named.sort()).toEqual([
+    'routes/admin-schedule.js', 'services/rebooker.js', 'services/scheduling/arrival-route.js',
+    'services/scheduling/find-time.js', 'services/scheduling/staff-save-route-check.js',
+  ]);
 });

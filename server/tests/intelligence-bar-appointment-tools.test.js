@@ -2518,7 +2518,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
         arrivalWindow: { serviceId: 'appt-1', roads: 'cache' },
       });
       expect(placeSpy).toHaveBeenCalledTimes(1);
-      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', staffSave: true, source: 'intelligence_bar' });
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'appt-1', staffSave: true, lateDays: true, source: 'intelligence_bar' });
       expect(typeof placeSpy.mock.calls[0][0]).toBe('function'); // the booking transaction, not the root connection
     });
 
@@ -2596,7 +2596,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
         arrivalWindow: { serviceId: 'svc-1', roads: 'cache' },
       });
       expect(placeSpy).toHaveBeenCalledTimes(1);
-      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, source: 'intelligence_bar' });
+      expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, lateDays: true, source: 'intelligence_bar' });
     });
 
     test('gate on: a move whose compare-and-swap missed is not route-checked or numbered', async () => {

@@ -164,3 +164,27 @@ describe('the insertion margin (GATE_STAFF_ROUTE_INSERTION) on a late day', () =
     expect(_internals.laterStopTooTight(simulation, order, 'T', rangeFor, 15, new Set(['B', 'C']))).toBe(false);
   });
 });
+
+describe('the detour on a late day is measured against the same travel source (Google road times)', () => {
+  // Every leg is 30 minutes on the road source and 20 in the model fallback. Baseline A, B, home = 3 legs;
+  // the 15:00 visit after B adds one leg, so the added drive is 30, not the 60 a model baseline would give.
+  const roadTravel = { lookup: () => ({ minutes: 30, source: 'google_traffic', reason: null }) };
+  const withRoads = (extra = {}) => {
+    const target = prospective('15:00', 60);
+    return evaluateArrivalPlacement({ ...context(LATE_DAY, target), travel: roadTravel },
+      { windowStart: '15:00', windowEnd: '16:00', durationMinutes: 60, ...extra });
+  };
+
+  test('detourMinutes is 30: 120 minutes of road legs against a 90 minute road baseline', () => {
+    const fit = withRoads({ lateDays: true });
+    expect(fit).toMatchObject({ feasible: true, dayAlreadyLate: true, driveMinutes: 120 });
+    expect(fit.detourMinutes).toBe(30);
+  });
+
+  test('the legs of the late baseline are handed to the road preload', () => {
+    const legs = [];
+    withRoads({ lateDays: true, collectLegs: legs });
+    // Baseline legs (home to A, A to B, B to home) are asked for as well as the candidate's.
+    expect(legs.length).toBeGreaterThanOrEqual(7);
+  });
+});

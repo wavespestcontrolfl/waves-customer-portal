@@ -133,7 +133,7 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     expect(result.success).toBe(true);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
     // A staff move: its day is numbered on its picker's road times (GATE_SAVE_ROAD_TIMES).
-    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true });
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, lateDays: true });
     // ...and its check reads the same road times (GATE_SAVE_ROAD_TIMES).
     expect(require('../services/scheduling/occupancy').findConflictingVisits).toHaveBeenCalledWith(
       expect.objectContaining({ arrivalWindow: expect.objectContaining({ serviceId: 'svc-1', roads: 'cache' }) }));
@@ -150,7 +150,7 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     wireRescheduleMocks(service());
     await move(TARGET, { start: '09:00', end: '10:00' }, { overlapAdvisory: true, placeInRoute: true });
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit).toHaveBeenCalledWith(expect.anything(), { serviceId: 'svc-1', staffSave: true });
+    expect(placeMovedVisit).toHaveBeenCalledWith(expect.anything(), { serviceId: 'svc-1', staffSave: true, lateDays: true });
   });
 
   // staffSave is the move's overlapAdvisory: the tech-out auto-mover (placeInRoute
@@ -201,7 +201,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
     const start = src.indexOf('async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {');
     const end = src.indexOf('// Read-only preview of what rescheduleSeries would touch', start);
     const body = src.slice(start, end);
-    const statement = 'await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory });';
+    const statement = 'await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });';
     const call = body.indexOf(statement);
     expect(call).toBeGreaterThan(-1);
     expect(body.indexOf('placeMovedVisit(', call + statement.length)).toBe(-1);
@@ -212,7 +212,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
   test('the Edit save places the edited visit after its moves, unless the office typed a new route number', () => {
     const src = read('../routes/admin-schedule.js');
     expect(src).toContain("if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {\n"
-      + "        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true });");
+      + "        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true, lateDays: true });");
     // Its advisory check reads the pickers' road times too (GATE_SAVE_ROAD_TIMES).
     expect(src).toContain("arrivalWindow: { serviceId: req.params.id, changes: updates, roads: 'cache' },");
     expect(src).toContain("const routeNumberTyped = Number.isInteger(updates.route_order)\n"
