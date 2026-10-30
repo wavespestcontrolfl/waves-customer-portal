@@ -349,26 +349,26 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
-        // A month whose attempt is parked for bank or card authentication (B16) can still hold a
+        // A month whose attempts are parked for bank or card authentication (B16) can still hold a
         // live PaymentIntent: an ACH micro-deposit check the customer can still finish, or one the
-        // park could not cancel. Charging the month beside it collects twice, so refuse until
-        // Stripe shows it inert (the pay page's read-only check; an unreadable intent refuses).
-        const parked = await db('payments')
+        // park could not cancel. Charging the month beside it collects twice, so EVERY parked
+        // intent of the month must read inert at Stripe first (the pay page's read-only check;
+        // an unreadable intent refuses).
+        const parkedIntents = await db('payments')
           .where({ customer_id: customerId, status: 'failed' })
           .whereNull('superseded_by_payment_id')
           .whereRaw("metadata->>'billed_month' = ? AND COALESCE(metadata->>'requires_action', '') = 'true'", [monthKey])
-          .orderBy('created_at', 'desc')
-          .first('stripe_payment_intent_id');
-        if (parked) {
-          const { neutralizeOpenPaymentIntent } = require('../services/prepaid-pi-guard');
-          const intent = await neutralizeOpenPaymentIntent(parked.stripe_payment_intent_id, { inspectOnly: true });
+          .pluck('stripe_payment_intent_id');
+        const { neutralizeOpenPaymentIntent } = require('../services/prepaid-pi-guard');
+        for (const piId of new Set(parkedIntents.filter(Boolean))) {
+          const intent = await neutralizeOpenPaymentIntent(piId, { inspectOnly: true });
           if (!intent.ok) {
             return {
               response: {
                 status: 409,
                 body: {
-                  error: `${monthKey} has an earlier charge still waiting on the customer's bank or card approval at Stripe (${parked.stripe_payment_intent_id}). Check it in Stripe before charging the month again.`,
-                  live_payment_intent: parked.stripe_payment_intent_id,
+                  error: `${monthKey} has an earlier charge still waiting on the customer's bank or card approval at Stripe (${piId}). Check it in Stripe before charging the month again.`,
+                  live_payment_intent: piId,
                 },
               },
             };

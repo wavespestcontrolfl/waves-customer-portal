@@ -46,6 +46,8 @@ function makeQB({ first = null } = {}) {
   ['where', 'whereIn', 'whereRaw', 'whereNull', 'orWhere', 'andWhere', 'select', 'orderBy', 'limit', 'update']
     .forEach((m) => { qb[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0].call(qb, qb); return qb; }); });
   qb.first = jest.fn(() => Promise.resolve(first));
+  // list reads (charge-now's parked-attempt check) find no rows
+  qb.pluck = jest.fn(() => Promise.resolve([]));
   return qb;
 }
 

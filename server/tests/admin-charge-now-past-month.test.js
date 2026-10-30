@@ -71,6 +71,7 @@ function makeQB({ first = null } = {}) {
       });
     });
   qb.first = jest.fn(() => Promise.resolve(first));
+  qb.pluck = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve([{ id: 'pay-old' }]));
   return qb;
 }
@@ -180,26 +181,40 @@ describe('charge-now with a picked month', () => {
     });
   });
 
-  test("a month whose parked attempt may still settle at Stripe is refused, and nothing charges", async () => {
-    // only the parked-attempt lookup finds a row; every other payments lookup finds none
-    paymentsQB.first.mockImplementation(async (column) => (column === 'stripe_payment_intent_id' ? { stripe_payment_intent_id: 'pi_parked' } : null));
-    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_parked', status: 'requires_action', next_action: { type: 'verify_with_microdeposits' } });
+  test('every parked intent of the month is checked: an older live one behind a newer canceled one refuses, and nothing charges', async () => {
+    paymentsQB.pluck.mockResolvedValue(['pi_newer_canceled', 'pi_older_live', 'pi_newer_canceled', null]);
+    StripeService.retrievePaymentIntent.mockImplementation(async (piId) => (piId === 'pi_older_live'
+      ? { id: piId, status: 'requires_action', next_action: { type: 'verify_with_microdeposits' } }
+      : { id: piId, status: 'canceled' }));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { billedMonth: '2026-09' });
       expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ live_payment_intent: 'pi_parked', error: expect.stringMatching(/^2026-09 has an earlier charge still waiting/) });
+      expect(await res.json()).toMatchObject({ live_payment_intent: 'pi_older_live', error: expect.stringMatching(/^2026-09 has an earlier charge still waiting/) });
       expect(paymentsQB.whereRaw).toHaveBeenCalledWith("metadata->>'billed_month' = ? AND COALESCE(metadata->>'requires_action', '') = 'true'", ['2026-09']);
+      // each distinct intent read once; the null PI needs no read
+      expect(StripeService.retrievePaymentIntent.mock.calls.map(([piId]) => piId)).toEqual(['pi_newer_canceled', 'pi_older_live']);
       expect(chargeMock).not.toHaveBeenCalled();
       expect(paymentsQB.update).not.toHaveBeenCalled();
     });
   });
 
-  test('a parked attempt Stripe shows canceled does not block: the month charges and the parked row is resolved', async () => {
-    paymentsQB.first.mockImplementation(async (column) => (column === 'stripe_payment_intent_id' ? { stripe_payment_intent_id: 'pi_parked' } : null));
-    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_parked', status: 'canceled' });
+  test('an unreadable parked intent refuses (fail closed)', async () => {
+    paymentsQB.pluck.mockResolvedValue(['pi_parked']);
+    StripeService.retrievePaymentIntent.mockRejectedValue(new Error('stripe timeout'));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { billedMonth: '2026-09' });
+      expect(res.status).toBe(409);
+      expect(chargeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  test('parked intents Stripe shows canceled do not block: the month charges and the parked rows are resolved', async () => {
+    paymentsQB.pluck.mockResolvedValue(['pi_a', 'pi_b']);
+    StripeService.retrievePaymentIntent.mockImplementation(async (piId) => ({ id: piId, status: 'canceled' }));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { billedMonth: '2026-09' });
       expect(res.status).toBe(200);
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(2);
       expect(chargeMock).toHaveBeenCalledTimes(1);
       expect(paymentsQB.update).toHaveBeenCalledTimes(1);
     });
