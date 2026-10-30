@@ -788,13 +788,16 @@ class BudgetManager {
           // Under the lock: two concurrent applies of the same rec both pass
           // the route's unlocked no-op check; the loser must not re-push the
           // already-current mode and count a second "applied" change.
-          if (mode === campaign.budget_mode && hold) {
-            // Decided under the lock: the campaign already runs the held mode, so
-            // only the hold is saved (no push, no mode change, no audit row).
+          const sameMode = mode === campaign.budget_mode;
+          if (sameMode && hold && budgetCentsEqual(campaign.daily_budget_current, this.calculateBudget(campaign, mode))) {
+            // Decided under the lock: the campaign already runs the held mode AND
+            // its recorded amount is the mode's amount, so only the hold is saved
+            // (no push, no mode change, no audit row). A recorded mode alone does
+            // not prove Google runs that budget — drift falls through to the push.
             await trx('ad_campaigns').where({ id: campaignId }).update({ ...withHold(campaign), updated_at: new Date() });
             return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget: campaign.daily_budget_current, googleAdsUpdated: false, livePushAttempted: false, holdOnly: true };
           }
-          if (mode === campaign.budget_mode) {
+          if (sameMode && !hold) {
             const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
             err.code = 'mode_noop';
             throw err;
@@ -846,7 +849,8 @@ class BudgetManager {
             new_mode: mode,
             previous_budget: campaign.daily_budget_current,
             new_budget: newBudget,
-            reason,
+            // A same-mode hold whose amount had drifted re-pushes the held amount.
+            reason: sameMode && googleAdsUpdated ? boundReason(`${reason} (budget re-pushed: Google was not at the held amount)`) : reason,
             trigger,
             op_id: opId,
             google_ads_updated: googleAdsUpdated,

@@ -121,6 +121,56 @@ test('same mode under the lock saves ONLY the hold: no push, no mode change, no 
   expect(JSON.parse(only.data.metadata)).toEqual({ keep: 'me', budget_hold: HOLD });
 });
 
+describe('same mode but the recorded amount drifted from the mode amount', () => {
+  // 'stop' recorded, but the amount is the base budget: Google may still be spending $5.
+  beforeEach(() => { row.budget_mode = 'stop'; row.daily_budget_current = '5'; });
+
+  test('pushes the held amount, then saves hold + audit row in ONE transaction', async () => {
+    const out = await BudgetManager.setMode('c-1', 'stop', 'Hold: stop until 2026-11-02 (set in the portal)', { ...OPTS, hold: { ...HOLD, mode: 'stop' } });
+    expect(mockUpdateBudget).toHaveBeenCalledWith('123', 0.05);
+    expect(out).toMatchObject({ newMode: 'stop', newBudget: 0.05, googleAdsUpdated: true, livePushAttempted: true });
+    expect(out.holdOnly).toBeUndefined();
+    const update = committed.find((w) => w.table === 'ad_campaigns');
+    const log = committed.find((w) => w.table === 'ad_budget_log');
+    expect(update.data).toMatchObject({ budget_mode: 'stop', daily_budget_current: 0.05 });
+    expect(JSON.parse(update.data.metadata).budget_hold).toMatchObject({ mode: 'stop' });
+    expect(log.data).toMatchObject({
+      previous_mode: 'stop', new_mode: 'stop', previous_budget: '5', new_budget: 0.05, google_ads_updated: true,
+      reason: 'Hold: stop until 2026-11-02 (set in the portal) (budget re-pushed: Google was not at the held amount)',
+    });
+    expect(update.trx).toBe(log.trx);
+    expect(new Set(committed.map((w) => w.trx)).size).toBe(1);
+    expect(events.indexOf('push')).toBeLessThan(events.indexOf('write:ad_campaigns:update'));
+  });
+
+  test('a push refusal saves nothing', async () => {
+    mockUpdateBudget.mockResolvedValue(false);
+    await expect(BudgetManager.setMode('c-1', 'stop', 'r', { ...OPTS, hold: { ...HOLD, mode: 'stop' } })).rejects.toMatchObject({ code: 'live_push_failed' });
+    expect(committed).toHaveLength(0);
+  });
+
+  test('an unavailable live push saves nothing', async () => {
+    mockIsConfigured.mockReturnValue(false);
+    await expect(BudgetManager.setMode('c-1', 'stop', 'r', { ...OPTS, hold: { ...HOLD, mode: 'stop' } })).rejects.toMatchObject({ code: 'live_push_unavailable' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(committed).toHaveLength(0);
+  });
+
+  test('a persist failure after the push runs the rollback once and saves nothing', async () => {
+    failNext = { table: 'ad_budget_log', op: 'insert' };
+    const rollback = jest.spyOn(BudgetManager, 'rollbackAfterLivePush').mockResolvedValue(Object.assign(new Error('rolled back'), { code: 'live_push_rolled_back' }));
+    await expect(BudgetManager.setMode('c-1', 'stop', 'r', { ...OPTS, hold: { ...HOLD, mode: 'stop' } })).rejects.toThrow('rolled back');
+    expect(rollback).toHaveBeenCalledTimes(1);
+    expect(committed).toHaveLength(0);
+  });
+
+  test('without a hold the same-mode call is still refused as a no-op', async () => {
+    const { hold: _h, ...plain } = OPTS;
+    await expect(BudgetManager.setMode('c-1', 'stop', 'r', plain)).rejects.toMatchObject({ code: 'mode_noop' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+  });
+});
+
 test('guards still apply with a hold: an inactive campaign saves nothing', async () => {
   row.status = 'paused';
   await expect(BudgetManager.setMode('c-1', 'base', 'r', OPTS)).rejects.toMatchObject({ code: 'campaign_inactive' });
