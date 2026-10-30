@@ -142,7 +142,95 @@ async function createJobApplication({ body = {}, database }) {
   return row;
 }
 
+// Statuses that count as an OPEN application (the same set the recruiting
+// reply matcher uses). A rejected, withdrawn or hired applicant who calls again
+// is a new application.
+const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
+const CALL_SUMMARY_MAX_CHARS = 500;
+
+function lastTenDigits(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+/**
+ * Files ONE Careers application from a phone call whose caller was a job
+ * applicant (GATE_CALL_APPLICANT_HANDLING). A sibling of createJobApplication,
+ * not a loosening of it: the public form's validator stays exactly as it was.
+ *
+ * COMMS-FREE by contract: this writes one job_applications row and nothing
+ * else. It sends no text and no email, mints no interview token or invite,
+ * and starts no AI screen. Status is always 'new' (never 'interview' or
+ * 'offer': those feed calendar occupancy and an admin move to interview sends
+ * an invite text). Role is 'technician' (the only intake role).
+ *
+ * Idempotent: keyed by call_log_id (a reprocess never files a second row,
+ * whatever became of the first) and deduped against an OPEN application with
+ * the same phone (last 10 digits).
+ *
+ * @returns {Promise<{ created: boolean, id: string|null, reason: string }>}
+ */
+async function createJobApplicationFromCall({ call = {}, extraction = null, database }) {
+  if (!call.id) return { created: false, id: null, reason: 'no_call' };
+  if (extraction?.call_nature !== 'job_applicant') return { created: false, id: null, reason: 'not_job_applicant' };
+  const caller = extraction.caller || {};
+
+  const fullName = cleanText(caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' '));
+  const name = fullName ? properCase(fullName) : '';
+  if (!name || name.length < 2 || name.length > 80) return { created: false, id: null, reason: 'no_name' };
+
+  // The caller's own spoken number first, else the number that called us (the
+  // number we dialed, on an outbound call).
+  const ani = String(call.direction || '').toLowerCase() === 'outbound' ? call.to_phone : call.from_phone;
+  const phone = normalizeNanpPhone(caller.phone_e164) || normalizeNanpPhone(ani);
+  if (!phone) return { created: false, id: null, reason: 'no_phone' };
+
+  const emailRaw = cleanValidEmailOrNull(caller.email);
+  const email = emailRaw && emailRaw.length <= 254 ? emailRaw : null;
+
+  const source = {
+    channel: 'phone_call',
+    call_log_id: String(call.id),
+    organization_name: cleanText(caller.organization_name || '').slice(0, MAX_SOURCE_CHARS) || null,
+    call_summary: cleanText(extraction.meta?.call_summary || '').slice(0, CALL_SUMMARY_MAX_CHARS) || null,
+  };
+
+  const phoneKey = lastTenDigits(phone);
+  return database.transaction(async (trx) => {
+    // One writer at a time per call and per phone: two passes of the same call
+    // (or two calls from one number) cannot both pass the checks below.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`job_application_call:${call.id}`]);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`job_application_phone:${phoneKey}`]);
+
+    const forCall = await trx('job_applications')
+      .whereRaw("source->>'call_log_id' = ?", [String(call.id)])
+      .first('id');
+    if (forCall) return { created: false, id: forCall.id, reason: 'already_filed_for_call' };
+
+    const open = await trx('job_applications')
+      .whereIn('status', OPEN_STATUSES)
+      .whereRaw("right(regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g'), 10) = ?", [phoneKey])
+      .first('id');
+    if (open) return { created: false, id: open.id, reason: 'open_application_same_phone' };
+
+    const [row] = await trx('job_applications')
+      .insert({
+        role: 'technician',
+        status: 'new',
+        language: 'en',
+        contact_snapshot: JSON.stringify({ name, phone, email, city: null }),
+        answers: JSON.stringify({}),
+        sms_consent: false,
+        source: JSON.stringify(source),
+      })
+      .returning(['id']);
+    return { created: true, id: row?.id || null, reason: 'created' };
+  });
+}
+
 module.exports = {
+  createJobApplicationFromCall,
+  OPEN_STATUSES,
   ROLES,
   INTAKE_ROLES,
   STATUSES,
