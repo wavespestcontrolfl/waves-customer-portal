@@ -1576,6 +1576,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       display: `${opt.displayDate}, ${displayWindow(window)}`,
       ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
+      ...(opt.dayAlreadyLate === true ? { dayAlreadyLate: true } : {}),
     };
   });
 

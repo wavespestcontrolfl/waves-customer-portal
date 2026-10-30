@@ -10161,7 +10161,7 @@ async function scheduleCreateHandler(req, res, next) {
       // fails the booking; an unassigned, untimed or shared visit stays as it
       // was. Recurring children and boosters keep today's behavior.
       if (newApptStopOrderLive()) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true });
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
       }
       // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
       // when off): AFTER the stop-order placement above (the check reads the
@@ -17582,7 +17582,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       const routeNumberTyped = Number.isInteger(updates.route_order)
         && updates.route_order !== (commsPeek?.route_order ?? null);
       if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true });
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true, lateDays: true });
       }
       // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
       // release run (they are external and cannot roll back with a rejected edit).

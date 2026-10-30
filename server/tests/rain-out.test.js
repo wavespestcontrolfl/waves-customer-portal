@@ -2177,7 +2177,7 @@ describe('rain-out service', () => {
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([
-        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+        { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120, dayAlreadyLate: true },
         { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
       ]);
       getDailyRainOutlook.mockResolvedValue({
@@ -2205,6 +2205,9 @@ describe('rain-out service', () => {
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
+      // GATE_ROUTE_CHECK_LATE_DAYS: the rebooker's already-late mark rides to the sheet; a clean day has no key.
+      expect(options.days[0].dayAlreadyLate).toBe(true);
+      expect(options.days[1]).not.toHaveProperty('dayAlreadyLate');
       // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
       // wider 2-3h suggestedWindow, and the display is re-derived to match.
       expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });

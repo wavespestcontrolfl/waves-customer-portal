@@ -790,8 +790,11 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
-                    {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
+                    {(conflictsFor(opt).length > 0 || opt.rainChance != null || opt.dayAlreadyLate) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        {opt.dayAlreadyLate && (
+                          <span data-testid="already-late-tag" style={{ fontSize: 12, fontWeight: 500, color: '#854D0E' }}>already late</span>
+                        )}
                         {conflictsFor(opt).length > 0 && (
                           <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
                         )}
