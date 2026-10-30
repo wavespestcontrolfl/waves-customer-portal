@@ -119,8 +119,9 @@ function installDb() {
   });
 }
 
-// Every test uses its own Gmail id: the retry count lives in the module.
+// Every test uses its own Gmail ids: the retry count lives in the module.
 let gmailId;
+let listed;
 let sequence = 0;
 const attachment = (name, extra = {}) => ({ gmail_attachment_id: `fetch-${Math.random()}`, filename: name, mime_type: 'application/pdf', size_bytes: 2, ...extra });
 const parsed = (overrides = {}) => ({
@@ -138,9 +139,10 @@ beforeEach(() => {
   installDb();
   sequence += 1;
   gmailId = `message-${sequence}`;
+  listed = [gmailId];
   gmail.isConnected.mockResolvedValue(true);
   gmail.getHistory.mockImplementation(async (cursor) => (cursor === '100'
-    ? { historyId: '200', history: [{ messagesAdded: [{ message: { id: gmailId } }] }] }
+    ? { historyId: '200', history: [{ messagesAdded: listed.map((id) => ({ message: { id } })) }] }
     : { historyId: cursor }));
   gmail.getMessage.mockImplementation(async () => parsed());
   gmail.getProfileHistoryId.mockResolvedValue('200');
@@ -165,13 +167,23 @@ describe('C01: a failed message holds the incremental cursor', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a message that keeps failing is passed after the retry runs, once its alert is written', async () => {
-    gmail.getMessage.mockRejectedValue(new Error('synthetic permanent failure'));
-    for (let run = 1; run < MESSAGE_RETRY_RUNS; run += 1) await syncEmails();
+  // The always-failing message, beside other mail that stores fine.
+  const failOnly = (id) => gmail.getMessage.mockImplementation(async (msgId) => {
+    if (msgId === id) throw new Error('synthetic permanent failure');
+    return parsed({ gmail_id: msgId });
+  });
+  const newMailArrives = () => { listed = [...listed, `${gmailId}-later-${listed.length}`]; };
+
+  test('a message that keeps failing is passed after the retry runs, in a run that stores other new mail, once its alert is written', async () => {
+    failOnly(gmailId);
+    for (let run = 1; run <= MESSAGE_RETRY_RUNS; run += 1) await syncEmails();
+    // The 15th run had no other new mail: the fault could be everyone's.
     expect(state().last_history_id).toBe('100');
     expect(notifyAdmin).not.toHaveBeenCalled();
 
+    newMailArrives();
     await syncEmails();
+    expect(tables.emails.map((row) => row.gmail_id)).toEqual([`${gmailId}-later-1`]);
     expect(state()).toMatchObject({ last_history_id: '200', errors: null });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
@@ -185,16 +197,35 @@ describe('C01: a failed message holds the incremental cursor', () => {
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  test('an alert that was not written keeps holding the cursor until one is', async () => {
-    gmail.getMessage.mockRejectedValue(new Error('synthetic permanent failure'));
-    notifyAdmin.mockResolvedValue(null);
-    for (let run = 1; run <= MESSAGE_RETRY_RUNS + 1; run += 1) await syncEmails();
+  test('when every message fails (an outage or a broken deploy), nothing is passed however long it lasts', async () => {
+    listed = [gmailId, `${gmailId}-b`];
+    gmail.getMessage.mockRejectedValue(new Error('synthetic insert path down'));
+    for (let run = 1; run <= MESSAGE_RETRY_RUNS * 2; run += 1) await syncEmails();
     expect(state().last_history_id).toBe('100');
-    expect(notifyAdmin).toHaveBeenCalledTimes(2);
+    expect(state().errors).toBe('incremental sync incomplete: 2 message(s) failed — cursor withheld, retrying next run');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+
+    // Fixed: the held window replays and stores both.
+    gmail.getMessage.mockImplementation(async (msgId) => parsed({ gmail_id: msgId }));
+    await syncEmails();
+    expect(tables.emails).toHaveLength(2);
+    expect(state().last_history_id).toBe('200');
+  });
+
+  test('an alert that was not written keeps holding the cursor until one is', async () => {
+    failOnly(gmailId);
+    notifyAdmin.mockResolvedValue(null);
+    for (let run = 1; run <= MESSAGE_RETRY_RUNS; run += 1) await syncEmails();
+    newMailArrives();
+    await syncEmails();
+    expect(state().last_history_id).toBe('100');
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
 
     notifyAdmin.mockResolvedValue({ id: 'alert-2' });
+    newMailArrives();
     await syncEmails();
     expect(state().last_history_id).toBe('200');
+    expect(notifyAdmin).toHaveBeenCalledTimes(2);
   });
 
   test('a Zelle notice whose retry record was lost holds past the retry runs, with no alert', async () => {

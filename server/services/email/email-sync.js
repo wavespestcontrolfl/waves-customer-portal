@@ -15,10 +15,13 @@ const messageFailures = new Map();
 
 // A failed message (not a 404, not a Zelle notice): true while it holds the
 // cursor for a retry next run. After MESSAGE_RETRY_RUNS runs it is passed,
-// once the office has an alert to read it in Gmail.
-async function holdForRetry(gmailId) {
+// once the office has an alert to read it in Gmail, and only in a run that
+// stored other new mail: then the fault is this message's own. When every
+// message fails (a Gmail outage, a deploy that breaks the insert), nothing
+// is passed, and the held window replays once the fault is fixed.
+async function holdForRetry(gmailId, othersStored) {
   const runs = (messageFailures.get(gmailId) || 0) + 1;
-  if (runs >= MESSAGE_RETRY_RUNS && await alertSkippedMessage(gmailId)) {
+  if (othersStored && runs >= MESSAGE_RETRY_RUNS && await alertSkippedMessage(gmailId)) {
     messageFailures.delete(gmailId);
     return false;
   }
@@ -28,9 +31,9 @@ async function holdForRetry(gmailId) {
 
 // The record of a message the incremental sync passes after
 // MESSAGE_RETRY_RUNS failed runs: one needs-you alert per message, so the
-// office reads it in Gmail. True when the alert stands (written now, already
-// open, or muted by the bell policy); otherwise the cursor stays held and the
-// next run asks again.
+// office reads it in Gmail. True when the alert row stands (written now, or
+// already open under the same key; `bell: true` is never muted by the bell
+// policy); otherwise the cursor stays held and the next run asks again.
 async function alertSkippedMessage(gmailId) {
   try {
     const { raiseAdminAlert } = require('../admin-alert-compose');
@@ -46,7 +49,7 @@ async function alertSkippedMessage(gmailId) {
     }, {
       bell: true, dedupeKey: `email-sync-skip:${gmailId}`, metadata: { gmailId }, detail: `Gmail message id: ${gmailId}`,
     });
-    return Boolean(alert);
+    return Boolean(alert?.id);
   } catch (err) {
     logger.error(`[email-sync] skipped-message alert failed for ${gmailId}: ${err.message}`);
     return false;
@@ -228,10 +231,10 @@ async function incrementalSync(state) {
     // notice whose retry record could not be written (err.zelleRetryLost)
     // has no durable trace at all, so it holds the cursor for as long as it
     // fails. Any other message is held for MESSAGE_RETRY_RUNS runs, then
-    // passed once the office has an alert to read it in Gmail: one message
-    // that always fails must not hold the cursor until the backlog forces a
-    // whole-mailbox full sync.
+    // passed (see holdForRetry): one message that always fails must not hold
+    // the cursor until the backlog forces a whole-mailbox full sync.
     let held = 0;
+    const failed = [];
     for (const msgId of messageIds) {
       try {
         // The cursor advances only to the listing's own historyId. A message
@@ -251,9 +254,13 @@ async function incrementalSync(state) {
           });
         } else {
           logger.warn(`[email-sync] Failed to fetch message ${msgId}: ${err.message}`);
-          if (err.zelleRetryLost || await holdForRetry(msgId)) held += 1;
+          if (err.zelleRetryLost) held += 1;
+          else failed.push(msgId);
         }
       }
+    }
+    for (const msgId of failed) {
+      if (await holdForRetry(msgId, newEmails > 0)) held += 1;
     }
 
     await db('email_sync_state').where('id', state.id).update({

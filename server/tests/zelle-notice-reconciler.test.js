@@ -589,7 +589,7 @@ describe('sync wiring', () => {
     expect(src).toMatch(/startsWith\('zelle_notice'\)/);
     // A lost retry record withholds the INCREMENTAL cursor too, with no retry cap (any other failed message holds
     // it for a capped number of runs; fullSync already withholds on any failed message).
-    expect(src).toMatch(/if \(err\.zelleRetryLost \|\| await holdForRetry\(msgId\)\) held \+= 1;/);
+    expect(src).toMatch(/if \(err\.zelleRetryLost\) held \+= 1;\s*else failed\.push\(msgId\);/);
     expect(src).toMatch(/last_history_id: held \? state\.last_history_id : latestHistoryId/);
     // The insert-race loser reloads the winner's row and offers it only while it carries the insert-time mark.
     expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.auto_action === ZELLE_RETRY_MARK[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
