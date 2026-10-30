@@ -411,7 +411,8 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(src).toContain('thirdPartyNatureDefault: callApplicantHandlingLive(),');
   });
   test('the three card sites strip the customer-only cards behind the gate', () => {
-    expect(src.match(/thirdPartyCustomerOnlyCards\(/g).length).toBe(3); // enforce, shadow bridge, enforce-mode email branch
+    // enforce, shadow bridge, enforce-mode email branch + the phone-match link skip
+    expect(src.match(/thirdPartyCustomerOnlyCards\(/g).length).toBe(4);
   });
   test('the commitments step passes thirdPartyCall from gate + nature + no service ask', () => {
     expect(src).toContain('thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)');
@@ -430,14 +431,18 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(thirdPartyCallMakesNoServiceAsk(vendorCallback)).toBe(false);
     expect(thirdPartyCallMakesNoServiceAsk(applicantCancels)).toBe(false);
   });
-  test('the phone-match branch never backfills an applicant / vendor email or address onto the matched customer (gate on)', () => {
-    // Codex #7034 r2 security P2: the gate drops the email/address review cards, so the
-    // backfill must take the pre-linked path's third-party veto or the write is silent.
+  test('a phone match is not linked where the gate drops the cards: no backfill, no profile enrichment', () => {
+    // Codex #7034 r2 + r3 security P2: with the review cards dropped, a linked phone match
+    // would silently feed the email/address backfill and enrichFromCall (codes, pets, notes).
+    // The link is skipped on exactly the card-drop predicate, so every customer write is.
     const at = src.indexOf("source: 'call-extraction-backfill'");
     expect(at).toBeGreaterThan(-1);
-    const before = src.slice(Math.max(0, at - 700), at);
-    expect(before).toContain('if (!(callApplicantHandlingLive() && v2ThirdPartyCallNature)) {');
-    expect(src.match(/source: 'call-extraction-backfill'/g).length).toBe(1);
+    const before = src.slice(Math.max(0, at - 1600), at);
+    expect(before).toContain('const thirdPartyMatchUnlinked = !!existing && thirdPartyCustomerOnlyCards(');
+    expect(before).toContain('if (thirdPartyMatchUnlinked) {');
+    expect(before).toMatch(/\} else if \(existing\) \{\s+customerId = existing\.id;/);
+    // Enrichment runs only for a linked customer.
+    expect(src).toMatch(/if \(customerId\) \{\s+await enrichFromCall\(/);
   });
 
   test('the Careers step runs on the main path (after commitments) and on the voicemail exit path', () => {

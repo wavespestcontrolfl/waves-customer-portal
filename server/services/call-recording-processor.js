@@ -14597,19 +14597,24 @@ const CallRecordingProcessor = {
         // shared) in between, so the callback card no longer applies. Retire it (Codex #6419 r9).
         await require('./call-family-name-link').retireCallbackSpokenNumberCard({ callLogId: call.id, procToken });
       }
-      if (existing) {
+      // GATE_CALL_APPLICANT_HANDLING: where the gate drops this call's customer
+      // review cards (an applicant / vendor call that asks no service), a phone
+      // match is NOT linked. The number may be one the caller named, and with the
+      // cards gone nothing would review what a link feeds: the email / address
+      // backfill below and the profile enrichment (access codes, pets, notes).
+      const thirdPartyMatchUnlinked = !!existing && thirdPartyCustomerOnlyCards(
+        v2Result?.status === 'valid' ? v2Result.extraction : null, { gateOn: callApplicantHandlingLive() },
+      ).length > 0;
+      if (thirdPartyMatchUnlinked) {
+        logger.info(`[call-proc] ${maskSid(callSid)}: applicant/vendor call matched a customer by phone; not linked (GATE_CALL_APPLICANT_HANDLING)`);
+      } else if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
         // Update with any new info (email + address; shared with the
-        // pre-linked path below). GATE_CALL_APPLICANT_HANDLING: an applicant's or
-        // vendor's email and address are not the matched customer's, and the gate
-        // drops the review cards that would catch the write, so this branch takes
-        // the pre-linked path's third-party veto (prelinkedBackfillGate).
-        if (!(callApplicantHandlingLive() && v2ThirdPartyCallNature)) {
-          await backfillLinkedCustomerFromExtraction({
-            customerId, existing, extracted, source: 'call-extraction-backfill',
-          });
-        }
+        // pre-linked path below).
+        await backfillLinkedCustomerFromExtraction({
+          customerId, existing, extracted, source: 'call-extraction-backfill',
+        });
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
