@@ -7,8 +7,9 @@ jest.mock('../models/db', () => jest.fn());
 
 const defaultDb = require('../models/db');
 const {
-  serviceLineFor, resolveLineTechnician, recordLinePickShadow,
+  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive,
 } = require('../services/scheduling/line-technician');
+const pickTechnician = require('../services/scheduling/pick-technician');
 
 const OWNER = { id: 'tech-owner', name: 'Owner Tech', employment_status: 'active', field_dispatchable: true, work_days: null };
 const HIRE = { id: 'tech-hire', name: 'New Hire', employment_status: 'active', field_dispatchable: true, work_days: [1, 2, 3, 4] };
@@ -178,6 +179,159 @@ describe('resolveLineTechnician', () => {
   });
 });
 
+describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
+  const live = () => { process.env.GATE_SERVICE_LINE_MAP = 'live'; };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('lineMapLive reads the gate at call time: only "live" is live', () => {
+    expect(lineMapLive()).toBe(false);
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    expect(lineMapLive()).toBe(false);
+    process.env.GATE_SERVICE_LINE_MAP = ' LIVE ';
+    expect(lineMapLive()).toBe(true);
+  });
+
+  describe('lineOfferRanking', () => {
+    test('gate shadow or off: null without a query (offers stay as today)', async () => {
+      const db = fakeDb({ lines: LINES });
+      expect(await lineOfferRanking(db, { lines: ['general'] })).toBeNull();
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      expect(await lineOfferRanking(db, { lines: ['general'] })).toBeNull();
+      expect(db.queries).toEqual([]);
+    });
+
+    test('no technician set for any asked line (the empty map of 2026-10-30): null, today\'s offers', async () => {
+      live();
+      expect(await lineOfferRanking(fakeDb({ lines: [] }), { lines: ['general'] })).toBeNull();
+      const empty = fakeDb({ lines: [{ service_category: 'general', home_technician_id: null, gap_technician_id: null }] });
+      expect(await lineOfferRanking(empty, { lines: ['general'] })).toBeNull();
+      expect(await lineOfferRanking(fakeDb({ lines: LINES }), { lines: [] })).toBeNull();
+      expect(await lineOfferRanking(fakeDb({ lines: LINES }), { lines: ['mosquito'] })).toBeNull();
+    });
+
+    test('general pest: home 0, gap 1, anyone else dropped', async () => {
+      live();
+      const ranking = await lineOfferRanking(fakeDb({ lines: LINES }), { lines: ['general'] });
+      expect(ranking.lines).toEqual(['general']);
+      expect(ranking.rankOf(HIRE.id)).toBe(0);
+      expect(ranking.rankOf(OWNER.id)).toBe(1);
+      expect(ranking.rankOf('tech-third')).toBeNull();
+      expect(ranking.rankOf(null)).toBeNull();
+    });
+
+    test('lawn with no gap: only the home tech', async () => {
+      live();
+      const ranking = await lineOfferRanking(fakeDb({ lines: LINES }), { lines: ['lawn'] });
+      expect(ranking.rankOf(OWNER.id)).toBe(0);
+      expect(ranking.rankOf(HIRE.id)).toBeNull();
+    });
+
+    test('a two-service booking (pest + lawn) keeps only a technician on BOTH lines', async () => {
+      live();
+      const ranking = await lineOfferRanking(fakeDb({ lines: LINES }), { lines: ['general', 'lawn'] });
+      expect(ranking.rankOf(OWNER.id)).toBe(1); // gap on pest, home on lawn
+      expect(ranking.rankOf(HIRE.id)).toBeNull(); // not on lawn
+    });
+
+    test('an unmapped line in a two-service booking adds no rule', async () => {
+      live();
+      const ranking = await lineOfferRanking(fakeDb({ lines: LINES }), { lines: ['general', 'mosquito'] });
+      expect(ranking.lines).toEqual(['general']);
+      expect(ranking.rankOf(HIRE.id)).toBe(0);
+    });
+
+    test('a technician switched Off for the line is dropped', async () => {
+      live();
+      const db = fakeDb({ lines: LINES, caps: [{ technician_id: HIRE.id, service_category: 'general', capability_level: 'qualified', active: false }] });
+      const ranking = await lineOfferRanking(db, { lines: ['general'] });
+      expect(ranking.rankOf(HIRE.id)).toBeNull();
+      expect(ranking.rankOf(OWNER.id)).toBe(1);
+    });
+
+    test('a gap equal to the home counts once, as home', async () => {
+      live();
+      const db = fakeDb({ lines: [{ service_category: 'general', home_technician_id: OWNER.id, gap_technician_id: OWNER.id }] });
+      expect((await lineOfferRanking(db, { lines: ['general'] })).rankOf(OWNER.id)).toBe(0);
+    });
+  });
+
+  describe('pickLineTechnician', () => {
+    const pick = (db, extra = {}) => pickLineTechnician(db, { serviceType: 'General Pest Control', date: MONDAY, ...extra });
+
+    test('gate not live: mapped false, no query', async () => {
+      const db = fakeDb({ lines: LINES });
+      expect(await pick(db)).toEqual({ mapped: false, line: null, technicianId: null, reason: 'off' });
+      expect(db.queries).toEqual([]);
+    });
+
+    test('no technician set for the line, or no line: mapped false (the caller keeps today\'s choice)', async () => {
+      live();
+      expect(await pick(fakeDb({ lines: [] }))).toMatchObject({ mapped: false, line: 'general', reason: 'no_map' });
+      expect(await pickLineTechnician(fakeDb({ lines: LINES }), { date: MONDAY })).toMatchObject({ mapped: false, line: null, reason: 'no_map' });
+    });
+
+    test('home fit -> home', async () => {
+      live();
+      expect(await pick(fakeDb({ lines: LINES }))).toEqual({ mapped: true, line: 'general', technicianId: HIRE.id, reason: 'home' });
+    });
+
+    test('home off day -> gap_off_day; neither -> none', async () => {
+      live();
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      expect(await pick(fakeDb({ lines: LINES }), { date: FRIDAY })).toMatchObject({ mapped: true, technicianId: OWNER.id, reason: 'gap_off_day' });
+      const db = fakeDb({ lines: LINES, absences: [{ technician_id: OWNER.id, absence_date: FRIDAY, cleared_at: null }] });
+      expect(await pick(db, { date: FRIDAY })).toEqual({ mapped: true, line: 'general', technicianId: null, reason: 'none' });
+    });
+
+    test('lawn with no gap and the home absent -> none (nobody covers lawn that day)', async () => {
+      live();
+      const db = fakeDb({ lines: LINES, absences: [{ technician_id: OWNER.id, absence_date: MONDAY, cleared_at: null }] });
+      expect(await pick(db, { serviceType: 'Lawn Care Visit' })).toMatchObject({ mapped: true, line: 'lawn', technicianId: null, reason: 'none' });
+    });
+
+    test('candidateIds: a home missing from the caller\'s list -> gap_not_listed', async () => {
+      live();
+      expect(await pick(fakeDb({ lines: LINES }), { candidateIds: [OWNER.id] })).toMatchObject({ technicianId: OWNER.id, reason: 'gap_not_listed' });
+    });
+
+    test('a map with only a gap -> gap_unset', async () => {
+      live();
+      const db = fakeDb({ lines: [{ service_category: 'general', home_technician_id: null, gap_technician_id: OWNER.id }] });
+      expect(await pick(db)).toMatchObject({ technicianId: OWNER.id, reason: 'gap_unset' });
+    });
+
+    test('checkFree: a busy home goes to the gap (gap_busy); both busy -> none; the probe gets the window and exclusions', async () => {
+      live();
+      const free = jest.spyOn(pickTechnician, 'technicianFreeAt').mockImplementation(async ({ technicianId }) => technicianId !== HIRE.id);
+      const out = await pick(fakeDb({ lines: LINES }), {
+        checkFree: true, windowStart: '09:00:00', durationMinutes: 45, excludeCustomerId: 'cust-1', excludeServiceIds: ['v-9'],
+      });
+      expect(out).toMatchObject({ technicianId: OWNER.id, reason: 'gap_busy' });
+      expect(free).toHaveBeenCalledWith(expect.objectContaining({
+        technicianId: HIRE.id, date: MONDAY, windowStart: '09:00', windowEnd: '09:45', excludeCustomerId: 'cust-1', excludeServiceIds: ['v-9'],
+      }));
+      free.mockResolvedValue(false);
+      expect(await pick(fakeDb({ lines: LINES }), { checkFree: true, windowStart: '09:00', windowEnd: '10:00' }))
+        .toMatchObject({ mapped: true, technicianId: null, reason: 'none' });
+    });
+
+    test('no checkFree, or no window: the probe is never asked', async () => {
+      live();
+      const free = jest.spyOn(pickTechnician, 'technicianFreeAt').mockResolvedValue(false);
+      expect(await pick(fakeDb({ lines: LINES }), { windowStart: '09:00' })).toMatchObject({ technicianId: HIRE.id, reason: 'home' });
+      expect(await pick(fakeDb({ lines: LINES }), { checkFree: true })).toMatchObject({ technicianId: HIRE.id, reason: 'home' });
+      expect(free).not.toHaveBeenCalled();
+    });
+
+    test('reads only', async () => {
+      live();
+      const db = fakeDb({ lines: LINES });
+      await pick(db);
+      expect(db.inserts).toEqual([]);
+    });
+  });
+});
+
 describe('recordLinePickShadow', () => {
   const base = {
     source: 'book', scheduledServiceId: 'visit-1', customerId: 'cust-1', date: MONDAY, windowStart: '09:00',
@@ -190,10 +344,19 @@ describe('recordLinePickShadow', () => {
     expect(defaultDb).not.toHaveBeenCalled();
   });
 
-  test('"true" is not a value yet: still off', async () => {
+  test('"true" is not a value: still off', async () => {
     process.env.GATE_SERVICE_LINE_MAP = 'true';
     await recordLinePickShadow(base);
     expect(defaultDb).not.toHaveBeenCalled();
+  });
+
+  test('live keeps recording: one row, like shadow', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    const db = fakeDb({ lines: LINES });
+    defaultDb.mockImplementation(db);
+    await recordLinePickShadow(base);
+    expect(db.inserts).toHaveLength(1);
+    expect(db.inserts[0]).toMatchObject({ table: 'service_line_pick_shadow', row: { source: 'book', would_technician_id: HIRE.id, would_reason: 'home' } });
   });
 
   test('shadow: one row with the actual and the would-be technician and the reason', async () => {
