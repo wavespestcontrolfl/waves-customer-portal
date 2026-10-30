@@ -25,6 +25,17 @@
       }
     },
     {
+      "id": "after-midnight-bare-tomorrow-held",
+      "why": "A 12:40 AM Friday call where the caller contrasts today with tomorrow and names no weekday or date. 'Tomorrow' could be Friday or Saturday: the day is not guessed, ambiguous, the office confirms (prompt v33).",
+      "call_date_et": "2026-11-06",
+      "call_time_et": "12:40 AM",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, this is Pat Example at 100 Example Lane in Sampleton. I keep finding spiders in the house and I can't sleep.\nAgent: We can come out. What does your day look like?\nCaller: I can't do today. Tomorrow at ten works.\nAgent: Okay, ten o'clock tomorrow.\nCaller: Yes.\nAgent: Great. We'll see you tomorrow at ten.\nCaller: Thank you.",
+      "expect": {
+        "scheduling_status": "ambiguous",
+        "confirmed_start_at": null
+      }
+    },
+    {
       "id": "daytime-tomorrow-is-next-day",
       "why": "Control: the call starts at 10:15 AM on a Friday and staff and the caller settle 'tomorrow at four'. Outside 12:00 AM to 4:00 AM, 'tomorrow' is the day after the call date (Saturday).",
       "call_date_et": "2026-11-06",

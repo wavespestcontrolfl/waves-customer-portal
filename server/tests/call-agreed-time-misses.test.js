@@ -289,21 +289,21 @@ describe('case: calls after midnight (v33)', () => {
     expect(user).not.toContain('CALLS AFTER MIDNIGHT');
   });
 
-  test('the rule reads "tomorrow" on a 12:00-4:00 AM call as the call date, and a stated other day governs', () => {
+  test('on a 12:00-4:00 AM call a said weekday or date decides what "tomorrow" names', () => {
     const rule = afterMidnightDayRule('2026-11-06');
     expect(rule).toContain('when the call time given at the top is from 12:00 AM up to 4:00 AM');
-    expect(rule).toContain('names the coming daytime, which is the CALL DATE itself (2026-11-06), not the day after it');
-    expect(rule).toContain('A weekday that names the call date ("Friday" on a call that started early on a Friday) is that same day, so it agrees with "tomorrow"');
-    expect(rule).toContain('the stated weekday or date governs');
+    expect(rule).toContain('can name the coming daytime, which is the CALL DATE itself (2026-11-06), or the day after it');
+    expect(rule).toContain('A weekday or calendar date said on the call for that day decides.');
+    expect(rule).toContain('When it names the call date and the call ties "tomorrow" to it ("Friday, which is tomorrow"');
+    expect(rule).toContain('When it names the day after the call date ("Saturday, which is tomorrow"), that day governs.');
     expect(rule).toContain('Outside 12:00 AM to 4:00 AM, "tomorrow" is the day after the call date as usual.');
   });
 
-  test('a reschedule day that rests only on "tomorrow" stays null on such a call (the reschedule grounding reads it as the next day)', () => {
+  test('a bare "tomorrow" on such a call is not guessed, and a reschedule day that rests on it stays null', () => {
     const rule = afterMidnightDayRule('2026-11-06');
-    expect(rule).toContain('This reading is for the slot of a NEW visit only.');
-    expect(rule).toContain('rests only on "tomorrow" or "the day after tomorrow" (no weekday or calendar date said for it), leave confirmed_start_at, proposed_start_at and moved_appointment_date null');
-    expect(rule).toContain('the office confirms that day. A weekday or calendar date said for it still sets it.');
-    expect(rule).not.toContain('follow-up and callback times');
+    expect(rule).toContain('("tomorrow at ten", "I can\'t do today; tomorrow at ten works"), do not guess: the status is "ambiguous", confirmed_start_at is null');
+    expect(rule).toContain('so the office confirms the day');
+    expect(rule).toContain('For a RESCHEDULE on such a call the same test sets confirmed_start_at, proposed_start_at and moved_appointment_date: when only "tomorrow" or "the day after tomorrow" was said for one of them, leave it null');
   });
 
   test('the rule sits right after the day/time conflict rule, before the existing-appointment line, in both layouts', () => {
@@ -330,19 +330,22 @@ describe('case: calls after midnight (v33)', () => {
     expect(byId('after-midnight-tomorrow-is-call-date').expect.confirmed_start_at.slice(0, 10)).toBe('2026-11-06');
     expect(weekday(byId('after-midnight-weekday-names-later-day').expect.confirmed_start_at)).toBe('Saturday');
     expect(byId('daytime-tomorrow-is-next-day').expect.confirmed_start_at.slice(0, 10)).toBe('2026-11-07');
+    expect(byId('after-midnight-bare-tomorrow-held').expect).toEqual({ scheduling_status: 'ambiguous', confirmed_start_at: null });
     for (const c of fixture.cases) {
-      expect(c.expect.confirmed_start_at).toMatch(/-05:00$/);
+      if (c.expect.confirmed_start_at) expect(c.expect.confirmed_start_at).toMatch(/-05:00$/);
       expect(c.transcript).not.toMatch(/\d{3}[-. ]\d{3}[-. ]\d{4}/);
       expect(c.transcript).toContain('Pat Example');
     }
   });
 
-  test('routing books the after-midnight extraction on the call date', () => {
+  test('routing books the after-midnight extraction on the call date and holds the bare-tomorrow one', () => {
     const e = byId('after-midnight-tomorrow-is-call-date').expect;
     expect(canAutoRoute(extraction({
       status: e.scheduling_status,
       confirmed_start_at: e.confirmed_start_at,
     }), { addressValidation: AV_CLEAN }).allowed).toBe(true);
+    const held = byId('after-midnight-bare-tomorrow-held').expect;
+    expect(canAutoRoute(extraction({ status: held.scheduling_status, confirmed_start_at: held.confirmed_start_at }), { addressValidation: AV_CLEAN }).allowed).toBe(false);
   });
 });
 

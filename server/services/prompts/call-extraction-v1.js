@@ -191,9 +191,9 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // v33: CALLS AFTER MIDNIGHT rule. 2026-10-30: a call started at 12:52 AM on a Friday; the caller
 // said "I get out of work on Friday at four. Like, which is tomorrow.", accepted five o'clock, and
 // staff closed with "we'll see you tomorrow at five". The extraction read "tomorrow" as Saturday,
-// called the day contested and nothing was booked. On a call from 12:00 AM up to 4:00 AM,
-// "tomorrow" is the call date (the coming daytime), a weekday naming the call date agrees with it,
-// and a weekday or date naming another day governs. Extraction only: no judge has the call's clock.
+// called the day contested and nothing was booked. On a call from 12:00 AM up to 4:00 AM, a said
+// weekday or date decides what "tomorrow" names (the call date or the day after); a bare "tomorrow"
+// is not guessed (ambiguous; a reschedule day stays null). Extraction only: no judge has the clock.
 const PROMPT_VERSION = 'v33';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
