@@ -50,7 +50,10 @@ jest.mock('../services/pay-combined', () => ({
   isCombinedPiMetadata: jest.fn(() => false),
   clearPaymentIntentStamps: jest.fn(async () => 0),
 }));
-jest.mock('../services/retry-collectibility', () => ({ findCollectedMonthlyPayment: jest.fn(async () => undefined) }));
+jest.mock('../services/retry-collectibility', () => ({
+  findCollectedMonthlyPayment: jest.fn(async () => undefined),
+  monthKeyOf: jest.requireActual('../services/retry-collectibility').monthKeyOf,
+}));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}) }));
 // The real composer validates the alert (headline, why, area, link, subject, done-when, who; it
 // throws on a violation under NODE_ENV=test); only the notification write is replaced.
@@ -263,6 +266,9 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     expect(spec.why).toBe('The October 2026 $55.30 dues payment was canceled at Stripe before it cleared; the month is unpaid.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'autopay-canceled:cust-1:pi_dues_1' });
     expect(opts.detail).toMatch(/No message was sent to the customer\./);
+    // The plain Charge now button bills the current month, so the office is told to enter the amount.
+    expect(opts.detail).toMatch(/enter the exact amount on the customer's page \(the plain Charge now button bills the current month\)/);
+    expect(opts.detail).toMatch(/To waive it, mark this done\./);
     expect(updatesWhenAlerted).toBe(0); // raised before the canceled flip
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_canceled', expect.objectContaining({
       paymentId: 'pay-dues-1', amountCents: 5530,
@@ -295,6 +301,35 @@ describe('monthly autopay dues canceled while processing (billing audit finding 
     await handleCanceled({ id: 'pi_other', metadata: {} });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(retryArms()).toHaveLength(0);
+  });
+
+  test('a failed dues row still on its retry ladder (a declined card PI canceled in Stripe) rings with the retry wording', async () => {
+    mockState.processingRow = duesRow({ status: 'failed', next_retry_at: '2026-11-02T14:07:00Z', retry_count: 1 });
+    await handleCanceled(DUES_PI);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(spec.why).toBe('The October 2026 $55.30 dues payment was canceled at Stripe, so its retries stopped; the month is unpaid.');
+    expect(opts.detail).toMatch(/had failed and was waiting for its next automatic retry/);
+    expect(opts.metadata).toMatchObject({ payment_status: 'failed', payment_id: 'pay-dues-1' });
+    expect(retryArms()).toHaveLength(0);
+  });
+
+  test('a failed dues row off its ladder, or parked on card authentication (the flip keeps it failed), never rings', async () => {
+    mockState.processingRow = duesRow({ status: 'failed', next_retry_at: null });
+    await handleCanceled(DUES_PI);
+    mockState.processingRow = duesRow({
+      status: 'failed', next_retry_at: '2026-11-02T14:07:00Z',
+      metadata: { billed_month: '2026-10', requires_action: true },
+    });
+    await handleCanceled(DUES_PI);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('the month falls back to the row\'s payment date when neither the row nor the PI carries billed_month', async () => {
+    mockState.processingRow = duesRow({ metadata: {}, payment_date: new Date('2026-09-30T04:00:00Z') });
+    await handleCanceled({ id: 'pi_dues_legacy', metadata: { type: 'monthly_autopay' } });
+    expect(findCollectedMonthlyPayment).toHaveBeenCalledWith('cust-1', expect.objectContaining({ monthKey: '2026-09' }), { excludePaymentId: 'pay-dues-1' });
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/^The September 2026 \$55\.30 dues payment/);
   });
 
   test('an alert that throws fails the webhook before the flip, so the redelivery finds the row still processing', async () => {

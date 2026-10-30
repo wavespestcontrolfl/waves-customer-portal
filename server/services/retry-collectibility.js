@@ -549,5 +549,6 @@ module.exports = {
   hasUnresolvedSiblingStripeOutcome,
   findCollectedMonthlyPayment,
   deriveMonthlyChargeIdempotencyKey,
+  monthKeyOf,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },
 };
