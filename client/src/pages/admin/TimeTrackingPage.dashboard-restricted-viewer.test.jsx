@@ -89,6 +89,9 @@ it("codex round-3 P2: hides the OT summary text and the bar chart's overtime spl
 
   await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
   expect(screen.queryByText(/OT:/)).not.toBeInTheDocument();
+  // No Reg/OT key either: this viewer's bars carry no overtime split.
+  expect(screen.queryByText("Reg")).not.toBeInTheDocument();
+  expect(screen.queryByText("OT")).not.toBeInTheDocument();
 });
 
 it("control: an admin viewer sees the OT summary text", async () => {
@@ -102,6 +105,8 @@ it("control: an admin viewer sees the OT summary text", async () => {
 
   await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
   expect(screen.getByText(/OT:/)).toBeInTheDocument();
+  expect(screen.getByText("Reg")).toBeInTheDocument();
+  expect(screen.getByText("OT")).toBeInTheDocument();
 });
 
 it("team overtime is each technician's own overtime, never one 40-hour line across the team", async () => {

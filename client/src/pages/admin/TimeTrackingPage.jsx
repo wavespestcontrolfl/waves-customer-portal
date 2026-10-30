@@ -670,17 +670,19 @@ export function DashboardTab({ showToast }) {
             {!isRestrictedViewer && <> | OT: {fmtHrs(weekOT)}</>}
           </span>{" "}
           {/* The bar chart's key, as text beside the chart instead of 9px
-              text inside it. */}
-          <span style={{ fontSize: 14, color: D.muted, display: "flex", gap: 12 }}>
-            <span>
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.teal, marginRight: 4 }} />
-              Reg
+              text inside it. A restricted viewer's bars have no OT split. */}
+          {!isRestrictedViewer && (
+            <span style={{ fontSize: 14, color: D.muted, display: "flex", gap: 12 }}>
+              <span>
+                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.teal, marginRight: 4 }} />
+                Reg
+              </span>
+              <span>
+                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.red, marginRight: 4 }} />
+                OT
+              </span>
             </span>
-            <span>
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: D.red, marginRight: 4 }} />
-              OT
-            </span>
-          </span>
+          )}
         </div>{" "}
         <WeekBarChart
           weekDailies={weekDailies}
@@ -919,10 +921,12 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
       setAutoLunch(dashRes.autoLunch === true);
     } catch (e) {
       if (request !== loadRequestRef.current) return;
-      // The rows on hand belong to another week; drop them so the grid
-      // never shows that week's people as this week's empty days.
+      // The rows on hand may belong to another week; drop them, and the
+      // open day with them, so nothing shows under this week but the notice.
       setDailies([]);
       setTechs([]);
+      cellRequestRef.current += 1;
+      setExpanded(null);
       setLoadFailed(true);
       showToast("Failed to load timesheet");
     }
@@ -2977,6 +2981,7 @@ export function TeamTab({ showToast }) {
   // A failed roster read is not an empty team: the empty-state invitation to
   // add a first technician shows only after a read that succeeded.
   const [loadFailed, setLoadFailed] = useState(false);
+  const loadRequestRef = useRef(0);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_TECH_FORM);
@@ -3056,13 +3061,18 @@ export function TeamTab({ showToast }) {
   };
 
   const load = useCallback(async () => {
+    // Saves, hires and Retry each reload the roster; only the latest read
+    // may set it or the failure notice.
+    const request = ++loadRequestRef.current;
     try {
       const res = await adminFetch("/admin/timetracking/technicians");
+      if (request !== loadRequestRef.current) return;
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
       setLoadFailed(false);
     } catch {
+      if (request !== loadRequestRef.current) return;
       // A roster already on screen stays; the notice says it may be stale.
       setLoadFailed(true);
     }
@@ -5172,6 +5182,7 @@ function DocumentsTab({ showToast }) {
   // A failed list read is not an empty library: "No documents yet" and its
   // upload invitation show only after a read that succeeded.
   const [loadFailed, setLoadFailed] = useState(false);
+  const loadRequestRef = useRef(0);
   const [catFilter, setCatFilter] = useState("all");
   const [techFilter, setTechFilter] = useState("all"); // 'all' | 'company' | <techId>
   const [showUpload, setShowUpload] = useState(false);
@@ -5205,6 +5216,9 @@ function DocumentsTab({ showToast }) {
   }, []);
 
   const load = useCallback(async () => {
+    // Only the latest read (filter change, upload, edit, archive, Retry) may
+    // set the list or the failure notice.
+    const request = ++loadRequestRef.current;
     try {
       const params = new URLSearchParams();
       params.set("category", catFilter);
@@ -5213,9 +5227,11 @@ function DocumentsTab({ showToast }) {
       const res = await adminFetch(
         `/admin/timetracking/documents?${params.toString()}`,
       );
+      if (request !== loadRequestRef.current) return;
       setDocs(res.documents || []);
       setLoadFailed(false);
     } catch {
+      if (request !== loadRequestRef.current) return;
       // The list on screen may belong to another filter, so it is cleared;
       // the notice below says the read failed.
       setDocs([]);

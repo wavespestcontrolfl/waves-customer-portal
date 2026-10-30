@@ -104,6 +104,65 @@ describe("timesheet day entries", () => {
   });
 });
 
+describe("timesheet week switch", () => {
+  it("a failed week read shows the notice instead of the previous week's people, and Retry reads the week", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+    let failNextWeek = true;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/daily")) {
+        if (u.searchParams.get("startDate") === "2026-11-02" && failNextWeek) {
+          return json({ error: "Synthetic outage" }, 503);
+        }
+        return json([{ technician_id: "tech-1", tech_name: "Field Tech", work_date: u.searchParams.get("startDate"), total_shift_minutes: 480, overtime_minutes: 0 }]);
+      }
+      if (u.pathname.endsWith("/entries")) return json({ entries: [] });
+      return json({ allTechs: [TECH], autoLunch: false });
+    }));
+    render(<TimesheetTab showToast={() => {}} onOpenApprovals={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Field Tech, Mon 2026-10-26: 8.0 hours" }));
+    expect(await screen.findByText("Entries for 2026-10-26")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    expect(await screen.findByText("Could not load the timesheet for 2026-11-02 to 2026-11-08.")).toBeInTheDocument();
+    expect(screen.queryByText("Field Tech")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Entries for /)).not.toBeInTheDocument();
+
+    failNextWeek = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Field Tech")).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load the timesheet/)).not.toBeInTheDocument();
+  });
+});
+
+describe("timesheet same-week reload", () => {
+  it("a failed reload after a lunch change closes the open day with the rows", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+    let dailyReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/no-lunch")) return json({ noLunch: true });
+      if (u.pathname.endsWith("/daily")) {
+        dailyReads += 1;
+        if (dailyReads > 1) return json({ error: "Synthetic outage" }, 503);
+        return json([{ technician_id: "tech-1", tech_name: "Field Tech", work_date: "2026-10-26", total_shift_minutes: 510, unpaid_meal_minutes: 30, overtime_minutes: 0, status: "pending" }]);
+      }
+      if (u.pathname.endsWith("/entries")) return json({ entries: [] });
+      return json({ allTechs: [TECH], autoLunch: true });
+    }));
+    render(<TimesheetTab showToast={() => {}} onOpenApprovals={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Field Tech, Mon 2026-10-26/ }));
+    fireEvent.change(await screen.findByLabelText("Reason for the lunch change"), { target: { value: "worked through" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mark no lunch" }));
+
+    expect(await screen.findByText("Could not load the timesheet for 2026-10-26 to 2026-11-01.")).toBeInTheDocument();
+    expect(screen.queryByText("Field Tech")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Entries for /)).not.toBeInTheDocument();
+  });
+});
+
 describe("approvals week switch", () => {
   const week = (name, token) => ({
     technician_id: "tech-1",
@@ -208,6 +267,32 @@ describe("failed reads are not empty lists", () => {
     render(<TeamTab showToast={() => {}} />);
     expect(await screen.findByText(/No technicians found/)).toBeInTheDocument();
     expect(screen.queryByText(/Could not load/)).not.toBeInTheDocument();
+  });
+
+  it("a slow read for an earlier document filter never replaces the newer filter's list", async () => {
+    let finishSop;
+    const sopResponse = new Promise((resolve) => { finishSop = resolve; });
+    const doc = (id, title) => ({ id, title, category: "general", file_name: `${id}.pdf`, file_size: 1024, created_at: "2026-10-28T12:00:00Z" });
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/technicians")) return json({ technicians: [TECH] });
+      const category = u.searchParams.get("category");
+      if (category === "sop") return sopResponse;
+      if (category === "general") return json({ documents: [doc("d-gen", "General handbook")] });
+      return json({ documents: [] });
+    }));
+    render(
+      <MemoryRouter initialEntries={["/admin/timetracking?tab=documents"]}>
+        <TimeTrackingPage />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "SOPs" }));
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(await screen.findByText("General handbook")).toBeInTheDocument();
+
+    await act(async () => { finishSop(json({ documents: [doc("d-sop", "Old SOP")] })); });
+    expect(screen.getByText("General handbook")).toBeInTheDocument();
+    expect(screen.queryByText("Old SOP")).not.toBeInTheDocument();
   });
 
   it("a failed document read says so instead of No documents yet, and Retry reads them again", async () => {
