@@ -1415,6 +1415,14 @@ const ON_TRACK_KINDS = ['other', 'callback', 'technician_follow_up'];
 // kept: R1 closes the ask it answers, and a promise it left open is held only
 // until that window's end.)
 const ON_TRACK_EXCLUDED_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped'];
+// A dated promise is not carried out by a visit booked months after its due day.
+const ON_TRACK_MAX_DAYS_AFTER_DUE = 14;
+// True when the visit's Eastern day is at most ON_TRACK_MAX_DAYS_AFTER_DUE days after the promise's due day.
+const withinOnTrackHorizon = (visit, dueDay) => {
+  const day = String(visit.scheduled_date || '').slice(0, 10);
+  const gap = (Date.parse(`${day}T00:00:00Z`) - Date.parse(`${dueDay}T00:00:00Z`)) / 86400000;
+  return Number.isFinite(gap) && gap <= ON_TRACK_MAX_DAYS_AFTER_DUE;
+};
 const onTrackWindowEnd = (visit) => {
   const day = String(visit.scheduled_date || '').slice(0, 10);
   const clock = (value) => (/^\d{2}:\d{2}/.test(String(value || '')) ? String(value).slice(0, 5) : null);
@@ -1429,7 +1437,8 @@ const onTrackWindowEnd = (visit) => {
 // The nearest visit that keeps an overdue waves row (promise or request) on track: live (not
 // cancelled, no-show or skipped), not a recurring-series child, at the
 // promise's property when it names one, created after the promise text, with
-// its window end still ahead. Null when the gate is off, the row is not such a
+// its window end still ahead and its day no more than ON_TRACK_MAX_DAYS_AFTER_DUE
+// (14) days after the promise's due day. Null when the gate is off, the row is not such a
 // promise, nothing qualifies, or the read fails (the ring then stands).
 async function findOnTrackVisit(conn, commitment, message, now) {
   const mode = promiseRecordMode();
@@ -1448,7 +1457,9 @@ async function findOnTrackVisit(conn, commitment, message, now) {
       .orderBy('scheduled_date').limit(20)
       .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'),
         conn.raw('window_start::text as window_start'), conn.raw('window_end::text as window_end'));
-    const ahead = visits.map((visit) => ({ visit, end: onTrackWindowEnd(visit) })).filter(({ end }) => end && end > now)
+    const dueDay = etDateString(new Date(commitment.due_at));
+    const ahead = visits.filter((visit) => withinOnTrackHorizon(visit, dueDay))
+      .map((visit) => ({ visit, end: onTrackWindowEnd(visit) })).filter(({ end }) => end && end > now)
       .sort((a, b) => a.end - b.end);
     return ahead.length ? { mode, visit_id: ahead[0].visit.id, window_end: ahead[0].end.toISOString() } : null;
   } catch (err) {
