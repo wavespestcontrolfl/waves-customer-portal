@@ -5,7 +5,7 @@ const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { sweepMissingPrimaryProperties } = require('../services/customer-properties');
+const { sweepMissingPrimaryProperties, customersWithStreetLineHoldingLocality } = require('../services/customer-properties');
 const logger = require('../services/logger');
 
 // Fake knex: `customers as c` list → candidates; `customers` by id → the
@@ -137,5 +137,35 @@ describe('scheduler wiring', () => {
   test('a daily 3:20 AM ET tick runs the primary backstop under its own job_health name', () => {
     const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
     expect(src).toMatch(/cron\.schedule\('20 3 \* \* \*', async \(\) => \{[\s\S]{0,600}runExclusive\('primary-property-backstop', \(\) => sweepMissingPrimaryProperties\(\)\)[\s\S]{0,200}timezone: 'America\/New_York'/);
+  });
+});
+
+describe('customersWithStreetLineHoldingLocality (daily lead-to-cash sweep check)', () => {
+  test('reads live profiles and active saved addresses, keeps only street lines that hold their locality, one id per customer', async () => {
+    const raws = [];
+    const rows = {
+      customers: [
+        { id: 'c2', address_line1: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish' },
+        { id: 'c3', address_line1: '324 48th Street, Court West', city: 'Palmetto' },
+      ],
+      customer_properties: [
+        { id: 'c2', address_line1: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish' },
+        { id: 'c1', address_line1: '4 Sample Rd, Venice', city: 'Venice' },
+      ],
+    };
+    const conn = (table) => {
+      const name = table.split(' ')[0];
+      const q = {
+        whereNull: () => q, where: () => q, join: () => q,
+        whereRaw: (sql) => { raws.push(sql); return q; },
+        select: async () => rows[name],
+      };
+      return q;
+    };
+    expect(await customersWithStreetLineHoldingLocality(conn)).toEqual(['c1', 'c2']);
+    expect(raws).toEqual([
+      "(c.address_line1 LIKE '%,%' OR c.address_line1 ~* '\\s(fl|florida)\\M')",
+      "(p.address_line1 LIKE '%,%' OR p.address_line1 ~* '\\s(fl|florida)\\M')",
+    ]);
   });
 });

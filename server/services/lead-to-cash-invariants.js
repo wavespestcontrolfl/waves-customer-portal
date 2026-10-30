@@ -211,6 +211,17 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids, detail: { checked: Math.min(visits.length, CLOSEOUT_VISIT_CAP), unevaluable, date: yesterday, truncated } };
     },
   },
+  {
+    key: 'street_line_holds_locality',
+    label: 'Street lines that also hold the city, state or ZIP (one house saved as two)',
+    href: '/admin/customers',
+    provenance: 'owner 2026-10-30 — a lead address copied unsplit; a merge kept both copies (#7131, 14 repaired)',
+    async run() {
+      const { customersWithStreetLineHoldingLocality } = require('./customer-properties');
+      const ids = await customersWithStreetLineHoldingLocality(db);
+      return { count: ids.length, ids };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer

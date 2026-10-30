@@ -24,7 +24,7 @@ const { buildCsrScoringText, resolveCallbackNumbers, callbackNamesOwnedNumber } 
 
 const CALLER = '+19415550142';
 const ALT = '+19415550988';
-const CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
+const CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'source_question', 'set_expectations', 'strong_close'];
 const RESCUE = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
 const scoreAnswer = (type, recommended_action) => ({
   point_details: Object.fromEntries([...CORE, ...RESCUE].map((k) => [k, 1])),

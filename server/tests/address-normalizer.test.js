@@ -1,5 +1,5 @@
 const {
-  normalizeLeadAddress, leadAddressFields, parseRawAddress, formatAddress,
+  normalizeLeadAddress, leadAddressFields, streetLineHoldsLocality, parseRawAddress, formatAddress,
   normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
   dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine, structuralUnitPart,
 } = require('../utils/address-normalizer');
@@ -774,5 +774,36 @@ describe('leadAddressFields', () => {
       { address: '123 Royal Palm Ct, Venice' },
       { address: '123 Main St', city: 'Bradenton', zip: '34205' },
     ]) expect(leadAddressFields(lead)).toEqual(unchanged(lead));
+  });
+});
+
+describe('streetLineHoldsLocality', () => {
+  test('a street line that also holds its city, state or ZIP', () => {
+    for (const [address_line1, city] of [
+      ['12 Sample Ct East, Parrish, FL 34219', 'Parrish'],
+      ['10451 Sample Cove, Parrish Fl', 'Parrish'],
+      ['13524 Sample Ct Parrish, 34219', 'Parrish'],
+      ['6428 Sample Lane, Lakewood Ranch, Fl., 34202', 'Lakewood Ranch'],
+      // The line's city may differ from the city column; the state and ZIP still give it away.
+      ['5523 Sample Pine Ct,bradenton Fl 34211', 'Lakewood Ranch'],
+      ['15715 8th Pl E, Bradenton, Fl 34212, Usa', 'Bradenton'],
+      ['123 Royal Palm Ct, Venice', 'Venice'],
+      ['123 Main St, Apt 4, Sarasota, FL 34236', 'Sarasota'],
+      ['17394 Sample Creek Trl Parrish FL 34219', 'Parrish'],
+    ]) expect([address_line1, streetLineHoldsLocality({ address_line1, city })]).toEqual([address_line1, true]);
+  });
+
+  test('units, street-name words and plain streets are not a locality', () => {
+    for (const [address_line1, city] of [
+      ['4907 18th Street West, Unit A And B', 'Bradenton'],
+      ['324 48th Street, Court West', 'Palmetto'],
+      ['6050 State Road 70 E, Unit A', 'Bradenton'],
+      ['123 Main St, Apt 12345', 'Sarasota'],
+      ['123 Main St, Fl 2', 'Sarasota'],
+      ['123 Royal Palm Ct, Venice', null],
+      ['123 Main St Apt 4', 'Sarasota'],
+      ['123 Main St', 'Sarasota'],
+      ['', ''],
+    ]) expect([address_line1, streetLineHoldsLocality({ address_line1, city })]).toEqual([address_line1, false]);
   });
 });

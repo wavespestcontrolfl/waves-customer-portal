@@ -237,7 +237,7 @@ async function fetchGscData({ days_back = 28, domain, min_impressions = 20 } = {
       implemented: true,
       tool: 'fetch_gsc_data',
       error: e.message,
-      hint: 'Tables gsc_performance_daily / gsc_queries / gsc_pages may be empty. Check /admin/seo?tab=advisor Sync Health card.',
+      hint: 'Tables gsc_performance_daily / gsc_queries / gsc_pages may be empty. Check /admin/seo?workspace=command&view=advisor Sync Health card.',
     };
   }
 }

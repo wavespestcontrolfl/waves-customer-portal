@@ -1000,7 +1000,7 @@ export function CSRCoachTabV2() {
                           scoreAlert(c.avgScore) && "text-alert-fg",
                         )}
                       >
-                        {c.avgScore}/15
+                        {c.avgScore}/16
                       </TD>{" "}
                       <TD
                         className={cn(
@@ -1023,7 +1023,7 @@ export function CSRCoachTabV2() {
                         {overview.teamTotals.bookingRate}%
                       </TD>{" "}
                       <TD className="text-right font-mono u-nums font-medium">
-                        {overview.teamTotals.avgScore}/15
+                        {overview.teamTotals.avgScore}/16
                       </TD>{" "}
                       <TD className="text-right text-ink-tertiary">—</TD>{" "}
                     </TR>

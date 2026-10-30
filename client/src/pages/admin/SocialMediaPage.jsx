@@ -2355,25 +2355,52 @@ function ComposeTab({ showToast, onPublished }) {
 }
 
 // ── RSS Feed Tab ──
+// First human-readable reason a checked item did not publish: the item's own
+// error, else the first platform error or skip text.
+function rssFirstReason(results) {
+  for (const r of results || []) {
+    if (r?.error) return String(r.error);
+    for (const p of r?.platforms || []) {
+      const reason = p?.error || (typeof p?.skipped === "string" ? p.skipped : null);
+      if (reason) return String(reason);
+    }
+  }
+  return null;
+}
+function rssCheckMessage(result) {
+  if (result.locked) return "RSS check skipped: another RSS check is running";
+  if (!result.processed) return "RSS check done: no new items";
+  const count = (v) => (typeof v === "number" ? v : 0);
+  const published = count(result.published);
+  const reason = published === 0 ? rssFirstReason(result.results) : null;
+  return (
+    `RSS check done: ${published} published, ${count(result.skipped)} skipped, ` +
+    `${count(result.failed)} failed${reason ? ` (${reason})` : ""}`
+  );
+}
 function RSSTab({ showToast, onPublished }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [checking, setChecking] = useState(false);
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/social-media/rss")
-      .then((d) => {
-        setItems(d.items || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      .then((d) => setItems(d.items || []))
+      .catch((e) => setLoadError(e.message || "request failed"))
+      .finally(() => setLoading(false));
   }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
   const handleAutoPublish = async () => {
     setChecking(true);
     try {
       const result = await adminFetch("/admin/social-media/check-rss", {
         method: "POST",
       });
-      showToast(`RSS check done: ${result.processed} new post(s) published`);
+      showToast(rssCheckMessage(result));
       onPublished();
       // Refresh
       const d = await adminFetch("/admin/social-media/rss");
@@ -2388,6 +2415,12 @@ function RSSTab({ showToast, onPublished }) {
       <div className="text-ink-secondary p-10 text-center">
         Loading RSS feed...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback error onRetry={load}>
+        RSS feed unavailable: {loadError}
+      </ActionFeedback>
     );
   return (
     <div>
@@ -2565,17 +2598,29 @@ function CalendarTab() {
 function AnalyticsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
+  const [loadError, setLoadError] = useState(null);
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/social-media/analytics")
       .then(setData)
-      .catch(() => {})
+      .catch((e) => setLoadError(e.message || "request failed"))
       .finally(() => setLoading(false));
   }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
   if (loading)
     return (
       <div className="text-ink-secondary p-10 text-center">
         Loading analytics...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback error onRetry={load}>
+        Analytics unavailable: {loadError}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -2635,6 +2680,9 @@ function AnalyticsTab() {
                 <span className="text-zinc-900">{stats.success} </span>{" "}
                 <span className={stats.failed > 0 ? "text-alert-fg" : "text-ink-secondary"}>
                   {stats.failed} No
+                </span>{" "}
+                <span className="text-ink-secondary">
+                  {stats.skipped || 0} skipped
                 </span>{" "}
                 <span className="text-ink-secondary">
                   {stats.total} total
