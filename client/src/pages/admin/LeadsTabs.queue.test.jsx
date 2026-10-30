@@ -158,6 +158,19 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
+  it('Create Estimate hands the builder the whole address when the city and ZIP sit in their own columns', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (!String(url).includes('/admin/leads?')) return base(url, opts);
+      await base(url, opts);
+      return { ok: true, json: async () => ({ leads: [{ ...lead, address: '100 Test Palm Way', city: 'Parrish', zip: '34219' }], total: 1 }) };
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Estimate' }));
+    await waitFor(() => expect(new URLSearchParams(screen.getByLabelText('Current route').textContent).get('address'))
+      .toBe('100 Test Palm Way, Parrish, FL 34219'));
+  });
   it('keeps status reconciliation off by default', async () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
