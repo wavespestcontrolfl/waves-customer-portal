@@ -23,6 +23,7 @@ const {
   buildProposalFirstInvoice,
   assertProposalTermsMatchPayer,
   flagProposalCustomerCommercialIfTaxable,
+  proposalTermsDueDate,
   ensureCustomerForProposalWin,
   promoteLinkedCustomerForProposalWin,
   resolveProposalWinContact,
@@ -247,6 +248,45 @@ describe('assertProposalTermsMatchPayer', () => {
     resolveForInvoice.mockRejectedValueOnce(new Error('payer lookup down'));
     await expect(assertProposalTermsMatchPayer({ trx: makeInvoiceTrx({}).trx, customerId: 'cust-1', proposal: withTerm('net30') }))
       .rejects.toThrow('payer lookup down');
+  });
+});
+
+// The win makes no invoice (option A), so each visit invoice of an invoice-mode proposal carries the agreement's Net
+// term (pre-push Codex P1: without it a self-pay customer's first invoice was due on the visit date).
+describe('proposalTermsDueDate', () => {
+  const estimateConn = (row) => jest.fn(() => ({ where() { return this; }, first: async () => row }));
+  const invoiceModeRow = (paymentTerms, extra = {}) => ({
+    status: 'accepted', bill_by_invoice: true,
+    estimate_data: { proposal: { ...SIESTA_PROPOSAL, enabled: true, commercialTerms: { paymentTerms } } },
+    ...extra,
+  });
+
+  test('an accepted invoice-mode proposal on Net 15 / 30 / 60 is due that many calendar days after the base date', async () => {
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), 'est-1', '2026-11-03')).toBe('2026-12-03');
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net60')), 'est-1', '2026-11-03')).toBe('2027-01-02');
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net15')), 'est-1', new Date('2026-12-20T15:00:00Z'))).toBe('2027-01-04');
+  });
+
+  test('anything else keeps the caller\'s own due date (null)', async () => {
+    for (const row of [
+      invoiceModeRow('due_on_receipt'), invoiceModeRow(undefined), invoiceModeRow('net30', { bill_by_invoice: false }),
+      invoiceModeRow('net30', { status: 'sent' }), undefined,
+      { status: 'accepted', bill_by_invoice: true, estimate_data: { recurring: { services: [] } } },
+    ]) {
+      expect(await proposalTermsDueDate(estimateConn(row), 'est-1', '2026-11-03')).toBeNull();
+    }
+    expect(await proposalTermsDueDate(estimateConn(invoiceModeRow('net30')), null, '2026-11-03')).toBeNull();
+  });
+
+  test('both completion lanes use it for the visit invoice due date (source pins)', () => {
+    const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+    const legacy = read('../services/complete-scheduled-service.js');
+    expect(legacy).toContain("proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(");
+    expect(legacy).toContain('dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),');
+    expect(legacy).toContain('dueDate: proposalTermsDue || serviceDateOnly(record.service_date),');
+    const sheet = read('../services/visit-completion-invoice.js');
+    expect(sheet).toContain("require('./proposal-win').proposalTermsDueDate(trx, sourceEstimateId, visit.scheduled_date)");
+    expect(sheet).toContain('dueDate: proposalTermsDue || dateOnly(visit.scheduled_date)');
   });
 });
 

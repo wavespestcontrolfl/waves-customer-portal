@@ -12223,6 +12223,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // visit row lock (see refuseCoveredMemberMintInTrx).
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
+        // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
+        // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
+        // backlog closeout is never minted overdue). A failed read keeps the usual due date: it moves no money.
+        let proposalTermsDue = null;
+        try {
+          proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
+            db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          );
+        } catch (termsErr) {
+          logger.warn(`[dispatch] proposal Net-term read failed for ${svc.id}; the invoice keeps the usual due date: ${termsErr.message}`);
+        }
         const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
         })
@@ -12319,7 +12330,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
-          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),
           // Claimed plan-choice setup fee rides the SAME mint (one invoice,
           // one auto-charge) — the claim above is the idempotency authority.
           extraLineItems: secureSetupFee
@@ -12435,7 +12446,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               taxRate: mintInvoiceTaxRate,
               frozenTaxAuthority: true,
               frozenPayerId: mintInvoicePayerId,
-              dueDate: serviceDateOnly(record.service_date),
+              dueDate: proposalTermsDue || serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
           });
