@@ -687,6 +687,17 @@ visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
 missing record returns null.
 
+Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
+`invoice.amountPaid`, the money the office already recorded on this
+still-open invoice (`invoices.amount_paid`, GATE_PARTIAL_PAYMENTS), beside
+`creditApplied` and the net `amountDue` (`invoiceAmountDue`: total less
+credit less part payments, the figure every charge path bills). It is
+display-only: the page shows it as a "Paid so far" row so the summary adds
+up, and no charge reads it. It is 0 when nothing was paid; the paid flip
+resets the column, so a settled invoice reads 0. `/invoice.pdf` prints the
+same row and the same net Amount due. No new route and no write; auth,
+headers and rate limits are unchanged.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
