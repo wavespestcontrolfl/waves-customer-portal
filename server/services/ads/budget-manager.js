@@ -298,24 +298,18 @@ class BudgetManager {
 
           // Holds and the live gap rule decide from the LOCKED row, so a hold set
           // or cleared (or a mode changed) since the list read is what they see.
+          // Gate off reads no hold. A hold wins over both rules; without one, live
+          // uses the gap decision and shadow keeps the old rule's mode.
           let transitionReason = null;
-          if (gapMode === 'shadow') {
-            const held = activeBudgetHold(campaign.metadata, todayEt);
-            if (held) {
-              newMode = held.mode;
-              transitionReason = holdLogReason(held);
-            }
+          const held = gapMode === 'off' ? null : activeBudgetHold(campaign.metadata, todayEt);
+          if (held) {
+            newMode = held.mode;
+            transitionReason = holdLogReason(held);
           } else if (gap) {
-            const held = activeBudgetHold(campaign.metadata, todayEt);
-            if (held) {
-              newMode = held.mode;
-              transitionReason = holdLogReason(held);
-            } else {
-              newMode = decideGapMode(gap.total_open, gap.settings, campaign);
-              transitionReason = gap.reason;
-            }
-            gapCampaigns.push({ id: campaign.id, new_mode: newMode });
+            newMode = decideGapMode(gap.total_open, gap.settings, campaign);
+            transitionReason = gap.reason;
           }
+          if (gap) gapCampaigns.push({ id: campaign.id, new_mode: newMode });
 
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
