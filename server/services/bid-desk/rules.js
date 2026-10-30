@@ -134,11 +134,12 @@ const UPKEEP_WORDS = new RegExp(`\\b(?:${[
   'groundskeeping', 'landscap(?:e|ing)\\s+maintenance', 'lawn\\s+maintenance', 'lot\\s+(?:maintenance|clearing)',
   'right[\\s-]*of[\\s-]*way\\s+maintenance', 'row\\s+maintenance', 'janitorial', 'irrigation\\s+(?:repair|maintenance)',
 ].join('|')})\\b`, 'i');
+// Two-word names allow a space or a hyphen ("Weed-Control", "Fire-Ant"): a hyphenated name of our work must keep the bid.
 const OUR_WORK_WORDS = new RegExp(`\\b(?:${[
-  'herbicides?', 'pesticides?', 'insecticides?', 'fungicides?', 'weed\\s+control', 'weed\\s+spraying', 'spray(?:ing)?', 'chemical',
-  'fertiliz\\w*', 'micro[\\s-]*nutrients?', 'nutrients?', 'pests?', 'pest\\s+control', 'termites?', 'mosquito(?:es)?', 'rodents?', 'rats?',
-  'exterminat\\w*', 'fumigat\\w*', 'insects?', 'fire\\s+ants?', 'chinch', 'grubs?', 'mole\\s+crickets?', 'ipm', 'integrated\\s+pest',
-  'vegetation\\s+control', 'aquatic\\s+weed', 'turf\\s+treatment', 'lawn\\s+treatment',
+  'herbicides?', 'pesticides?', 'insecticides?', 'fungicides?', 'weed[\\s-]+control', 'weed[\\s-]+spraying', 'spray(?:ing)?', 'chemical',
+  'fertiliz\\w*', 'micro[\\s-]*nutrients?', 'nutrients?', 'pests?', 'pest[\\s-]+control', 'termites?', 'mosquito(?:es)?', 'rodents?', 'rats?',
+  'exterminat\\w*', 'fumigat\\w*', 'insects?', 'fire[\\s-]+ants?', 'chinch', 'grubs?', 'mole[\\s-]+crickets?', 'ipm', 'integrated[\\s-]+pest',
+  'vegetation[\\s-]+control', 'aquatic[\\s-]+weed', 'turf[\\s-]+treatment', 'lawn[\\s-]+treatment',
 ].join('|')})\\b`, 'i');
 const NOT_OUR_WORK_NOTE = 'Not our work: mowing, edging or trimming (owner 2026-10-29).';
 

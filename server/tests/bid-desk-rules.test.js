@@ -238,6 +238,12 @@ describe('notOurWork (GATE_BID_DESK_NOT_OUR_WORK, owner 2026-10-29: we do not mo
     'Edgewater Pest Control',
     'Edgewater Park Hurricane Repairs',
     'Trimble Road Culvert Replacement',
+    // A hyphenated name of our work keeps the bid (Codex #7049 r1).
+    'Grounds Maintenance and Weed-Control',
+    'Mowing and Fire-Ant Treatment',
+    'Lawn Maintenance with Mole-Cricket Bait',
+    'Lot Clearing and Vegetation-Control',
+    'Landscape Maintenance and Turf-Treatment',
   ])('%s is kept', (title) => {
     expect(notOurWork(title)).toBe(false);
   });
