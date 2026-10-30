@@ -28,17 +28,18 @@ const { dateOnlyString } = require('../utils/date-only');
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-// The first stored mist time strictly after `now`: later today (ET), else the
-// first one tomorrow. Instants come from parseETDateTime (the one ET wall-clock
-// resolver, DST-correct), never a hand-rolled offset.
+// The earliest RESOLVED mist instant strictly after `now`: later today (ET), else the earliest one tomorrow.
+// Instants come from parseETDateTime (the one ET wall-clock resolver, DST-correct), never a hand-rolled
+// offset. The earliest instant wins, not the first wall-clock string: on the spring-forward day a time in
+// the missing hour (02:30) resolves to 03:30, after a 03:00 mist that sorts later as text.
 function nextMistInstant(mistTimes, now) {
-  const times = [...new Set((mistTimes || []).filter((t) => HHMM.test(t)))].sort();
+  const times = [...new Set((mistTimes || []).filter((t) => HHMM.test(t)))];
   if (!times.length) return null;
-  const today = etDateString(now);
-  const later = times.map((t) => parseETDateTime(`${today}T${t}`)).find((at) => at.getTime() > now.getTime());
-  if (later) return later;
-  const tomorrow = etDateString(addETDays(now, 1));
-  return parseETDateTime(`${tomorrow}T${times[0]}`);
+  const earliest = (date, after) => times
+    .map((t) => parseETDateTime(`${date}T${t}`))
+    .filter((at) => after === null || at.getTime() > after)
+    .reduce((best, at) => (best === null || at.getTime() < best.getTime() ? at : best), null);
+  return earliest(etDateString(now), now.getTime()) || earliest(etDateString(addETDays(now, 1)), null);
 }
 
 async function getPortalMistingSystem({ customerId, scope, now = new Date(), knex = db }) {
