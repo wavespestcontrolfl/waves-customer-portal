@@ -63,10 +63,12 @@ describeDb('mix help through PostgreSQL', () => {
       await clone(table);
     }
     for (const table of ['service_products', 'property_application_history']) {
+      if (await knex.schema.hasColumn(table, 'treated_places')) await knex.schema.alterTable(table, (t) => t.dropColumn('treated_places'));
       if (await knex.schema.hasColumn(table, 'treated_place')) await knex.schema.alterTable(table, (t) => t.dropColumn('treated_place'));
     }
     await knex.raw('DROP TABLE IF EXISTS lawn_trouble_areas');
     await migration.up(knex);
+    await require('../models/migrations/20261030120000_lawn_treated_places').up(knex);
     await product(ARENA, { category: 'insecticide', default_rate_per_1000: 0.147, epa_reg_number: '59639-152' });
     await product(CELSIUS, { default_rate_per_1000: 0.085, epa_reg_number: '432-1507', mixing_order_category: 'dry_wg_wdg_wp_df' });
     await product(CERTAINTY, { epa_reg_number: '59639-226', mixing_order_category: 'liquid_flowable_sc' });

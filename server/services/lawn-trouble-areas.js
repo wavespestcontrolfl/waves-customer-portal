@@ -7,8 +7,9 @@
  *
  *   1. A PLACE on every spot-treatment row: one of a closed list (PLACES). The lawn has no named zone model
  *      (the treatment-zone map holds drawn outlines, the photo shots hold three views), so the list is fixed.
- *      The place rides the /complete product row as `areaPlace`, is stored on the product record
- *      (service_products.treated_place) and on the application ledger row (treated_place).
+ *      The place rides the /complete product row as `areaPlaces` (a list: one spray that went on the Front and the Back is ONE application
+ *      at both places; an older client's single `areaPlace` reads as a list of one), is stored on the product record
+ *      (service_products.treated_places) and on the application ledger row (treated_places), with the first place also in treated_place.
  *   2. A per-property store of TROUBLE AREAS (lawn_trouble_areas): one row per (property, place, type).
  *      The completion writes it from the spot rows that carry a place (the first writer wins, a later visit
  *      moves last seen / last treated and reactivates a cleared area). The context reads it for a compact
@@ -50,6 +51,27 @@ const SOURCES = Object.freeze(['tech_tap', 'guide_card']);
 
 const isPlace = (value) => typeof value === 'string' && PLACE_IDS.includes(value);
 const placeLabel = (id) => PLACE_LABELS[id] || id;
+
+// The places of a stored row (a service_products row or a ledger row): treated_places, else the one treated_place of a row that a
+// server running the code before treated_places wrote (a deploy overlap). [] = no place on record: the row counts at EVERY place.
+function placesOfRecord(row) {
+  const list = Array.isArray(row?.treated_places) && row.treated_places.length ? row.treated_places : [row?.treated_place];
+  return [...new Set(list.filter(isPlace))];
+}
+
+// The same in SQL, for a table or alias (a plain identifier): NULL = no place on record. The one expression every per-place reader uses.
+const placesSql = (table = null) => {
+  const prefix = table ? `${table}.` : '';
+  return `COALESCE(${prefix}treated_places, CASE WHEN ${prefix}treated_place IS NULL THEN NULL ELSE ARRAY[${prefix}treated_place::varchar] END)`;
+};
+const PLACES_OF_ROW = placesSql();
+
+// The places a /complete product row names, trimmed and de-duplicated, in the order sent: `areaPlaces` (a list), else the single
+// `areaPlace` of an older client as a list of one. Entries are NOT checked against the closed list here (placeRefusal does).
+function placesOfInput(input) {
+  const list = Array.isArray(input?.areaPlaces) && input.areaPlaces.length ? input.areaPlaces : [input?.areaPlace];
+  return [...new Set(list.map((value) => (value == null ? '' : String(value).trim())).filter(Boolean))];
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const live = () => require('../config/feature-gates').lawnTroubleAreasLive();
@@ -186,10 +208,10 @@ async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
   const query = knex('property_application_history')
     .where({ property_id: propertyId })
     .whereNull('retracted_at')
-    .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
+    .whereRaw(`${PLACES_OF_ROW} && ?::varchar[]`, [[...new Set(areas.map((area) => area.place))]])
     .whereRaw("lower(category) = 'fungicide'");
   if (asOf) query.where('application_date', '<=', asOf);
-  const rows = await query.orderByRaw('application_date DESC').select('treated_place', 'target_pest', 'application_date');
+  const rows = await query.orderByRaw('application_date DESC').select('treated_place', 'treated_places', 'target_pest', 'application_date');
   // The newest application DAY at a place decides, and it must be unambiguous: one completion can record several fungicides at one place on
   // the same day with the same timestamp, so there is no "newest row" among them. The area is a large patch only when EVERY fungicide row of
   // that day names large patch; a mix of targets (or a blank one) is ambiguous evidence and fails closed.
@@ -197,8 +219,11 @@ async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
   const targets = new Map();
   for (const row of rows) {
     const day = dayOf(row.application_date);
-    if (!newestDay.has(row.treated_place)) { newestDay.set(row.treated_place, day); targets.set(row.treated_place, []); }
-    if (day === newestDay.get(row.treated_place)) targets.get(row.treated_place).push(row.target_pest);
+    // One application on several places is evidence at each of them.
+    for (const place of placesOfRecord(row)) {
+      if (!newestDay.has(place)) { newestDay.set(place, day); targets.set(place, []); }
+      if (day === newestDay.get(place)) targets.get(place).push(row.target_pest);
+    }
   }
   return areas.filter((area) => {
     const list = targets.get(area.place);
@@ -300,18 +325,19 @@ function areaRowsOf({ requestRows, inserted, catalog, confirmed = null, readFail
     const type = troubleTypeFor({
       category: row.category, hint: row.request.troubleType, takeAll: !!confirmed?.takeAll?.has(row.id), chinch: !!confirmed?.chinch?.has(row.id), chinchOnly: !!confirmed?.chinchOnly?.has(row.id),
     });
-    if (type) out.push({ place: row.place, type, source: row.request.troubleSource });
+    // One spray on several places is one area per place.
+    if (type) for (const place of row.places) out.push({ place, type, source: row.request.troubleSource });
   }
   return out;
 }
 
-// The product rows a completion recorded as SPOT treatments at a closed-list place: `{ id, place, request, category }` (the lower-case
-// product id, the stored place, the sheet's own row for it and the catalog category).
+// The product rows a completion recorded as SPOT treatments at closed-list places: `{ id, places, request, category }` (the lower-case
+// product id, the stored places, the sheet's own row for it and the catalog category).
 function placedSpotRows({ requestRows, inserted, catalog }) {
   const byProduct = new Map((requestRows || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
-  return (inserted || []).filter((sp) => isPlace(sp.treated_place) && sp.application_method === 'spot_treatment').map((sp) => {
+  return (inserted || []).filter((sp) => placesOfRecord(sp).length && sp.application_method === 'spot_treatment').map((sp) => {
     const id = String(sp.product_id || '').toLowerCase();
-    return { id, place: sp.treated_place, request: byProduct.get(id) || {}, category: catalog?.get?.(id)?.category || sp.product_category };
+    return { id, places: placesOfRecord(sp), request: byProduct.get(id) || {}, category: catalog?.get?.(id)?.category || sp.product_category };
   });
 }
 
@@ -320,21 +346,27 @@ function placedSpotRows({ requestRows, inserted, catalog }) {
 const needsSets = ({ category, request }) => ['fungicide', 'insecticide'].includes(String(category || '').trim().toLowerCase())
   || request.troubleType === 'take_all' || request.troubleType === 'chinch';
 
-// The place a completion stores for a product row: only a spot row, only a closed-list place.
-const storedPlace = (applicationMethod, value) => (applicationMethod === 'spot_treatment' && isPlace(value) ? value : null);
+// The places a completion stores for a product row: only a spot row, only closed-list places (de-duplicated, in the order sent).
+const storedPlaces = (applicationMethod, input) => (applicationMethod === 'spot_treatment' ? placesOfInput(input).filter(isPlace) : []);
 
 /**
- * The place column of a product record being inserted: `{ treated_place }` for a spot row that carries a closed-list place while the
- * gate is live and the column exists, else `{}` (the insert is then the same statement as before the gate). `cols` is the table's
- * columnInfo, `input` the /complete product row.
+ * The place columns of a product record being inserted: `{ treated_place, treated_places }` for a spot row that carries closed-list
+ * places while the gate is live and the columns exist, else `{}` (the insert is then the same statement as before the gate).
+ * treated_place holds the FIRST place, so a reader of the single column keeps working. `cols` is the table's columnInfo, `input` the
+ * /complete product row.
  */
 function placeFields({ cols, applicationMethod, input, enabled = true }) {
-  const place = live() && enabled && cols?.treated_place ? storedPlace(applicationMethod, typeof input?.areaPlace === 'string' ? input.areaPlace.trim() : null) : null;
-  return place ? { treated_place: place } : {};
+  const places = live() && enabled && cols?.treated_place ? storedPlaces(applicationMethod, input) : [];
+  if (!places.length) return {};
+  return { treated_place: places[0], ...(cols.treated_places ? { treated_places: places } : {}) };
 }
 
-// The place column of a ledger row from its product record: `{ treated_place }` when the record carries one, else `{}`.
-const ledgerPlace = (serviceProduct) => (serviceProduct?.treated_place ? { treated_place: serviceProduct.treated_place } : {});
+// The place columns of a ledger row from its product record: the record's own, else `{}`.
+function ledgerPlace(serviceProduct) {
+  const places = placesOfRecord(serviceProduct);
+  if (!places.length) return {};
+  return { treated_place: places[0], treated_places: places };
+}
 
 /**
  * The completion's store write (inside its transaction, after the ledger): the spot rows that carry a place become trouble areas.
@@ -494,7 +526,7 @@ const UNMAPPED_REASON = 'Take-all is treated on mapped take-all areas only. Pick
  */
 async function unmappedRefusal({ knex, svc, spots, propertyId }) {
   // The card path is decided by the row's source alone; whether the PRODUCT is a take-all row is the server's call, never the sheet's tag.
-  const claims = spots.filter((row) => row.troubleSource === 'guide_card' && isPlace(String(row.areaPlace || '').trim()));
+  const claims = spots.filter((row) => row.troubleSource === 'guide_card' && placesOfInput(row).some(isPlace));
   if (!claims.length) return null;
   let takeAll;
   try {
@@ -507,16 +539,20 @@ async function unmappedRefusal({ knex, svc, spots, propertyId }) {
   const rows = claims.filter((row) => takeAll.has(String(row.productId || '').toLowerCase()));
   if (!rows.length) return null;
   const mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
-  const bad = rows.find((row) => !mapped.has(row.areaPlace.trim()));
-  return bad ? { status: 400, payload: { error: UNMAPPED_REASON, code: 'lawn_place_not_mapped', productId: String(bad.productId).toLowerCase(), place: bad.areaPlace.trim() } } : null;
+  // Every place the row names must be mapped; the refusal names the first one that is not.
+  for (const row of rows) {
+    const place = placesOfInput(row).find((id) => !mapped.has(id));
+    if (place) return { status: 400, payload: { error: UNMAPPED_REASON, code: 'lawn_place_not_mapped', productId: String(row.productId).toLowerCase(), place } };
+  }
+  return null;
 }
 
 // Every spot row names a closed-list place, or the first refusal.
 function placeRefusal(spots) {
   for (const row of spots) {
-    const place = typeof row.areaPlace === 'string' ? row.areaPlace.trim() : '';
-    if (!place) return requiredRefusal((typeof row.name === 'string' && row.name.trim()) || null);
-    if (!isPlace(place)) return { status: 400, payload: { error: 'That place is not on the list. Pick Front, Back, Left side or Right side.', code: 'lawn_place_invalid' } };
+    const places = placesOfInput(row);
+    if (!places.length) return requiredRefusal((typeof row.name === 'string' && row.name.trim()) || null);
+    if (!places.every(isPlace)) return { status: 400, payload: { error: 'That place is not on the list. Pick Front, Back, Left side or Right side.', code: 'lawn_place_invalid' } };
   }
   return null;
 }
@@ -595,7 +631,10 @@ module.exports = {
   recordFromCompletion,
   clearArea,
   areaRowsOf,
-  storedPlace,
+  placesOfRecord,
+  placesOfInput,
+  placesSql,
+  storedPlaces,
   placeFields,
   ledgerPlace,
   recordStore,

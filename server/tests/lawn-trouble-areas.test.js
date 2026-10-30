@@ -206,11 +206,46 @@ describe('chinch is never created by the hint alone', () => {
 });
 
 describe('what a completion stores', () => {
-  test('storedPlace: a closed-list place, on a spot row only', () => {
-    expect(areas.storedPlace('spot_treatment', 'front')).toBe('front');
-    expect(areas.storedPlace('spot_treatment', 'roof')).toBeNull();
-    expect(areas.storedPlace('spot_treatment', null)).toBeNull();
-    expect(areas.storedPlace('broadcast_spray', 'front')).toBeNull();
+  test('storedPlaces: closed-list places, de-duplicated in the order sent, on a spot row only; an older client\'s single areaPlace is a list of one', () => {
+    expect(areas.storedPlaces('spot_treatment', { areaPlace: 'front' })).toEqual(['front']);
+    expect(areas.storedPlaces('spot_treatment', { areaPlaces: ['back', ' front ', 'back'] })).toEqual(['back', 'front']);
+    // The list wins over the single field; an empty list falls back to it.
+    expect(areas.storedPlaces('spot_treatment', { areaPlaces: ['back'], areaPlace: 'front' })).toEqual(['back']);
+    expect(areas.storedPlaces('spot_treatment', { areaPlaces: [], areaPlace: 'front' })).toEqual(['front']);
+    expect(areas.storedPlaces('spot_treatment', { areaPlaces: ['roof', 'left_side'] })).toEqual(['left_side']);
+    expect(areas.storedPlaces('spot_treatment', { areaPlace: 'roof' })).toEqual([]);
+    expect(areas.storedPlaces('spot_treatment', {})).toEqual([]);
+    expect(areas.storedPlaces('broadcast_spray', { areaPlaces: ['front'] })).toEqual([]);
+  });
+
+  test('placeFields: the first place also lands in treated_place; the list only where the column exists; nothing off the gate, off a spot row or with no place', () => {
+    process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+    try {
+      const both = { treated_place: {}, treated_places: {} };
+      expect(areas.placeFields({ cols: both, applicationMethod: 'spot_treatment', input: { areaPlaces: ['back', 'front'] } })).toEqual({ treated_place: 'back', treated_places: ['back', 'front'] });
+      expect(areas.placeFields({ cols: both, applicationMethod: 'spot_treatment', input: { areaPlace: 'left_side' } })).toEqual({ treated_place: 'left_side', treated_places: ['left_side'] });
+      expect(areas.placeFields({ cols: { treated_place: {} }, applicationMethod: 'spot_treatment', input: { areaPlaces: ['back', 'front'] } })).toEqual({ treated_place: 'back' });
+      expect(areas.placeFields({ cols: both, applicationMethod: 'broadcast_spray', input: { areaPlaces: ['front'] } })).toEqual({});
+      expect(areas.placeFields({ cols: both, applicationMethod: 'spot_treatment', input: { areaPlaces: [] } })).toEqual({});
+      expect(areas.placeFields({ cols: both, applicationMethod: 'spot_treatment', input: { areaPlaces: ['front'] }, enabled: false })).toEqual({});
+    } finally { delete process.env.GATE_LAWN_TROUBLE_AREAS; }
+    expect(areas.placeFields({ cols: { treated_place: {}, treated_places: {} }, applicationMethod: 'spot_treatment', input: { areaPlaces: ['front'] } })).toEqual({});
+  });
+
+  test('ledgerPlace and placesOfRecord: the list, else the single column of a row an older server wrote; none = {}', () => {
+    expect(areas.ledgerPlace({ treated_place: 'back', treated_places: ['back', 'front'] })).toEqual({ treated_place: 'back', treated_places: ['back', 'front'] });
+    expect(areas.ledgerPlace({ treated_place: 'front' })).toEqual({ treated_place: 'front', treated_places: ['front'] });
+    expect(areas.ledgerPlace({ treated_place: null, treated_places: null })).toEqual({});
+    expect(areas.placesOfRecord({ treated_place: 'front', treated_places: ['back', 'roof', 'back'] })).toEqual(['back']);
+  });
+
+  test('areaRowsOf: one spray on two places is one area per place', () => {
+    const catalog = new Map([[P_CEL, { category: 'herbicide' }]]);
+    const inserted = [{ product_id: P_CEL, treated_place: 'front', treated_places: ['front', 'back'], application_method: 'spot_treatment' }];
+    expect(areas.areaRowsOf({ requestRows: [{ productId: P_CEL }], inserted, catalog })).toEqual([
+      { place: 'front', type: 'weeds', source: undefined },
+      { place: 'back', type: 'weeds', source: undefined },
+    ]);
   });
 
   test('areaRowsOf: only spot rows with a place that resolve to a type; the hints come from the request row', () => {

@@ -171,7 +171,7 @@ function unreadableAt(placeId, row, { weedMix, chinch }) {
 /**
  * The place a row starts on when the tech has not tapped one: the lawn's single known trouble area of the row's type
  * whose place is not held for the row (`problems` = the holds; a yearly limit is a warning, never a hold). Two or more
- * known places of that type, or none, leave the choice to the tech.
+ * known places of that type, or none, leave the choice to the tech. One place only: the tech taps more chips to add others.
  */
 export function defaultPlaceFor(row, { areas, problems }) {
   const type = troubleTypeOfRow(row);
@@ -185,8 +185,9 @@ export function defaultPlaceFor(row, { areas, problems }) {
 export const knownPlacesOfType = (areas, type) => new Set(areas.known.filter((area) => area.type === type).map((area) => area.place));
 
 /**
- * What a row's place is, given the tech's own tap (`chosen`, '' when none): the tap, else the default. The row's
- * `placeRule` says the server asks for one; `place` is '' while it is missing.
+ * What a row's places are, given the tech's own taps (`chosen`: a list of place ids; '' when not touched): the taps, else the one
+ * default (a list, even an empty one, is the tech's own choice and takes no default). One spray on several places is one row. The row's `placeRule` says the server asks for a place; `places` is [] and `place`
+ * ('' ) while it is missing. `place` is the FIRST place (what the sheet's one-place readers still use).
  */
 export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeAll = null, takeAllPlaces = null }) {
   // `takeAll`: the guide's take-all product ids (a Set of lower-case ids); the row stands for a take-all area, not plain fungus.
@@ -201,21 +202,32 @@ function placed(row, { areas, chosen, weedMix, chinch, weedRows, takeAllPlaces }
   const problems = placeProblems(row, { areas, weedMix, chinch, weedRows, takeAllPlaces });
   // The holds are the problems that are not a yearly limit; they alone close a chip and hold Complete.
   const holds = Object.fromEntries(Object.entries(problems).map(([id, reason]) => [id, reason && heldAt(id, row, { areas, takeAllPlaces }) ? reason : null]));
-  const picked = chosen && areas.places.some((place) => place.id === chosen) ? chosen : '';
-  const place = picked || defaultPlaceFor(row, { areas, problems: holds });
+  // The tapped places, in the closed list's own order (a stable order for the first place and the payload), each once. A list (even an
+  // empty one: the tech un-tapped every chip) is the tech's own choice and keeps the default away; '' or nothing is "not touched yet".
+  const tapped = new Set([].concat(chosen || []));
+  const picked = areas.places.map((place) => place.id).filter((id) => tapped.has(id));
+  const defaulted = picked.length || Array.isArray(chosen) ? '' : defaultPlaceFor(row, { areas, problems: holds });
+  const places = picked.length ? picked : (defaulted ? [defaulted] : []);
+  const place = places[0] || '';
+  const heldAtPlaces = places.filter((id) => holds[id]);
+  const warned = places.filter((id) => problems[id] && !holds[id]);
   return {
     ...row,
     placeRule: true,
     placeLabels: Object.fromEntries(areas.places.map((choice) => [choice.id, choice.label])),
     place,
+    places,
     placeProblems: problems,
     placeHolds: holds,
-    placeDefaulted: !picked && !!place,
-    // The reason a row may not go where it is (or anywhere), for the hold under the Complete button.
-    placeBlock: place && holds[place] ? holds[place] : null,
-    // The yearly limit's own words at the row's place: a warning (the visit can still be completed and the office is told).
-    placeWarning: place && problems[place] && !holds[place] ? problems[place] : null,
-    placeUnreadable: !!place && !problems[place] && unreadableAt(place, row, { weedMix, chinch }),
+    placeDefaulted: !picked.length && !!place,
+    // The reason a row may not go where it is (or anywhere), for the hold under the Complete button: the first held place picked.
+    placeBlock: heldAtPlaces.length ? holds[heldAtPlaces[0]] : null,
+    placeBlockPlace: heldAtPlaces[0] || '',
+    // The yearly limit's own words at each picked place: a warning (the visit can still be completed and the office is told).
+    // placeWarning is the first; placeWarnings lists every picked place that has one.
+    placeWarning: warned.length ? problems[warned[0]] : null,
+    placeWarnings: warned.map((id) => ({ place: id, text: problems[id] })),
+    placeUnreadable: places.some((id) => !problems[id] && unreadableAt(id, row, { weedMix, chinch })),
     placeNowhere: Object.values(holds).every(Boolean) ? Object.values(holds)[0] : null,
   };
 }

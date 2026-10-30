@@ -161,6 +161,46 @@ postgres('closeout: the place of a spot treatment', () => {
     } finally { await cleanup(f); }
   });
 
+  test('one spot on the front and the back is ONE product record and ONE ledger row naming both places; the store gets an area at each; an older client\'s single areaPlace still works', async () => {
+    const f = await seedLawnVisit();
+    try {
+      const out = await complete(f, { products: [spot(f, { areaPlaces: ['front', 'back', 'front'] })] });
+      expect(out.status).toBe(200);
+      const record = await recordOf(f);
+      const stored = await mockPg('service_products').where({ service_record_id: record.id });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ treated_place: 'front', treated_places: ['front', 'back'], application_method: 'spot_treatment' });
+      const ledger = await mockPg('property_application_history').where({ customer_id: f.customerId, service_record_id: record.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toMatchObject({ treated_place: 'front', treated_places: ['front', 'back'], property_id: f.propertyId });
+      expect((await areasOf(f)).map((area) => `${area.place}:${area.type}`).sort()).toEqual(['back:weeds', 'front:weeds']);
+    } finally { await cleanup(f); }
+    const g = await seedLawnVisit();
+    try {
+      expect((await complete(g, { products: [spot(g, { areaPlace: 'left_side' })] })).status).toBe(200);
+      const record = await recordOf(g);
+      expect(await mockPg('service_products').where({ service_record_id: record.id }).first()).toMatchObject({ treated_place: 'left_side', treated_places: ['left_side'] });
+      expect(await ledgerOf(g, record.id)).toMatchObject({ treated_place: 'left_side', treated_places: ['left_side'] });
+    } finally { await cleanup(g); }
+  });
+
+  test('a spot on two places where one place is at its limit is flagged once; a spot on two other places is not flagged', async () => {
+    const f = await seedLawnVisit();
+    try {
+      await priorCelsius(f, 'front');
+      const out = await complete(f, { products: [spot(f, { areaPlaces: ['back', 'front'] })] });
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Celsius WG is over its yearly application limit\.$/)]);
+    } finally { await cleanup(f); }
+    const g = await seedLawnVisit();
+    try {
+      await priorCelsius(g, 'front');
+      const out = await complete(g, { products: [spot(g, { areaPlaces: ['back', 'left_side'] })] });
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([]);
+    } finally { await cleanup(g); }
+  });
+
   test('a 3rd Celsius spot of the year at the SAME place is recorded and flagged for the office (the preflight and the closeout never refuse; the office gets one bell)', async () => {
     const f = await seedLawnVisit();
     try {
@@ -520,7 +560,7 @@ postgres('closeout: the place of a spot treatment', () => {
       // Byte-identical to before the column: the table's other columns, no more and no fewer. area_addon_key
       // (20261009200000, the internal tag naming the area add-on a row belongs to) is staff-only too.
       expect(res.body.products[0]).not.toHaveProperty('area_addon_key');
-      const staffOnly = ['treated_place', 'area_addon_key'];
+      const staffOnly = ['treated_place', 'treated_places', 'area_addon_key'];
       const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => !staffOnly.includes(c)).sort();
       expect(Object.keys(res.body.products[0]).sort()).toEqual(columns);
     } finally { await cleanup(f); }

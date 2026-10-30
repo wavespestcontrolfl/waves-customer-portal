@@ -228,9 +228,27 @@ describe('closeout: a spot application is audited at its place (GATE_LAWN_TROUBL
       const database = placedLedger([{ product_id: CELSIUS_ID, treated_place: 'back' }, { product_id: DEFAULT_ID, treated_place: null }]);
       limitedIds.add(DEFAULT_ID);
       await recordedProductLimitFindings({ svc: service, record, database });
-      expect(placedLedger.columns).toEqual(['product_id', 'treated_place']);
+      expect(placedLedger.columns).toEqual(['product_id', 'treated_place', 'treated_places']);
       expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID, place: 'back' });
       expect(checkLimits).toHaveBeenCalledWith(service.customer_id, DEFAULT_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
+    } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; }
+  });
+
+  test('one application on two places is audited at each, and a limit it breaks at both is one finding', async () => {
+    process.env.GATE_LAWN_SPOT_RULES = 'true';
+    process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+    try {
+      // A ledger row names its places as a list; a second row of the same product (another spot) adds its place; the list wins over the single column.
+      const database = placedLedger([
+        { product_id: CELSIUS_ID, treated_place: 'back', treated_places: ['back', 'front'] },
+        { product_id: CELSIUS_ID, treated_place: 'left_side', treated_places: null },
+      ]);
+      const out = await recordedProductLimitFindings({ svc: service, record, database });
+      for (const place of ['back', 'front', 'left_side']) {
+        expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID, place });
+      }
+      expect(checkLimits).toHaveBeenCalledTimes(3);
+      expect(out.filter((finding) => finding.limitType === 'annual_max_apps')).toHaveLength(1);
     } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; }
   });
 
