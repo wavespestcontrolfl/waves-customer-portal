@@ -200,6 +200,26 @@ describe('the detector behind the alert and the completion hold', () => {
     expect(mockTermCalls.find((c) => c[1] === 't.term_start')[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  // GATE_SETUP_FEE_OPEN_INVOICE_NOTICE reads `open`: an unpaid fee line is still not
+  // collected money, but it is the fee this rule counts the day its invoice is paid.
+  test('gate ON, not settled: lists the open invoices whose fee lines count once paid, never a draft, void, prepaid, waived bundle or other fee', async () => {
+    process.env[GATE] = 'true';
+    const line = (description, amount) => ({ description, amount });
+    mockTables = { 'annual_prepay_terms as t': null, invoices: { stamped: [], other: [], customer: [
+      { id: 'inv-sent', invoice_number: 'W-1001', status: 'sent', created_at: recent, line_items: [line('Pest Control Service', 110), line('WaveGuard Membership', 99)] },
+      { id: 'inv-partly', invoice_number: 'W-1002', status: 'partially_paid', created_at: recent, line_items: JSON.stringify([line('WaveGuard Membership — one-time setup fee', 49.5)]) },
+      { id: 'inv-draft', invoice_number: 'W-1003', status: 'draft', created_at: recent, line_items: [line('WaveGuard Membership', 99)] },
+      { id: 'inv-void', invoice_number: 'W-1004', status: 'void', created_at: recent, line_items: [line('WaveGuard Membership', 99)] },
+      { id: 'inv-prepaid', invoice_number: 'W-1005', status: 'prepaid', created_at: recent, line_items: [line('WaveGuard Membership', 99)] },
+      { id: 'inv-bundle', invoice_number: 'W-1006', status: 'sent', created_at: recent, line_items: [line('WaveGuard Membership — 12 months prepaid (setup fee waived)', 388)] },
+      { id: 'inv-bait', invoice_number: 'W-1007', status: 'viewed', created_at: recent, line_items: [line('Bait Station Setup — one-time setup fee', 150)] },
+    ] } };
+    expect(await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 })).toEqual({
+      settled: false,
+      open: [{ id: 'inv-sent', invoiceNumber: 'W-1001', cents: 9900 }, { id: 'inv-partly', invoiceNumber: 'W-1002', cents: 4950 }],
+    });
+  });
+
   describe('partial fee money paid elsewhere reduces the remainder (completion alert + hold)', () => {
     const PARTIAL = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
 
