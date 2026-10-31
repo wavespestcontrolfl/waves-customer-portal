@@ -710,17 +710,25 @@ function OperatingCostsSettingsTab({ canAdmin }) {
   const [dirty, setDirty] = useState({}); // { ovhKey: string input value }
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null); // { text, error }
+  // A failed read, kept apart from save results so a retry that works leaves
+  // no stale error above the form. "Try again" bumps loadAttempt.
+  const [loadError, setLoadError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
     adminFetch("/admin/revenue/settings")
       .then((data) => {
+        if (cancelled) return;
         if (!data || typeof data !== "object" || !("settings" in data)) {
           throw new Error(data?.error || "Could not load operating costs.");
         }
         setRow(data.settings || {});
       })
-      .catch((err) => setMessage({ text: err.message || "Could not load operating costs.", error: true }));
-  }, []);
+      .catch((err) => { if (!cancelled) setLoadError(err.message || "Could not load operating costs."); });
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   const valueOf = (f) =>
     dirty[f.key] !== undefined ? dirty[f.key] : row?.[f.col] != null ? String(parseFloat(row[f.col])) : "";
@@ -769,7 +777,9 @@ function OperatingCostsSettingsTab({ canAdmin }) {
   // Fail closed — no inputs until the latest row actually loaded (editing on
   // top of a failed load could clobber entered figures with blanks).
   if (!row) {
-    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading operating costs..."}</ActionFeedback>;
+    return loadError
+      ? <ActionFeedback error onRetry={() => setLoadAttempt((n) => n + 1)} className="min-h-20">{loadError}</ActionFeedback>
+      : <ActionFeedback className="min-h-20">Loading operating costs...</ActionFeedback>;
   }
 
   const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
@@ -852,10 +862,16 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   // { text, error } — an explicit flag, not a substring heuristic, so server
   // validation rejections can never render green as if the save succeeded.
   const [message, setMessage] = useState(null);
+  // As in OperatingCostsSettingsTab: a failed read stays apart from save results.
+  const [loadError, setLoadError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
     adminFetch("/admin/kpi-targets")
       .then((data) => {
+        if (cancelled) return;
         // adminFetch resolves non-2xx JSON bodies too — treat anything
         // without a real targets array as a failed load. Editing off
         // fallback defaults while the store didn't load would let a save
@@ -867,8 +883,9 @@ function KpiTargetsSettingsTab({ canAdmin }) {
         for (const row of data.targets) byMetric[row.metric] = row;
         setRows(byMetric);
       })
-      .catch((err) => setMessage({ text: err.message || "Could not load KPI targets.", error: true }));
-  }, []);
+      .catch((err) => { if (!cancelled) setLoadError(err.message || "Could not load KPI targets."); });
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   // Stored row, overlaid by unsaved edits, falling back to the tile default.
   const effective = (metric) => ({
@@ -949,7 +966,9 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   // fallback defaults are for the dashboard tiles, not for editing, and a
   // save on top of them could clobber owner-set targets that failed to load.
   if (!rows) {
-    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading KPI targets..."}</ActionFeedback>;
+    return loadError
+      ? <ActionFeedback error onRetry={() => setLoadAttempt((n) => n + 1)} className="min-h-20">{loadError}</ActionFeedback>
+      : <ActionFeedback className="min-h-20">Loading KPI targets...</ActionFeedback>;
   }
 
   return (

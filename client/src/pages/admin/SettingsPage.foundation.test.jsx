@@ -456,6 +456,21 @@ describe("Settings audit fixes", () => {
     expect(screen.getAllByText("Unsaved")).toHaveLength(1);
   });
 
+  it.each([
+    ["operating-costs", "/admin/revenue/settings", "Operating costs"],
+    ["kpi-targets", "/admin/kpi-targets", "KPI targets"],
+  ])("a failed %s read shows the error with Try again, and the retry loads the form", async (tab, path, title) => {
+    let fail = true;
+    override({ [path]: (options) => (fail && !options.method ? response({ error: "Read failed" }, 503) : undefined) });
+    mount(tab);
+    expect((await screen.findByText("Read failed")).closest('[role="alert"]')).not.toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(title, { exact: true })).toBeInTheDocument();
+    // The failed read leaves no stale error above the loaded form.
+    expect(screen.queryByText("Read failed")).not.toBeInTheDocument();
+  });
+
   it("offers no blackout controls until the days off have loaded", async () => {
     let fail = true;
     override({
