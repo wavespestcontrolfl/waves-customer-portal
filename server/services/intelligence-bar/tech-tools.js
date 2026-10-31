@@ -9,10 +9,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { effectiveServiceAddress } = require('../stamped-address');
+const { effectiveServiceAddress, stampedDivergesSql } = require('../stamped-address');
 const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
-const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../service-report/application-conditions');
+const { fetchPropertyForecast, toCoordinate, SERVICE_AREA_DEFAULT_LOCATION } = require('../service-report/application-conditions');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
@@ -115,7 +115,7 @@ Use for: "what's on my truck?", "is my truck check due?", "am I missing anything
   },
   {
     name: 'get_weather_conditions',
-    description: `Get current weather for the service area. Shows temp, wind, rain probability — relevant for spray decisions.
+    description: `Get current weather at the tech's current stop, else their next stop today, else the Lakewood Ranch service-area point (location_source says which). Shows temp, wind, wind direction, rain probability — relevant for spray decisions.
 Use for: "should I spray today?", "what's the wind like?", "rain probability?"`,
     input_schema: {
       type: 'object',
@@ -199,7 +199,7 @@ async function executeTechTool(toolName, input, techContext) {
       case 'get_protocol': return await getProtocol(input);
       case 'check_customer_status': return await checkCustomerStatus(input, techId);
       case 'search_knowledge_base': return await searchKnowledgeBase(input.query, { forTech });
-      case 'get_weather_conditions': return await getWeatherConditions();
+      case 'get_weather_conditions': return await getWeatherConditions(techId);
       case 'get_my_truck_kit': return await getMyTruckKit(techContext);
       default: return { error: `Unknown tech tool: ${toolName}` };
     }
@@ -661,18 +661,76 @@ async function getMyTruckKit(techContext) {
   }
 }
 
-async function getWeatherConditions() {
+// Total budget for the whole weather tool (stop lookup + forecast).
+const WEATHER_BUDGET_MS = 6000;
+// The stop lookup gets a slice of it; a slow or failing query falls back to
+// the named service-area point and never breaks the tool.
+const WEATHER_STOP_LOOKUP_MS = 1500;
+
+const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+// 16-point label for the direction the wind blows FROM, or null when the
+// forecast module did not supply wind_dir_deg.
+function compassLabel(deg) {
+  if (deg == null || deg === '' || !Number.isFinite(Number(deg))) return null;
+  return COMPASS_16[Math.round((((Number(deg) % 360) + 360) % 360) / 22.5) % 16];
+}
+
+// The tech's current stop (checked in, not completed), else the next
+// not-completed stop today in route/window order, as { latitude, longitude,
+// source }. Same property pin the job card uses (job-card.js visitPinSql: the
+// visit's own lat/lng when both are stored, else the customer's pair unless
+// the stamped address diverges), skipping missing and 0,0 points. Null on no
+// usable stop, no tech, a DB error or a slow query (fail open).
+async function weatherStopPoint(techId) {
+  if (!techId) return null;
+  let timer;
   try {
-    // Hard 6s budget: a hanging weather API must degrade to the error shape,
-    // not dangle the tool — in the field that hang is a tech staring at a
-    // spinner, and in CI it blows the contract smoke's 10s budget and reds
-    // the whole server check (2026-08-01). The tool has no property in hand
-    // ("the service area"), so it passes the named service-area point
-    // explicitly to the shared property-forecast module.
+    const pin = (v, c) => `CASE WHEN ss.lat IS NOT NULL AND ss.lng IS NOT NULL THEN ss.${v} WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.${c} END`;
+    const query = db('scheduled_services as ss')
+      .join('customers as c', 'ss.customer_id', 'c.id')
+      .where({ 'ss.scheduled_date': etDateString(), 'ss.technician_id': techId })
+      .whereNotIn('ss.status', TERMINAL_APPOINTMENT_STATUSES)
+      .orderByRaw("(ss.status = 'on_site') DESC, COALESCE(ss.route_order, 999), ss.window_start")
+      .limit(20)
+      .select('ss.status', db.raw(`${pin('lat', 'latitude')} as latitude`), db.raw(`${pin('lng', 'longitude')} as longitude`))
+      .timeout(WEATHER_STOP_LOOKUP_MS);
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('stop lookup timed out')), WEATHER_STOP_LOOKUP_MS); });
+    const rows = await Promise.race([query, deadline]);
+    for (const r of rows) {
+      const lat = toCoordinate(r.latitude);
+      const lon = toCoordinate(r.longitude);
+      const usable = lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
+      if (usable) return { latitude: lat, longitude: lon, source: r.status === 'on_site' ? 'current_stop' : 'next_stop' };
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:tech] weather stop lookup failed, using the service-area point: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Wording for wind >= 15 mph: the job card's wind action, copied from
+// cautionAction (server/services/job-card.js, kind 'wind'; not exported).
+const WIND_ACTION = 'Check the wind at the nozzle. Do not spray if it drifts onto beds.';
+
+async function getWeatherConditions(techId) {
+  try {
+    // Hard 6s budget for the whole tool: a hanging weather API must degrade to
+    // the error shape, not dangle the tool — in the field that hang is a tech
+    // staring at a spinner, and in CI it blows the contract smoke's 10s budget
+    // and reds the whole server check (2026-08-01). The stop lookup spends part
+    // of it and the forecast gets the rest. Location: the tech's current or
+    // next stop, else the named service-area point.
+    const started = Date.now();
+    const stop = await weatherStopPoint(techId);
+    const point = stop || SERVICE_AREA_DEFAULT_LOCATION;
     const forecast = await fetchPropertyForecast({
-      latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
-      longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
-      timeoutMs: 6000,
+      latitude: point.latitude,
+      longitude: point.longitude,
+      timeoutMs: Math.max(1000, WEATHER_BUDGET_MS - (Date.now() - started)),
     });
     if (forecast.status !== 'ok') {
       return { error: forecast.reason === 'http_error' ? 'Weather API unavailable' : 'Could not fetch weather' };
@@ -684,15 +742,17 @@ async function getWeatherConditions() {
     const rainOk = (c.precipitation_probability_pct || 0) < 40;
 
     return {
+      location_source: stop ? stop.source : 'service_area_default',
       temperature: Math.round(c.temperature_f || 0),
       wind_speed: Math.round(c.wind_mph || 0),
       wind_gusts: Math.round(c.wind_gust_mph || 0),
+      wind_direction: compassLabel(c.wind_dir_deg),
       rain_probability: c.precipitation_probability_pct || 0,
       spray_conditions: windOk && rainOk ? 'good' : !windOk ? 'too_windy' : 'rain_likely',
       recommendation: windOk && rainOk
         ? 'Good spray conditions. Proceed normally.'
         : !windOk
-          ? `Wind at ${Math.round(c.wind_mph || 0)}mph — consider delaying liquid applications or switching to granular.`
+          ? WIND_ACTION
           : `${c.precipitation_probability_pct}% rain chance — check timing. Avoid spraying if rain expected within 2 hours.`,
     };
   } catch {
