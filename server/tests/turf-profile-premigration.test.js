@@ -6,7 +6,7 @@ const mockTrx = table => {
   mockCalls.push(table);
   const q = {
     where: () => q, whereRaw: () => q, update: async () => 1,
-    first: async () => (table === 'customer_turf_profiles' ? { grass_type: 'bahia', lawn_sqft: 3000 } : null),
+    first: async () => (table === 'customer_turf_profiles' ? { grass_type: 'bahia', lawn_sqft: 3000 } : table === 'customers' ? { deleted_at: null } : null),
     insert: () => q, onConflict: () => q, merge: () => q,
     returning: async () => [{ customer_id: 'cust-1', lawn_sqft: 4500 }],
   };

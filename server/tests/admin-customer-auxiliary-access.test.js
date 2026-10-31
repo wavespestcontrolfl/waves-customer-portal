@@ -147,6 +147,26 @@ describe.each(['GET', 'PUT'])('%s turf profile', method => {
   });
 });
 
+describe('PUT turf profile on an archived customer', () => {
+  const save = () => request('PUT', '/customer/turf-profile', 'admin', { grass_type: 'bermuda', county: 'Manatee', county_confirmed: true });
+  test('is not found, and nothing is written', async () => {
+    db.rows.customers[0].deleted_at = '2026-10-01T12:00:00.000Z';
+    expect(await save()).toEqual({ status: 404, body: { error: 'Customer not found' } });
+    expect(withTurfProfileFence).not.toHaveBeenCalled();
+    expect(db.rows.customer_turf_profiles[0].grass_type).toBe('bahia');
+  });
+  test('an archive that commits before the fence wins: nothing is written or confirmed', async () => {
+    withTurfProfileFence.mockImplementationOnce(async (handle, _id, callback) => {
+      db.rows.customers[0].deleted_at = '2026-10-01T12:00:00.000Z';
+      return callback(handle);
+    });
+    expect(await save()).toEqual({ status: 404, body: { error: 'Customer not found' } });
+    expect(withTurfProfileFence).toHaveBeenCalledTimes(1);
+    expect(db.rows.customer_turf_profiles[0].grass_type).toBe('bahia');
+    expect(confirmIrrigationFields).not.toHaveBeenCalled();
+  });
+});
+
 const intelligenceRoutes = [
   ['GET', '/'], ['GET', '/customer/health'],
   ['PUT', '/retention/outreach/approve'], ['PUT', '/retention/outreach/skip'],

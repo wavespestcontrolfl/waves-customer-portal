@@ -128,6 +128,20 @@ describe('GET /customers', () => {
     expect(chain.whereNotIn).toHaveBeenCalledWith('ss.status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
     expect(chain.limit).toBeUndefined();
   });
+
+  test('an admin with no lawn stop today gets the lawn customer directory without archived customers', async () => {
+    mockRole = 'admin';
+    const chain = {};
+    for (const m of ['where', 'whereNotIn', 'whereIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'select', 'orderBy', 'andWhere', 'orWhere', 'whereRaw']) chain[m] = jest.fn(() => chain);
+    chain.first = jest.fn(async () => null);
+    chain.limit = jest.fn(async () => [{ id: CUSTOMER }]);
+    db.mockImplementation(() => chain);
+    await withServer(async (base) => {
+      expect(await (await call(base, 'GET', '/customers')).json()).toEqual({ customers: [{ id: CUSTOMER }] });
+    });
+    expect(db).toHaveBeenCalledWith('customers as c');
+    expect(chain.whereNull).toHaveBeenCalledWith('c.deleted_at');
+  });
 });
 
 describe('POST /assess binds to the submitted visit', () => {
