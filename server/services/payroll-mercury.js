@@ -205,7 +205,7 @@ async function dispatch(row, client, conn = db) {
     patch = { state: 'requested', mercury_request_id: answer.requestId, error: null };
     await alerts.closeKeyBell({ kind: 'send', conn });
   } catch (err) {
-    if (err instanceof MercuryError && (err.kind === 'rejected' || err.kind === 'auth')) {
+    if (err instanceof MercuryError && (err.kind === 'rejected' || err.kind === 'auth' || err.kind === 'not_found')) {
       patch = { state: 'failed', error: err.kind === 'auth' ? `Mercury refused the key${err.status ? ` (HTTP ${err.status})` : ''}` : failureText(err), resolved_at: conn.fn.now() };
       if (err.kind === 'auth') await alerts.raiseKeyAlert({ kind: 'send' });
     } else {

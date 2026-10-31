@@ -272,6 +272,18 @@ postgres('payroll Mercury paychecks', () => {
       expect(raise.mock.calls.every(([event]) => event === 'failed')).toBe(true);
     });
 
+    it('a 404 on the request (an unknown account id) is a definite failure, not unknown', async () => {
+      const { run, check } = await bankRun();
+      const client = fakeClient();
+      client.requestSendMoney.mockRejectedValue(new MercuryError('not_found', { status: 404 }));
+      jest.spyOn(alerts, 'raisePaymentAlert').mockResolvedValue(true);
+      expect((await sendRun(run.id, client))[0].outcome).toBe('failed');
+      const [row] = await payments(check('Sample Alpha').id);
+      expect(row).toMatchObject({ state: 'failed', error: 'Mercury refused the request (HTTP 404)' });
+      // After the account is corrected, Send again works.
+      expect((await mercury.sendAgain(check('Sample Alpha').id, {}, ADMIN_ID, { client: fakeClient() })).outcome).toBe('requested');
+    });
+
     it('a partial batch: one failure does not stop the other, and a re-send never repeats either', async () => {
       const { run, check } = await bankRun(['Sample Alpha', 'Sample Beta']);
       const client = fakeClient();
