@@ -80,4 +80,11 @@ describe('heatSafetyFromRows', () => {
   test('an hour with both readings still counts when the other hour has a gap', () => {
     expect(heatSafetyFromRows([rowAt('2 pm', 100, null), rowAt('3 pm', 100, 50)], label)).toMatchObject({ at: '3 pm', level: 'extreme' });
   });
+
+  test('the band follows the whole number the tech reads', () => {
+    // 89°F / 87% RH -> 115.04: reads "115°F", which OSHA puts in High, not extreme.
+    expect(heatSafetyFromRows([rowAt('2 pm', 89, 87)], label)).toMatchObject({ heatIndexF: 115, level: 'high' });
+    // 85°F / 92% RH -> 102.89: reads "103°F", the first High number, so the line shows.
+    expect(heatSafetyFromRows([rowAt('2 pm', 85, 92)], label)).toMatchObject({ heatIndexF: 103, level: 'high' });
+  });
 });

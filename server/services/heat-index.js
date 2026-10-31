@@ -44,9 +44,10 @@ function heatSafetyFromRows(rows, labelOf) {
     const hi = heatIndexF(row.temperatureF, row.relativeHumidity);
     if (hi != null && (!worst || hi > worst.hi)) worst = { hi, row };
   }
-  const level = worst && heatLevel(worst.hi);
+  // The band follows the whole number the tech reads, so "115°F" is never called extreme (OSHA: above 115).
+  const heatIndex = worst && Math.round(worst.hi);
+  const level = worst && heatLevel(heatIndex);
   if (!level) return null;
-  const heatIndex = Math.round(worst.hi);
   const at = labelOf(worst.row);
   return { heatIndexF: heatIndex, at, level, text: HEAT_TEXT[level](heatIndex, at) };
 }
