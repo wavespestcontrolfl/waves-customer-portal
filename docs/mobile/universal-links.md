@@ -37,10 +37,12 @@ links therefore stay portal URLs forever; the app claims them at the OS level.
      list nor its browser-only set (`/card`, `/careers`, `/newsletter`).
    - Email: SendGrid click tracking rewrites links to `click.wavespestcontrol.com`,
      which no app claims, so a tracked email link always opened the browser.
-     `sendOne` marks anchors to the listed portal paths (and the portal root,
-     for `/?tab=` links) `clicktracking=off`, so they go straight to the portal
-     and open the app. Other links stay tracked; newsletter broadcasts
-     (`sendBatch`) are unchanged.
+     With `GATE_EMAIL_APP_LINKS=true`, `sendOne` marks anchors to the listed
+     portal paths (and the portal root, for `/?tab=` links) `clicktracking=off`,
+     so they go straight to the portal and open the app. Other links stay
+     tracked; newsletter broadcasts (`sendBatch`) are unchanged. The gate stays
+     off until the app lands on the tapped page (2026-10-31: the iPhone app
+     opened on Home for `/?tab=billing` and `/book`).
 3. In the app, Capacitor fires `appUrlOpen` / `getLaunchUrl` with the tapped
    URL; `client/src/native/nativeLinks.js` navigates the webview to the same
    path (same-origin only). The shell loads the remote portal, so short-link
