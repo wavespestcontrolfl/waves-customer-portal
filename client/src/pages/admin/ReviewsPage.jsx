@@ -839,7 +839,8 @@ function PolicyInfoCard({ Icon, label, value, sub, color }) {
 const NAME_EVIDENCE = {
   exact: "Same name",
   variant: "Nickname or one-letter spelling",
-  near: "Surname close, not the same",
+  // A surname one letter off, or a shortened first name with the same surname.
+  near: "Close name, not the same",
   initial: "Last initial only",
   household: "Same surname, different first name",
   first_only: "First name only",

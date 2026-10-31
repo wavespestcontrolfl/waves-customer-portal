@@ -230,6 +230,15 @@ describe("Reviews workspace foundation", () => {
               },
             },
             {
+              id: "customer-short",
+              name: "Ottilie Pemberton",
+              services: [],
+              evidence: {
+                nameKind: "near", role: "holder", dates: "unknown", firstContactAt: null,
+                tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: false,
+              },
+            },
+            {
               id: "customer-late",
               name: "Gwen Pemberton",
               services: [],
@@ -277,6 +286,7 @@ describe("Reviews workspace foundation", () => {
     // A card without evidence (an older server) shows no evidence line.
     expect(screen.getAllByTestId("link-evidence").map((node) => node.textContent)).toEqual([
       "Same name | First contact Oct 24, 2025 | Visit or review text in the 14 days before",
+      "Close name, not the same | First contact unknown",
       'Same surname, different first name | First contact May 14, 2026, after this review | Tapped the review link within 3 hours | Texted "I left a review" | Already linked to another review on this profile',
     ]);
   });

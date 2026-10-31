@@ -397,7 +397,7 @@ async function main() {
       assert.deepEqual(
         await page.getByTestId("link-evidence").allTextContents(),
         [
-          'Surname close, not the same | First contact Jun 12, 2025 | Tapped the review link within 3 hours | Visit or review text in the 14 days before | Texted "I left a review"',
+          'Close name, not the same | First contact Jun 12, 2025 | Tapped the review link within 3 hours | Visit or review text in the 14 days before | Texted "I left a review"',
           "Same surname, different first name | First contact Oct 5, 2026, after this review | Already linked to another review on this profile",
         ],
       );
