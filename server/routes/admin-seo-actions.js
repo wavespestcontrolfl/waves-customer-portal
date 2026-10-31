@@ -168,30 +168,35 @@ router.post('/:id/defer', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /:id/execute — mark as done + create experiment
+// POST /:id/execute — mark as done + create experiment. One transaction: a
+// failed experiment insert leaves the action not done, so Mark done can retry.
 router.post('/:id/execute', requireAdmin, async (req, res) => {
   try {
-    const action = await db('seo_actions').where('id', req.params.id).first();
-    if (!action) return res.status(404).json({ error: 'Action not found' });
+    const result = await db.transaction(async (trx) => {
+      const action = await trx('seo_actions').where('id', req.params.id).first();
+      if (!action) return { status: 404, body: { error: 'Action not found' } };
 
-    const [updatedAction] = await db('seo_actions')
-      .where({ id: req.params.id, status: 'open', approval_status: 'approved' })
-      .whereNot('execution_status', 'done')
-      .update({
-        execution_status: 'done',
-        started_at: action.started_at || db.fn.now(),
-        completed_at: db.fn.now(),
-        execution_notes: req.body.notes || 'Manually marked as executed',
-        executor: 'manual',
-      })
-      .returning('*');
+      const [updatedAction] = await trx('seo_actions')
+        .where({ id: req.params.id, status: 'open', approval_status: 'approved' })
+        .whereNot('execution_status', 'done')
+        .update({
+          execution_status: 'done',
+          started_at: action.started_at || trx.fn.now(),
+          completed_at: trx.fn.now(),
+          execution_notes: req.body.notes || 'Manually marked as executed',
+          executor: 'manual',
+        })
+        .returning('*');
 
-    if (!updatedAction) {
-      return res.status(409).json({ error: 'Action must be open, approved, and not already executed' });
-    }
+      if (!updatedAction) {
+        return { status: 409, body: { error: 'Action must be open, approved, and not already executed' } };
+      }
 
-    const experiment = await SeoActionGenerator.createExperiment(updatedAction);
-    res.json({ executed: true, id: req.params.id, experiment_id: experiment?.id });
+      const experiment = await SeoActionGenerator.createExperiment(updatedAction, trx);
+      return { status: 200, body: { executed: true, id: req.params.id, experiment_id: experiment?.id } };
+    });
+
+    res.status(result.status).json(result.body);
   } catch (err) {
     logger.error('[seo-actions] execute error', err);
     res.status(500).json({ error: 'Execution failed' });
