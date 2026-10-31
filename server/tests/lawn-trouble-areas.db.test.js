@@ -5,7 +5,7 @@
 const { randomUUID } = require('crypto');
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261009110000_lawn_trouble_areas');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etCalendarDayOf } = require('../utils/datetime-et');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 // The preflight loads the whole completion module the first time (a cold transform takes several seconds).
@@ -609,9 +609,9 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       await write([{ place: 'front', type: 'fungus', source: 'tech_tap' }], second);
       const [row] = await rowsOf();
       expect(row).toMatchObject({ place: 'front', type: 'fungus', status: 'active', source: 'guide_card' });
-      expect(etDateString(row.first_seen_on)).toBe(dayAgo(20));
-      expect(etDateString(row.last_seen_on)).toBe(dayAgo(3));
-      expect(etDateString(row.last_treated_on)).toBe(dayAgo(3));
+      expect(etCalendarDayOf(row.first_seen_on)).toBe(dayAgo(20));
+      expect(etCalendarDayOf(row.last_seen_on)).toBe(dayAgo(3));
+      expect(etCalendarDayOf(row.last_treated_on)).toBe(dayAgo(3));
       expect(row.first_service_record_id).toBe(first.record.id);
       expect(row.last_service_record_id).toBe(second.record.id);
     });
@@ -625,7 +625,7 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       const rows = await rowsOf();
       expect(rows).toHaveLength(1);
       expect(rows[0].last_service_record_id).toBe(newer.record.id);
-      expect(etDateString(rows[0].last_treated_on)).toBe(dayAgo(3));
+      expect(etCalendarDayOf(rows[0].last_treated_on)).toBe(dayAgo(3));
     });
 
     test('rows outside the closed lists, a visit with no property and no rows write nothing', async () => {
@@ -668,14 +668,14 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       expect(row).toMatchObject({ status: 'cleared' });
       expect(row.cleared_at).toBeTruthy();
       expect(row.cleared_by_technician_id).toBeTruthy();
-      expect(etDateString(row.last_treated_on)).toBe(dayAgo(12));
+      expect(etCalendarDayOf(row.last_treated_on)).toBe(dayAgo(12));
       expect(row.last_service_record_id).toBe(old.record.id);
       expect(await areas.loadActive(knex, world.property.id)).toEqual([]);
       // A visit from three days ago is after the clear: active again, the clear's marks gone.
       await write([{ place: 'back', type: 'fungus', source: 'tech_tap' }], await recordOn(-3));
       [row] = await rowsOf();
       expect(row).toMatchObject({ status: 'active', cleared_at: null, cleared_by_technician_id: null });
-      expect(etDateString(row.last_treated_on)).toBe(dayAgo(3));
+      expect(etCalendarDayOf(row.last_treated_on)).toBe(dayAgo(3));
       expect((await areas.loadActive(knex, world.property.id)).map((a) => a.place)).toEqual(['back']);
     });
 
