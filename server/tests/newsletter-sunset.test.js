@@ -206,7 +206,12 @@ describe('win-back under GATE_NEWSLETTER_AUTO_SEND (owner 2026-10-30, option A)'
       // A draft parked before the switch still needs the owner.
       q.insert.mockClear();
       await syncAlert({ valveTripped: false, cohortAwaiting: 12, autoSend: true, winbackParked: true }, new Date());
-      expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining('Newsletter win-back waiting') }));
+      expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({
+        title: expect.stringContaining('Newsletter win-back waiting'),
+        // No manual send exists: the alert opens History and says to delete the parked draft.
+        href: '/admin/newsletter?tab=history',
+        description: expect.stringContaining('Delete it there, and the next Monday run stages one that sends itself.'),
+      }));
     } finally {
       delete db.schema;
       delete db.raw;
