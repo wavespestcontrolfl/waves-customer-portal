@@ -221,27 +221,29 @@ async function findThread(psid, pageId) {
 // `through` means a customer message landed since, and that bell stays open. The check and the close run
 // under the key's advisory lock, the one notifyAdmin takes to refresh the bell, so a refresh is either
 // before the check (and keeps it open) or after the close (and reopens it). No row locks.
-async function closeBell(conversationId, { through = null } = {}) {
+async function closeBell(conversationId, { through = null, trx = null } = {}) {
   const key = bellKey(conversationId);
   const NotificationService = require('./notification-service');
-  return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
+  const run = async (conn) => {
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
     const stale = through
       ? 'NOT EXISTS (SELECT 1 FROM messages nm WHERE nm.conversation_id = ? AND nm.twilio_sid = notifications.metadata->>\'dedupeVersion\' AND nm.created_at > ?)'
       : "notifications.metadata->>'dedupeVersion' IS NULL";
-    const rows = await trx('notifications')
+    const rows = await conn('notifications')
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [key])
       .whereNull('done_at')
       .whereRaw(stale, through ? [conversationId, through.created_at] : [])
       .select('id');
     if (!rows.length) return 0;
-    return NotificationService.markAdminDone(rows.map((r) => r.id), { by: BELL_ACTOR, resolution: BELL_RESOLUTION }, trx);
-  });
+    return NotificationService.markAdminDone(rows.map((r) => r.id), { by: BELL_ACTOR, resolution: BELL_RESOLUTION }, conn);
+  };
+  // `trx`: the caller's open transaction (the reconcile), so no second connection is taken.
+  return trx ? run(trx) : db.transaction(run);
 }
 
 // "<Area> — reply to <name> on Facebook", the words behind it in the why.
-async function ringBell(thread, latestInbound) {
+async function ringBell(thread, latestInbound, { trx = null } = {}) {
   const { raiseAdminAlert, breaksAlertRules } = require('./admin-alert-compose');
   const { fitAction, redactedWords, whyWithQuote } = require('./admin-alert-names');
   const name = thread.contact_label || 'a Facebook contact';
@@ -269,6 +271,8 @@ async function ringBell(thread, latestInbound) {
     bumpOnRefresh: true,
     detail: words ? words.slice(0, 1000) : undefined,
     metadata: { conversationId: thread.id },
+    // The reconcile's own transaction: the bell write takes no connection of its own.
+    ...(trx ? { trx } : {}),
   });
   // notifyAdmin answers null when the bell write failed (a withheld bell answers { suppressed }).
   // Fail the import so the cursor holds and the next poll rings it again.
@@ -301,8 +305,9 @@ async function ensureThread(contact, pageId) {
 async function reconcileBell(thread) {
   // One reconcile per thread at a time, reads included: the poll's and a reply's decisions are made
   // and carried out in turn, so a ring decided from an older state cannot land after a close decided
-  // from a newer one. Advisory lock only (no row locks). ringBell and closeBell take their own,
-  // different, lock keys (admin:<bell key>) on their own connections, so nothing nests on this key.
+  // from a newer one. Advisory lock only (no row locks). ringBell and closeBell run on this same
+  // transaction (their own lock key, admin:<bell key>, differs from this one), so the whole reconcile
+  // uses ONE pool connection: with DB_POOL_MAX=2 the cron lock already pins the other.
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`messenger-reconcile:${thread.id}`]);
     const latestIn = await trx('messages').where({ conversation_id: thread.id, direction: 'inbound' })
@@ -310,8 +315,8 @@ async function reconcileBell(thread) {
     const latestOut = await trx('messages').where({ conversation_id: thread.id, direction: 'outbound' })
       .max({ at: 'created_at' }).first();
     const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
-    if (answered) return closeBell(thread.id, { through: latestIn || null });
-    if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid });
+    if (answered) return closeBell(thread.id, { through: latestIn || null, trx });
+    if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid }, { trx });
     return null;
   });
 }

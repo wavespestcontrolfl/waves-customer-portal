@@ -600,6 +600,46 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(bell.done_at).not.toBeNull();
     });
 
+    test('a poll and a reply reconcile on one pool connection: the bell write takes no second connection (DB_POOL_MAX=2 with the cron lock)', async () => {
+      // Count the connections held at once. The scheduled poll runs beside the cron lock's pinned
+      // connection, so a reconcile that needs more than one would starve a pool of two.
+      const client = db.client;
+      const acquire = client.acquireConnection.bind(client);
+      const release = client.releaseConnection.bind(client);
+      let held = 0;
+      let peak = 0;
+      client.acquireConnection = async () => { const c = await acquire(); held += 1; peak = Math.max(peak, held); return c; };
+      client.releaseConnection = (c) => { held -= 1; return release(c); };
+      try {
+        const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'ring me', at: ago(3) }] });
+        await messenger.pollMessenger();
+        expect((await bellsOf('a'))[0].done_at).toBeNull();
+        expect(peak).toBe(1);
+
+        // A reply from the portal: store, send, reconcile and close, all one connection at a time.
+        peak = 0;
+        const id = (await threadOf('a')).id;
+        const res = await realFetch(`${base}/threads/${id}/reply`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Calling now' }),
+        });
+        expect(res.status).toBe(200);
+        expect((await bellsOf('a'))[0].done_at).not.toBeNull();
+        expect(peak).toBe(1);
+
+        // And a new customer message after the reply, rung from the poll, is the same.
+        const after = new Date(Date.now() + 5000);
+        conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'ring me again', at: after });
+        conv.updated = after;
+        peak = 0;
+        await messenger.pollMessenger();
+        expect((await bellsOf('a'))[0].done_at).toBeNull();
+        expect(peak).toBe(1);
+      } finally {
+        client.acquireConnection = acquire;
+        client.releaseConnection = release;
+      }
+    });
+
     test('a linked customer thread keeps its customer and takes new messages', async () => {
       const conv = conversation('a', { name: 'Pat Synthetic', unread: 0, messages: [{ fromPage: false, text: 'hi', at: ago(50) }] });
       await messenger.pollMessenger();
