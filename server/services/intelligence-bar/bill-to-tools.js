@@ -93,7 +93,6 @@ function payerRow(id, { database = db, lock = false } = {}) {
 // The terms a payer added from the card gets: the payers table default, passed explicitly so the card's line is true.
 const NEW_PAYER_TERMS = 'due_on_receipt';
 const NEW_PAYER_FIELDS = ['new_payer_company', 'new_payer_email', 'new_payer_phone'];
-const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
 // A payer the card would add (the page's "New payer" form fields), normalized as the create will store them. An AP
 // email an active payer already holds resolves to that payer (the form's dedupeByEmail); a deactivated one, or an
@@ -114,13 +113,14 @@ async function resolveNewPayer(input) {
     if (active) return { payer: active, matchedEmail: fields.ap_email };
     if (held.length) return refusal(`A deactivated payer already uses ${fields.ap_email}, so nothing was offered. Reactivate or edit it in Finance → Payers.`, 'payer_inactive');
   }
-  const names = [fields.display_name, fields.company_name].filter(Boolean);
-  const matches = (await Promise.all(names.map((n) => Payers.listPayers({ search: n, limit: 10 })))).flat();
-  const taken = [...new Map(matches
-    .filter((p) => names.some((n) => same(n, p.display_name) || same(n, p.company_name)))
-    .map((p) => [String(p.id), p])).values()];
+  // Exact (trimmed, case-blind) name or company matches, read directly so no search limit can hide one.
+  const names = [...new Set([fields.display_name, fields.company_name].filter(Boolean).map((n) => n.toLowerCase()))];
+  const marks = names.map(() => '?').join(', ');
+  const taken = await db('payers').where('active', true)
+    .where((w) => w.whereRaw(`LOWER(TRIM(display_name)) IN (${marks})`, names).orWhereRaw(`LOWER(TRIM(COALESCE(company_name, ''))) IN (${marks})`, names))
+    .orderBy('id', 'asc').limit(6);
   if (taken.length) {
-    return refusal(`An active payer named ${payerLabel(taken[0])} already exists${taken.length > 1 ? ` (and ${taken.length - 1} more)` : ''}. Ask whether to use it, then pass its payer_id.`, 'payer_exists', {
+    return refusal(`An active payer named ${payerLabel(taken[0])} already exists. Ask whether to use it (or which one, if candidates lists more), then pass its payer_id.`, 'payer_exists', {
       candidates: taken.slice(0, 5).map((p) => ({ payer_id: String(p.id), name: payerLabel(p) })),
     });
   }
@@ -262,6 +262,8 @@ function billToVersion({ customer, name, payer, payerAfter, pinned }) {
     payer_name: payerLabel(payer),
     payer_terms: payer.payment_terms || null,
     payer_tax_exempt: payer.tax_exempt === true,
+    payer_ap_email: payer.ap_email || null,
+    payer_ap_phone: payer.ap_phone || null,
     pinned,
   };
 }
@@ -351,7 +353,7 @@ async function addCardPayer(fields) {
 function addedPayerVersion(version, payer) {
   const { new_payer: _shown, ...card } = version;
   const added = billToVersion({ customer: { id: card.customer_id }, name: card.customer_name, payer, payerAfter: String(payer.id), pinned: card.pinned });
-  return ['payer_active', 'payer_name', 'payer_terms', 'payer_tax_exempt'].every((k) => added[k] === card[k]) ? added : null;
+  return ['payer_active', 'payer_name', 'payer_terms', 'payer_tax_exempt', 'payer_ap_email', 'payer_ap_phone'].every((k) => added[k] === card[k]) ? added : null;
 }
 
 // A result after the card added a payer: say so, since setting Bill-To back does not remove it.

@@ -241,4 +241,17 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('payers').where({ ap_email: `ap-${suffix}@example.invalid` })).toHaveLength(1);
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: other });
   });
+  test('a new payer whose name or company an active payer already has is refused, naming it', async () => {
+    const customerId = await customer();
+    const suffix = randomUUID().slice(0, 8);
+    const [dup] = await db('payers').insert({ display_name: `  FIXTURE SAME NAME ${suffix} `, active: true }).returning('id');
+    created.payers.push(dup.id);
+    const [inactive] = await db('payers').insert({ display_name: `Fixture Off ${suffix}`, company_name: `Fixture Holdings ${suffix}`, active: false }).returning('id');
+    created.payers.push(inactive.id);
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, new_payer_name: `fixture same name ${suffix}` }, ADMIN))
+      .toMatchObject({ code: 'payer_exists', candidates: [{ payer_id: String(dup.id) }] });
+    // An inactive payer's name or company is not a match.
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, new_payer_name: `Fixture Other ${suffix}`, new_payer_company: `Fixture Holdings ${suffix}` }, ADMIN))
+      .toMatchObject({ preview: true, payer_new: true });
+  });
 });
