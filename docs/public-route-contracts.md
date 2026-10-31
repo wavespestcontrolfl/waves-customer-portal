@@ -5083,7 +5083,8 @@ links the lead and draft estimate to ONE of them instead of inserting a new
 `customers` row, but only when every matched row is live (active, not
 deleted) and all rows plus the typed contact are one person at one premise:
 names compatible (`namesCompatible`), the same parsed street key, equal units
-(both empty counts), and equal 5-digit ZIPs, or, when either ZIP is blank,
+(both empty counts; a non-empty unit the parser cannot read, such as
+"Floor 3", fails closed), and equal 5-digit ZIPs, or, when either ZIP is blank,
 equal non-empty cities (`resolveSamePersonCluster`, `customer-dedupe.js`).
 The chosen row is the one the nightly duplicate sweep would keep
 (`pickWinner` with the sweep's business weighting). Any mismatch, an

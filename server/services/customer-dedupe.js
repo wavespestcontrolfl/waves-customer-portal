@@ -302,14 +302,26 @@ function isLiveRow(row) {
 // addressCompat is permissive on purpose (a missing unit or locality is not a
 // conflict, and two identical unparseable lines match). Linking a public
 // quote needs POSITIVE agreement instead: both street lines parse to the same
-// key, the units are equal (both empty counts), and the ZIPs are equal or,
+// key, the units are equal (both empty counts; an unreadable unit fails), and the ZIPs are equal or,
 // when either ZIP is blank, both cities are present and equal.
+// The row's unit for the strict test: '' for none, or undefined when a
+// non-empty address_line2 is not a unit the parser can read ("Floor 3",
+// "Bldg C Annex"), which fails closed rather than reading as no unit.
+function strictUnit(streetKey, line2) {
+  const raw = String(line2 || '').trim();
+  const fromLine2 = raw ? unitFromLine2(raw) : null;
+  if (raw && !fromLine2) return undefined;
+  return streetKey.unit || fromLine2 || '';
+}
+
 function samePremiseStrict(a, b) {
   if (addressCompat(a, b).status !== 'match') return false;
   const ak = normalizeStreetKey(a.address_line1);
   const bk = normalizeStreetKey(b.address_line1);
   if (!ak || !bk || ak.key !== bk.key) return false;
-  if ((ak.unit || unitFromLine2(a.address_line2) || '') !== (bk.unit || unitFromLine2(b.address_line2) || '')) return false;
+  const au = strictUnit(ak, a.address_line2);
+  const bu = strictUnit(bk, b.address_line2);
+  if (au === undefined || bu === undefined || au !== bu) return false;
   const az = String(a.zip || '').slice(0, 5);
   const bz = String(b.zip || '').slice(0, 5);
   if (az && bz) return az === bz;

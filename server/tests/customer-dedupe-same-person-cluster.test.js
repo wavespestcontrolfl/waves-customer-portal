@@ -60,6 +60,18 @@ describe('resolveSamePersonCluster', () => {
     expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: '#2' })).not.toBeNull();
   });
 
+  // Codex #7249 r1 P2: the unit parser does not read "Floor N"; an unreadable
+  // non-empty unit must fail closed, never read as no unit.
+  test('units the parser cannot read never resolve (Floor 2 vs Floor 3)', async () => {
+    const rows = [row('a', { address_line2: 'Floor 3' }), row('b', { address_line2: 'Floor 3' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Floor 2' })).toBeNull();
+  });
+
+  test('an identical unreadable unit still fails closed', async () => {
+    const rows = [row('a', { address_line2: 'Floor 3' }), row('b', { address_line2: 'Floor 3' })];
+    expect(await resolveSamePersonCluster(fakeDb(), rows, { ...TYPED, address_line2: 'Floor 3' })).toBeNull();
+  });
+
   test('no ZIP and no city on a row is not a locality match', async () => {
     const rows = [row('a'), row('b', { zip: '', city: '' })];
     expect(await resolveSamePersonCluster(fakeDb(), rows, TYPED)).toBeNull();
