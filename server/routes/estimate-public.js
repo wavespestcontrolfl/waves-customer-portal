@@ -9327,6 +9327,14 @@ function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
   return estimate;
 }
 
+// Accepted, declined and price-locked estimates keep the prices the customer
+// saw. One predicate (estimate-proposal-billing), shared by every renderer.
+function estimateIsTerminalPriced(estimate) {
+  const billing = require('../services/estimate-proposal-billing');
+  if (typeof billing.estimateIsPriceLocked === 'function') return billing.estimateIsPriceLocked(estimate);
+  return estimate.status === 'accepted' || estimate.status === 'declined' || !!estimate.price_locked_at;
+}
+
 // Resolves undefined when there was nothing to reconcile, { ok: true } after a
 // reconcile, { ok: false, error } when the live lookup / reprice failed (the
 // row is then still the UNRECONCILED snapshot). Never rejects.
@@ -9346,8 +9354,12 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
     if (!estimate || !estimate.customer_id) return;
     // Never reconcile an accepted or price-locked estimate: that deal was
     // committed at the send-time classification, so a later plan lapse must
-    // not retroactively change the terms the customer accepted.
-    if (estimate.status === 'accepted' || estimate.price_locked_at) return;
+    // not retroactively change the terms the customer accepted. A declined
+    // estimate is terminal the same way (it can never be accepted), so every
+    // document renderer shows the quote the customer turned down, not a
+    // repriced one: the one rule, estimateIsPriceLocked, is shared with the
+    // fallback PDF (estimate-proposal-billing).
+    if (estimateIsTerminalPriced(estimate)) return;
     const isString = typeof estimate.estimate_data === 'string';
     const estData = isString
       ? JSON.parse(estimate.estimate_data)
