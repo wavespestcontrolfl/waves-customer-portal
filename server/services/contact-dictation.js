@@ -386,10 +386,10 @@ async function fetchDecoderResponse(prompt) {
   if (require('../config/feature-gates').callEmailChecksLive?.() === true) return fetchDecoderWithFallback(prompt);
   if (!process.env.GEMINI_API_KEY) return null;
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${DECODER_MODEL()}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${DECODER_MODEL()}:generateContent`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { response_mime_type: 'application/json', temperature: 0 },

@@ -47,7 +47,7 @@ const MAX_PROMPT_IMAGES = 5;
 // mirroring the existing property-lookup / lawn-assessment integrations.
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 // Perception backup (owner 2026-10-29, "sure add it"; ROUTES.lawnDiagnosisPerceptionBackup
 // documents the ruling): when the Gemini read misses for any reason, the lawn photo lane's
 // OpenAI model reads the same photos with the same prompt. It runs through the adapter, so
@@ -547,7 +547,7 @@ async function perceiveWithGemini(photos, season) {
     ];
     const resp = await fetch(geminiUrl(LAWN_VISION_MODEL), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
       // Room for a "thinking" Flash model to reason AND emit the observations JSON.
       body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2048 } }),
     });

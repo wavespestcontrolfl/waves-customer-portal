@@ -83,6 +83,8 @@ describe('gate off', () => {
     await expect(decodeDictatedContacts({ transcript: TRANSCRIPT })).resolves.toBeNull();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(fetchSpy.mock.calls[0][0]).toContain('generativelanguage.googleapis.com');
+    expect(fetchSpy.mock.calls[0][0]).not.toMatch(/[?&]key=/);
+    expect(fetchSpy.mock.calls[0][1].headers['x-goog-api-key']).toBe('test-key');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('gemini 429'));
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
