@@ -1667,6 +1667,44 @@ async function exceedsPlausibleVisit(trx, { productId, inventoryUnit, deductedAm
   return ceiling > 0 && deductedAmount > ceiling;
 }
 
+// A technician's completion is refused, before any write, when a submitted line is over the plausibility ceiling
+// (owner "dont block" applies to the office: an admin entry is deliberate and keeps the advisory path in
+// deductProductInventory). The line would otherwise reach service_products, the FDACS ledger, usage, limits and the
+// customer report. Returns the 422 body for the first offending line, else null.
+const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
+
+async function implausibleLineOf(database, submitted, catalogRow) {
+  const amount = submitted.totalAmount != null && submitted.totalAmount !== '' ? Number(submitted.totalAmount) : null;
+  const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
+  if (!catalogRow || !amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) return null;
+  const inventoryUnit = catalogRow.inventory_unit || amountUnit;
+  const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
+  if (deductedAmount == null) return null;
+  if (!await exceedsPlausibleVisit(database, { productId: catalogRow.id, inventoryUnit, deductedAmount })) return null;
+  return {
+    error: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${catalogRow.name} is far more than one visit uses. Check the amount and submit again.`,
+    code: IMPLAUSIBLE_PRODUCT_AMOUNT,
+    productId: catalogRow.id,
+    productName: catalogRow.name,
+    amount,
+    amountUnit,
+  };
+}
+
+async function technicianImplausibleProduct(database, { actor, products, skip = false }) {
+  if (skip || actor?.techRole === 'admin' || !Array.isArray(products)) return null;
+  const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
+  if (!lines.length) return null;
+  const ids = [...new Set(lines.map((p) => canonicalProductId(p.productId)).filter((id) => UUID_SHAPE.test(id)))];
+  const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
+  const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
+  for (const line of lines) {
+    const refusal = await implausibleLineOf(database, line, rowById.get(canonicalProductId(line.productId)));
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -3273,6 +3311,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
+    // A technician's over-ceiling amount is refused here, before the claim and every write (admin keeps the advisory path).
+    // The effects phase of a saved packet runs after its records committed, so it never re-checks.
+    const implausibleProduct = await technicianImplausibleProduct(db, { actor: completionInput.actor, products, skip: packetEffects });
+    if (implausibleProduct) return ({ status: 422, body: implausibleProduct });
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -16247,5 +16289,6 @@ module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
 module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
+module.exports.technicianImplausibleProduct = technicianImplausibleProduct;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;
