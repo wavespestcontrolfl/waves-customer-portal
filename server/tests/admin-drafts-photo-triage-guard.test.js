@@ -315,19 +315,23 @@ describe('approve — the late recheck also guards the provider handoff and keep
 });
 
 describe('approve — the SMS row\'s current linkage wins over the draft\'s own customer_id (codex #4810 r15)', () => {
-  test('a draft stamped for customer A whose SMS row now points at B rechecks against B', async () => {
+  // Since audit AG-01 the generic recipient guard refuses this re-link for
+  // every intent, before the photo-triage recheck runs.
+  test('a draft stamped for customer A whose SMS row now points at B is refused before any recheck', async () => {
     enqueue('message_drafts', { returning: [photoDraft({ sms_log_id: 'sms-9', customer_id: 'cust-A' })] });
     enqueue('sms_log', { first: { id: 'sms-9', from_phone: '+19415550142', to_phone: '+19415550000', customer_id: 'cust-B' } }); // recipient resolve
-    enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-B' } });                                                          // guard re-read
     enqueue('message_drafts', { update: 1 });
-    mockRecheck.mockResolvedValue({ blocked: 'recipient_changed', family: 'tree_shrub' });
 
+    let body;
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
       expect(res.status).toBe(409);
+      body = await res.json();
     });
-    expect(mockRecheck).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-B' }));
+    expect(body.code).toBe('DRAFT_CUSTOMER_CHANGED');
+    expect(mockRecheck).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.table === 'message_drafts' && u.payload.status === 'pending')).toBe(true);
   });
 });
 
@@ -335,6 +339,7 @@ describe('approve — the late hooks re-read the SMS row linkage on every call (
   test('a re-link during the send pipeline is seen by preDispatchCheck', async () => {
     enqueue('message_drafts', { returning: [photoDraft({ sms_log_id: 'sms-9', customer_id: 'cust-A' })] });
     enqueue('sms_log', { first: { id: 'sms-9', from_phone: '+19415550142', to_phone: '+19415550000', customer_id: 'cust-A' } }); // recipient resolve
+    enqueue('customers', { first: { id: 'cust-A', phone: '+19415550142' } }); // recipient guard: A still owns the number
     enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-A' } });   // route-level guard
     enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-B' } });   // late hook — re-linked meanwhile
     enqueue('message_drafts', { update: 1 });
@@ -378,6 +383,7 @@ describe('approve — recipient resolution', () => {
   test('a draft linked only through its sms_log row rechecks against THAT customer', async () => {
     enqueue('message_drafts', { returning: [photoDraft({ customer_id: null, sms_log_id: 'sms-5', flags: JSON.stringify({ ...PHOTO_FLAGS, toPhone: undefined }) })] });
     enqueue('sms_log', { first: { id: 'sms-5', customer_id: 'cust-linked', from_phone: '+19415550142', to_phone: '+19415550100' } });
+    enqueue('customers', { first: { id: 'cust-linked', phone: '+19415550142' } }); // recipient guard: the linked customer owns the number
     enqueue('message_drafts', { update: 1 });
     mockRecheck.mockResolvedValue({ blocked: 'owned', family: 'tree_shrub' });
 
