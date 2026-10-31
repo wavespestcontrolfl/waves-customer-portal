@@ -3531,7 +3531,7 @@ const PERKS = [
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
   'Customer portal for service history, invoices, and payments',
-  'Owner-operator accountability on every visit',
+  'Not private equity. Not a franchise. Just Waves.',
 ];
 
 const LAWN_CARE_PERKS = [
@@ -3546,6 +3546,8 @@ const LAWN_CARE_PERKS = [
   'Between-visit service calls at no charge — we diagnose and spot-treat covered issues',
   'Text your tech directly for quick questions',
   'Billing after completed lawn care visits',
+  // Owner copy ruling 2026-10-31: lawn keeps this line while the owner does every lawn
+  // visit; the pest, mosquito and termite lists say "Not private equity..." instead.
   'Owner-operator accountability on every visit',
 ];
 
@@ -3553,14 +3555,14 @@ const MOSQUITO_PERKS = [
   'Directed barrier applications to mosquito resting zones',
   'Standing-water and breeding-source notes after visits',
   'Program options matched to seasonal or monthly pressure',
-  'Owner-operator accountability on every visit',
+  'Not private equity. Not a franchise. Just Waves.',
 ];
 
 const TERMITE_BAIT_PERKS = [
   'Termite station service matched to your home perimeter',
   'Visit notes after completed termite protection visits',
   'Locked-in pricing for 12 months',
-  'Owner-operator accountability on every visit',
+  'Not private equity. Not a franchise. Just Waves.',
 ];
 
 // Canonical SWFL stores — name, physical address, ZIPs, spoke page slug
