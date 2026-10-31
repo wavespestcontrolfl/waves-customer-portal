@@ -11,8 +11,8 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
-const { LAWN_ROUNDS_9, lawnRoundDate, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
-const { newSeriesAreaAnchor, lawnRoundDateFromFloored } = require('./lawn-area-days');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
+const { newSeriesAreaAnchor } = require('./lawn-area-days');
 const { lawn9xRoundsLive } = require('../config/feature-gates');
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -202,6 +202,14 @@ function seriesCadencePosition(row) {
 // does not change.
 function seriesRoundAnchor(parent) {
   return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
+}
+
+// The anchor a rounds date walk places from: the caller's roundAnchor (a NEW series on its
+// area's anchor, areaSeedOptions), else the parent's own (seriesRoundAnchor: its stored
+// recurring_round_anchor_date, else its cadence position), so a reseed of a series that
+// already stores an area anchor keeps its area day.
+function walkRoundAnchor(parent, opts) {
+  return opts.roundAnchor ?? seriesRoundAnchor(parent) ?? undefined;
 }
 
 function positiveInt(value) {
@@ -443,8 +451,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
   // opts.roundAnchor: the series anchor, when `safe` is a later visit of it
   // (extension, top-up, reseed) — keeps the anchor's offset. See lawnRoundDateFrom.
-  // opts.areaFirstGapFloor: a new series on an area anchor (lawn-area-days.js) keeps its first follow-up 28 days out.
-  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFromFloored(opts.roundAnchor, safe, i, opts.areaFirstGapFloor);
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -574,8 +581,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
     // Lawn rounds, a NEW series on its area's anchor only (resolveNewSeriesAreaAnchor); undefined otherwise.
-    roundAnchor: opts.roundAnchor,
-    areaFirstGapFloor: opts.areaFirstGapFloor,
+    roundAnchor: walkRoundAnchor(parent, opts),
   });
   // existingSeriesDates hands a SeriesDates (boosters own no lawn round); a
   // caller's plain list is read as cadence dates.
@@ -1323,14 +1329,14 @@ async function seedingBlackoutDates(conn, parent, opts = {}) {
 
 // Lawn rounds neighborhood day: the extra options of a NEW lawn_rounds_9 series
 // whose area (lawn-area-days.js) has an anchor: the anchor itself (stamped on
-// the parent, and the roundAnchor of the date walk) and the 28-day first
-// follow-up floor. {} for every other series, a parent that already stores an
-// anchor, and a caller that passed its own roundAnchor. The seed and its
-// planner both call this, so their dates are identical.
+// the parent, and the roundAnchor of the date walk). {} for every other series,
+// a parent that already stores an anchor (its walk reads that, walkRoundAnchor),
+// and a caller that passed its own roundAnchor. The seed and its planner both
+// call this, so their dates are identical.
 async function areaSeedOptions(conn, parent, opts, pattern) {
   if (dateOnly(opts.roundAnchor)) return {};
   const areaRoundAnchor = await newSeriesAreaAnchor(conn, parent, pattern);
-  return areaRoundAnchor ? { areaRoundAnchor, roundAnchor: areaRoundAnchor, areaFirstGapFloor: true } : {};
+  return areaRoundAnchor ? { areaRoundAnchor, roundAnchor: areaRoundAnchor } : {};
 }
 
 // The dates a seedFollowUpsForParent call with the SAME opts would insert —

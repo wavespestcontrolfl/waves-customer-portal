@@ -607,8 +607,8 @@ const { lawn9xRoundsLive } = require('../config/feature-gates');
 const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
-const { LAWN_ROUNDS_9, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
-const { newSeriesAreaAnchor, lawnRoundDateFromFloored } = require('../services/lawn-area-days');
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
+const { newSeriesAreaAnchor } = require('../services/lawn-area-days');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -677,13 +677,12 @@ async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
 
 // Lawn neighborhood day (lawn-area-days.js): where a make-recurring spawn places
 // its series. A rounds parent with no stored anchor is placed from its area's
-// anchor (and keeps its first follow-up 28 days out); every other parent from
-// its own date `baseDateStr`. The planner and the write both call this, so
-// their dates are identical. Returns the { roundAnchor, areaFirstGapFloor }
-// recurrence options; roundAnchor is also what the parent stores.
+// anchor; every other parent from its own date `baseDateStr`. The planner and
+// the write both call this, so their dates are identical. Returns the
+// { roundAnchor } recurrence option, which is also what the parent stores.
 async function spawnRoundPlacement(conn, parentRow, pattern, baseDateStr) {
   const areaAnchor = await newSeriesAreaAnchor(conn, parentRow, pattern);
-  return { roundAnchor: areaAnchor || baseDateStr, areaFirstGapFloor: !!areaAnchor };
+  return { roundAnchor: areaAnchor || baseDateStr };
 }
 
 // Lawn neighborhood day, office New Appointment: the recurrence options of a NEW
@@ -696,13 +695,13 @@ async function createRoundOptions(conn, customerId, bookingProperty, pattern) {
     service_address_zip: bookingProperty?.service_address_zip ?? null,
     service_address_city: bookingProperty?.service_address_city ?? null,
   }, pattern);
-  return areaAnchor ? { roundAnchor: areaAnchor, areaFirstGapFloor: true } : {};
+  return areaAnchor ? { roundAnchor: areaAnchor, areaRoundAnchor: areaAnchor } : {};
 }
 
 // The parent column that stores an area anchor chosen by createRoundOptions.
 function areaAnchorColumns(cols, rOpts) {
-  return cols.recurring_round_anchor_date && rOpts.areaFirstGapFloor
-    ? { recurring_round_anchor_date: rOpts.roundAnchor }
+  return cols.recurring_round_anchor_date && rOpts.areaRoundAnchor
+    ? { recurring_round_anchor_date: rOpts.areaRoundAnchor }
     : {};
 }
 
@@ -759,8 +758,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // top-up and reseed hop from the LATEST visit, so opts.roundAnchor (the
   // series anchor, set by recurrenceOrdinalOptions) keeps the anchor's offset
   // in every round; without it every hop drifts toward the round's end.
-  // opts.areaFirstGapFloor: a new series on an area anchor (lawn-area-days.js) keeps its first follow-up 28 days out.
-  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFromFloored(opts.roundAnchor, safeBaseStr, i, opts.areaFirstGapFloor);
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safeBaseStr, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -9297,7 +9295,7 @@ async function scheduleCreateHandler(req, res, next) {
       ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
       : 0;
     // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
-    // (the parent stores it below) with the 28-day first follow-up floor. The dates are planned once
+    // (the parent stores it below). The dates are planned once
     // here and the insert loop writes exactly these, so plan and write cannot differ.
     // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
     const rOpts = {

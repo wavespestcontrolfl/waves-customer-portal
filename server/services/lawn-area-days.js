@@ -9,13 +9,14 @@
  *
  * Config: system_settings key `lawn_round_area_days` (JSON text or jsonb), read
  * at call time like scheduling/zone-route-days.js:
- *   {"parrish": {"label": "Parrish", "zips": ["34219"], "cities": ["parrish"], "anchor": "2027-01-12"}}
+ *   {"parrish": {"label": "Parrish", "zips": ["34219"], "cities": ["parrish"], "anchor": "2027-01-26"}}
  *   - key ABSENT       -> DEFAULT_LAWN_ROUND_AREA_DAYS (below)
  *   - `{}`             -> no areas (the kill switch: every series keeps its own anchor)
  *   - invalid JSON, a non-object value or a read failure -> no areas (logged once)
- *   - anchor           one real weekday (Mon-Fri) inside a round whose in-round offset leaves at
- *                      least 7 days on both sides, so a one-week move never crosses a round edge.
- *                      An area with any other anchor is ignored (logged once).
+ *   - anchor           one real weekday (Mon-Fri) late in a round: in-round offset 30 or more and at
+ *                      least 3 days before the round's end, so the area date is 28 or more days
+ *                      after any visit of the round before. An area with any other anchor is
+ *                      ignored (logged once).
  *
  * Matching: ZIP first (the first 5 digits of the series parent's
  * service_address_zip, else the customer's zip), then city (parent
@@ -31,29 +32,33 @@
  */
 
 const logger = require('./logger');
-const { LAWN_ROUNDS_9, roundOf, lawnRoundDateFrom } = require('./lawn-rounds');
+const { LAWN_ROUNDS_9, roundOf } = require('./lawn-rounds');
 
 const LAWN_ROUND_AREA_DAYS_KEY = 'lawn_round_area_days';
 
-// First follow-up floor: a new series whose area date in the next round is
-// closer than this to the parent's own visit uses parent date + this many days
-// for that one follow-up. Later rounds follow the area anchor.
-const AREA_FIRST_FOLLOW_UP_MIN_DAYS = 28;
-// An anchor needs this many days on both sides inside its round.
-const ANCHOR_MARGIN_DAYS = 7;
+// An area anchor sits late in its round: offset (days from the round start) of at
+// least ANCHOR_MIN_OFFSET and at most round length - ANCHOR_END_MARGIN_DAYS. Why:
+// the weekday snap in lawnRoundDate moves a date at most 3 days, so with an offset
+// of 30 or more the area date sits at offset 27 or more in every round (and the
+// 3-day margin at the end keeps the snap inside the round). A visit in round R is
+// on R's last day at the latest, so the area date in R+1 is at least 28 days after
+// ANY visit in R, whatever day it was placed on. Consecutive area dates are 35, 42
+// or 49 days apart. Nothing else (no floor, no special first gap) is needed.
+const ANCHOR_MIN_OFFSET = 30;
+const ANCHOR_END_MARGIN_DAYS = 3;
 
 const DEFAULT_LAWN_ROUND_AREA_DAYS = Object.freeze({
   parrish: Object.freeze({
     label: 'Parrish',
     zips: Object.freeze(['34219']),
     cities: Object.freeze(['parrish', 'duette']),
-    anchor: '2027-01-12',
+    anchor: '2027-01-26',
   }),
   lakewood_ranch: Object.freeze({
     label: 'Lakewood Ranch',
     zips: Object.freeze(['34202', '34211', '34212']),
     cities: Object.freeze(['lakewood ranch', 'lakewood rch']),
-    anchor: '2027-01-19',
+    anchor: '2027-01-28',
   }),
 });
 
@@ -80,10 +85,6 @@ function diffDays(fromStr, toStr) {
   return Math.round((utcDay(toStr) - utcDay(fromStr)) / 86400000);
 }
 
-function addDays(dateStr, days) {
-  return new Date(utcDay(dateStr) + days * 86400000).toISOString().slice(0, 10);
-}
-
 function normalizeZip(value) {
   const zip = String(value == null ? '' : value).trim().slice(0, 5);
   return /^\d{5}$/.test(zip) ? zip : null;
@@ -95,8 +96,8 @@ function normalizeCity(value) {
 }
 
 // A usable area anchor: a real YYYY-MM-DD on Monday-Friday whose offset in its
-// round leaves ANCHOR_MARGIN_DAYS on both sides inside the round. Returns the
-// date string or null.
+// round is at least ANCHOR_MIN_OFFSET and leaves ANCHOR_END_MARGIN_DAYS to the
+// round's end (see the note on those constants). Returns the date string or null.
 function validAreaAnchor(value) {
   const anchor = typeof value === 'string' ? value.trim() : '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) return null;
@@ -107,7 +108,7 @@ function validAreaAnchor(value) {
   const home = roundOf(anchor);
   if (!home) return null;
   const offset = diffDays(home.start, anchor);
-  if (offset < ANCHOR_MARGIN_DAYS || home.length - 1 - offset < ANCHOR_MARGIN_DAYS) return null;
+  if (offset < ANCHOR_MIN_OFFSET || home.length - offset < ANCHOR_END_MARGIN_DAYS + 1) return null;
   return anchor;
 }
 
@@ -140,7 +141,7 @@ function parseLawnAreaDays(value) {
     if (!key || !rule || typeof rule !== 'object') continue;
     const anchor = validAreaAnchor(rule.anchor);
     if (!anchor) {
-      warnOnce(`anchor:${key}:${rule.anchor}`, `area "${key}" ignored: anchor ${JSON.stringify(rule.anchor)} must be a Mon-Fri date at least ${ANCHOR_MARGIN_DAYS} days inside its round`);
+      warnOnce(`anchor:${key}:${rule.anchor}`, `area "${key}" ignored: anchor ${JSON.stringify(rule.anchor)} must be a Mon-Fri date at offset ${ANCHOR_MIN_OFFSET}+ in its round and ${ANCHOR_END_MARGIN_DAYS}+ days before its end`);
       continue;
     }
     const zips = new Set();
@@ -234,40 +235,14 @@ async function newSeriesAreaAnchor(conn, parentRow, pattern) {
   return lawnAreaRoundAnchor(conn, parentRow);
 }
 
-// First follow-up floor. `areaDate` is the area's date in the next round,
-// `baseDate` the parent's own visit: when the area date is fewer than
-// AREA_FIRST_FOLLOW_UP_MIN_DAYS after the visit, the first follow-up is the
-// visit + that many days. Inside the next round by construction: the area date
-// is on or after the round start, so a visit within the window sits after
-// start - 28 and +28 reaches past the start; the visit is on or before the
-// previous round's last day and +28 stays under the 40-day round length.
-function areaFirstFollowUpDate(baseDate, areaDate) {
-  const base = dateOnly(baseDate);
-  const area = dateOnly(areaDate);
-  if (!base || !area || !/^\d{4}-\d{2}-\d{2}$/.test(base) || !/^\d{4}-\d{2}-\d{2}$/.test(area)) return areaDate;
-  return diffDays(base, area) < AREA_FIRST_FOLLOW_UP_MIN_DAYS ? addDays(base, AREA_FIRST_FOLLOW_UP_MIN_DAYS) : area;
-}
-
-// The rounds date walk with the optional first follow-up floor, shared by the
-// seeder, the office planners and the prepay schedule: lawnRoundDateFrom, and
-// for a NEW series on an area anchor (`firstGapFloor`) visit 1 of the walk
-// (`i` = 1) is floored by areaFirstFollowUpDate.
-function lawnRoundDateFromFloored(anchorDateStr, baseDateStr, i, firstGapFloor) {
-  const date = lawnRoundDateFrom(anchorDateStr, baseDateStr, i);
-  return firstGapFloor && i === 1 ? areaFirstFollowUpDate(baseDateStr, date) : date;
-}
-
 module.exports = {
   LAWN_ROUND_AREA_DAYS_KEY,
   DEFAULT_LAWN_ROUND_AREA_DAYS,
-  AREA_FIRST_FOLLOW_UP_MIN_DAYS,
   parseLawnAreaDays,
   readLawnAreaDays,
   matchLawnArea,
   validAreaAnchor,
   lawnAreaRoundAnchor,
   newSeriesAreaAnchor,
-  areaFirstFollowUpDate,
-  lawnRoundDateFromFloored,
   _resetWarnings: () => warned.clear(),
 };

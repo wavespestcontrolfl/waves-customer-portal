@@ -154,7 +154,7 @@ function buildPrepayCoverageSummary(prepay) {
 // visit's share of the prepay total. Computed from the term — not a
 // scheduled_services join — so it's correct even before the invoice is paid and
 // coverage rows are seeded. Empty array when coverage isn't configured.
-function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor, areaFirstGapFloor } = {}) {
+function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor } = {}) {
   // A term that has not been paid yet has not seeded any visits, so its
   // displayed schedule is still a forecast; an active/decided term's visits
   // are already on the calendar.
@@ -184,8 +184,6 @@ function buildCoverageVisits(term, prepayAmount, { today = null, roundAnchor, ar
       // lawn_rounds_9 only: the covered series' stored round anchor, the one
       // the payment-time seeder places the dates from.
       roundAnchor,
-      // A NEW rounds series on its area anchor: visit 2 keeps 28 days from visit 1 (annual-prepay-renewals).
-      areaFirstGapFloor,
     };
     let scheduleEnd = term.term_end;
     if (paymentPending) {
@@ -291,7 +289,7 @@ async function resolveInvoiceTermId(invoice, conn = db, { strict = false } = {})
 // A rounds (lawn_rounds_9) term lists its covered visits from the covered
 // series' stored round anchor, resolved the way the payment-time seeder does
 // (annual-prepay-renewals seriesRoundAnchorForTerm over the term's own window).
-// Returns the buildCoverageVisits options { roundAnchor, areaFirstGapFloor }. Display only: any failure returns {} (the plain round walk) and never
+// Returns the buildCoverageVisits options { roundAnchor }. Display only: any failure returns {} (the plain round walk) and never
 // breaks the invoice load. Other cadences make no extra read.
 async function roundAnchorOptionsForDisplay(term, invoice, conn) {
   try {

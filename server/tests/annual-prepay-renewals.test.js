@@ -968,12 +968,11 @@ describe('annual prepay renewal helpers', () => {
       });
 
       test('a lawn neighborhood day: a first activation for an area customer stamps the AREA anchor and places later rounds from it', async () => {
-        const paid = '2027-02-02'; // last day of round 1; the Parrish day in round 2 (Feb 23) is under 28 days away
-        const parrish = '2027-01-12';
-        const expected = coverageScheduleDates(paid, 9, 'lawn_rounds_9', null, { roundAnchor: parrish, areaFirstGapFloor: true });
+        const paid = '2027-02-02'; // last day of round 1
+        const parrish = '2027-01-26';
+        const expected = Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(parrish, paid, i));
         expect(expected[0]).toBe(paid);
-        expect(expected[1]).toBe('2027-03-02'); // paid + 28 days, inside round 2
-        expect(expected.slice(2)).toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(parrish, paid, i)).slice(2));
+        expect(expected[1]).toBe('2027-03-09'); // the Parrish Tuesday, 35 days after the paid anchor
         const inserts = seedInserts(expected);
         setDbQueues({
           scheduled_services: [query({ columnInfo: ROUNDS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],

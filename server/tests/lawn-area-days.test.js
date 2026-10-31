@@ -26,11 +26,11 @@ const { coverageScheduleDates, areaRoundAnchorOptionsForTerm } = require('../ser
 
 const {
   parseLawnAreaDays, readLawnAreaDays, matchLawnArea, validAreaAnchor, lawnAreaRoundAnchor, newSeriesAreaAnchor,
-  areaFirstFollowUpDate, DEFAULT_LAWN_ROUND_AREA_DAYS,
+  DEFAULT_LAWN_ROUND_AREA_DAYS,
 } = area;
 
-const PARRISH = '2027-01-12';
-const LAKEWOOD = '2027-01-19';
+const PARRISH = '2027-01-26'; // Tuesday, offset 32 in round 1 of 2027 (Dec 25 2026 - Feb 2 2027)
+const LAKEWOOD = '2027-01-28'; // Thursday, offset 34
 const weekday = (s) => new Date(`${s}T12:00:00Z`).getUTCDay();
 const addDays = (s, n) => new Date(new Date(`${s}T12:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
 const gap = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
@@ -68,7 +68,11 @@ describe('the code default', () => {
     const areas = parseLawnAreaDays(DEFAULT_LAWN_ROUND_AREA_DAYS);
     expect(areas.map((a) => a.key)).toEqual(['parrish', 'lakewood_ranch']);
     expect(areas.map((a) => a.anchor)).toEqual([PARRISH, LAKEWOOD]);
-    expect(areas.map((a) => weekday(a.anchor))).toEqual([2, 2]);
+    expect(areas.map((a) => weekday(a.anchor))).toEqual([2, 4]);
+    // Round 1 of 2027 runs Dec 25 2026 - Feb 2 2027 (40 days): offsets 32 and 34.
+    expect(roundOf(PARRISH)).toMatchObject({ round: 1, start: '2026-12-25', end: '2027-02-02', length: 40 });
+    expect(areas.map((a) => gap('2026-12-25', a.anchor))).toEqual([32, 34]);
+    expect(areas.map((a) => a.zips.size)).toEqual([1, 3]);
   });
 
   test('key absent -> the default; `{}` -> no areas; jsonb object and JSON text read alike', async () => {
@@ -191,8 +195,9 @@ describe('an invalid anchor ignores its area', () => {
     ['empty', ''],
     ['missing', undefined],
     ['the first day of a round (no room before)', '2027-02-03'],
-    ['3 days into a round', '2027-02-08'],
-    ['6 days before a round ends', '2027-02-02'],
+    ['offset 29 (Tuesday)', '2027-01-22'],
+    ['offset 14', '2027-01-12'],
+    ['3 days before the round ends (offset 37 of 40)', '2027-01-31'],
     ['the last day of round 9', '2026-12-24'],
   ])('%s', (_name, anchor) => {
     expect(validAreaAnchor(anchor)).toBeNull();
@@ -204,24 +209,22 @@ describe('an invalid anchor ignores its area', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
-  test('the boundary: 7 days from each round edge is valid, 6 is not', () => {
+  test('the boundary, every round of two program years: offset 30 to length - 4 on a weekday is valid, 29 and length - 3 are not', () => {
+    let valid = 0;
     for (let programYear = 2027; programYear <= 2028; programYear++) {
       for (let round = 1; round <= 9; round++) {
         const start = roundStart(programYear, round);
-        const end = roundEnd(programYear, round);
-        const okAt = (s) => validAreaAnchor(s) === s;
-        // Pick the nearest weekday inside the allowed band.
-        const lo = addDays(start, 7);
-        const hi = addDays(end, -7);
-        for (const d of [lo, addDays(lo, 1), addDays(lo, 2)]) {
-          if (weekday(d) >= 1 && weekday(d) <= 5) expect(okAt(d)).toBe(true);
+        const length = gap(start, roundEnd(programYear, round)) + 1;
+        for (let offset = 0; offset < length; offset++) {
+          const date = addDays(start, offset);
+          const weekdayOk = weekday(date) >= 1 && weekday(date) <= 5;
+          const want = weekdayOk && offset >= 30 && offset <= length - 4;
+          expect(validAreaAnchor(date) === date).toBe(want);
+          if (want) valid += 1;
         }
-        for (const d of [hi, addDays(hi, -1), addDays(hi, -2)]) {
-          if (weekday(d) >= 1 && weekday(d) <= 5) expect(okAt(d)).toBe(true);
-        }
-        for (const d of [addDays(start, 6), addDays(end, -6)]) expect(validAreaAnchor(d)).toBeNull();
       }
     }
+    expect(valid).toBeGreaterThan(50);
   });
 });
 
@@ -239,7 +242,7 @@ describe('customers of one area share every date', () => {
     ['2027-06-29', 'booked in round 5, near its end'],
   ];
 
-  test.each([[PARRISH], [LAKEWOOD], ['2028-02-29']])('anchor %s', (anchor) => {
+  test.each([[PARRISH], [LAKEWOOD], ['2028-03-10']])('anchor %s', (anchor) => {
     const wanted = weekday(anchor);
     const byRound = new Map();
     for (const [parentDate] of customers) {
@@ -258,12 +261,11 @@ describe('customers of one area share every date', () => {
     expect(byRound.get(roundOrdinal('2028-02-10'))).toBeDefined();
   });
 
-  test('the Feb 29 anchor: round 2 of 2028 is 41 days and the area day is the anchor itself', () => {
+  test('round 2 of 2028 is 41 days (Feb 29): an anchor late in it is valid and holds in other rounds', () => {
     expect(roundOf('2028-02-29')).toMatchObject({ round: 2, length: 41 });
-    expect(validAreaAnchor('2028-02-29')).toBe('2028-02-29');
-    // Round 9 of 2027 (Nov 10 - Dec 24) + 2 and round 5 of 2027 + 6 both land in round 2 of 2028.
-    expect(lawnRoundDateFrom('2028-02-29', '2027-12-01', 2)).toBe('2028-02-29');
-    expect(lawnRoundDateFrom('2028-02-29', '2027-06-29', 6)).toBe('2028-02-29');
+    expect(validAreaAnchor('2028-03-10')).toBe('2028-03-10'); // Friday, offset 36 of 41
+    expect(lawnRoundDateFrom('2028-03-10', '2027-12-01', 2)).toBe('2028-03-10');
+    expect(validAreaAnchor('2028-02-29')).toBeNull(); // offset 26: too early in its round
   });
 
   test('both default areas keep every round on its weekday, 35 to 49 days apart', () => {
@@ -276,32 +278,38 @@ describe('customers of one area share every date', () => {
   });
 });
 
-describe('the 28-day first follow-up floor', () => {
-  test('keeps the area date when it is 28 or more days after the visit', () => {
-    expect(areaFirstFollowUpDate('2026-12-30', '2027-02-23')).toBe('2027-02-23');
-    expect(areaFirstFollowUpDate('2026-12-26', '2027-01-23')).toBe('2027-01-23'); // exactly 28
+describe('the offset rule: the area date is 28 or more days after ANY visit of the round before', () => {
+  // Every day of every round of two program years (round 9 is 45 days; Feb 29 2028 is in round 2) is a
+  // possible visit date. For both default anchors the next round's area date is 28+ days later, the
+  // dates stay in their rounds on the anchor's weekday, and consecutive area dates are 35/42/49 days apart.
+  test.each([[PARRISH], [LAKEWOOD]])('anchor %s', (anchor) => {
+    const wanted = weekday(anchor);
+    let minGap = Infinity;
+    let checked = 0;
+    for (let day = '2026-12-25'; day <= '2028-12-24'; day = addDays(day, 1)) {
+      let previous = null;
+      for (let k = 1; k <= 3; k++) {
+        const date = lawnRoundDateFrom(anchor, day, k);
+        const home = roundOf(date);
+        expect(roundOrdinal(date)).toBe(roundOrdinal(day) + k);
+        expect(date >= home.start && date <= home.end).toBe(true);
+        expect(weekday(date)).toBe(wanted);
+        if (previous) expect([35, 42, 49]).toContain(gap(previous, date));
+        else minGap = Math.min(minGap, gap(day, date));
+        previous = date;
+      }
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(700);
+    expect(minGap).toBeGreaterThanOrEqual(28);
   });
 
-  test('uses visit + 28 days when the area date is closer', () => {
-    expect(areaFirstFollowUpDate('2026-12-26', '2027-01-22')).toBe('2027-01-23');
-    expect(areaFirstFollowUpDate('2027-02-02', '2027-02-23')).toBe('2027-03-02');
-  });
-
-  test('a floored date stays inside the next round, for every visit day of two program years', () => {
-    let floored = 0;
-    for (const anchor of [PARRISH, LAKEWOOD, '2028-02-29', '2027-03-24', '2027-11-23']) {
-      for (let day = '2026-12-25'; day <= '2028-12-24'; day = addDays(day, 1)) {
-        const areaDate = lawnRoundDateFrom(anchor, day, 1);
-        const first = areaFirstFollowUpDate(day, areaDate);
-        const next = roundOf(areaDate);
-        expect(roundOrdinal(first)).toBe(roundOrdinal(day) + 1);
-        expect(first >= next.start && first <= next.end).toBe(true);
-        expect(gap(day, first)).toBeGreaterThanOrEqual(28);
-        if (first !== areaDate) { floored += 1; expect(first).toBe(addDays(day, 28)); }
-        else expect(gap(day, areaDate)).toBeGreaterThanOrEqual(28);
+  test('a visit on the last day of a round (the worst case) is still 28+ days from the next area date', () => {
+    for (const anchor of [PARRISH, LAKEWOOD]) {
+      for (const lastDay of ['2027-02-02', '2027-03-14', '2027-04-23', '2027-06-02', '2027-07-12', '2027-08-21', '2027-09-30', '2027-11-09', '2027-12-24', '2028-03-14']) {
+        expect(gap(lastDay, lawnRoundDateFrom(anchor, lastDay, 1))).toBeGreaterThanOrEqual(28);
       }
     }
-    expect(floored).toBeGreaterThan(0);
   });
 });
 
@@ -390,27 +398,38 @@ describe('seedFollowUpsForParent on an area', () => {
     expect(b.parentUpdates[0].recurring_round_anchor_date).toBe(PARRISH);
   });
 
-  test('the planner returns exactly the dates the write inserts, floor included', async () => {
-    // Parent on the last day of round 1: the Parrish date in round 2 is 21 days later, so the floor applies.
+  test('the planner returns exactly the dates the write inserts', async () => {
+    // A parent on the last day of round 1, off the area day: every follow-up is on the area day.
     const parent = parentRow({ scheduled_date: '2027-02-02' });
     const planned = await seeder.planFollowUpSeedDates(seedConn().conn, parent, seedOpts);
     const { conn, inserted } = seedConn();
     await seeder.seedFollowUpsForParent(conn, parent, seedOpts);
     expect(planned).toEqual(inserted.map((r) => r.scheduled_date));
-    expect(inserted[0].scheduled_date).toBe('2027-03-02'); // 2027-02-02 + 28, not the area day Feb 23
-    expect(lawnRoundDateFrom(PARRISH, parent.scheduled_date, 1)).toBe('2027-02-23');
-    expect(roundOf(inserted[0].scheduled_date).round).toBe(2);
-    // Later rounds follow the area anchor.
-    expect(inserted.slice(1).map((r) => r.scheduled_date)).toEqual(
-      Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(PARRISH, parent.scheduled_date, i)).slice(2),
+    expect(inserted.map((r) => r.scheduled_date)).toEqual(
+      Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(PARRISH, parent.scheduled_date, i)).slice(1),
     );
+    expect(inserted[0].scheduled_date).toBe('2027-03-09'); // 35 days after the Feb 2 visit: no special first gap
   });
 
-  test('the floor applies only to the first follow-up, and only on an area anchor', async () => {
-    const parent = parentRow({ scheduled_date: '2027-02-02' });
-    const noArea = seedConn({ customer: { zip: '34251', city: 'Myakka City' } });
-    await seeder.seedFollowUpsForParent(noArea.conn, parent, seedOpts);
-    expect(noArea.inserted[0].scheduled_date).toBe(lawnRoundDate('2027-02-02', 1));
+  test('a reseed of a parent that already stores an area anchor keeps its area day', async () => {
+    // The parent's own visit was moved off the area day; the stored anchor still places every follow-up.
+    const parent = parentRow({ scheduled_date: '2027-03-31', recurring_round_anchor_date: PARRISH });
+    const { conn, inserted, parentUpdates } = seedConn({ customer: { zip: '34219', city: 'Parrish' } });
+    const opts = { pattern: LAWN_ROUNDS_9, plannedCount: 5, skipWeekends: true };
+    const planned = await seeder.planFollowUpSeedDates(seedConn().conn, parent, opts);
+    await seeder.seedFollowUpsForParent(conn, parent, opts);
+    const area = [1, 2, 3, 4].map((i) => lawnRoundDateFrom(PARRISH, parent.scheduled_date, i));
+    expect(inserted.map((r) => r.scheduled_date)).toEqual(area);
+    expect(planned).toEqual(area);
+    expect(area).not.toEqual([1, 2, 3, 4].map((i) => lawnRoundDate(parent.scheduled_date, i)));
+    expect(area.every((d) => weekday(d) === 2)).toBe(true);
+    expect(parentUpdates[0]).not.toHaveProperty('recurring_round_anchor_date'); // already stored: not re-stamped
+    // The builder alone does the same, with no area lookup.
+    const rows = seeder.buildRecurringFollowUpRows(parent, { pattern: LAWN_ROUNDS_9, plannedCount: 5, skipWeekends: true });
+    expect(rows.map((r) => r.scheduled_date)).toEqual(area);
+    // A parent with no stored anchor still walks from its own date (cadence position), as before.
+    const own = seeder.buildRecurringFollowUpRows(parentRow({ scheduled_date: '2027-03-31' }), { pattern: LAWN_ROUNDS_9, plannedCount: 3, skipWeekends: true });
+    expect(own.map((r) => r.scheduled_date)).toEqual([1, 2].map((i) => lawnRoundDate('2027-03-31', i)));
   });
 
   test('a series outside every area is unchanged: no stamp, its own anchor walk', async () => {
@@ -436,10 +455,13 @@ describe('seedFollowUpsForParent on an area', () => {
     expect(on.parentUpdates[0].recurring_round_anchor_date).toBe(PARRISH);
   });
 
-  test('a parent that already stores an anchor, a caller roundAnchor and other patterns are untouched', async () => {
+  test('a parent that already stores an anchor, a caller roundAnchor and other patterns are not re-stamped', async () => {
     const stored = seedConn();
     await seeder.seedFollowUpsForParent(stored.conn, parentRow({ recurring_round_anchor_date: '2026-11-03' }), seedOpts);
     expect(stored.parentUpdates[0]).not.toHaveProperty('recurring_round_anchor_date');
+    expect(stored.inserted.map((r) => r.scheduled_date)).toEqual(
+      Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom('2026-11-03', '2027-03-02', i)).slice(1),
+    );
     const explicit = seedConn();
     await seeder.seedFollowUpsForParent(explicit.conn, parentRow(), { ...seedOpts, roundAnchor: '2027-02-09' });
     expect(explicit.parentUpdates[0]).not.toHaveProperty('recurring_round_anchor_date');
@@ -464,7 +486,7 @@ describe('prepay gap-fill for a term that covers no series', () => {
   test('areaRoundAnchorOptionsForTerm: rounds term, no visits, area customer', async () => {
     const conn = seedConn({ customer: { zip: '34219', city: 'Parrish' } }).conn;
     expect(await areaRoundAnchorOptionsForTerm({ term, coverageCadence: LAWN_ROUNDS_9, existingRows: [], conn }))
-      .toEqual({ roundAnchor: PARRISH, areaFirstGapFloor: true });
+      .toEqual({ roundAnchor: PARRISH });
     // Tied to a series, another cadence, or no area -> {}
     expect(await areaRoundAnchorOptionsForTerm({ term, coverageCadence: LAWN_ROUNDS_9, existingRows: [{ id: 'x' }], conn })).toEqual({});
     expect(await areaRoundAnchorOptionsForTerm({ term, coverageCadence: 'every_6_weeks', existingRows: [], conn })).toEqual({});
@@ -472,16 +494,13 @@ describe('prepay gap-fill for a term that covers no series', () => {
     expect(await areaRoundAnchorOptionsForTerm({ term, coverageCadence: LAWN_ROUNDS_9, existingRows: [], conn: away })).toEqual({});
   });
 
-  test('the schedule keeps visit 1 on the paid anchor and follows the area afterwards, with the 28-day floor', () => {
+  test('the schedule keeps visit 1 on the paid anchor and follows the area afterwards', () => {
     const start = '2027-02-02'; // last day of round 1
     const plain = coverageScheduleDates(start, 9, LAWN_ROUNDS_9);
-    const areaDates = coverageScheduleDates(start, 9, LAWN_ROUNDS_9, null, { roundAnchor: PARRISH, areaFirstGapFloor: true });
+    const areaDates = coverageScheduleDates(start, 9, LAWN_ROUNDS_9, null, { roundAnchor: PARRISH });
     expect(areaDates[0]).toBe(start);
-    expect(areaDates[1]).toBe('2027-03-02');
-    expect(areaDates.slice(2)).toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(PARRISH, start, i)).slice(2));
+    expect(areaDates).toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(PARRISH, start, i)));
     expect(areaDates).not.toEqual(plain);
-    // A stored series anchor (no floor flag) is unchanged by this feature.
-    expect(coverageScheduleDates(start, 9, LAWN_ROUNDS_9, null, { roundAnchor: PARRISH }))
-      .toEqual(Array.from({ length: 9 }, (_, i) => lawnRoundDateFrom(PARRISH, start, i)));
+    expect(gap(areaDates[0], areaDates[1])).toBeGreaterThanOrEqual(28);
   });
 });

@@ -286,11 +286,10 @@ describe('POST / — admin create — lawn 9x series pattern', () => {
 });
 
 // Lawn neighborhood day (lawn-area-days.js) on the office New Appointment: a NEW rounds series is placed
-// from its area's anchor, the parent stores it, and the first follow-up keeps 28 days from the visit.
+// from its area's anchor and the parent stores it.
 describe('POST / — admin create — lawn neighborhood day', () => {
   const { lawnRoundDateFrom } = require('../services/lawn-rounds');
-  const { areaFirstFollowUpDate } = require('../services/lawn-area-days');
-  const PARRISH = '2027-01-12';
+  const PARRISH = '2027-01-26';
   const withCustomer = (extra) => {
     // The same row on db and trx: the booking compares the two reads of the customer.
     const row = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, ...extra };
@@ -300,11 +299,9 @@ describe('POST / — admin create — lawn neighborhood day', () => {
     }
   };
   const dates = () => inserts.map((d) => d.scheduled_date);
-  const areaDates = (base) => [0, 1, 2, 3].map((i) => (i === 1
-    ? areaFirstFollowUpDate(base, lawnRoundDateFrom(PARRISH, base, 1))
-    : lawnRoundDateFrom(PARRISH, base, i)));
+  const areaDates = (base) => [0, 1, 2, 3].map((i) => lawnRoundDateFrom(PARRISH, base, i));
 
-  test('an area customer: the parent stores the area anchor, children follow it with the 28-day floor', async () => {
+  test('an area customer: the parent stores the area anchor and the children follow it', async () => {
     gateOn();
     withCustomer({ zip: '34219', city: 'Parrish' });
     const { status } = await post(lawnBody);
@@ -312,9 +309,9 @@ describe('POST / — admin create — lawn neighborhood day', () => {
     expect(dates()).toEqual(areaDates('2099-07-03'));
     expect(inserts[0].recurring_round_anchor_date).toBe(PARRISH);
     expect(inserts.slice(1).every((d) => !('recurring_round_anchor_date' in d))).toBe(true);
-    // The Parrish Tuesday in the next round is 25 days out, so the first follow-up is the visit + 28 days.
-    expect(lawnRoundDateFrom(PARRISH, '2099-07-03', 1)).toBe('2099-07-28');
-    expect(dates()[1]).toBe('2099-07-31');
+    // Every follow-up is on the Parrish Tuesday and 28+ days after the visit.
+    expect(dates().slice(1).every((d) => new Date(`${d}T12:00:00Z`).getUTCDay() === 2)).toBe(true);
+    expect(Math.round((new Date(`${dates()[1]}T12:00:00Z`) - new Date('2099-07-03T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
   });
 
   test('planner equals write: the dates locked up front are exactly the dates inserted', async () => {
@@ -592,7 +589,7 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
   describe('gate on: a lawn neighborhood day', () => {
     const roundsVisit = { ...lawnVisit, recurring_pattern: 'lawn_rounds_9', scheduled_date: '2099-07-01', day: '2099-07-01' };
     const { lawnRoundDateFrom } = require('../services/lawn-rounds');
-    const PARRISH = '2027-01-12';
+    const PARRISH = '2027-01-26';
     const stamps = () => parentUpdates.filter((u) => u.recurring_round_anchor_date !== undefined);
 
     test('an area customer: the parent stores the area anchor and the children follow it', async () => {
@@ -601,24 +598,18 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
       const { status } = await put({ ...makeRecurring, recurringCount: 4 });
       expect(status).toBe(200);
       expect(stamps()).toEqual([{ recurring_round_anchor_date: PARRISH }]);
-      // The Parrish Tuesday in the next round (Jul 28) is 27 days out: the first follow-up is visit + 28 days.
-      expect(lawnRoundDateFrom(PARRISH, '2099-07-01', 1)).toBe('2099-07-28');
-      const expected = ['2099-07-29', ...[2, 3].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-01', i))];
+      const expected = [1, 2, 3].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-01', i));
       expect(spawned.map((d) => d.scheduled_date)).toEqual(expected);
       expect(spawned.every((d) => d.recurring_pattern === 'lawn_rounds_9')).toBe(true);
     });
 
-    test('the first follow-up keeps 28 days from the visit, then the area day', async () => {
+    test('a visit late in its round: the first follow-up is still 28+ days out, on the area day', async () => {
       gateOn();
-      // The Parrish Tuesday in the next round is under 28 days after Jul 7, so the floor applies.
       mockVisit({ ...roundsVisit, scheduled_date: '2099-07-07', day: '2099-07-07' }, { zip: '34219', city: 'Parrish' });
       const { status } = await put({ ...makeRecurring, recurringCount: 3 });
       expect(status).toBe(200);
-      const areaDate = lawnRoundDateFrom(PARRISH, '2099-07-07', 1);
-      const first = spawned[0].scheduled_date;
-      expect(Math.round((new Date(`${first}T12:00:00Z`) - new Date('2099-07-07T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
-      expect(first >= areaDate).toBe(true);
-      expect(spawned[1].scheduled_date).toBe(lawnRoundDateFrom(PARRISH, '2099-07-07', 2));
+      expect(spawned.map((d) => d.scheduled_date)).toEqual([1, 2].map((i) => lawnRoundDateFrom(PARRISH, '2099-07-07', i)));
+      expect(Math.round((new Date(`${spawned[0].scheduled_date}T12:00:00Z`) - new Date('2099-07-07T12:00:00Z')) / 86400000)).toBeGreaterThanOrEqual(28);
     });
 
     test('a customer outside every area keeps the visit date as the anchor', async () => {
