@@ -216,6 +216,12 @@ function standardLaborMinutesFor(serviceType) {
   return rule ? rule.minutes : null;
 }
 
+// The drive cost of one stop with no cost card: gate on, the Average Drive Time at the loaded labor rate
+// (20 minutes at $35 = $11.67); gate off, company_financials.drive_cost_per_stop as today.
+function standardStopDriveCost({ standardOn, laborRate, driveCostPerStop }) {
+  return standardOn ? (standardDriveMinutes() / 60) * laborRate : driveCostPerStop;
+}
+
 // The Average Drive Time (pricing_config global_drive_time) in minutes, read at call time.
 function standardDriveMinutes() {
   try {
@@ -319,15 +325,7 @@ async function loadDriveLeg(db, svc, { ownsDriveCost, marked }) {
  */
 function deriveRevenue({
   serviceRecord, scheduledService, customer, ignoreExistingRevenue = false, keepRecordedRevenue = false,
-  ownRevenue = null,
 } = {}) {
-  // GATE_JOB_COST_STANDARD_MINUTES: calculateJobCost passes the visit's own revenue sources
-  // (loadOwnRevenueSources). Null = today's rules below, untouched.
-  if (ownRevenue) {
-    return deriveRevenueFromOwnSources({
-      serviceRecord, scheduledService, customer, ignoreExistingRevenue, keepRecordedRevenue, ownRevenue,
-    });
-  }
   // A cost-only re-run (keepRecordedRevenue) keeps whatever revenue is already
   // written, $0 included: the positive-only short-circuit below would re-derive
   // a recorded $0 from today's price or plan and rewrite historical revenue.
@@ -424,6 +422,12 @@ function deriveRevenueFromOwnSources({
   return (keepRecordedRevenue ? null : positiveMoney(customer?.monthly_rate)) ?? 0;
 }
 
+// GATE_JOB_COST_STANDARD_MINUTES: with the visit's own revenue sources loaded (loadOwnRevenueSources), the
+// standard rules; without them (null), today's deriveRevenue, untouched.
+function deriveVisitRevenue(args) {
+  return args.ownRevenue ? deriveRevenueFromOwnSources(args) : deriveRevenue(args);
+}
+
 // Is this annual-prepay term paid? Live statuses are. A payment_pending or decided term (renewed,
 // switch_plan, or a decided lapse riding out its paid window) counts once its prepay invoice is collected;
 // a decided term with no linked invoice is legacy and keeps its covered meaning (coveredTermsAsOf,
@@ -440,7 +444,9 @@ async function prepayTermIsPaid(db, term) {
     || !!invoice.paid_at);
 }
 
-// The visit's share of its paid annual-prepay term: prepay_amount over the term's visits that still count.
+// The visit's share of its paid annual-prepay term: prepay_amount over the larger of the term's covered visit
+// count (coverage_visit_count) and its linked visits that still count. Visits not yet scheduled keep their
+// share, and the linked visits together never book more than the prepayment.
 async function loadPrepayVisitShare(db, svc) {
   if (!svc.annual_prepay_term_id) return 0;
   try {
@@ -451,7 +457,7 @@ async function loadPrepayVisitShare(db, svc) {
       .whereNotIn('status', PREPAY_UNCOUNTED_VISIT_STATUSES)
       .count({ c: '*' })
       .first();
-    const visits = Number(counted?.c);
+    const visits = Math.max(Number(counted?.c) || 0, Number.parseInt(term.coverage_visit_count, 10) || 0);
     return visits >= 1 ? round2(Number(term.prepay_amount) / visits) : 0;
   } catch (err) {
     logger.debug(`[job-costing] prepay share error: ${err.message}`);
@@ -477,13 +483,15 @@ function serviceLineTotal(rawLineItems) {
   }, 0);
 }
 
-// The newest non-void invoice written for this visit's service record: its service lines.
+// The newest non-void invoice written for this visit's service record: its service lines. A prepay invoice
+// (annual_prepay_term_id set) bills the whole term, not this visit: its share comes from loadPrepayVisitShare.
 async function loadLinkedInvoiceTotal(db, record) {
   if (!record?.id) return 0;
   try {
     const invoice = await db('invoices')
       .where({ service_record_id: record.id })
       .whereNotIn('status', INVOICE_NO_REVENUE_STATUSES)
+      .whereNull('annual_prepay_term_id')
       .orderBy('created_at', 'desc')
       .first('line_items');
     return invoice ? round2(serviceLineTotal(invoice.line_items)) : 0;
@@ -491,6 +499,16 @@ async function loadLinkedInvoiceTotal(db, record) {
     logger.debug(`[job-costing] linked invoice error: ${err.message}`);
     return 0;
   }
+}
+
+// GATE_JOB_COST_STANDARD_MINUTES: the visit's own revenue sources for deriveRevenue, or null when the gate is
+// off or the visit is intentionally free (its revenue is $0 whatever the sources say).
+async function standardRevenueSources(db, svc, record, {
+  standardOn, intentionallyFree, keepRecordedRevenue, recomputeRevenue,
+}) {
+  if (!standardOn || intentionallyFree) return null;
+  const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
+  return loadOwnRevenueSources(db, svc, record, { recordedWins });
 }
 
 // Only the sources the revenue rules can still reach: a visit with its own price, a recorded revenue above
@@ -632,11 +650,14 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
 }
 
 // GATE_JOB_COST_STANDARD_MINUTES labor (owner ruling 2026-10-31), applied to the measured result of
-// calcLaborCost. Order: an admin time-on-site correction (overrideLaborMinutes, resolved by the caller) wins;
-// else the standard for the service type of a completed visit, which replaces measured time, time entries,
-// backfill minutes and a combined-closeout allocation; else the measured result, where one over the
-// stale-span limit books the scheduled estimate (else 0). Pure: no I/O.
-function applyStandardLabor(measured, { svc, rate, overrideLaborMinutes, estimatedLaborMinutes }) {
+// calcLaborCost. Gate off: the measured result, unchanged. Gate on, in order: an admin time-on-site correction
+// (overrideLaborMinutes, resolved by the caller) wins; else the standard for the service type of a completed
+// visit, which replaces measured time, time entries, backfill minutes and a combined-closeout allocation; else
+// the measured result, where one over the stale-span limit books the scheduled estimate (else 0). Pure: no I/O.
+function applyStandardLabor(measured, {
+  standardOn, svc, rate, overrideLaborMinutes, estimatedLaborMinutes,
+}) {
+  if (!standardOn) return measured;
   const override = Number(overrideLaborMinutes);
   if (Number.isFinite(override) && override > 0) return measured;
   const priced = (minutes, laborEstimated) => ({
@@ -931,11 +952,10 @@ async function calculateJobCost(scheduledServiceId, db, {
   // GATE_JOB_COST_STANDARD_MINUTES, read once for this call: standard labor minutes, the standard drive
   // cost and the visit's own revenue sources. Off = today's path below, untouched.
   const standardOn = jobCostStandardOn();
-  const recordedRevenueWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
-  const ownRevenue = standardOn && !intentionallyFree
-    ? await loadOwnRevenueSources(db, svc, record, { recordedWins: recordedRevenueWins })
-    : null;
-  const revenue = intentionallyFree ? 0 : deriveRevenue({
+  const ownRevenue = await standardRevenueSources(db, svc, record, {
+    standardOn, intentionallyFree, keepRecordedRevenue, recomputeRevenue,
+  });
+  const revenue = intentionallyFree ? 0 : deriveVisitRevenue({
     serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue, ownRevenue,
   });
   // The scheduled estimate is a last resort for COMPLETED visits only: a
@@ -956,9 +976,9 @@ async function calculateJobCost(scheduledServiceId, db, {
   );
   const {
     laborCost: baseLaborCost, laborHours, laborEstimated, laborMinutes,
-  } = standardOn
-    ? applyStandardLabor(measuredLabor, { svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes })
-    : measuredLabor;
+  } = applyStandardLabor(measuredLabor, {
+    standardOn, svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes,
+  });
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
     : { productsCost: 0, breakdown: [] };
@@ -973,7 +993,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   const ownsDriveCost = marked ? svc.id === driveAllocation.ownerServiceId : true;
   let laborCost = baseLaborCost;
   // GATE_JOB_COST_STANDARD_MINUTES: the stop's drive is the Average Drive Time at the loaded labor rate.
-  const stopDriveCost = standardOn ? (standardDriveMinutes() / 60) * laborRate : driveCostPerStop;
+  const stopDriveCost = standardStopDriveCost({ standardOn, laborRate, driveCostPerStop });
   let driveCost = ownsDriveCost ? stopDriveCost : 0;
   let costRatesApplied = null;
   // The vehicle fixed cost inside drive_cost (NULL = no cost card applied).
@@ -1232,6 +1252,7 @@ module.exports = {
   parseJsonObject,
   backfillServiceRecordFinancials,
   deriveRevenue,
+  deriveRevenueFromOwnSources,
   computeServiceRecordFinancials,
   JOB_COST_STANDARD,
   standardLaborMinutesFor,

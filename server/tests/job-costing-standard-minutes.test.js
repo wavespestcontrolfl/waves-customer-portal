@@ -14,7 +14,9 @@ const { loadVisitRates } = require('../services/tech-cost-rates');
 const { GLOBAL } = require('../services/pricing-engine/constants');
 const jobCosting = require('../services/job-costing');
 
-const { calculateJobCost, deriveRevenue, standardLaborMinutesFor } = jobCosting;
+const {
+  calculateJobCost, deriveRevenue, deriveRevenueFromOwnSources, standardLaborMinutesFor,
+} = jobCosting;
 const GATE = 'GATE_JOB_COST_STANDARD_MINUTES';
 const STAMPED = 'GATE_STAMPED_ZERO_FREE';
 const CARDS = 'GATE_TECH_COST_RATES';
@@ -70,6 +72,7 @@ function fakeDb(tables = {}) {
       whereNot: () => chain,
       whereNotIn: (col, list) => { preds.push((r) => !list.includes(r[col])); return chain; },
       whereNotNull: () => chain,
+      whereNull: (col) => { preds.push((r) => r[col] == null); return chain; },
       whereBetween: () => chain,
       orderBy: () => chain,
       forUpdate: () => chain,
@@ -272,6 +275,30 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await cost(fakeDb(stamped), KEEP)).revenue).toBe(40);
     });
 
+    test('the share divides by the larger of the covered visit count and the linked visits', async () => {
+      const tables = (coverage, linkedOthers) => ({
+        ...withRecord({ revenue: 0 }),
+        annual_prepay_terms: [{ id: 'term-1', prepay_amount: '480.00', status: 'active', coverage_visit_count: coverage }],
+        scheduled_services: [
+          { ...SVC, ...unpriced, annual_prepay_term_id: 'term-1' },
+          ...Array.from({ length: linkedOthers }, (_, i) => ({ id: `v-${i}`, annual_prepay_term_id: 'term-1', status: 'scheduled' })),
+        ],
+      });
+      // 12 covered visits, only this one scheduled so far: 480 / 12, not 480 / 1.
+      expect((await cost(fakeDb(tables(12, 0)), KEEP)).revenue).toBe(40);
+      // 4 covered visits but 6 linked: 480 / 6, so the linked visits never book more than the prepayment.
+      expect((await cost(fakeDb(tables(4, 5)), KEEP)).revenue).toBe(80);
+    });
+
+    test('a prepay invoice is never one visit\'s revenue', async () => {
+      const prepayInvoice = {
+        service_record_id: 'rec-1', status: 'paid', annual_prepay_term_id: 'term-9',
+        line_items: [{ description: 'Quarterly Pest Control Service — 4 prepaid visits', amount: 432 }],
+      };
+      const tables = { ...withSvc(unpriced), ...withRecord({ revenue: 0 }), invoices: [prepayInvoice] };
+      expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);
+    });
+
     test('an unpaid term gives no share; a payment_pending term counts once its prepay invoice is paid', async () => {
       const base = {
         ...withSvc({ ...unpriced, annual_prepay_term_id: 'term-1' }),
@@ -344,18 +371,19 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
     });
   });
 
-  describe('deriveRevenue stays pure', () => {
-    test('without ownRevenue it is exactly today\'s function', () => {
+  describe('revenue rules stay pure', () => {
+    test('deriveRevenue is exactly today\'s function', () => {
       expect(deriveRevenue({
         serviceRecord: { revenue: 0 }, scheduledService: { estimated_price: 149 }, customer: { monthly_rate: 99 }, keepRecordedRevenue: true,
       })).toBe(0);
     });
 
-    test('with ownRevenue the prepay share outranks the invoice, which outranks nothing', () => {
+    test('the own-source rules: the prepay share outranks the invoice, which outranks nothing', () => {
       const base = { serviceRecord: { revenue: 0 }, scheduledService: { estimated_price: null }, keepRecordedRevenue: true };
-      expect(deriveRevenue({ ...base, ownRevenue: { prepayShare: 40, invoiceTotal: 70 } })).toBe(40);
-      expect(deriveRevenue({ ...base, ownRevenue: { prepayShare: 0, invoiceTotal: 70 } })).toBe(70);
-      expect(deriveRevenue({ ...base, customer: { monthly_rate: 99 }, ownRevenue: { prepayShare: 0, invoiceTotal: 0 } })).toBe(0);
+      const own = (args) => deriveRevenueFromOwnSources(args);
+      expect(own({ ...base, ownRevenue: { prepayShare: 40, invoiceTotal: 70 } })).toBe(40);
+      expect(own({ ...base, ownRevenue: { prepayShare: 0, invoiceTotal: 70 } })).toBe(70);
+      expect(own({ ...base, customer: { monthly_rate: 99 }, ownRevenue: { prepayShare: 0, invoiceTotal: 0 } })).toBe(0);
     });
   });
 });
