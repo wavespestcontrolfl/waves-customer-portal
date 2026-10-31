@@ -21,7 +21,7 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 
-const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v6'; // v6: the seeded recent-text data turn is agent-visible context
+const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v7'; // v7: the agent's first name is per-deployment (Jennifer; older transcripts say Sandy), never a defect. v6: the seeded recent-text data turn is agent-visible context
 const JUDGE_MAX_TOKENS = 1200;
 // No explicit timeoutMs on the dispatch: an explicit budget hands the WHOLE
 // remainder to each leg in turn (llm/call.js keeps callers' original
@@ -74,7 +74,9 @@ const JUDGE_SCHEMA = Object.freeze({
 });
 
 const SYSTEM_PROMPT = [
-  'You are the quality judge for Waves Pest Control\'s automated phone assistant (Sandy).',
+  'You are the quality judge for Waves Pest Control\'s automated phone assistant. Its first name is',
+  'set per deployment (Jennifer today; older transcripts say Sandy). Never treat the name it uses',
+  'for itself as an error.',
   'You receive ONE call transcript and the scenario SPEC it was tested against. Grade the',
   'AGENT turns only — the caller is a scripted test caller.',
   '',

@@ -21,6 +21,7 @@ const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
+const { agentName } = require('./voice-agent/relay-protocol');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -415,14 +416,14 @@ const TRIGGER_REGISTRY = {
   // registered here so the persisted rows carry a known trigger key and
   // `build` mirrors the shape it writes.
   sandy_transfer_no_context: {
-    label: 'Sandy transfer arrived without its summary',
+    label: `${agentName()} transfer arrived without its summary`,
     category: 'alert',
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
     build: (p) => ({
-      title: 'Sandy transfer without context',
+      title: `${agentName()} transfer without context`,
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
       link: callLink(p),
     }),
@@ -577,7 +578,7 @@ const TRIGGER_REGISTRY = {
   // call ended with no booking, no lead and no transfer — gated by
   // GATE_RELAY_UNBOOKED_HANDOFF. See services/voice-agent/relay-unbooked-handoff.js.
   relay_unbooked_call: {
-    label: 'Sandy call ended without a booking',
+    label: `${agentName()} call ended without a booking`,
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
@@ -587,8 +588,8 @@ const TRIGGER_REGISTRY = {
     // PAN-scrubbed call summary, not free model text.
     allowContactDetails: true,
     build: (p) => ({
-      title: 'Sandy call ended without a booking',
-      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : 'The caller spoke with Sandy, then the call ended.']
+      title: `${agentName()} call ended without a booking`,
+      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : `The caller spoke with ${agentName()}, then the call ended.`]
         .filter(Boolean).join(' - '),
       link: callLink(p),
     }),

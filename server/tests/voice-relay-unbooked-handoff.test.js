@@ -175,9 +175,9 @@ describe('the trigger', () => {
       jest.doMock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn() }));
       const real = require('../services/notification-triggers');
       const t = real.TRIGGER_REGISTRY.relay_unbooked_call;
-      expect(t).toMatchObject({ label: 'Sandy call ended without a booking', priority: 'high', group: 'Communication', allowContactDetails: true });
+      expect(t).toMatchObject({ label: 'Jennifer call ended without a booking', priority: 'high', group: 'Communication', allowContactDetails: true });
       const built = t.build({ callLogId: 'call-1', phone: '+19415550133', summary: 'Caller said: I need a quote' });
-      expect(built.title).toBe('Sandy call ended without a booking');
+      expect(built.title).toBe('Jennifer call ended without a booking');
       expect(built.body).toContain('+19415550133');
       expect(built.body).toContain('I need a quote');
       expect(built.link).toBe('/admin/communications#tab=calls&call=call-1');

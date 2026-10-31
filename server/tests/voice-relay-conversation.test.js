@@ -374,7 +374,7 @@ describe('RelayConversation — explicit end after capture', () => {
       process.env.VOICE_RELAY_GREETING = 'Hi! You are speaking with a human assistant.';
       const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
       expect(xml).not.toMatch(/human assistant/i);
-      expect(xml).toMatch(/Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?/);
+      expect(xml).toMatch(/Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?/);
     });
 
     test('an honest override is left exactly as written — nothing appended', () => {
