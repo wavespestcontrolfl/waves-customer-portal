@@ -1019,6 +1019,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY 8 AM-8 PM ET at :41 — the office check after a "report only, no
+  // pay link" completion (owner 2026-10-30): a bill still open the next ET day
+  // raises one needs-you Billing alert; a settled bill closes it. Gate read per
+  // tick, so a flip needs no restart. Office-side only: no customer message.
+  cron.schedule('41 8-20 * * *', async () => {
+    if (!require('../config/feature-gates').reportOnlyPaymentAlertLive()) return;
+    try {
+      await runExclusive('report-only-payment-alert', async () => {
+        const result = await require('./report-only-payment-alert').runReportOnlyPaymentCheck();
+        if (result.checked || result.closed) logger.info(`[report-only-payment-alert] ${result.checked} open bill(s), ${result.closed} alert(s) closed`);
+      });
+    } catch (err) {
+      logger.error(`[report-only-payment-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,

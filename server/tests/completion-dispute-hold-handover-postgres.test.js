@@ -239,7 +239,9 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
       const inv = await invoiceFor(f);
       expect(bodies().some((text) => payLinkIn(text, inv))).toBe(true);
       expect(inv.status).not.toBe('scheduled');
-      expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      const notes = (await recordFor(f)).structured_notes;
+      expect(notes.invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      expect(notes.payLinkOmitted).toBeUndefined();
     } finally { await cleanup(f); }
   });
 
@@ -250,7 +252,11 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
       expect(await complete(f, { includePayLink: false })).toMatchObject({ status: 200 });
       const inv = await invoiceFor(f);
       expect(inv).toMatchObject({ status: 'draft', scheduled_send_at: null });
-      expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      const notes = (await recordFor(f)).structured_notes;
+      expect(notes.invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      // The report-only choice is saved for the next-day office alert
+      // (report-only-payment-alert.js): the draft bill above is what it finds.
+      expect(notes.payLinkOmitted).toBe(true);
     } finally { await cleanup(f); }
   });
 
