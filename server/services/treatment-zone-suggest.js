@@ -229,10 +229,10 @@ function orthogonalizePerimeter(points) {
 }
 
 async function geminiSuggest(model, base64Png, prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
     body: JSON.stringify({
       contents: [{ parts: [{ inline_data: { mime_type: 'image/png', data: base64Png } }, { text: prompt }] }],
       generationConfig: { temperature: 0.1, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)

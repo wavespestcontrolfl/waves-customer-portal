@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
+const { resolveGeo } = require('./geo');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveLimit = require('./move-limit');
@@ -349,6 +350,9 @@ function makeMoveGuard({ service, best, config = {} }) {
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
+    // GATE_TERRITORY_NIGHT_RUN: the moving visit lands only in its own territory, read at apply (a ZIP can
+    // change hands, or the visit's address change, after the run scored the move).
+    await assertInOwnTerritory([row], receiving, refuse);
     // GATE_TECH_START_POINTS: the start points the move was scored from still
     // stand — an unassigned visit's current day included (sourceDayTechnicianId).
     await assertScoredStartPoints(trx, [service.technician_id, config.sourceDayTechnicianId, receiving], config.startPointFor);
@@ -528,7 +532,23 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
+    // GATE_TERRITORY_NIGHT_RUN: an unassigned pest / termite sibling lands only in its own territory.
+    await assertInOwnTerritory(rows, best.technician_id || service.technician_id || null, refuse);
   };
+}
+
+// The candidate side restricts the whole unit (candidate-slots unitTerritoryTechnician); this re-checks the
+// rows at apply (the moving visit in makeMoveGuard, its committed siblings in makeMemberGuard), so a move
+// never gives a visit another territory's technician. No receiving technician: nobody gets the visit.
+async function assertInOwnTerritory(rows, targetTechId, refuse) {
+  // Gate off: no read at all (read off the module: a partial feature-gates mock reads off).
+  const gates = require('../../config/feature-gates');
+  if (!targetTechId || typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return;
+  const { territoryTechnicianForVisit } = require('./candidate-slots');
+  for (const row of rows) {
+    const own = await territoryTechnicianForVisit(row, resolveGeo(row));
+    if (own && String(own) !== String(targetTechId)) throw refuse(row.id, 'belongs to another technician\'s territory');
+  }
 }
 
 // A run can move 100 rows, so a reminder store that fails for every one of

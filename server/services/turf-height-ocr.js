@@ -77,10 +77,10 @@ async function callClaudeGaugeOcr(base64Image, mimeType) {
 async function callGeminiGaugeOcr(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_OCR_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_OCR_MODEL}:generateContent`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
       body: JSON.stringify({
         contents: [{
           parts: [

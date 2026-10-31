@@ -101,6 +101,7 @@
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / flat / no_data on the content_optimization_impact row. A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
  *   GATE_PORTAL_INBOX=true (owner 2026-10-31, option A: a Portal tab in Admin > Communications lists what customers asked for inside the customer portal and nobody answered: portal chat hand-offs (ai_escalations from a portal_chat session still pending) and customer service requests not yet resolved, closed or cancelled and not made by staff. Shows the last 14 days; older open items sit under one Older line with a Close all older button that closes them and sends nothing to customers. Mark handled on a row closes the item and the admin bell alerts raised for it. Admin only. Read at call time via portalInboxLive(), strict 'true', dark by default; off = the tab is hidden, the new routes answer enabled:false/404, and the escalation and request update routes close no alerts. Sends nothing to a customer.)
+ *   GATE_ROUTE_ENGINE_SUMMARY=true (owner 2026-10-31: the admin Day Scorecard payload also carries an `engine` block, a plain summary of the nightly auto-dispatch run over the last 7 ET nights: moves made, visits the per-run cap held back and how many of those moved later, nights that failed or finished with errors, and the model's net estimate of drive minutes saved. Read-only over auto_dispatch_runs and auto_dispatch_audit_logs; sends nothing. Strict opt-in: exactly 'true', read at call time via routeEngineSummaryLive() by server/routes/admin-route-scorecard.js; dark by default; off = the scorecard payload is unchanged, with no engine key.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
@@ -164,6 +165,8 @@
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
  *   GATE_TERRITORY_ROUTING=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page: each technician has a territory, drawn as a ZIP list in territory_zips. On, the service-line map (GATE_SERVICE_LINE_MAP) lays the territory over a pest, mosquito, rodent or termite / WDO line: the technician who owns the visit's ZIP is that line's home technician, and the line's own home (else gap) technician covers gaps. Lawn / tree & shrub keeps the line map. The ZIP comes from the visit's ZIP, else its map position (Census ZIP shapes), else the customer's row. A ZIP with no territory technician adds no rule. It acts only where the line map acts: shadow rows show it under 'shadow', picks follow it under 'live'. Strict opt-in: exactly 'true', read at call time via territoryRoutingLive(). Ships DARK; off = the line map exactly as before, no territory query. Sends nothing to a customer.)
+ *   GATE_TERRITORY_NIGHT_RUN=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 7: the auto-dispatch night run gives an UNASSIGNED pest, mosquito, rodent or termite / WDO visit only to the technician who owns the visit's ZIP (territory_zips): every other technician's slot is dropped as a candidate (drops.other_territory), so with no slot for that technician the visit keeps its place. The ZIP comes from the visit's service ZIP, else its map position, else the customer row. A visit with a technician, a lawn / tree & shrub visit, or a ZIP with no territory technician adds no rule. Strict opt-in: exactly 'true', read at call time via territoryNightRunLive(). Ships DARK; off = the night run byte-identical, no territory query. Sends nothing to a customer.)
+ *   GATE_TERRITORY_READOUT=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 3: the Team tab shows a Territories card, stops a week per technician and area, booked over the next 4 weeks and done over the last 4, so the re-cut rule is a number you see. The area is the visit's service ZIP, else its customer's ZIP, through territory_zips. Read only. Strict opt-in: exactly 'true', read at call time via territoryReadoutLive(). Ships DARK; off = the roster response carries no territoryReadoutEnabled flag and GET /api/admin/timetracking/territory-readout answers 404. Sends nothing.)
  *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
@@ -2544,6 +2547,8 @@ const gates = {
   aiChangeCheck: process.env.GATE_AI_CHANGE_CHECK === 'true',
   // GATE_SAME_QUESTION_CHECK (new-blog same-question check: owner page rewrite instead of a sibling post, dark). Boot-log entry only; the call-time reader is sameQuestionCheckLive().
   sameQuestionCheck: process.env.GATE_SAME_QUESTION_CHECK === 'true',
+  // GATE_ROUTE_ENGINE_SUMMARY (engine summary block on the admin Day Scorecard, read-only, dark). Boot-log entry only; the call-time reader is routeEngineSummaryLive().
+  routeEngineSummary: process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true',
   // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
   // sweep reads recent two-party calls and quiet text threads where only a DAY
   // was agreed for a visit (or a move of one), asks the model what the office
@@ -5021,6 +5026,14 @@ const gates = {
   // service-line map. Registered for logGateStatus only; consumers read territoryRoutingLive() at
   // CALL time. Kill switch: unset.
   territoryRouting: process.env.GATE_TERRITORY_ROUTING === 'true',
+  // Territories by ZIP, build 3 (owner 2026-10-30): the Team tab's territory read-out. Registered for
+  // logGateStatus only; consumers read territoryReadoutLive() at CALL time. Kill switch: unset.
+  territoryReadout: process.env.GATE_TERRITORY_READOUT === 'true',
+
+  // Territories by ZIP, build 7 (owner 2026-10-30): the night run gives an unassigned pest /
+  // termite visit only to its ZIP's territory technician. Registered for logGateStatus only;
+  // consumers read territoryNightRunLive() at CALL time. Kill switch: unset.
+  territoryNightRun: process.env.GATE_TERRITORY_NIGHT_RUN === 'true',
 
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
@@ -7093,6 +7106,21 @@ function territoryRoutingLive() {
   return process.env.GATE_TERRITORY_ROUTING === 'true';
 }
 
+// GATE_TERRITORY_NIGHT_RUN read at CALL time - strict `=== 'true'`. On: the auto-dispatch night
+// run (services/auto-dispatch/candidate-slots.js) keeps only the territory technician's slots
+// for an unassigned pest, mosquito, rodent or termite visit whose ZIP has one (territory_zips).
+// Off = byte-identical, no territory query.
+function territoryNightRunLive() {
+  return process.env.GATE_TERRITORY_NIGHT_RUN === 'true';
+}
+
+// GATE_TERRITORY_READOUT read at CALL time - strict `=== 'true'`. On: the Team tab's Territories card
+// (routes/admin-timetracking.js GET /territory-readout): stops a week per technician and area. Read
+// only. Off = no roster flag and the route answers 404.
+function territoryReadoutLive() {
+  return process.env.GATE_TERRITORY_READOUT === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -8696,6 +8724,8 @@ module.exports.serviceLineMapMode = serviceLineMapMode;
 // GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.unassignedVisitGuardLive = unassignedVisitGuardLive;
 module.exports.territoryRoutingLive = territoryRoutingLive;
+module.exports.territoryNightRunLive = territoryNightRunLive;
+module.exports.territoryReadoutLive = territoryReadoutLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;
@@ -9374,6 +9404,11 @@ function sameQuestionCheckLive() {
 function portalInboxLive() {
   return process.env.GATE_PORTAL_INBOX === 'true';
 }
+// GATE_ROUTE_ENGINE_SUMMARY read at CALL time, strict `=== 'true'`, dark in every environment. Off = the route scorecard payload has no
+// engine key. Read-only over the auto-dispatch run and audit tables; sends nothing.
+function routeEngineSummaryLive() {
+  return process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9524,3 +9559,5 @@ module.exports.aiChangeCheckLive = aiChangeCheckLive;
 module.exports.sameQuestionCheckLive = sameQuestionCheckLive;
 // GATE_PORTAL_INBOX reader, on its own line so gate PRs never conflict.
 module.exports.portalInboxLive = portalInboxLive;
+// GATE_ROUTE_ENGINE_SUMMARY reader, on its own line so gate PRs never conflict.
+module.exports.routeEngineSummaryLive = routeEngineSummaryLive;

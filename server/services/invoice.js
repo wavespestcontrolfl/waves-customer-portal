@@ -10967,6 +10967,11 @@ const InvoiceService = {
             today,
           );
         });
+        // An annual prepay charged after the first visit is not due before
+        // that visit, whatever date its draft carries.
+        if (hasAnnualPrepayTerms) {
+          q.whereRaw(`invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`);
+        }
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
@@ -14071,6 +14076,11 @@ const InvoiceService = {
 
   async getStats() {
     const today = etDateString();
+    // The list's overdue filter: an annual prepay charged after the first
+    // visit is not overdue before that visit.
+    const notAwaitingFirstVisit = (await annualPrepayInvoiceTableExists())
+      ? ` AND invoices.id NOT IN (${require("./paf-prepay-release").AWAITING_FIRST_VISIT_INVOICE_IDS_SQL})`
+      : "";
     const [totals] = await db("invoices")
       .select(
         db.raw("COUNT(*) as total"),
@@ -14079,7 +14089,7 @@ const InvoiceService = {
           "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          `COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)${notAwaitingFirstVisit}) as overdue`,
           [today],
         ),
         db.raw(

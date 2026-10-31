@@ -1096,7 +1096,7 @@
     },
     {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out. Re-reviewed 2026-10-29 (partial payments): the handler also sends the partialPaymentsEnabled flag; rows now carry amount_paid (money received on a still-open invoice), kept beside credit_applied; signals and unresolved unchanged. Re-reviewed 2026-10-30 (billing audit finding 7): the list date filter and ordering read an undated invoice on the Eastern day it was created ((created_at AT TIME ZONE 'America/New_York')::date instead of created_at::date); same rows and columns, no new table, field or write; signals and unresolved unchanged.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out. Re-reviewed 2026-10-29 (partial payments): the handler also sends the partialPaymentsEnabled flag; rows now carry amount_paid (money received on a still-open invoice), kept beside credit_applied; signals and unresolved unchanged. Re-reviewed 2026-10-30 (billing audit finding 7): the list date filter and ordering read an undated invoice on the Eastern day it was created ((created_at AT TIME ZONE 'America/New_York')::date instead of created_at::date); same rows and columns, no new table, field or write; signals and unresolved unchanged. Re-reviewed 2026-10-31 (after-visit prepay not overdue): status=overdue also leaves out the annual prepays whose charge waits for the first visit (invoices.id NOT IN AWAITING_FIRST_VISIT_INVOICE_IDS_SQL from paf-prepay-release.js: a read of annual_prepay_terms and each term's estimate_data prepayAutoChargeJob); a filter only, same rows and columns, no new field or write; signals and unresolved unchanged.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -1198,7 +1198,7 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "803235a89347e6a10ca75ccd87f3f972"
+      "hash": "6c40d705d84f27cfa1c0f3f04cecda41"
     },
     {
       "endpoint": "/admin/invoices/:id",
@@ -1422,11 +1422,19 @@
     },
     {
       "endpoint": "/admin/invoices/stats",
-      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data.",
+      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data. Re-reviewed 2026-10-31 (after-visit prepay not overdue): the overdue count leaves out the annual prepays whose charge waits for the first visit (the list's overdue subquery, a read of annual_prepay_terms and estimates); the table check is annualPrepayInvoiceTableExists, whose optionalInvoiceRead is the write:transaction signal (a nested transaction around a schema read, as on /admin/invoices); still aggregates only, no row data.",
       "scope": "broad",
-      "signals": [],
-      "unresolved": [],
-      "hash": "863e1fc44f84a8028b7bc6481daca6c1"
+      "acceptSignals": [
+        "write:transaction"
+      ],
+      "signals": [
+        "write:transaction"
+      ],
+      "unresolved": [
+        "services/invoice.js#database.transaction",
+        "services/invoice.js#read"
+      ],
+      "hash": "3d561cd4c99776b5a8f0cf7727010fde"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
