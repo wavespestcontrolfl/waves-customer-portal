@@ -262,7 +262,7 @@ function WeekStrip({ date, onDateChange }) {
             style={{ minWidth: 40 }}
           >
             <span className={cn(
-              'text-10 uppercase tracking-label',
+              'text-14 uppercase tracking-label',
               isSel ? 'text-zinc-300' : 'text-ink-tertiary',
             )}>{d.dow}</span>
             <span className={cn(
@@ -358,6 +358,13 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
   const hasProtocolAction = !!onProtocol;
   const hasPlanAction = isLawnService(service) && onTreatmentPlan;
   const actionCount = (hasAuditAction ? 1 : 0) + (hasProtocolAction ? 1 : 0) + (hasPlanAction ? 1 : 0);
+  // Visit labels sit at the 14px readability floor (schedule audit S9). A
+  // block shorter than an hour cannot stack the time over the name at 14px,
+  // so the time shares the name's row there; the title keeps the full text.
+  const compact = effectiveHeight < SLOT_HEIGHT * 2;
+  // The drive into this stop needs a one-hour block, and stays off one whose
+  // foot carries the readiness strip; the tooltip always carries it.
+  const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !(service.readiness && onProtocol && effectiveHeight <= SLOT_HEIGHT * 2);
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
@@ -413,7 +420,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-2 py-1 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute px-2 py-1 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900 ring-offset-1 ring-offset-white z-30',
@@ -432,7 +439,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       {routeOrder != null && (
         <div
           className={cn(
-            'absolute top-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
+            'absolute top-0.5 u-nums text-14 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
             actionCount >= 3 ? 'right-16' : actionCount === 2 ? 'right-11' : actionCount === 1 ? 'right-6' : 'right-0.5'
           )}
           style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
@@ -492,10 +499,11 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
           <Leaf size={12} strokeWidth={1.75} />
         </button>
       )}
-      <div className="opacity-90 truncate text-10">
+      <div className={compact ? 'flex items-center gap-1 min-w-0' : undefined}>
+      <div className={cn('opacity-90 truncate', compact && 'shrink-0 max-w-[50%]')}>
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 min-w-0">
         <button
           type="button"
           onPointerDown={(e) => e.stopPropagation()}
@@ -505,7 +513,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             if (customerId) onViewCustomer?.(service);
           }}
           className={cn(
-            'text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+            'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
             'text-inherit bg-transparent border-0 p-0 cursor-pointer'
           )}
           title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
@@ -516,7 +524,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
             title="Prepaid"
           >$</span>
         )}
@@ -527,22 +535,28 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.visit && Number(service.visit.serviceCount) > 1 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
-            // One-slot (30 min) blocks are 32px with overflow-hidden: keep the
-            // compact pill there so the chip is not clipped; grow it when the
-            // block has a second row of room.
-            style={effectiveHeight >= SLOT_HEIGHT * 2 ? { height: 18, padding: '0 6px', fontSize: 11 } : { height: 14, padding: '0 5px', fontSize: 11, lineHeight: 1 }}
+            // A one-slot (30 min) block carries the chip on its first row
+            // (the time shares it), which leaves room for the 18px pill.
+            style={{ height: 18, padding: '0 6px', fontSize: 14 }}
             title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
             data-testid="visit-chip"
           >Visit · {service.visit.serviceCount}</span>
         )}
       </div>
+      </div>
+      {/* At 14px a one-hour block holds three rows (time, name, service),
+          so the drive rides on the service row; the service name truncates
+          first. */}
       {effectiveHeight > SLOT_HEIGHT && (
-        <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
-      )}
-      {/* A one-hour block has room for this line unless the readiness
-          strip sits at its foot; the tooltip always carries it. */}
-      {drive && effectiveHeight >= SLOT_HEIGHT * 2 && !(service.readiness && onProtocol && effectiveHeight <= SLOT_HEIGHT * 2) && (
-        <div className="opacity-70 truncate u-nums" style={{ fontSize: 14 }}>{drive}</div>
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="opacity-80 truncate min-w-0">{serviceDisplayName(service)}</span>
+          {showDrive && (
+            <>
+              <span className="opacity-70 shrink-0" aria-hidden="true">·</span>
+              <span className="opacity-70 shrink-0 u-nums" style={{ fontSize: 14 }}>{drive}</span>
+            </>
+          )}
+        </div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
@@ -687,11 +701,11 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       style={{ minWidth: COL_MIN_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
       <div
-        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 text-12 font-medium text-zinc-900 flex items-center justify-between"
+        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 text-14 font-medium text-zinc-900 flex items-center justify-between"
         style={{ borderBottom: '1px solid #E4E4E7', borderTop: accent ? `2px solid ${accent}` : undefined }}
       >
         <span className="truncate">{tech.name}</span>
-        <span className="u-nums text-11 text-ink-secondary">
+        <span className="u-nums text-14 text-ink-secondary">
           {services.length}
         </span>
       </div>
@@ -814,8 +828,8 @@ function TimeAxis() {
           return (
             <div
               key={idx}
-              className="absolute right-0 pr-2 u-nums text-12 text-ink-tertiary"
-              style={{ top: idx * SLOT_HEIGHT - 6, height: SLOT_HEIGHT, lineHeight: '12px' }}
+              className="absolute right-0 pr-2 u-nums text-14 text-ink-tertiary"
+              style={{ top: idx * SLOT_HEIGHT - 7, height: SLOT_HEIGHT, lineHeight: '14px' }}
             >
               {minutesToLabel(min)}
             </div>
@@ -833,7 +847,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
       className="bg-zinc-50/50 px-2 py-2 flex flex-wrap gap-1"
       style={{ borderBottom: '1px solid #E4E4E7' }}
     >
-      <span className="text-10 uppercase tracking-label text-ink-tertiary self-center mr-2">All-day</span>
+      <span className="text-14 uppercase tracking-label text-ink-tertiary self-center mr-2">All-day</span>
       {services.map((svc) => (
         <span key={svc.id} className="inline-flex items-center gap-1">
           <button
@@ -845,7 +859,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
               }
               onEdit?.(svc);
             }}
-            className="px-2 py-1 rounded-[3px] text-11 font-medium text-white truncate max-w-[220px] u-focus-ring"
+            className="px-2 py-1 rounded-[3px] text-14 font-medium text-white truncate max-w-[220px] u-focus-ring"
             style={{ background: svc.status === 'completed' ? '#E4E4E7' : '#3B82F6', color: svc.status === 'completed' ? '#71717A' : '#FFFFFF', border: `1px solid ${svc.status === 'completed' ? '#E4E4E7' : '#3B82F6'}` }}
             title={(svc.customerId || svc.customer_id) && onViewCustomer ? 'Open customer profile' : undefined}
           >
@@ -923,7 +937,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
         onEdit?.(service);
       }}
       className={cn(
-        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900',
@@ -931,7 +945,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
       style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
       title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
-      <div className="u-nums text-10 opacity-90 mb-0.5">{timeLabel}</div>
+      <div className="u-nums opacity-90 mb-0.5">{timeLabel}</div>
       <button
         type="button"
         onPointerDown={(e) => e.stopPropagation()}
@@ -941,7 +955,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left text-11 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+          'block w-full text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
           'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
@@ -961,7 +975,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
             e.stopPropagation();
             onTreatmentPlan(service);
           }}
-          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-10 uppercase tracking-label u-focus-ring"
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-14 uppercase tracking-label u-focus-ring"
         >
           <Leaf size={12} strokeWidth={1.75} />
           Plan
@@ -976,7 +990,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
             e.currentTarget.focus({ preventScroll: true });
             onProtocol(service);
           }}
-          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-10 uppercase tracking-label u-focus-ring"
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-14 uppercase tracking-label u-focus-ring"
         >
           <BookOpen size={12} strokeWidth={1.75} />
           Protocol
@@ -990,7 +1004,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
             e.stopPropagation();
             onViewAudit(service);
           }}
-          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-10 uppercase tracking-label u-focus-ring"
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-14 uppercase tracking-label u-focus-ring"
         >
           <ShieldCheck size={12} strokeWidth={1.75} />
           Audit
@@ -1032,22 +1046,22 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
       >
         {open ? (
           <>
-            <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+            <span className="text-14 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
             <span className="flex items-center gap-1.5">
-              <span className="u-nums text-11 text-zinc-700">{sorted.length}</span>
-              <span className="text-zinc-500" aria-hidden>‹</span>
+              <span className="u-nums text-14 text-zinc-700">{sorted.length}</span>
+              <span className="text-14 text-zinc-500" aria-hidden>‹</span>
             </span>
           </>
         ) : (
           <span className="flex flex-col items-center w-full gap-1">
-            <span className="u-nums text-11 font-medium text-zinc-700">{sorted.length}</span>
-            <span className="text-zinc-500" aria-hidden>›</span>
+            <span className="u-nums text-14 font-medium text-zinc-700">{sorted.length}</span>
+            <span className="text-14 text-zinc-500" aria-hidden>›</span>
           </span>
         )}
       </button>
       {open && (
         sorted.length === 0 ? (
-          <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+          <div className="px-3 py-6 text-14 text-ink-tertiary text-center">
             Drop here to unassign
           </div>
         ) : (
@@ -1085,19 +1099,19 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
   });
   return (
     <div
-      className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white text-12"
+      className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white text-14"
       style={{ borderBottom: '1px solid #E4E4E7' }}
     >
       <span className="u-nums font-medium">{count} selected</span>
       <span className="mx-1 text-zinc-500">·</span>
-      <label className="flex items-center gap-1.5 text-11 text-zinc-300">
+      <label className="flex items-center gap-1.5 text-14 text-zinc-300">
         Move to
         <input
           type="date"
           value={targetDate}
           onChange={(e) => setTargetDate(e.target.value)}
           disabled={busy}
-          className="u-nums text-12 text-zinc-900 bg-white px-2 py-1 rounded-sm"
+          className="u-nums text-14 text-zinc-900 bg-white px-2 py-1 rounded-sm"
           style={{ border: '1px solid #3F3F46' }}
         />
       </label>
@@ -1105,7 +1119,7 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
         type="button"
         onClick={() => onMove(targetDate)}
         disabled={busy || !targetDate || targetDate === defaultDate}
-        className="px-3 py-1 rounded-sm bg-white text-zinc-900 text-11 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+        className="px-3 py-1 rounded-sm bg-white text-zinc-900 text-14 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
       >
         Apply
       </button>
@@ -1114,7 +1128,7 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
         type="button"
         onClick={onUnassign}
         disabled={busy}
-        className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+        className="px-3 py-1 rounded-sm text-14 text-white disabled:opacity-40"
         style={{ border: '1px solid #52525B' }}
       >
         Unassign all
@@ -1128,7 +1142,7 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
             type="button"
             onClick={onSeparate}
             disabled={busy}
-            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+            className="px-3 py-1 rounded-sm text-14 text-white disabled:opacity-40"
             style={{ border: '1px solid #52525B' }}
             title="Split this service out of its visit"
           >
@@ -1141,12 +1155,12 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
         type="button"
         onClick={onClear}
         disabled={busy}
-        className="px-3 py-1 rounded-sm text-11 text-zinc-300 hover:text-white disabled:opacity-40"
+        className="px-3 py-1 rounded-sm text-14 text-zinc-300 hover:text-white disabled:opacity-40"
       >
         Clear
       </button>
       {(bulkConflicts.conflictCount > 0 || bulkConflicts.truncated) && (
-        <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
+        <span className="basis-full text-14" style={{ color: '#FDE68A' }}>
           {bulkConflicts.conflictCount > 0
             ? `⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${targetDate}.`
             : '⚠️ Overlap check covered only the first 25 selected visits.'}
@@ -1582,7 +1596,7 @@ export default function TimeGridDay({
         style={{ border: '1px solid #E4E4E7' }}
       >
         {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-        <div className="text-ink-secondary text-center py-16 text-13">
+        <div className="text-ink-secondary text-center py-16 text-14">
           No technicians scheduled for this day.
         </div>
       </div>
@@ -1640,7 +1654,7 @@ export default function TimeGridDay({
             />
           )}
           {techList.length === 0 ? (
-            <div className="flex-1 text-ink-secondary text-center py-16 text-13">
+            <div className="flex-1 text-ink-secondary text-center py-16 text-14">
               No technicians scheduled for this day.
             </div>
           ) : (
@@ -1685,7 +1699,7 @@ export default function TimeGridDay({
       </DndContext>
       {busy && (
         <div
-          className="px-3 py-1 text-11 text-ink-secondary"
+          className="px-3 py-1 text-14 text-ink-secondary"
           style={{ borderTop: '1px solid #E4E4E7' }}
         >Saving…</div>
       )}

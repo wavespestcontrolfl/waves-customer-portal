@@ -101,12 +101,12 @@ function DayRainChip({ rainChance }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-0.5 shrink-0 rounded-full px-1.5 py-px text-11 u-nums font-medium',
+        'inline-flex items-center gap-0.5 shrink-0 rounded-full px-1.5 py-px text-14 u-nums font-medium',
         rainChance >= 50 ? 'bg-alert-bg text-alert-fg' : 'bg-amber-50 text-amber-800',
       )}
       title={`${rainChance}% chance of rain`}
     >
-      <CloudRain size={11} strokeWidth={1.75} aria-hidden="true" />
+      <CloudRain size={14} strokeWidth={1.75} aria-hidden="true" />
       {rainChance}%
     </span>
   );
@@ -385,7 +385,7 @@ function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPl
       style={{ height: ANYTIME_HEADER_HEIGHT, borderBottom: '1px solid #E4E4E7' }}
     >
       {services.length > 0 && (
-        <div className="text-10 uppercase tracking-label text-ink-tertiary">
+        <div className="text-14 uppercase tracking-label text-ink-tertiary">
           Any time
         </div>
       )}
@@ -463,7 +463,7 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletio
       style={{ minWidth: COL_MIN_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
       <div
-        className="sticky top-0 z-10 bg-white px-3 py-2 text-13 text-zinc-500 flex items-center justify-between"
+        className="sticky top-0 z-10 bg-white px-3 py-2 text-14 text-zinc-500 flex items-center justify-between"
         style={{ height: DAY_HEADER_HEIGHT, borderBottom: '1px solid #E4E4E7' }}
       >
         <span className="flex items-center gap-1.5 min-w-0">
@@ -472,7 +472,7 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletio
           </span>
           <DayRainChip rainChance={day.rainChance} />
         </span>
-        <span className="u-nums text-11 text-zinc-400">{assignedServices.length}</span>
+        <span className="u-nums text-14 text-zinc-400">{assignedServices.length}</span>
       </div>
       <AnytimeStrip
         services={anytimeServices}
@@ -558,8 +558,8 @@ function TimeAxis({ headerHeight }) {
           return (
             <div
               key={idx}
-              className="absolute right-0 pr-2 text-12 u-nums text-zinc-500"
-              style={{ top: idx * SLOT_HEIGHT - 8, height: SLOT_HEIGHT }}
+              className="absolute right-0 pr-2 text-14 u-nums text-zinc-500"
+              style={{ top: idx * SLOT_HEIGHT - 10, height: SLOT_HEIGHT }}
             >
               {minutesToLabel(min)}
             </div>
