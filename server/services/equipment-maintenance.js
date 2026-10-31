@@ -7,7 +7,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays } = require('../utils/datetime-et');
+const { etDateString, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { addMonthsSameDay } = require('../utils/date-only');
 
 // ─── Nightly Maintenance Check ───────────────────────────────────
 /**
@@ -189,15 +190,13 @@ async function recordMaintenance({
         if (milesAtService) scheduleUpdates.last_performed_miles = milesAtService;
         if (hoursAtService) scheduleUpdates.last_performed_hours = hoursAtService;
 
-        // Calculate next due
+        // Calculate next due from today's ET date (the UTC clock is a day
+        // ahead from 8 PM ET). Months use the shared same-day rule, clamped
+        // to the month's last day (Jan 31 + 1 → Feb 28/29).
         if (schedule.interval_days) {
-          const next = new Date();
-          next.setDate(next.getDate() + schedule.interval_days);
-          scheduleUpdates.next_due_at = next.toISOString().split('T')[0];
+          scheduleUpdates.next_due_at = etDateString(addETDays(new Date(), schedule.interval_days));
         } else if (schedule.interval_months) {
-          const next = new Date();
-          next.setMonth(next.getMonth() + schedule.interval_months);
-          scheduleUpdates.next_due_at = next.toISOString().split('T')[0];
+          scheduleUpdates.next_due_at = addMonthsSameDay(etDateString(), schedule.interval_months);
         }
 
         if (schedule.interval_miles && milesAtService) {
@@ -470,8 +469,10 @@ async function getFleetOverview() {
     // Dec 31 (operations audit OP-15).
     const yearStart = etYearStart();
 
+    // performed_at is a timestamp: start at midnight ET on Jan 1, not UTC
+    // midnight (7 PM ET on Dec 31).
     const ytdMaintenance = await db('maintenance_records')
-      .where('performed_at', '>=', yearStart)
+      .where('performed_at', '>=', parseETDateTime(`${yearStart}T00:00`))
       .select(db.raw('COALESCE(SUM(total_cost), 0) as total'))
       .first();
 
