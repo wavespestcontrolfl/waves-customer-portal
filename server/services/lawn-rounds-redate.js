@@ -321,12 +321,15 @@ async function convertPrepayTerms(trx, deps, termIds, now) {
   return sixWeek.length;
 }
 
-// Apply ONE series. The root is read again first: a series that no longer passes the identity and customer
-// rules (a cadence edit, a pause, a cancellation since the plan) is skipped. `replan(root)` re-plans it from
-// fresh reads; the series is skipped when that differs from `plan` (a visit changed since the dry run).
-// Returns { status, ... }: converted | held | skipped | error. An error after some moves leaves the series
-// unconverted; a re-run plans zero moves for the visits already at target and finishes.
+// Apply ONE series. A series the run's own plan held stays held (the fresh checks below only add holds; the
+// run's review reserved hours across series, which a single re-plan cannot see). The root is read again: a
+// series that no longer passes the identity and customer rules (a cadence edit, a pause, a cancellation since
+// the plan) is skipped. `replan(root)` re-plans it from fresh reads; the series is skipped when that differs
+// from `plan` (a visit changed since the dry run). Returns { status, ... }: converted | held | skipped | error.
+// An error after some moves leaves the series unconverted; a re-run plans zero moves for the visits already at
+// target and finishes.
 async function applySeries(conn, deps, plan, replan) {
+  if (plan.held) return { status: 'held', why: plan.held };
   const [entry] = await readCandidateRoots(conn, { parentId: plan.parentId });
   const fresh = entry?.candidate ? await replan(entry.candidate) : { skip: entry?.skip || NOT_LAWN_9X };
   if (!fresh || fresh.skip) return { status: 'skipped', why: fresh?.skip || 'series not found' };

@@ -329,6 +329,16 @@ describe('applySeries', () => {
     expect(w.log).toEqual([]);
   });
 
+  test('a series the run held stays held even when a fresh re-plan alone would pass', async () => {
+    // The run's review held it for an hour an earlier series reserved; a single re-plan cannot see that reservation.
+    const w = world();
+    const plan = { ...(await w.replan()), held: 'hour taken', heldReasons: ['hour taken'] };
+    const out = await applySeries(w.conn, w.deps, plan, w.replan);
+    expect(out).toEqual({ status: 'held', why: 'hour taken' });
+    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(w.log).toEqual([]);
+  });
+
   test('a series that changed since the plan is skipped with the reason', async () => {
     const w = world();
     const plan = await w.replan();
