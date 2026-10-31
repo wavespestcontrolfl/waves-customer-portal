@@ -172,11 +172,26 @@ async function loadInvoiceEmailContext(invoice, options = {}) {
   return { customer, prefs };
 }
 
+// The pay link as the Intelligence Bar's card shows it (the reminder card's token): the card's email and the send's re-render
+// are both fingerprinted with it, so the short link minted at send time is not part of the approval.
+const INVOICE_EMAIL_PAY_LINK_TOKEN = '[pay link]';
+
+// The Intelligence Bar's send_invoice email (channel 'email') passes:
+//   previewOnly            the card: the email is built exactly as a send builds it and its rendered fingerprint (subject, text,
+//                          template content hash, one digest) is returned instead of sending. Nothing is written: no claim
+//                          check, no short link, no PDF, no email row.
+//   expectedRecipientEmail the address the card showed; a different resolved recipient refuses (recipient_changed).
+//   expectedEmailDigest    the card's fingerprint digest; the send re-renders with the token and refuses a different email.
+//   expectedContentHash    the card's template content hash; sendTemplate refuses a different active template.
+//   verifyOwner            the card's live owner / plan / delivery-choice check, run again at the provider handoff.
+// A bar send never falls back to SMTP (the card showed the template's email).
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  const previewOnly = options.previewOnly === true;
+  const barApproved = Boolean(options.expectedEmailDigest);
   const claimToken = options.claimToken || null;
-  if ((invoice.send_claim_token || null) !== claimToken) {
+  if (!previewOnly && (invoice.send_claim_token || null) !== claimToken) {
     return { ok: false, error: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
   }
   try {
@@ -251,6 +266,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // treated like a one-off recipient: no card on file, no other invoices' balance.
   const { list: ccList, error: ccError } = invoiceCcList(options.cc, recipient.email);
   if (ccError) return { ok: false, error: ccError, code: 'invalid_cc', recipient: recipientPayload };
+  if (options.expectedRecipientEmail !== undefined && cleanEmail(recipient.email) !== options.expectedRecipientEmail) {
+    return { ok: false, code: 'recipient_changed', deliveryOutcome: 'not_sent', recipient: recipientPayload,
+      error: 'The invoice email address is not the one the approval showed; the email was not sent' };
+  }
+  if ((previewOnly || barApproved) && !sendgrid.isConfigured()) {
+    return { ok: false, code: 'email_unavailable', deliveryOutcome: 'not_sent', error: 'Invoice email is not set up', recipient: recipientPayload };
+  }
 
   // Freeze the AP email this invoice was actually DELIVERED to onto the payer
   // snapshot (shared with the project combined-send path), so the (async)
@@ -288,7 +310,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
 
   const domain = publicPortalUrl();
   const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);
-  const payUrl = await shortenOrPassthrough(longPayUrl, {
+  const payUrl = previewOnly ? INVOICE_EMAIL_PAY_LINK_TOKEN : await shortenOrPassthrough(longPayUrl, {
     kind: 'invoice',
     entityType: 'invoices',
     entityId: invoice.id,
@@ -368,7 +390,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
   let pdfBuffer;
   try {
-    pdfBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
+    if (!previewOnly) pdfBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
   } catch (err) {
     logger.error(`[invoice-email] PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     return { ok: false, error: 'PDF generation failed' };
@@ -518,6 +540,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          // The bar's live check (who owes it, annual plan, delivery choice, totals, a scheduled send), on the locked
+          // handle right before the provider call, as the text leg runs it. Fail closed: a verifier that throws refuses.
+          if (options.verifyOwner) {
+            let ownerRefusal = 'The bar could not verify who owes this invoice, so it was not sent.';
+            try { ownerRefusal = await options.verifyOwner({ ...current }, trx); } catch { /* keep the fail-closed text */ }
+            if (ownerRefusal) {
+              boundaryRefusal = { code: 'approved_version_changed', reason: typeof ownerRefusal === 'object' ? ownerRefusal.message : ownerRefusal };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
           // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
           // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
@@ -605,30 +637,49 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     }
   }
 
+  const templatePayload = {
+    first_name: first,
+    invoice_url: payUrl,
+    invoice_number: invoice.invoice_number,
+    amount_due: currency(amountDue),
+    due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
+    service_label: invoice.service_type || '',
+    service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
+    invoice_summary: summaryNote,
+    // The previous-balance sentence rides the existing invoice_message
+    // slot so the live template renders it with no template edit; the
+    // operator note (when present) stays first.
+    invoice_message: [thankYouNote, previousBalanceNote].filter(Boolean).join('\n\n'),
+    attachment_note: extraAttachmentCount > 0
+      ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
+      : 'Your PDF invoice is attached.',
+    ...detailPayload,
+  };
+  // The bar's card and its send: the rendered email with the pay link as the token (invoice-followups renderedEmailFingerprint,
+  // the reminder card's own fingerprint). The card shows it; the send refuses an email that no longer renders the same.
+  if (previewOnly || barApproved) {
+    const fingerprint = await require('./invoice-followups')
+      .renderedEmailFingerprint('invoice.sent', { ...templatePayload, invoice_url: INVOICE_EMAIL_PAY_LINK_TOKEN })
+      .catch(() => null);
+    if (previewOnly) {
+      return fingerprint
+        ? { ok: true, preview: true, recipient: recipientPayload, cc: ccList, email: fingerprint }
+        : { ok: false, code: 'email_unavailable', error: 'The invoice email template is not set up', recipient: recipientPayload };
+    }
+    if (!fingerprint || fingerprint.digest !== options.expectedEmailDigest) {
+      return { ok: false, code: 'email_content_changed', deliveryOutcome: 'not_sent', recipient: recipientPayload,
+        error: 'The invoice email changed after the card was shown; it was not sent' };
+    }
+  }
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'invoice.sent',
+        ...(options.expectedContentHash ? { expectedContentHash: options.expectedContentHash } : {}),
         to: recipient.email,
         ...(ccList.length ? { cc: ccList } : {}),
-        payload: {
-          first_name: first,
-          invoice_url: payUrl,
-          invoice_number: invoice.invoice_number,
-          amount_due: currency(amountDue),
-          due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
-          service_label: invoice.service_type || '',
-          service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
-          invoice_summary: summaryNote,
-          // The previous-balance sentence rides the existing invoice_message
-          // slot so the live template renders it with no template edit; the
-          // operator note (when present) stays first.
-          invoice_message: [thankYouNote, previousBalanceNote].filter(Boolean).join('\n\n'),
-          attachment_note: extraAttachmentCount > 0
-            ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
-            : 'Your PDF invoice is attached.',
-          ...detailPayload,
-        },
+        payload: templatePayload,
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_sent:${invoice.id}`,
@@ -667,7 +718,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
         ...(ccList.length ? { cc: ccList } : {}), ...evidence };
     } catch (err) {
-      if (!canFallbackFromTemplateEmailError(err)) {
+      // The bar's pinned template changed between its render check and the send's own resolve: nothing was sent.
+      if (barApproved && /reviewed email content changed/i.test(err?.message || '')) {
+        return { ok: false, code: 'email_content_changed', deliveryOutcome: 'not_sent', recipient: recipientPayload,
+          error: 'The invoice email changed after the card was shown; it was not sent' };
+      }
+      // A bar send never falls back to SMTP: the card showed the template's email.
+      if (barApproved || !canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
         return { ok: false, error: err.message, recipient: recipientPayload };
       }
@@ -1137,6 +1194,7 @@ module.exports = {
   loadInvoiceEmailContext,
   invoiceRecipientFor,
   invoiceCcList,
+  INVOICE_EMAIL_PAY_LINK_TOKEN,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

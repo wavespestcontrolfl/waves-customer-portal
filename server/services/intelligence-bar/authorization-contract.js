@@ -139,7 +139,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'resend_receipt',
   // The confirmed run texts or emails the customer their Auto Pay setup link.
   'send_autopay_setup_link',
-  // The invoice text (one text with the pay link; the bar sends no email).
+  // The invoice text (one text with the pay link), or under GATE_IB_INVOICE_EMAIL the invoice email (PDF + pay link) with at most
+  // one CC, which the card names.
   'send_invoice',
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',

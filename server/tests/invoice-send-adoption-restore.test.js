@@ -1308,6 +1308,38 @@ describe('a text-only bar send (round 13)', () => {
     expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
   });
 
+  // Gap #20 (GATE_IB_INVOICE_EMAIL): `channels: ['email']` is the mirror image, with the card's pins on the email leg only.
+  test('an email-only bar send never starts the text, hands the email leg its CC and pins, and finalizes as sent', async () => {
+    const verifyOwner = jest.fn(async () => null);
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+      channels: ['email'], refusalOnly: true, adoptsQueuedInvoiceSend: false, emailCc: 'manager@example.com',
+      expectedRecipients: { email: 'pat@example.com', cc: 'manager@example.com' },
+      expectedVersion: { emailDigest: 'digest-1', emailContentHash: 'hash-1', verifyOwner },
+    });
+    expect(result).toMatchObject({ ok: true, sms: { ok: false, skipped: true, code: 'sms_not_requested' }, email: { ok: true } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendInvoiceEmail).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+      cc: 'manager@example.com', expectedRecipientEmail: 'pat@example.com', expectedEmailDigest: 'digest-1', expectedContentHash: 'hash-1', verifyOwner,
+    }));
+    expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  test('an email that fails is handed back, never rescued by a text; the page send passes no email pins', async () => {
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: false, code: 'email_content_changed', deliveryOutcome: 'not_sent' });
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+      channels: ['email'], refusalOnly: true, adoptsQueuedInvoiceSend: false, expectedVersion: { emailDigest: 'digest-1' },
+    });
+    expect(result).toMatchObject({ ok: false, email: { ok: false, code: 'email_content_changed' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+
+    await InvoiceService.sendViaSMSAndEmail('inv-1', { emailCc: 'manager@example.com' });
+    const pageOptions = sendInvoiceEmail.mock.calls.at(-1)[1];
+    expect(pageOptions).toMatchObject({ cc: 'manager@example.com' });
+    expect(pageOptions).not.toHaveProperty('expectedEmailDigest');
+    expect(pageOptions).not.toHaveProperty('verifyOwner');
+  });
+
   test('a queued pay-link text refuses the bar send (queued_pay_link) and is left exactly as it was; the page send adopts it', async () => {
     smsLog = makeSmsLogTable([{ ...queuedRow }]);
     await expect(InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false }))
