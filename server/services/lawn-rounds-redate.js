@@ -228,23 +228,22 @@ async function readSeriesContext(conn, root, { todayET, nowMs = Date.now(), anch
 
 const windowEnd = (row) => row.we || hhmm(toMin(row.ws) + Number(row.dur));
 
-const OPEN_STEP_MINUTES = 30;
-
-// The first open start for a timed move on its new date, for its own length: its own time, then later in the
-// working day (scheduling/find-time hours), then earlier, in 30-minute steps. Open = the rebooker's own commit
-// check (previewMoveConflicts: its technician scope and statuses, unassigned visits included) finds nothing, and
-// no hour in `claimed` (earlier planned series in this run, by date, whatever the technician) overlaps.
+// The first open start for a timed move on its new date, for its own length. Starts are on the hour (AGENTS.md:
+// window_start is HH:00; the end follows the length): its own hour, then each later hour that ends by the end of
+// the working day (scheduling/find-time hours), then each earlier hour. Open = the rebooker's own commit check
+// (previewMoveConflicts: its technician scope and statuses, unassigned visits included) finds nothing, and no
+// hour in `claimed` (earlier planned series in this run, by date, whatever the technician) overlaps.
 // Returns [start, end] (HH:MM) or null.
 async function openStart(conn, rebooker, move, claimed) {
-  const own = toMin(move.ws);
-  const length = toMin(windowEnd(move)) - own;
-  const last = DAY_END_HOUR * 60 - length;
-  const later = Array.from({ length: Math.max(0, Math.floor((last - own) / OPEN_STEP_MINUTES) + 1) }, (_, i) => own + i * OPEN_STEP_MINUTES);
-  const earlier = Array.from({ length: Math.max(0, Math.floor((Math.min(own, last + OPEN_STEP_MINUTES) - DAY_START_HOUR * 60) / OPEN_STEP_MINUTES)) },
-    (_, i) => Math.min(own, last + OPEN_STEP_MINUTES) - (i + 1) * OPEN_STEP_MINUTES);
-  for (const start of [...later, ...earlier]) {
-    const span = [hhmm(start), hhmm(start + length)];
-    if (claimed.some(([s, e]) => toMin(s) < start + length && start < toMin(e))) continue;
+  const length = toMin(windowEnd(move)) - toMin(move.ws);
+  const own = Math.floor(toMin(move.ws) / 60);
+  const last = Math.floor((DAY_END_HOUR * 60 - length) / 60);
+  const top = Math.min(own, last + 1);
+  const later = Array.from({ length: Math.max(0, last - own + 1) }, (_, i) => own + i);
+  const earlier = Array.from({ length: Math.max(0, top - DAY_START_HOUR) }, (_, i) => top - 1 - i);
+  for (const hour of [...later, ...earlier]) {
+    const span = [hhmm(hour * 60), hhmm(hour * 60 + length)];
+    if (claimed.some(([s, e]) => toMin(s) < hour * 60 + length && hour * 60 < toMin(e))) continue;
     if (!(await rebooker.previewMoveConflicts(move.id, move.to, { start: span[0], end: span[1] }, { conn })).length) return span;
   }
   return null;

@@ -194,23 +194,29 @@ describe('reviewPlan', () => {
   });
 
   test('a move whose own hour the rebooker would refuse takes the next open time; every timed move is checked, unassigned too', async () => {
-    // The rebooker's commit check refuses 09:00 on every day; 09:30 is open.
+    // The rebooker's commit check refuses 09:00 on every day; 10:00 is open (starts stay on the hour).
     const rebooker = { previewMoveConflicts: jest.fn(async (id, date, window) => (window.start === '09:00' ? [{ id: 'x' }] : [])) };
     const unassigned = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: null }))));
     const out = await reviewPlan(conn, unassigned, { rebooker });
     expect(out.held).toBeNull();
-    expect(out.moves.map((m) => [m.id, m.ws, m.we])).toEqual([['v2', '09:30', '10:30'], ['v3', '09:30', '10:30'], ['v4', '09:30', '10:30']]);
-    expect(out.visits.find((v) => v.id === 'v2')).toMatchObject({ ws: '09:30', we: '10:30' });
+    expect(out.moves.map((m) => [m.id, m.ws, m.we])).toEqual([['v2', '10:00', '11:00'], ['v3', '10:00', '11:00'], ['v4', '10:00', '11:00']]);
+    expect(out.visits.find((v) => v.id === 'v2')).toMatchObject({ ws: '10:00', we: '11:00' });
     expect(rebooker.previewMoveConflicts.mock.calls.slice(0, 2).map(([id, date, window, opts]) => [id, date, window, opts.conn]))
-      .toEqual([['v2', '2027-01-12', { start: '09:00', end: '10:00' }, conn], ['v2', '2027-01-12', { start: '09:30', end: '10:30' }, conn]]);
+      .toEqual([['v2', '2027-01-12', { start: '09:00', end: '10:00' }, conn], ['v2', '2027-01-12', { start: '10:00', end: '11:00' }, conn]]);
+  });
+
+  test('a start stays on the hour and the end follows the length (a 90-minute visit)', async () => {
+    const long = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { we: '10:30', dur: 90 })]));
+    const rebooker = { previewMoveConflicts: jest.fn(async (id, date, window) => (window.start === '09:00' ? [{ id: 'x' }] : [])) };
+    expect((await reviewPlan(conn, long, { rebooker })).moves[0]).toMatchObject({ ws: '10:00', we: '11:30' });
   });
 
   test('a day with no open time in working hours holds the series: hour taken; an untimed move needs none', async () => {
     const full = { previewMoveConflicts: jest.fn(async () => [{ id: 'x' }]) };
     expect((await reviewPlan(conn, plan(), { rebooker: full })).held).toBe('hour taken');
-    // 09:00 to 16:00 later (15 starts, the last that ends by 17:00), then 08:30 and 08:00 earlier.
+    // On the hour: 09:00 to 16:00 later (the last that ends by 17:00), then 08:00 earlier.
     expect(full.previewMoveConflicts.mock.calls.filter(([id]) => id === 'v2').map(([, , w]) => w.start))
-      .toEqual(['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '08:30', '08:00']);
+      .toEqual(['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '08:00']);
     const untimed = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null })]));
     const free = await reviewPlan(conn, untimed, { rebooker: full });
     expect(free.held).toBeNull();
@@ -347,14 +353,14 @@ describe('applySeries', () => {
   test('a move takes its planned open time; an untimed visit moves by date only', async () => {
     const rows = [visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null }), visit('v3', '2027-02-09'), visit('v4', '2027-03-23')];
     const w = world({ visits: rows });
-    // The rebooker's commit check refuses 09:00 on v4's new day, so v4 takes 09:30.
+    // The rebooker's commit check refuses 09:00 on v4's new day, so v4 takes 10:00.
     w.rebooker.previewMoveConflicts.mockImplementation(async (id, date, win) => (date === '2027-03-30' && win.start === '09:00' ? [{ id: 'x' }] : []));
     const out = await applySeries(w.conn, w.deps, await w.replan(), w.replan);
     expect(out.status).toBe('converted');
     const calls = Object.fromEntries(w.rebooker.reschedule.mock.calls.map(([id, date, window]) => [id, [date, window]]));
-    expect(calls).toEqual({ v2: ['2027-01-12', null], v3: ['2027-02-23', { start: '09:00', end: '10:00' }], v4: ['2027-03-30', { start: '09:30', end: '10:30' }] });
+    expect(calls).toEqual({ v2: ['2027-01-12', null], v3: ['2027-02-23', { start: '09:00', end: '10:00' }], v4: ['2027-03-30', { start: '10:00', end: '11:00' }] });
     expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1]]))
-      .toEqual([['v2', '2027-01-12T08:00'], ['v3', '2027-02-23T09:00'], ['v4', '2027-03-30T09:30']]);
+      .toEqual([['v2', '2027-01-12T08:00'], ['v3', '2027-02-23T09:00'], ['v4', '2027-03-30T10:00']]);
   });
 
   test('the conversion runs only after every move landed, under the series locks', async () => {
