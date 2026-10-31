@@ -4,7 +4,7 @@
 // section rides the glass card treatment. A residential estimate keeps all of those sections.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -170,10 +170,22 @@ describe('commercial first visit on the proposal page', () => {
     expect(screen.getByTestId('proposal-next-steps')).toHaveTextContent('Pick the day and time of your first visit below');
   });
 
-  // The refetch and re-render after a pageshow ran past the default 1 s wait on loaded CI runners (main 10-27,
-  // #6912 10-28, #7136 10-30); local runs take ~15 ms. A longer wait, and a test timeout that leaves room for it.
+  // A longer wait for the refetch and re-render on loaded CI runners, and a test timeout that leaves room for it.
   const AFTER_REFETCH = { timeout: 4000 };
   const AFTER_REFETCH_TEST_MS = 10000;
+  const dataCalls = (fetchMock) => fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length;
+
+  // Back from signing. The page attaches its pageshow listener in an effect that runs after /data has loaded. On a
+  // loaded runner that effect can still be pending when the sign button first renders, and a pageshow sent then is
+  // never heard, so no wait was long enough (main 10-27, #6912 10-28, #7136 10-30, #7212 10-31). Send it until the
+  // page hears it: the listener calls fetch before its first await, so a heard pageshow is one more /data call at
+  // once, and none is sent after that.
+  async function backFromSigning(fetchMock) {
+    await waitFor(() => {
+      if (dataCalls(fetchMock) < 2) window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+      expect(dataCalls(fetchMock)).toBe(2);
+    }, AFTER_REFETCH);
+  }
 
   // Codex #6869 r2 P2: the signing page's "Back to your estimate" is a history step, so a bfcache restore must refetch
   // /data, or the page keeps its unsigned card and never shows the picker.
@@ -190,7 +202,7 @@ describe('commercial first visit on the proposal page', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<EstimateViewPage />);
     await screen.findByRole('button', { name: 'Accept & sign agreement' });
-    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    await backFromSigning(fetchMock);
     expect(await screen.findByTestId('commercial-first-visit-picker', {}, AFTER_REFETCH)).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
   }, AFTER_REFETCH_TEST_MS);
@@ -203,7 +215,7 @@ describe('commercial first visit on the proposal page', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<EstimateViewPage />);
     await screen.findByRole('button', { name: 'Accept & sign agreement' });
-    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    await backFromSigning(fetchMock);
     expect(await screen.findByTestId('commercial-agreement-signed', {}, AFTER_REFETCH)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Accept & sign agreement' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
