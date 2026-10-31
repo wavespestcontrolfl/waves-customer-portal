@@ -106,6 +106,7 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('sms-commitment-source:9')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('truck-kit:v1')).emitter).toBe('truck-kit');
     expect(retention.ringRiskFor(keyed('autopay_hold_charge:declined:inv-1')).kind).toBe('event');
+    expect(retention.ringRiskFor(keyed('lead-agent-hold:lead-1')).emitter).toBe('lead-agent-hold');
     expect(retention.ringRiskFor(keyed('something-else:1'))).toBeNull();
     expect(retention.ringRiskFor(row())).toBeNull();
   });
