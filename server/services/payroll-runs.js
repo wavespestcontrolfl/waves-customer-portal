@@ -67,7 +67,7 @@ const {
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
-const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive } = require('../config/feature-gates');
+const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
@@ -107,6 +107,10 @@ const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeO
 // GATE_PAYROLL_BANK_MATCH, read at call time, with the same guard. On, a finalized check carries
 // its bank status; off, no response gains a key.
 const bankMatchOn = () => typeof payrollBankMatchLive === 'function' && payrollBankMatchLive();
+
+// GATE_PAYROLL_MERCURY_STATUS, read at call time, with the same guard. On, a finalized run carries each check's Mercury
+// payment and a summary for the Send button; off, no response gains a key.
+const mercuryStatusOn = () => typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
 
 // payroll_checks time-off columns, read and written only with the gate on.
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
@@ -686,6 +690,8 @@ async function runView(conn, runId, { evaluation = null } = {}) {
   const run = await loadRun(conn, runId);
   const rows = await loadCheckRows(conn, runId);
   const bank = bankMatchOn() && run.status === 'finalized' && rows.length ? await bankStatusByCheck(conn, rows) : null;
+  const mercury = mercuryStatusOn() && run.status === 'finalized' && rows.length
+    ? await require('./payroll-mercury').viewForChecks(conn, run, rows) : null;
   const view = {
     id: run.id,
     weekStart: run.week_start,
@@ -696,7 +702,12 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     finalizedAt: iso(run.finalized_at),
     voidedAt: iso(run.voided_at),
     voidReason: run.void_reason || null,
-    checks: rows.map((row) => (bank ? { ...serializeCheck(row), bank: bank.get(row.id) } : serializeCheck(row))),
+    checks: rows.map((row) => ({
+      ...serializeCheck(row),
+      ...(bank ? { bank: bank.get(row.id) } : {}),
+      ...(mercury ? { payment: mercury.byCheck.get(row.id) } : {}),
+    })),
+    ...(mercury ? { mercury: mercury.summary } : {}),
     blocked: [],
     waiting: [],
     stale: false,
@@ -904,6 +915,8 @@ async function voidRun(runId, input, actor, conn = db) {
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
+    // Money may be on its way through Mercury: not behind a gate, so turning the gates off never lets a void through.
+    await require('./payroll-mercury').assertNoOpenPayments(trx, rows.map((row) => row.id));
     await trx('payroll_checks').where({ run_id: runId }).whereIn('status', ['draft', 'finalized']).update({ status: 'voided' });
     // Not behind the gate: a line a finalized run paid must reopen even if the gate was turned off since.
     await reopenLinesOfRun(trx, runId);

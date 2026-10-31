@@ -350,6 +350,40 @@ function FamilyCell({ technician, onSaved }) {
   </form>;
 }
 
+// GATE_PAYROLL_MERCURY_STATUS: the id Mercury gave this employee as a payee. Saving it reads the recipient from Mercury and
+// shows the name only, so the owner can tell it is the right person. No account number is ever shown or kept here.
+function MercuryRecipientCell({ technician, onSaved }) {
+  const current = technician.mercuryRecipientId || '';
+  const [value, setValue] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      const data = await call(`/technicians/${technician.id}/mercury-recipient`, {
+        method: 'PUT',
+        body: { recipientId: value.trim() === '' ? null : value.trim() },
+      });
+      const name = data.technician.recipientName;
+      onSaved(data.technician.mercuryRecipientId
+        ? `Mercury recipient saved for ${technician.name}${name ? `. Mercury shows the name ${name}` : ''}.`
+        : `Mercury recipient cleared for ${technician.name}.`);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+    <Input
+      aria-label={`Mercury recipient id for ${technician.name}`} className="w-72" autoComplete="off"
+      placeholder="Not set" value={value} onChange={event => setValue(event.target.value)}
+    />
+    <Button type="submit" variant="secondary" disabled={busy || value.trim() === current}>Save</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 function payMethodLabel(technician) {
   if (technician.payMethod === 'bank_transfer') {
     return <span>Bank transfer<span className="block text-ui-caption text-ink-secondary">Written OK {dayLabel(technician.payMethodConsentOn)}</span></span>;
@@ -384,6 +418,8 @@ export default function PayrollSettings() {
   const showCoverage = hasField(technicians, 'flsaOvertimeCovered');
   // Present only when the server has GATE_PAYROLL_FAMILY_EMPLOYEE on.
   const showFamily = hasField(technicians, 'familyEmployment');
+  // Present only when the server has GATE_PAYROLL_MERCURY_STATUS on.
+  const showMercury = hasField(technicians, 'mercuryRecipientId');
 
   return <UiSurface density="touch" className="grid gap-4">
     <header>
@@ -401,6 +437,7 @@ export default function PayrollSettings() {
           {showAllowance && <TH>Paid time off hours per year</TH>}
           {showCoverage && <TH>Federal overtime law covers</TH>}
           {showFamily && <TH>Family employee</TH>}
+          {showMercury && <TH>Mercury recipient id</TH>}
           <TH><span className="sr-only">Actions</span></TH>
         </TR></THead>
         <TBody>
@@ -412,6 +449,7 @@ export default function PayrollSettings() {
             {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
             {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
             {showFamily && <TD><FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} /></TD>}
+            {showMercury && <TD><MercuryRecipientCell key={`${tech.id}:${tech.mercuryRecipientId}`} technician={tech} onSaved={saved} /></TD>}
             <TD>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>

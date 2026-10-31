@@ -249,3 +249,49 @@ describe('Family employee setting (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('The family employee setting is for W-2 employees.');
   });
 });
+
+describe('Mercury recipient id (GATE_PAYROLL_MERCURY_STATUS)', () => {
+  const withMercury = () => adminFetch.mockImplementation((path, options = {}) => {
+    if (options.method === 'PUT') {
+      writes.push({ path, method: options.method, body: options.body });
+      if (options.body.recipientId === 'bad') return reply({ error: 'Mercury has no recipient with that id.' }, false, 400);
+      return reply({ technician: { id: 'tech-a', mercuryRecipientId: options.body.recipientId, recipientName: 'Sample Alpha', verified: true } });
+    }
+    if (path === '/admin/payroll/technicians') return reply({ technicians: TECHS.map(tech => ({ ...tech, mercuryRecipientId: tech.id === 'tech-b' ? '22222222-2222-4222-8222-222222222222' : null })) });
+    if (path === '/admin/payroll/runs') return reply({ runs: [] });
+    return reply({}, false, 404);
+  });
+
+  it('shows no column when the server sends no field (gate off)', async () => {
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.queryByRole('columnheader', { name: 'Mercury recipient id' })).toBeNull();
+  });
+
+  it('shows the saved id, and saves a new one, showing the name Mercury reports', async () => {
+    withMercury();
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.getByRole('columnheader', { name: 'Mercury recipient id' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Mercury recipient id for Sample Beta')).toHaveValue('22222222-2222-4222-8222-222222222222');
+    const input = screen.getByLabelText('Mercury recipient id for Sample Alpha');
+    const save = within(input.closest('form')).getByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    fireEvent.change(input, { target: { value: ' 33333333-3333-4333-8333-333333333333 ' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ path: '/admin/payroll/technicians/tech-a/mercury-recipient', method: 'PUT', body: { recipientId: '33333333-3333-4333-8333-333333333333' } });
+    await screen.findByText('Mercury recipient saved for Sample Alpha. Mercury shows the name Sample Alpha.');
+  });
+
+  it('shows the server answer when Mercury has no such recipient', async () => {
+    withMercury();
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    const input = screen.getByLabelText('Mercury recipient id for Sample Alpha');
+    fireEvent.change(input, { target: { value: 'bad' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await screen.findByText('Mercury has no recipient with that id.');
+  });
+});
+

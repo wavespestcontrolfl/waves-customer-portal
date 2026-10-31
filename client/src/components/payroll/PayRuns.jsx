@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
+import { Checkbox } from '../ui/Checkbox';
 import { Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
 import { Field } from '../ui/Field';
 import { Input } from '../ui/Input';
@@ -174,6 +175,83 @@ function Problems({ title, items }) {
   </div>;
 }
 
+// Mercury paychecks (GATE_PAYROLL_MERCURY_STATUS / _PAY, owner plan A): Mercury sends a bank-transfer paycheck only
+// after the owner approves the request in the Mercury app. Present only when the server sends `payment` on a check.
+const PAYMENT_CHIPS = {
+  queued: { tone: 'warn', label: 'Sending to Mercury' },
+  requested: { tone: 'warn', label: 'Waiting for your approval in Mercury' },
+  approved: { tone: 'neutral', label: 'Approved' },
+  sent: { tone: 'strong', label: 'Sent' },
+  failed: { tone: 'alert', label: 'Failed' },
+  rejected: { tone: 'alert', label: 'Rejected' },
+  cancelled: { tone: 'alert', label: 'Cancelled' },
+  returned: { tone: 'alert', label: 'Returned' },
+  unknown: { tone: 'alert', label: 'Outcome unknown' },
+};
+
+function PaymentChip({ payment }) {
+  if (payment.state === 'none') return <span className="text-ink-secondary">Not sent</span>;
+  if (payment.state === 'paper') return <Badge tone="neutral">Paid by check #{payment.checkNumber}</Badge>;
+  const known = PAYMENT_CHIPS[payment.state] || { tone: 'neutral', label: payment.state };
+  const sentOn = payment.state === 'sent' && payment.postedOn ? ` ${dayLabel(payment.postedOn)}` : '';
+  return <Badge tone={known.tone}>{known.label}{sentOn}</Badge>;
+}
+
+function MercuryCell({ call, check, onSaved }) {
+  const payment = check.payment;
+  const [mode, setMode] = useState(null);
+  const [number, setNumber] = useState('');
+  const [nothingWaiting, setNothingWaiting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (check.payMethod !== 'bank_transfer' && payment.state === 'none') return <span className="text-ink-secondary">Paper check</span>;
+
+  async function run(path, body, done) {
+    setBusy(true); setError('');
+    try {
+      await call(path, { method: 'POST', body });
+      setMode(null);
+      onSaved(done);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <div className="grid gap-2">
+    <div><PaymentChip payment={payment} /></div>
+    {payment.error && <p className="m-0 text-ui-caption text-alert-fg">{payment.error}</p>}
+    {payment.state === 'unknown' && <p className="m-0 text-ui-caption text-ink-secondary">
+      We cannot tell if Mercury got this request. Look in Mercury for a request of this amount before you send again.
+    </p>}
+    {mode === null && <div className="flex flex-wrap gap-2">
+      {payment.canSendAgain && <Button variant="secondary" disabled={busy} onClick={() => setMode('again')} aria-label={`Send again for ${check.name}`}>Send again</Button>}
+      {payment.canPaper && <Button variant="secondary" disabled={busy} onClick={() => setMode('paper')} aria-label={`Paid by paper check instead for ${check.name}`}>Paid by paper check instead</Button>}
+    </div>}
+    {mode === 'again' && <div role="group" aria-label={`Confirm send again for ${check.name}`} className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
+      <p className="m-0">Ask Mercury for a new approval request of {centsToDollars(check.netCents)} for {check.name}?</p>
+      {payment.canSendAgain === 'confirm' && <Checkbox
+        id={`nothing-waiting-${check.id}`} label="Nothing is waiting in Mercury"
+        checked={nothingWaiting} onChange={event => setNothingWaiting(event.target.checked)}
+      />}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          disabled={busy || (payment.canSendAgain === 'confirm' && !nothingWaiting)}
+          onClick={() => run(`/checks/${check.id}/send-again`, payment.canSendAgain === 'confirm' ? { confirmNothingWaiting: true } : {}, `Asked Mercury again for ${check.name}. Approve it in the Mercury app.`)}
+        >Yes, send again</Button>
+        <Button variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+      </div>
+    </div>}
+    {mode === 'paper' && <form
+      aria-label={`Paper check for ${check.name}`} className="flex flex-wrap items-center gap-2"
+      onSubmit={event => { event.preventDefault(); run(`/checks/${check.id}/paper`, { checkNumber: number }, `Recorded a paper check for ${check.name}.`); }}
+    >
+      <Input aria-label={`Paper check number for ${check.name}`} className="w-28" maxLength={30} autoComplete="off" value={number} onChange={event => setNumber(event.target.value)} />
+      <Button type="submit" disabled={busy || !number.trim()}>Save paper check</Button>
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+    </form>}
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </div>;
+}
+
 function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   if (run.checks.length === 0) return <p className="m-0">No paychecks in this run yet.</p>;
   const t = run.totals;
@@ -181,6 +259,8 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   const showPto = run.checks.some(check => check.ptoPayCents > 0);
   const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
   const showBank = isFinal && run.checks.some(check => check.bank);
+  // Only a run read with GATE_PAYROLL_MERCURY_STATUS on carries each check's payment.
+  const showMercury = isFinal && run.checks.some(check => check.payment);
   // Only a pay run drafted with pay lines turned on carries these figures.
   const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.lineOvertimePremiumCents > 0);
   const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
@@ -197,6 +277,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
         {showHsa && <TH align="right">HSA from Waves</TH>}
         {isFinal && <TH>Check</TH>}
         {showBank && <TH>Bank</TH>}
+        {showMercury && <TH>Mercury</TH>}
       </TR></THead>
       <TBody>
         {run.checks.map(check => <TR key={check.id}>
@@ -224,6 +305,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
             </div>
           </TD>}
           {showBank && <TD>{check.bank ? bankWords(check.bank) : ''}</TD>}
+          {showMercury && <TD>{check.payment ? <MercuryCell call={call} check={check} onSaved={onSaved} /> : ''}</TD>}
         </TR>)}
       </TBody>
     </Table>
@@ -251,6 +333,79 @@ function VoidForm({ busy, onVoid, onCancel }) {
       <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button>
     </div>
   </form>;
+}
+
+const OUTCOME_WORDS = { requested: 'asked Mercury', failed: 'Mercury did not take it', unknown: 'outcome unknown', skipped: 'not sent' };
+const SKIP_WORDS = { no_recipient: 'no Mercury recipient id', no_pay: 'no pay', already_has_payment: 'already has a payment' };
+const skipWords = reason => SKIP_WORDS[String(reason).split(':')[0]] || 'not sent';
+
+function Warning({ children, tone = 'neutral' }) {
+  return <li className={`rounded-sm border-hairline p-2 ${tone === 'warn' ? 'border-warn-fg text-warn-fg' : 'border-zinc-200'}`}>{children}</li>;
+}
+
+// GATE_PAYROLL_MERCURY_PAY: ask Mercury for an approval request for each bank-transfer paycheck. The confirm step shows the
+// three warnings (never a block): funding, key health and the approve-by day. Money leaves only when you approve in Mercury.
+function SendToMercury({ call, run, onChanged, onMessage }) {
+  const [step, setStep] = useState('idle');
+  const [preview, setPreview] = useState(null);
+  const [results, setResults] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const info = run.mercury;
+  if (!info || !info.payEnabled) return null;
+
+  async function openConfirm() {
+    setBusy(true); setError(''); setResults(null);
+    try {
+      const data = await call(`/runs/${run.id}/send-preview`);
+      setPreview(data.preview); setStep('confirm');
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  async function send() {
+    setBusy(true); setError('');
+    try {
+      const data = await call(`/runs/${run.id}/send`, { method: 'POST', body: {} });
+      const asked = data.results.filter(item => item.outcome === 'requested').length;
+      setResults(data.results); setStep('idle');
+      onMessage(asked > 0 ? `Asked Mercury for ${asked} payment${asked === 1 ? '' : 's'}. Approve them in the Mercury app.` : 'Nothing was sent to Mercury.');
+      await onChanged(run.id);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <div className="grid gap-2">
+    {info.missingRecipient.length > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+      No Mercury recipient id yet for {info.missingRecipient.join(', ')}. Add it in the employee table above.
+    </p>}
+    {step === 'idle' && info.canSend && <div>
+      <Button disabled={busy} onClick={openConfirm}>Send to Mercury</Button>
+    </div>}
+    {step === 'confirm' && preview && <div role="group" aria-label="Confirm send to Mercury" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
+      <p className="m-0">
+        Ask Mercury to pay {preview.eligible.length} paycheck{preview.eligible.length === 1 ? '' : 's'}
+        {' '}({preview.eligible.map(item => `${item.name} ${centsToDollars(item.netCents)}`).join(', ')}).
+        Nothing is paid until you approve each one in the Mercury app.
+      </p>
+      <ul className="m-0 grid list-none gap-1 p-0" aria-label="Before you send">
+        <Warning tone={preview.funding.short ? 'warn' : 'neutral'}>{preview.funding.text}</Warning>
+        <Warning tone={preview.key.stale ? 'warn' : 'neutral'}>{preview.key.text}</Warning>
+        <Warning>{preview.approveBy.text}</Warning>
+      </ul>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={busy} onClick={send}>Yes, send to Mercury</Button>
+        <Button variant="secondary" disabled={busy} onClick={() => setStep('idle')}>Cancel</Button>
+      </div>
+    </div>}
+    {results && <ul className="m-0 grid list-none gap-1 p-0" aria-label="Send results">
+      {results.map(item => <li key={item.checkId} className="text-ui-caption">
+        {item.name}: {item.outcome === 'skipped' ? skipWords(item.reason) : OUTCOME_WORDS[item.outcome] || item.outcome}
+        {item.message ? ` (${item.message})` : ''}
+      </li>)}
+    </ul>}
+    {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
+  </div>;
 }
 
 export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
@@ -339,6 +494,8 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
       {(isDraft || isFinal) && <Button variant="secondary" disabled={busy} onClick={() => setVoiding(true)}>Void</Button>}
       {run.status !== 'voided' && run.checks.length > 0 && <Button variant="secondary" disabled={busy} onClick={exportCsv}>Export CSV</Button>}
     </div>}
+
+    {isFinal && <SendToMercury call={call} run={run} onChanged={onChanged} onMessage={onMessage} />}
 
     {stubFor && <StubDialog call={call} check={stubFor} onClose={() => setStubFor(null)} />}
   </Card>;

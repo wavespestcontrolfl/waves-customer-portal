@@ -117,10 +117,13 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // truck_kit: one bell per truck when a technician's truck check finds a tool
 // missing or damaged (services/truck-kit.js). The dark GATE_TRUCK_KIT is the
 // switch; once on, the item must reach the office, who can still silence it.
+// payroll: a Mercury paycheck that failed, was rejected, was returned or is stuck (services/payroll-mercury-alerts.js,
+// owner plan A 2026-10-30). The dark GATE_PAYROLL_MERCURY_STATUS is the switch; once on, the item must reach the owner,
+// who can still silence the category here.
 // access_codes: the one standing row for the access codes waiting on
 // Customers → Gate codes (services/access-code-found-bell.js, owner ruling
 // 2026-10-24). The dark GATE_ACCESS_CODES_FOUND_BELL is the switch; same treatment.
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes']);
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes', 'payroll']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
@@ -171,6 +174,7 @@ const OVERRIDABLE_CATEGORIES = [
   'review_low_rating',
   'truck_kit',
   'access_codes',
+  'payroll',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 

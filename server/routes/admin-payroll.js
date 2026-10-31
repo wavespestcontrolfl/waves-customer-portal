@@ -65,6 +65,19 @@
  *                                    otherwise). A pay run dated on or after exemptFrom skips federal and
  *                                    Florida unemployment tax for that employee and nothing else.
  *
+ * Mercury paychecks (owner plan A, 2026-10-30; GATE_PAYROLL_MERCURY_STATUS and GATE_PAYROLL_MERCURY_PAY, both
+ * dark; off answers 404 { enabled: false }). Mercury sends a paycheck only after the owner approves the request in
+ * the Mercury app. No route here calls Mercury's direct send.
+ * PUT  /technicians/:id/mercury-recipient  { recipientId | null } (status gate) the technician's Mercury recipient
+ *                                    id. With a key set it reads the recipient and returns the NAME only (404 from
+ *                                    Mercury answers 400).
+ * GET  /runs/:id/send-preview        (status gate) the three warnings before a send: funding, key health, approve-by.
+ * POST /runs/:id/send                (pay gate) request payment for each bank-transfer check with no payment yet.
+ *                                    Answers { results: [{ checkId, name, outcome, reason?, message? }], run }.
+ * POST /checks/:id/send-again        (pay gate) { confirmNothingWaiting? } a new attempt after failed, rejected,
+ *                                    cancelled or returned, or after unknown when the owner confirms.
+ * POST /checks/:id/paper             (status gate) { checkNumber } paid by paper check instead.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -74,6 +87,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
+  payrollMercuryStatusLive, payrollMercuryPayLive,
 } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
@@ -81,6 +95,7 @@ const payrollFormFigures = require('../services/payroll-form-figures');
 const payrollTimeOff = require('../services/payroll-time-off');
 const payrollPayLines = require('../services/payroll-pay-lines');
 const payrollFamilyEmployee = require('../services/payroll-family-employee');
+const payrollMercury = require('../services/payroll-mercury');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -202,6 +217,49 @@ router.put('/technicians/:id/family-employment', familyEmployeeOnly, async (req,
   try {
     res.json({ technician: await payrollFamilyEmployee.setFamilyEmployment(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set family employee', err); }
+});
+
+// GATE_PAYROLL_MERCURY_STATUS / _PAY off: the same answer the payroll routes give when their gate is off.
+const mercuryStatusOnly = (req, res, next) => {
+  if (!(typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+const mercuryPayOnly = (req, res, next) => {
+  if (!(typeof payrollMercuryPayLive === 'function' && payrollMercuryPayLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/mercury-recipient', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollMercury.setMercuryRecipient(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set Mercury recipient', err); }
+});
+
+router.get('/runs/:id/send-preview', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ preview: await payrollMercury.sendPreview(req.params.id) });
+  } catch (err) { fail(res, 'read Mercury send preview', err); }
+});
+
+router.post('/runs/:id/send', mercuryPayOnly, async (req, res) => {
+  try {
+    const results = await payrollMercury.sendRun(req.params.id, req.technicianId);
+    // The requests are made and saved. A failed re-read must not hide what happened.
+    const run = await payrollRuns.getRun(req.params.id).catch(() => null);
+    res.json({ results, run });
+  } catch (err) { fail(res, 'send pay run to Mercury', err); }
+});
+
+router.post('/checks/:id/send-again', mercuryPayOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.sendAgain(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'send paycheck to Mercury again', err); }
+});
+
+router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.recordPaper(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'record paper check', err); }
 });
 
 router.get('/technicians', async (req, res) => {
