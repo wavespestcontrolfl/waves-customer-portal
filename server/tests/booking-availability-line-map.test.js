@@ -85,7 +85,8 @@ describe('buildBookingAvailability — serviceLines (line map live)', () => {
 
   test('the home technician wins a start both have, the gap technician fills the start the home lacks, a third technician is dropped', async () => {
     const result = await build(shared(), { serviceLines: ['general'] });
-    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'] });
+    // The booked address rides along for GATE_TERRITORY_ROUTING (the territory technician leads).
+    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 } });
     expect(offers(result)).toEqual(['09:00:tech-home', '11:00:tech-gap']);
   });
 
@@ -169,7 +170,7 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     findAvailableSlots.mockResolvedValue({ slots: [slotOf('tech-home', '10:00')], total_feasible: 1 });
     const args = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: NOW, serviceKey: 'pest_control' };
     await buildFunnelAvailability(args);
-    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'] });
+    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 } });
     lineTech.lineOfferRanking.mockClear();
     lineTech.lineMapLive.mockReturnValue(false);
     await buildFunnelAvailability(args);

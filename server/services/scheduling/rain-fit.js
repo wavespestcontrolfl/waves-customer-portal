@@ -78,6 +78,8 @@ const RAIN_OK_KEYS = new Set([
   'rodent_bait_quarterly', 'rodent_monitoring',
   'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
   'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_medium', 'rodent_sanitation_heavy',
+  // Dead Rodent Removal & Odor Treatment: attic, garage or crawl-space work (owner 2026-10-30: "THIS JOB IS NOT OUTDOORS").
+  'rodent_dead_animal_removal',
 ]);
 // Not a visit's work at all: a billing rider (the registry's lane), or the
 // generic appointment whose work is unknown. Left out of the booking's

@@ -190,6 +190,15 @@ describe('pickTechnicianForVisit — service-line map live', () => {
     expect(findTime.findAvailableSlots).not.toHaveBeenCalled();
   });
 
+  test('the visit\'s place (customer, map position) reaches the line picker for GATE_TERRITORY_ROUTING', async () => {
+    mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-b', reason: 'home' };
+    mockState.slots = [slot(A, 1), slot(B, 30)];
+    await pickTechnicianForVisit({ conn: makeConn(), ...base, lat: 27.05, lng: -82.4 });
+    expect(lineTech.pickLineTechnician).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      customerId: 'cust-1', lat: 27.05, lng: -82.4,
+    }));
+  });
+
   test('the gap technician, and nobody, keep the line reason', async () => {
     mockState.linePick = { mapped: true, line: 'general', technicianId: 'tech-a', reason: 'gap_absent' };
     expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ technician: { id: 'tech-a' }, reason: 'line_gap_absent' });
