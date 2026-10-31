@@ -24,6 +24,13 @@
  * A line with no technician set adds no rule: while service_line_techs is empty
  * (as on 2026-10-30) live picks exactly what today's code picks.
  *
+ * TERRITORY (GATE_TERRITORY_ROUTING, owner 2026-10-30): each technician owns a ZIP
+ * list (territory_zips, services/territory.js). On, a pest, mosquito, rodent or
+ * termite line's home technician is the one who owns the visit's ZIP, and the line's
+ * own home (else gap) technician covers gaps; lawn keeps the map. It rides the
+ * map's own modes: shadow rows record it, live picks follow it. Off, or a ZIP with
+ * no territory technician: the map exactly as before.
+ *
  * Reads only, apart from the one shadow insert. No new eligibility rules: a
  * technician counts as assignable through technician-eligibility (employment
  * active + field dispatchable), absent through technician_absences, off through
@@ -40,6 +47,7 @@ const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligib
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 const { commitPromiseOf } = require('../../utils/trx-commit-promise');
+const territory = require('../territory');
 
 const SOURCES = Object.freeze(['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']);
 const LINES = CAPABILITY_CATEGORIES;
@@ -50,7 +58,40 @@ const lineMapMode = () => (typeof featureGates.serviceLineMapMode === 'function'
 // Live keeps the shadow rows: the read-out then shows each live pick next to what was saved.
 const shadowOn = () => ['shadow', 'live'].includes(lineMapMode());
 const lineMapLive = () => lineMapMode() === 'live';
+const territoryOn = () => (typeof featureGates.territoryRoutingLive === 'function' ? featureGates.territoryRoutingLive() : false);
 const sameId = (a, b) => a != null && b != null && String(a) === String(b);
+
+/** The place fields a picker's caller passes: { zip, lat, lng, customerId }. */
+const placeOf = (opts = {}) => ({
+  zip: opts.zip || null, lat: opts.lat ?? null, lng: opts.lng ?? null, customerId: opts.customerId || null,
+});
+
+/**
+ * The technician who owns the place's territory, or null: gate off, no place, a ZIP
+ * with no territory technician, or an unreadable territory (logged; the map alone
+ * decides then).
+ */
+async function territoryTechnicianOf(db, place) {
+  if (!territoryOn() || !place) return null;
+  try {
+    return await territory.territoryTechnicianFor(db, place);
+  } catch (err) {
+    logger.warn(`[line-technician] territory read failed (the line map alone decides): ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * A line's { homeId, gapId } with the territory laid over it. On a territory line the
+ * territory technician is the home, and the gap is the line's own home, else its gap,
+ * when that is someone else. Any other line, or no territory technician: `entry`
+ * unchanged (null = the line has no technician set).
+ */
+function withTerritory(entry, line, territoryTechId) {
+  if (!territoryTechId || !territory.TERRITORY_LINES.includes(line)) return entry;
+  const cover = entry ? [entry.homeId, entry.gapId].find((id) => id && !sameId(id, territoryTechId)) : null;
+  return { homeId: territoryTechId, gapId: cover || null };
+}
 
 const clean = (value, max = 200) => {
   if (value === null || value === undefined) return null;
@@ -119,6 +160,17 @@ async function loadFitContext(db, { ids, line, day }) {
 }
 
 /**
+ * One line's { homeId, gapId } as the shadow resolver reads it (its own single-row read),
+ * with the place's territory laid over it; null when nobody is set.
+ */
+async function shadowLineEntry(db, line, place) {
+  const row = await db('service_line_techs').where({ service_category: line }).first('home_technician_id', 'gap_technician_id');
+  const mapped = row && (row.home_technician_id || row.gap_technician_id)
+    ? { homeId: row.home_technician_id || null, gapId: row.gap_technician_id || null } : null;
+  return withTerritory(mapped, line, await territoryTechnicianOf(db, place));
+}
+
+/**
  * What the map would pick: { line, lineFrom, homeId, gapId, technicianId, reason }.
  *   reason: 'home' (the home tech takes it) | gap_off_day | gap_absent |
  *           gap_not_assignable | gap_capability_off (the gap tech takes it; the
@@ -127,15 +179,14 @@ async function loadFitContext(db, { ids, line, day }) {
  * `date` is the visit's YYYY-MM-DD ET calendar date; without one the absence and
  * off-day tests are skipped. Reads only; throws only on an unreadable database.
  */
-async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, date = null } = {}) {
+async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, date = null, place = null } = {}) {
   const db = conn || defaultDb;
   const { line, lineFrom } = await serviceLineFor(db, { serviceId, serviceKey, serviceType });
   const base = { line, lineFrom, homeId: null, gapId: null, technicianId: null, reason: 'no_map' };
   if (!line || !LINES.includes(line)) return base;
-  const map = await db('service_line_techs').where({ service_category: line }).first('home_technician_id', 'gap_technician_id');
-  const homeId = (map && map.home_technician_id) || null;
-  const gapId = (map && map.gap_technician_id) || null;
-  if (!homeId && !gapId) return base;
+  const entry = await shadowLineEntry(db, line, place);
+  if (!entry) return base;
+  const { homeId, gapId } = entry;
 
   const day = date ? dateOnlyString(date) : null;
   const ctx = await loadFitContext(db, { ids: [homeId, gapId].filter(Boolean), line, day });
@@ -219,10 +270,15 @@ async function loadLineMap(db, lines) {
  * has none for: the owner's "i cover all gaps the tech cant fullfill" (2026-10-25).
  * Reads only; throws only on an unreadable database.
  */
-async function lineOfferRanking(conn, { lines = [] } = {}) {
+async function lineOfferRanking(conn, { lines = [], place = null } = {}) {
   if (!lineMapLive()) return null;
   const db = conn || defaultDb;
   const map = await loadLineMap(db, lines);
+  const territoryTechId = await territoryTechnicianOf(db, place);
+  for (const line of new Set((lines || []).filter((value) => LINES.includes(value)))) {
+    const entry = withTerritory(map.get(line) || null, line, territoryTechId);
+    if (entry) map.set(line, entry);
+  }
   if (!map.size) return null;
   const ids = [...new Set([...map.values()].flatMap(({ homeId, gapId }) => [homeId, gapId]).filter(Boolean))];
   const capRows = await db('technician_capabilities').whereIn('technician_id', ids).whereIn('service_category', [...map.keys()])
@@ -269,7 +325,8 @@ async function pickLineTechnician(conn, opts = {}) {
   const identity = { serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType };
   if (await isAssessmentIdentity(db, identity)) return { mapped: false, line: null, technicianId: null, reason: 'assessment' };
   const { line } = await serviceLineFor(db, identity);
-  const entry = line ? (await loadLineMap(db, [line])).get(line) : null;
+  const mapEntry = line ? (await loadLineMap(db, [line])).get(line) || null : null;
+  const entry = line ? withTerritory(mapEntry, line, await territoryTechnicianOf(db, placeOf(opts))) : null;
   if (!entry) return { mapped: false, line, technicianId: null, reason: 'no_map' };
 
   const day = opts.date ? dateOnlyString(opts.date) : null;
@@ -376,6 +433,7 @@ async function writeShadowRow(row) {
   try {
     pick = await resolveLineTechnician(db, {
       serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, date,
+      place: row.customerId ? { customerId: row.customerId } : null,
     });
   } catch (err) {
     logger.warn(`[line-technician] shadow resolve failed: ${err.message}`);
@@ -459,5 +517,5 @@ module.exports = {
   lineOfferRanking,
   pickLineTechnician,
   liveServiceLine,
-  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity },
+  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity, withTerritory },
 };

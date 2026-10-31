@@ -55,8 +55,10 @@ describe('ownLineTechnicianForPromotedUnit', () => {
     lineTechnician.pickLineTechnician.mockResolvedValue({ mapped: true, line: 'lawn', technicianId: 'tech-lawn', reason: 'home' });
     await expect(ownLineTechnicianForPromotedUnit(database, args())).resolves.toEqual({ technicianId: 'tech-lawn' });
     expect(database.transaction).toHaveBeenCalledTimes(1);
+    // The visit's own service ZIP and customer ride along for GATE_TERRITORY_ROUTING.
     expect(lineTechnician.pickLineTechnician).toHaveBeenCalledWith(savepoint, {
       serviceId: 'svc-lawn', serviceKey: 'lawn_care_monthly', serviceType: 'Lawn Care', date: '2027-05-20',
+      zip: null, customerId: null,
     });
   });
 

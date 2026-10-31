@@ -67,7 +67,7 @@ async function resolveOfficeAutoTechnician({
     if (lineMapLive()) {
       const line = await pickLineTechnician(conn, {
         serviceId, serviceKey, serviceType, date: day, windowStart, windowEnd, durationMinutes,
-        excludeCustomerId: customerId, candidateIds: techs.map((t) => t.id),
+        customerId, lat, lng, excludeCustomerId: customerId, candidateIds: techs.map((t) => t.id),
         checkFree: require('./pick-technician').pickTechnicianActive(),
       });
       if (line.mapped) return line.technicianId ? assigned(line.technicianId, line.reason === 'home' ? 'line_home' : 'line_gap') : unassigned('line_none');

@@ -20560,6 +20560,7 @@ const CallRecordingProcessor = {
                       serviceKey: existing.service_key_snapshot || null,
                       serviceType: existing.service_type || serviceType,
                       date: callBookingDateOnly(existing.scheduled_date),
+                      customerId: existing.customer_id || null,
                     });
                     if (reuseLineTech) {
                       reuseCandidateTechId = reuseLineTech.id;
@@ -21099,6 +21100,7 @@ const CallRecordingProcessor = {
                   serviceKey: callBookingCatalogRow?.service_key || null,
                   serviceType,
                   date: scheduledDate,
+                  customerId,
                 });
                 if (bookingLineTech) {
                   bookingTechnicianId = bookingLineTech.id;

@@ -24,6 +24,8 @@ async function ownLineTechnicianForPromotedUnit(database, { row, unit, unitDate,
       serviceKey: unit.catalogServiceKey || null,
       serviceType: row.service_type,
       date: unitDate,
+      zip: row.service_address_zip || null,
+      customerId: row.customer_id || null,
     }));
     if (!pick.mapped) return null;
     const reservedTech = reservedStart.technician_id;
