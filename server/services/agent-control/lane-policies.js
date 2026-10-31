@@ -125,7 +125,6 @@ const LANE_RUNTIME = {
   // offline (Codex r16): one provider with no cross-provider answer, retried by the background call pipeline.
   transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
-  call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', workflow_id: 'call-self-audit', ...LONG_BATCH },
   call_incidents: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', workflow_id: 'call-incidents-adjudicate', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
@@ -232,6 +231,8 @@ const LANE_RUNTIME = {
   // runNarrative (writer fallback) for lawn_diag_writer, via ledgerCall — while each lane's primary is a raw
   // Gemini / OpenAI fetch outside the adapters. Marking them 'call' would read the unrecorded primary traffic as a
   // silent lane.
+  // 2026-10-29: runPerception's OpenAI backup (on a Gemini miss) runs through dispatch() and records under this
+  // lane; the Gemini primary is still the raw fetch, so the lane stays unrecordable.
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
@@ -258,8 +259,6 @@ const LANE_RUNTIME = {
   // M2 (Codex r20): persists the brief + an unpriced, disabled estimate scaffold; the operator prices, enables and sends.
   commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   churn_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  signal_detector: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', ...LONG_BATCH },
-  retention_drafts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
 
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
@@ -303,7 +302,7 @@ const LANE_RUNTIME = {
   invoice_pdf: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
 
   // ── Content & SEO ──
-  // M3 (Codex r19): a scheduled draft can ride the 'publishing' claim through pages-poll auto-merge after the preview + Codex gates.
+  // M3 (Codex r19): a scheduled draft whose 'publishing' claim a crash strands can still auto-merge through pages-poll after the preview + Codex gates (normally it waits for an admin's approval).
   blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   // draft_for_human + M2 (Codex r21): optimizeExistingPost only stores optimization_suggestions; the operator applies them to the draft by hand.
   blog_optimize: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },

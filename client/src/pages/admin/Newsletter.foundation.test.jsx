@@ -2,54 +2,72 @@
 import '@testing-library/jest-dom/vitest';
 import { StrictMode } from 'react';
 import { act, render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import NewsletterPage from './NewsletterPage';
-import { ComposeView } from './NewsletterTabs';
 vi.mock('./EmailAutomationsPanelV2', () => ({default:()=> <div>Automation companion</div>}));
 const response = body => ({ok:true,json:async()=>body});
 function fixture(url, options={}) {
  const route = String(url).split('?')[0];
  if(route.endsWith('/auth/me'))return {email:'operator@example.invalid'};
  if(route.endsWith('/subscribers'))return {subscribers:[],counts:{active:3},total:3};
- if(route.endsWith('/tags'))return {tags:[]};
- if(route.endsWith('/quizzes'))return {quizzes:[]};
- if(route.endsWith('/latest-autopilot'))return {send:null};
- if(route.endsWith('/segment-preview'))return {count:3};
- if(route.endsWith('/calendar'))return {currentWeek:'2035-01-01',calendar:[{id:'plan-1',weekOf:'2035-01-01',topic:'Synthetic topic',homeownerMinuteTopic:'Synthetic tip',status:'planned',eventIds:[]}]};
- if(route.endsWith('/sends'))return options.method==='POST'?{send:{id:'draft-1'}}:{sends:[],counts:{sent:0}};
- if(route.endsWith('/validate'))return {errors:[],warnings:[]};
+ if(route.endsWith('/sends'))return {sends:[],counts:{sent:0}};
  return {};
 }
 beforeEach(()=>{localStorage.setItem('waves_admin_token','synthetic-token');vi.stubGlobal('fetch',vi.fn(async(url,options)=>response(fixture(url,options))));Element.prototype.scrollIntoView=vi.fn();});
 afterEach(()=>{cleanup();vi.unstubAllGlobals();localStorage.clear();});
-function Location(){return <output data-testid="location">{useLocation().search}</output>;}
-it('preserves unrelated URL filters and clears a draft deep link when changing workspace',async()=>{
- render(<MemoryRouter initialEntries={['/admin/newsletter?tab=calendar&draftId=draft-1&keep=yes']}><NewsletterPage/><Location/></MemoryRouter>);
- await screen.findByDisplayValue('Synthetic topic');
- fireEvent.click(within(screen.getByRole('navigation',{name:'Newsletter section'})).getByRole('button',{name:'Compose',exact:true}));
- expect(screen.getByTestId('location')).toHaveTextContent('keep=yes');expect(screen.getByTestId('location')).toHaveTextContent('tab=compose');expect(screen.getByTestId('location')).not.toHaveTextContent('draftId');
+// Manual newsletter tools were removed (owner 2026-10-30): the weekly issue
+// is drafted by the Monday autopilot and sent through the proof flow.
+const REMOVED_ROUTES=[/\/calendar/,/\/tags$/,/\/quizzes$/,/\/latest-autopilot/,/\/segment-preview$/,/\/draft-ai$/,/\/digest-plan$/,/\/preview$/,/\/validate$/,/\/approved-ids$/,/\/test$/,/\/schedule$/,/\/send$/];
+const requestedPaths=()=>fetch.mock.calls.map(([url,options])=>({path:String(url).split('?')[0],method:options?.method||'GET'}));
+const removedRequests=()=>requestedPaths().filter(({path,method})=>REMOVED_ROUTES.some(re=>re.test(path))||(method==='POST'&&path.endsWith('/sends'))||(method==='PATCH'&&/\/sends\/[^/]+$/.test(path)));
+const draftRow={id:'draft-1',subject:'Synthetic draft issue',status:'draft',recipient_count:0,delivered_count:0};
+const correctableRow={id:'sent-1',subject:'Synthetic sent issue',status:'sent',correctable:true,recipient_count:10,delivered_count:8,sent_at:'2035-01-01T15:00:00.000Z'};
+const withSends=sends=>{const original=fetch.getMockImplementation();fetch.mockImplementation(async(url,options)=>String(url).split('?')[0].endsWith('/sends')?response({sends,counts:{sent:1,draft:1}}):original(url,options));};
+it.each([
+ '?tab=compose',
+ '?tab=compose&draftId=draft-1',
+ '?tab=compose&autopilotType=reengagement&draftId=draft-1',
+ '?tab=calendar',
+])('opens History for the retired link %s and calls no removed route',async(query)=>{
+ withSends([draftRow]);
+ render(<MemoryRouter initialEntries={[`/admin/newsletter${query}`]}><NewsletterPage/></MemoryRouter>);
+ expect(await screen.findByText('Synthetic draft issue')).toBeInTheDocument();
+ expect(screen.getByText('Past sends')).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:/^History/})).toBeInTheDocument();
+ expect(removedRequests()).toEqual([]);
 });
-it('saves calendar edits to the existing row with both editor values',async()=>{
- render(<MemoryRouter initialEntries={['/admin/newsletter?tab=calendar']}><NewsletterPage/></MemoryRouter>);
- const input=await screen.findByDisplayValue('Synthetic topic');fireEvent.change(input,{target:{value:'Edited topic'}});fireEvent.blur(input);
- await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/newsletter/calendar/plan-1',expect.objectContaining({method:'PATCH',body:JSON.stringify({topic:'Edited topic',homeownerMinuteTopic:'Synthetic tip'})})));
+it('renders no Compose, Calendar, New Campaign, Draft, Edit or Correct copy control',async()=>{
+ withSends([draftRow,correctableRow]);
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation(async(url,options)=>String(url).includes('/events')?response({events:[{id:'event-1',title:'Synthetic event',startAt:'2035-01-02T15:00:00.000Z',adminStatus:'pending'}],counts:{pending:1}}):original(url,options));
+ const banned=/compose|calendar|new campaign|draft newsletter|^edit$|correct copy|open composer/i;
+ const view=render(<MemoryRouter initialEntries={['/admin/newsletter']}><NewsletterPage/></MemoryRouter>);
+ const bannedButtons=()=>screen.queryAllByRole('button').filter(b=>banned.test(`${b.textContent} ${b.getAttribute('aria-label')||''} ${b.getAttribute('title')||''}`.trim()));
+ await screen.findByText('Synthetic event');
+ expect(bannedButtons()).toEqual([]);
+ const nav=within(screen.getByRole('navigation',{name:'Newsletter section'}));
+ expect(nav.getAllByRole('button').map(b=>b.textContent.replace(/\s*\(\d+\)$/,''))).toEqual(['Dashboard','History','Automation','Audience']);
+ fireEvent.click(nav.getByRole('button',{name:/^History/}));
+ await screen.findByText('Synthetic draft issue');
+ expect(bannedButtons()).toEqual([]);
+ expect(screen.getByRole('button',{name:'Delete'})).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'Resume'})).toBeInTheDocument();
+ fireEvent.click(nav.getByRole('button',{name:'Automation'}));
+ fireEvent.click(await screen.findByRole('button',{name:'Events'}));
+ await screen.findByText('Synthetic event');
+ expect(bannedButtons()).toEqual([]);
+ expect(view.container).not.toHaveTextContent(/Open composer|Compose manually/i);
+ expect(removedRequests()).toEqual([]);
 });
-it('requires validation and typed SEND before the campaign send request',async()=>{
- render(<MemoryRouter><ComposeView/></MemoryRouter>);
- const subject=await screen.findByPlaceholderText('e.g. Florida spring pest alert — what to watch for');
- fireEvent.change(subject,{target:{value:'Synthetic subject'}});
- const body=screen.getByPlaceholderText('<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>');fireEvent.change(body,{target:{value:'<p>Synthetic body</p>'}});
- fireEvent.click(screen.getByRole('button',{name:"Send To Audience"}));
- const dialog=await screen.findByRole('dialog');const send=within(dialog).getByRole('button',{name:'Send to all'});expect(send).toBeDisabled();
- expect(fetch.mock.calls.some(([url])=>String(url).endsWith('/send'))).toBe(false);
- fireEvent.change(within(dialog).getByPlaceholderText('SEND'),{target:{value:'SEND'}});expect(send).toBeEnabled();fireEvent.click(send);
- await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/newsletter/sends/draft-1/send',expect.objectContaining({method:'POST'})));
+it('tells the operator the weekly issue comes from the autopilot when no campaign exists',async()=>{
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage/></MemoryRouter>);
+ expect(await screen.findByText('No campaigns yet. The weekly issue appears here after the Monday autopilot drafts it.')).toBeInTheDocument();
 });
 it('clears stale summary badges when an automatic summary refresh fails',async()=>{
  render(<MemoryRouter><NewsletterPage/></MemoryRouter>);
  expect(await screen.findByRole('button',{name:'Audience (3)'})).toBeInTheDocument();
- expect(screen.getByRole('button',{name:'Schedule (0)'})).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'History (0)'})).toBeInTheDocument();
  const priorImplementation=fetch.getMockImplementation();
  fetch.mockImplementation((url,options)=>{
   const route=String(url).split('?')[0];
@@ -58,9 +76,9 @@ it('clears stale summary badges when an automatic summary refresh fails',async()
  });
  fireEvent(window,new Event('online'));
  await waitFor(()=>expect(screen.getByRole('button',{name:'Audience'})).toBeInTheDocument());
- expect(screen.getByRole('button',{name:'Schedule'})).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'History'})).toBeInTheDocument();
  expect(screen.queryByRole('button',{name:'Audience (3)'})).not.toBeInTheDocument();
- expect(screen.queryByRole('button',{name:'Schedule (0)'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'History (0)'})).not.toBeInTheDocument();
 });
 it('drops vanished inbox selections while keeping visible rows selected for bulk actions',async()=>{
  let events=[
@@ -133,10 +151,52 @@ it.each(['bulk', 'merge'])('recovers inbox polling after a failed %s action canc
  fireEvent.change(screen.getByRole('combobox',{name:'Freshness'}),{target:{value:'fresh'}});
  await screen.findByText('Loading events...');
  fireEvent.click(action==='merge'?screen.getByRole('button',{name:'Merge 2'}):screen.getByRole('button',{name:'Approve',exact:true}));
- if(action==='bulk')await screen.findByText('Bulk approve failed: Synthetic action failure');
+ if(action==='bulk')await screen.findByText('0 of 2 events updated. Bulk approve failed: Synthetic action failure. 2 still selected.');
  else await waitFor(()=>expect(alert).toHaveBeenCalledWith('Merge failed: Synthetic action failure'));
  expect(cancelledSignal.aborted).toBe(true);
  expect(screen.queryByText('Loading events...')).not.toBeInTheDocument();
  fireEvent(window,new Event('online'));
  expect(await screen.findByText('Refreshed event')).toBeInTheDocument();
 });
+
+// Audit 2026-10-30 NEWS-04: the route takes 50 ids per request; the inbox
+// once reported a 100-event selection as updated after only 50 were.
+it('sends a large selection in batches, reports the server count and keeps unprocessed events selected', async () => {
+ const events=Array.from({length:60},(_,i)=>({id:`event-${i}`,title:`Batch event ${i}`,adminStatus:'pending'}));
+ const batches=[];
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation((url,options)=>{
+  if(String(url).includes('/events/inbox'))return Promise.resolve(response({events,counts:{pending:60}}));
+  if(String(url).endsWith('/events/bulk-action')){
+   const {ids}=JSON.parse(options.body);batches.push(ids);
+   const updatedIds=ids.filter(id=>id!=='event-59');
+   return Promise.resolve(response({success:true,updated:updatedIds.length,updatedIds}));
+  }
+  return original(url,options);
+ });
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ await screen.findByText('Batch event 0');
+ fireEvent.click(within(screen.getAllByRole('columnheader')[0]).getByRole('checkbox'));
+ fireEvent.click(within(screen.getByText('60 selected').parentElement).getByRole('button',{name:'Approve',exact:true}));
+ expect(await screen.findByText('59 of 60 events updated. 1 could not be updated and is still selected.')).toBeInTheDocument();
+ expect(batches.map(ids=>ids.length)).toEqual([50,10]);
+ expect(screen.getByText('1 selected')).toBeInTheDocument();
+ expect(within(screen.getByText('Batch event 59').closest('tr')).getByRole('checkbox')).toBeChecked();
+}, 20_000); // 60 rendered rows: generous under a loaded CI runner
+
+it('refuses a merge larger than one request before the confirm', async () => {
+ const events=Array.from({length:52},(_,i)=>({id:`dup-${i}`,title:`Duplicate ${i}`,adminStatus:'pending'}));
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation((url,options)=>{
+  if(String(url).includes('/events/inbox'))return Promise.resolve(response({events,counts:{pending:52}}));
+  return original(url,options);
+ });
+ const confirmSpy=vi.fn(()=>true);vi.stubGlobal('confirm',confirmSpy);
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ await screen.findByText('Duplicate 0');
+ fireEvent.click(within(screen.getAllByRole('columnheader')[0]).getByRole('checkbox'));
+ fireEvent.click(screen.getByRole('button',{name:'Merge 52'}));
+ expect(await screen.findByText('Merge up to 51 events at a time. 52 are selected.')).toBeInTheDocument();
+ expect(confirmSpy).not.toHaveBeenCalled();
+ expect(fetch.mock.calls.some(([url])=>String(url).endsWith('/events/merge'))).toBe(false);
+}, 20_000); // 52 rendered rows: generous under a loaded CI runner

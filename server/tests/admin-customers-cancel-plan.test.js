@@ -2361,6 +2361,46 @@ describe('POST /:id/cancel-plan', () => {
       expect(arg.approvedScopedPricing).toMatch(/^tier=.*\|monthly=.*\|rates=.*\|perapp=/);
     }));
 
+    test('the approved pricing string equals the processor fingerprint of the same plan, with and without template rows; a template edit trips preview_changed', () => withServer(async (baseUrl) => {
+      const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+      const { scopedPricingFingerprint } = jest.requireActual('../services/cancellation-processor');
+      const base = await buildCancellationImpact();
+      mockState.annual_prepay_terms = [];
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], remainingRates: [], tierBefore: 'Silver', tierAfter: 'Bronze', scalarAfter: null });
+      const templateRows = [
+        { rootId: 'root-b', family: 'pest_control', field: 'primary_line_price', source: 'own', before: 90, after: 100 },
+        { rootId: 'root-a', family: 'pest_control', field: 'estimated_price', source: 'override', before: 100, after: 111.11 },
+      ];
+      const perAppRows = [{ id: 'v2', family: 'pest_control', before: 90, after: 100 }, { id: 'v1', family: 'pest_control', before: 100, after: 111.11 }];
+      const scopedImpact = (rows) => ({
+        ...base, wholeAccount: false, tierBefore: 'Silver', tierAfter: 'Bronze', accountMonthlyAfter: null, billingMode: 'per_application',
+        remaining: [{ key: 'pest_control', label: 'Pest Control', monthlyBefore: null, monthlyAfter: null }],
+        perAppChanges: perAppRows.map((r) => ({ ...r, label: 'Pest Control' })),
+        templateChanges: rows.map((r) => ({ ...r, label: 'Pest Control' })),
+      });
+      for (const rows of [templateRows, []]) {
+        buildCancellationImpact.mockResolvedValue(scopedImpact(rows));
+        mockProcess.mockClear().mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
+        const res = await postCancel(baseUrl, { families: ['lawn_care'] });
+        expect(res.status).toBe(200);
+        const approved = mockProcess.mock.calls[0][0].approvedScopedPricing;
+        const processorString = scopedPricingFingerprint({
+          tierAfter: 'Bronze', scalarAfter: null, remainingRates: [{ family: 'pest_control', before: null, after: null }],
+          perAppRows, tierBefore: 'Silver', billingMode: 'per_application', templateRows: rows,
+        });
+        expect(approved).toBe(processorString);
+        expect(approved).toMatch(rows.length ? /\|templates=root-a:estimated_price:100:111.11,root-b:primary_line_price:90:100$/ : /\|templates=$/);
+      }
+      // An edit to the template between preview and commit changes the facts.
+      buildCancellationImpact.mockResolvedValue(scopedImpact(templateRows));
+      const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] })).json();
+      buildCancellationImpact.mockResolvedValue(scopedImpact([{ ...templateRows[1], before: 120, after: 133.33 }, templateRows[0]]));
+      const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], previewFingerprint: preview.previewFingerprint });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('preview_changed');
+      buildCancellationImpact.mockResolvedValue(base);
+    }));
+
   test('the prepaid refund computes in integer cents — float drift never shaves a cent off an actionable task', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms = [{
         id: 'term-c', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
@@ -2905,6 +2945,23 @@ describe('POST /:id/cancel-plan', () => {
     // The only office notification is the review bell — never the refund task.
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('service');
+  }));
+
+  test('a visit stuck on site from an EARLIER day still bells the office, but the customer hears the cancel is done', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'], staleInProgressVisitIds: ['s9'] });
+    const body = await (await postCancel(baseUrl)).json();
+    // The operator still sees the partial run and the office is belled.
+    expect(body).toEqual(expect.objectContaining({ processed: false, errors: ['in_progress_visit:s9'] }));
+    expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // Only the customer copy changes: completed, not "a team member will confirm".
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+  }));
+
+  test('a stale stuck visit next to a LIVE in-progress visit keeps the by-hand confirmation', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9', 'in_progress_visit:s10'], staleInProgressVisitIds: ['s9'] });
+    await postCancel(baseUrl);
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
   }));
 
   test('a partial processor run reports processed:false, keeps the errors, and bells the office once', () => withServer(async (baseUrl) => {

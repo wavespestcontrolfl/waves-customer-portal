@@ -26,6 +26,14 @@ const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
+// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// this domain" as a blocked bounce. That is a bad address, not a sender block:
+// no provider retry, no "the recipient did not bounce" handling, anywhere in
+// this webhook. Gate off = providerRetry.isProviderBlockedEvent exactly.
+function isProviderBlock(ev) {
+  return providerRetry.isProviderBlockedEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev);
+}
+
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
@@ -322,9 +330,21 @@ async function handleEvent(ev) {
   // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
   // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
   const alertUntrackedHardBounce = ({ rescue = true } = {}) => {
-    if (!bounceRecovery.isHardBounceEvent(ev)) return;
+    const deadDomain = bounceRecovery.isNoMailServerEvent(ev);
+    if (!deadDomain && !bounceRecovery.isHardBounceEvent(ev)) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+    if (deadDomain) {
+      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce for a domain with no mail
+      // server goes to people only, on every send path: the alert above and
+      // the recording re-check card. No rescue: it can apply a repair on its
+      // own, and a call-captured address is never auto-corrected (AGENTS.md
+      // call-pipeline rule). The re-check claims one open card per call, so
+      // a redelivery or a sibling send's bounce adds no second card.
+      require('../services/email-bounce-reverify').reverifyBouncedEmailFromCall({ bouncedEmail: email })
+        .catch((err) => logger.error(`[sendgrid-webhook] bounce re-check failed: ${err.message}`));
+      return;
+    }
     // Untracked bounces have no email_messages row for domain recovery, but
     // the transcript rescue only needs the address — same fire-and-forget
     // contract; the rescue ledger's UNIQUE(bounced_email) absorbs replays.
@@ -409,9 +429,16 @@ async function handleEvent(ev) {
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew && attemptMatched) {
-      if (providerRetry.isProviderBlockedEvent(ev)) {
+      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
+      // server is a bad address, not a sender block — no retry rail for it.
+      if (isProviderBlock(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
+      } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
+        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people
+        // (the alert and the recording re-check card), never to
+        // attemptRecovery, which can repair a domain and resend on its own.
+        alertUntrackedHardBounce();
       } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
         // A rate review letter is reconciled on its notice above, with its own alert that a
         // delivered re-send closes: the generic recovery (and its "needs a correct address"
@@ -436,11 +463,17 @@ async function handleEvent(ev) {
     return;
   }
   if (suppressionOnlyEmailMessage) {
-    await processWebhookEvent(ev, messageId, email, async (trx) => {
+    const processed = await processWebhookEvent(ev, messageId, email, async (trx) => {
       const snapshotGroup = await groupKeyForEmailMessage(suppressionOnlyEmailMessage, trx);
       const groupKey = staleEmailSuppressionGroupKey(ev, snapshotGroup);
       await recordEmailSuppressionForEvent(ev, suppressionOnlyEmailMessage, groupKey, eventOccurredAt(ev), trx);
     });
+    // The event is for a CC'd copy (the row's recipient is the main address): a hard bounce there is told to a person.
+    // Once per event (a redelivery is not processed again); fire-and-forget, like the recovery calls above.
+    if (processed && bounceRecovery.isHardBounceEvent(ev)) {
+      bounceRecovery.alertBouncedCcCopy(suppressionOnlyEmailMessage, email)
+        .catch((err) => logger.error(`[sendgrid-webhook] CC bounce alert failed for ${messageId}: ${err.message}`));
+    }
     return;
   }
   // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to
@@ -532,7 +565,7 @@ async function processWebhookEvent(ev, messageId, email, handler) {
 function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   const event = String(ev?.event || '').toLowerCase();
   const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
-  if (providerRetry.isProviderBlockedEvent(ev)) {
+  if (isProviderBlock(ev)) {
     return {
       delivery: {
         // SendGrid sometimes reports reputation/content blocks as
@@ -665,7 +698,7 @@ function eventOccurredAt(ev, fallback = new Date()) {
 }
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
-  if (providerRetry.isProviderBlockedEvent(ev)) {
+  if (isProviderBlock(ev)) {
     return {
       // Provider/IP/content rejection, not a bad recipient address. `failed`
       // remains retryable when the owning workflow runs again and, unlike
@@ -855,7 +888,7 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
 async function reconcileSummaryForEmailEvent(ev, message, updates, client) {
   if (!updates) return;
   const Summary = require('../services/visit-completion-summary');
-  const providerBlock = providerRetry.isProviderBlockedEvent(ev);
+  const providerBlock = isProviderBlock(ev);
   const optOutDrop = ev.event === 'dropped' && Summary.summaryEmailOptOutDrop(ev.reason || ev.response);
   const terminalBounce = ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerBlock && !optOutDrop;
   if (terminalBounce || (providerBlock && updates.provider_retry_exhausted_at)) {
@@ -911,7 +944,7 @@ async function handleEmailMessageEvent(ev, message, client = db) {
     // A block that lands after the customer's email was corrected hits a row the correction stamped
     // (never scheduled): settle it through the same path the correction uses, so its reservation
     // reopens and a previsit claim is freed instead of the row reading as accepted.
-    if (updates && providerRetry.isProviderBlockedEvent(ev)) {
+    if (updates && isProviderBlock(ev)) {
       await providerRetry.settleLateBlockOfReplacedRecipient(message, client, now);
     }
     await reconcileSummaryForEmailEvent(ev, message, updates, client);
@@ -1064,7 +1097,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
     case 'blocked':
     case 'dropped': {
       await client('automation_step_sends').where({ id: sendRow.id }).update({
-        status: providerRetry.isProviderBlockedEvent(ev) ? 'failed' : 'bounced',
+        status: isProviderBlock(ev) ? 'failed' : 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
       });

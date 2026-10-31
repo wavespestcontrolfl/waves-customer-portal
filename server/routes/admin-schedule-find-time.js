@@ -25,6 +25,8 @@
  *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
+ *     quickMove?,             // Quick Move's picker: with GATE_PICKER_ROAD_CHECK on, the
+ *                             // route check Edit appointment uses (arrivalWindows)
  *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX or GATE_BOARD_OPEN_TIMES on: the open-times
  *                             // list (the box; the Dispatch grid's lit hours) instead (up to 28 days,
  *                             // every technician's hours, no picked verdict, no best-times rows);
@@ -47,10 +49,12 @@ const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
+const { createPickerBudget } = require('../services/scheduling/hint-road-times');
+const { trackRoadLimit, roadLimitOf } = require('../services/scheduling/picker-road-limit-notice');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
-const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+const { arrivalWindowRoutingEnabled, pickerRoadCheckLive } = require('../services/scheduling/arrival-route');
 const { bookingPropertyStamp } = require('../services/customer-properties');
 const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 
@@ -66,6 +70,14 @@ const MAX_FIND_TIME_DAYS = 90;
 // currently service, with technicianId forced to themselves so the ranked
 // search never walks another technician's route (ADMIN-BUG-R07).
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Aborted when the client goes away before the answer is sent (the picker
+// closed, or a new search replaced this one): the Google lookups check it.
+function closedSignal(res) {
+  const controller = new AbortController();
+  res.on?.('close', () => { if (!res.writableEnded) controller.abort(); });
+  return controller.signal;
+}
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -235,7 +247,9 @@ router.get('/ui', (req, res) => {
   res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
 });
 
-router.post('/', async (req, res) => {
+// GATE_PICKER_ROAD_LIMIT_NOTICE: scopes this request so a refused Google
+// purchase (a spending limit) is noted for the answer's `road_limit`.
+router.post('/', trackRoadLimit, async (req, res) => {
   try {
     const {
       customerId, address, lat, lng,
@@ -343,7 +357,23 @@ router.post('/', async (req, res) => {
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 
-    const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
+    // Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK,
+    // owner 2026-10-26): Quick Move joins Edit appointment's route check (it
+    // used the gap check, which offers no start after 4 PM), and the check
+    // drives this week on Google road times (find-time.js
+    // findArrivalWindowSlots). Off = byte-identical.
+    // Paid Google road times are staff-only (Codex #6881 security): a
+    // technician's own picker keeps the model, so the tech portal can never
+    // spend the shared allowance.
+    const paidRoads = !isTech;
+    const pickerRoadCheck = hint && paidRoads && pickerRoadCheckLive();
+    // One Google budget for everything this request asks (the list's route
+    // check and the picked-hour verdict), counted against the staff user who
+    // asked (picker-road-spend.js daily / monthly ceilings). A picker that
+    // closes or re-searches aborts its request: nothing more is bought.
+    const pickerBudget = pickerRoadCheck ? createPickerBudget({ signal: closedSignal(res) }) : null;
+    const routeCheck = arrivalWindows === true || (pickerRoadCheck && req.body?.quickMove === true);
+    const useArrivalWindows = hint && serviceId && routeCheck && arrivalWindowRoutingEnabled();
     // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
     // 2026-10-26): its open-times box runs the same route check on a new stop
     // at the searched address, as customer booking does (find-time.js
@@ -405,8 +435,10 @@ router.post('/', async (req, res) => {
       // unit: the staff screens this hint feeds move a shared stop as a
       // whole, unless the operator chose to separate this service (alone).
       // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
+      ...(hint && serviceId && routeCheck ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
       ...(newVisitRoute ? { arrivalWindow: { prospective: { lat: target.lat, lng: target.lng, estimated_duration_minutes: spanMin } } } : {}),
+      ...(pickerRoadCheck && (useArrivalWindows || newVisitRoute)
+        ? { pickerRoadCheck: true, roadSpender: req.technicianId, pickerBudget } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -435,7 +467,8 @@ router.post('/', async (req, res) => {
       ? await scorePickedHour({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
-        withReason: plan.summary, moveAlone,
+        withReason: plan.summary, moveAlone, paidRoads,
+        ...(pickerBudget ? { roadSpender: req.technicianId, pickerBudget } : {}),
       })
       : undefined;
 
@@ -487,8 +520,14 @@ router.post('/', async (req, res) => {
       // stop reaches around this service (rain-fit.js bookingRainPlan).
       serviceTypes: rainPlan.services,
       rainSpan: rainPlan.rainSpan,
+      // The chips' Google prices are staff-only and counted against the
+      // staff user who asked (Codex #6881 security).
+      paidRoads, roadSpender: req.technicianId,
     });
     const pickedOut = built.picked;
+    // GATE_PICKER_ROAD_LIMIT_NOTICE: the staff line for a stopped spending
+    // limit. Gate off (or nothing refused): no field.
+    const roadLimit = roadLimitOf(req);
 
     res.json({
       ...engineResult,
@@ -497,6 +536,7 @@ router.post('/', async (req, res) => {
       ...(pickedByTech ? { pickedByTech } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
       summary: built.summary,
+      ...(roadLimit ? { road_limit: roadLimit } : {}),
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });

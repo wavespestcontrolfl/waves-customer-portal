@@ -124,6 +124,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
+  // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
+  // technician to threads linked to a customer on their own route, like the SMS inbox.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/messenger\/(summary|threads|threads\/[^/]+)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/messenger\/threads\/[^/]+\/(read|reply)$/ },
   // The line a text to this number leaves from (the composer's server-chosen
   // sender); it returns one of the business's own lines, never customer data.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/sender$/ },
@@ -148,6 +152,9 @@ const TECHNICIAN_ALLOW_LIST = [
   // Documents, pay and growth.
   { bucket: 'documents', methods: ANY, pattern: /^\/api\/tech\/staff-documents(\/.*)?$/ },
   { bucket: 'pay-growth', methods: ANY, pattern: /^\/api\/tech\/pay-growth(\/.*)?$/ },
+  // A technician's own finalized pay stubs (GATE_TECH_PAY_STUBS, owner 2026-10-28; inside "pay and growth" of the
+  // 2026-10-02 ruling). The router scopes both reads to req.technicianId. Pay runs, W-4s and tax forms stay admin-only.
+  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },
 
   // Knowledge base: read, and ask. Never write, verify, or run paid jobs.
   { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/admin\/kb(\/[^/]+)?$/ },

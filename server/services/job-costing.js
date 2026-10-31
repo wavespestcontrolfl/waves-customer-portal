@@ -28,6 +28,26 @@
  *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
+ * GATE_TECH_COST_RATES (L11a) on, AND a cost card in effect for the visit's
+ * technician on its scheduled date (tech-cost-rates.js): labor_cost = the
+ * technician's labor cost per worked hour x (on-job minutes + drive minutes),
+ * and drive_cost = per-mile cost x drive miles + the vehicle's fixed cost per
+ * worked hour x (on-job minutes + drive minutes). Drive minutes and miles come
+ * from the visit's matched visit_gps_legs row when that table and row exist,
+ * else the measured per-stop defaults below. Gate off, or no card = the lines
+ * above, unchanged.
+ *
+ * With a card applied, job_costs also keeps the two minute figures the cost was charged for
+ * (charged_on_job_minutes, charged_drive_minutes; L11b), which the open time report adds up against a
+ * technician's paid day. NULL = no card applied. They are written only when those columns exist, and
+ * they change no cost figure.
+ *
+ * GATE_JOB_COST_STANDARD_MINUTES (owner ruling 2026-10-31) on: a completed lawn visit books 20 on-site
+ * minutes and a pest control visit 25 (JOB_COST_STANDARD), a measured span over 480 minutes books the
+ * visit's scheduled estimate, the drive to a stop is the Average Drive Time at the loaded labor rate, and
+ * revenue falls back to the visit's own annual-prepay share or linked invoice (never today's monthly
+ * rate under keepRecordedRevenue). Cost and margin figures only. Off = everything above, unchanged.
+ *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
  * service_records financials for the same scheduled_service_id.
  *
@@ -47,6 +67,36 @@ const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive(
 
 const DEFAULT_LABOR_RATE = 35; // fallback if company_financials empty
 const DEFAULT_DRIVE_COST_PER_STOP = 6;
+// GATE_TECH_COST_RATES: the drive a visit is charged when no matched GPS leg
+// exists for it. The 10-26 measurement: 11 miles and 24 minutes per stop.
+const DEFAULT_DRIVE_MINUTES_PER_STOP = 24;
+const DEFAULT_DRIVE_MILES_PER_STOP = 11;
+// The largest margin percent a decimal(5,2) column holds.
+const MARGIN_PCT_LIMIT = 999.99;
+
+// GATE_JOB_COST_STANDARD_MINUTES. Owner ruling 2026-10-31: measured check-in-to-report spans are inflated
+// by on-site conversation and by writing the report in the van, and one lawn visit closed weeks after
+// check-in carried 528 hours. So a lawn care visit is costed at 20 on-site minutes and a pest control
+// visit at 25, whatever the clock says. A service type that also names a specialty or one-off job has no
+// standard and keeps its measured time. A measured result over staleSpanMinutes is a stale span and
+// books the visit's scheduled estimate instead.
+const JOB_COST_STANDARD = Object.freeze({
+  rules: Object.freeze([
+    Object.freeze({ pattern: /lawn care/i, minutes: 20 }),
+    Object.freeze({ pattern: /pest control/i, minutes: 25 }),
+  ]),
+  excluded: /cockroach|roach|rodent|termite|mosquito|bed ?bug|flea|wasp|bee|wildlife|exclusion|inspection/i,
+  staleSpanMinutes: 480,
+  defaultDriveMinutes: 20,
+});
+
+// Visit statuses that do not take a share of the prepay (annual-prepay-renewals.js COVERAGE_EXCLUDED_STATUSES, line 218).
+const PREPAY_UNCOUNTED_VISIT_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'];
+// Invoice statuses that bill nothing (annual-prepay-invoice-statuses.js).
+const INVOICE_NO_REVENUE_STATUSES = ['void', 'voided', 'cancelled', 'canceled', 'refunded'];
+// A one-time setup, membership or onboarding fee is not the visit's service revenue. Real descriptions:
+// "WaveGuard Membership — one-time setup", "One-time setup fee", "setup fee — waived ...". Tax is never a line.
+const INVOICE_NON_SERVICE_LINE_RE = /set[- ]?up|onboarding|membership fee|enrollment fee|\btax\b/i;
 
 // Lazy so importing this module (e.g. from a migration) never opens the app's
 // db pool — the singleton is only resolved when a caller omits the handle.
@@ -132,6 +182,120 @@ async function getFinancials(db, onDate) {
   }
 }
 
+// GATE_TECH_COST_RATES, read at call time. Lazy and guarded so importing this
+// module (a migration backfill) never loads the gate map, and a suite that mocks
+// feature-gates without this reader reads "off".
+function techCostRatesOn() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.techCostRatesLive === 'function' && gates.techCostRatesLive() === true;
+  } catch {
+    return false;
+  }
+}
+
+// GATE_JOB_COST_STANDARD_MINUTES, read at call time with the same guard as techCostRatesOn.
+function jobCostStandardOn() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.jobCostStandardMinutesLive === 'function' && gates.jobCostStandardMinutesLive() === true;
+  } catch {
+    return false;
+  }
+}
+
+// The standard on-job minutes for a service type name, or null when none applies.
+function standardLaborMinutesFor(serviceType) {
+  const name = String(serviceType || '');
+  if (JOB_COST_STANDARD.excluded.test(name)) return null;
+  const rule = JOB_COST_STANDARD.rules.find((r) => r.pattern.test(name));
+  return rule ? rule.minutes : null;
+}
+
+// The Average Drive Time (pricing_config global_drive_time) in minutes, read at call time.
+function standardDriveMinutes() {
+  try {
+    const value = Number(require('./pricing-engine/constants').GLOBAL.DRIVE_TIME);
+    return Number.isFinite(value) && value >= 0 ? value : JOB_COST_STANDARD.defaultDriveMinutes;
+  } catch {
+    return JOB_COST_STANDARD.defaultDriveMinutes;
+  }
+}
+
+// visit_gps_legs is created by the trip-link change and may not exist yet. The
+// check is one information_schema read (safe inside a transaction, it never
+// errors on a missing table). "Exists" is cached for the life of the process;
+// "missing" is cached for a minute, so costing does not re-ask for every visit
+// and the first deploy after that migration starts using legs without a restart.
+const GPS_LEGS_MISSING_RECHECK_MS = 60 * 1000;
+let visitGpsLegsTableKnown = false;
+let visitGpsLegsMissingAt = 0;
+async function visitGpsLegsTableExists(db) {
+  if (visitGpsLegsTableKnown) return true;
+  if (visitGpsLegsMissingAt && Date.now() - visitGpsLegsMissingAt < GPS_LEGS_MISSING_RECHECK_MS) return false;
+  try {
+    visitGpsLegsTableKnown = !!(await db.schema.hasTable('visit_gps_legs'));
+  } catch {
+    visitGpsLegsTableKnown = false;
+  }
+  visitGpsLegsMissingAt = visitGpsLegsTableKnown ? 0 : Date.now();
+  return visitGpsLegsTableKnown;
+}
+
+// The two charged-minutes columns on job_costs (L11b). Read per call, like the service_records columns:
+// a database or a mock without them gets today's row object, keys and all.
+async function chargedMinuteColumns(db) {
+  try {
+    const info = await db('job_costs').columnInfo();
+    return {
+      onJob: !!(info && info.charged_on_job_minutes),
+      drive: !!(info && info.charged_drive_minutes),
+    };
+  } catch {
+    return { onJob: false, drive: false };
+  }
+}
+
+// The drive one visit is charged (GATE_TECH_COST_RATES). None for a visit
+// that is not completed (it has driven nowhere) or that does not own the
+// stop's drive (`ownsDriveCost`, the combined-closeout owner rule
+// drive_cost_per_stop follows). Else its matched GPS leg when there is one,
+// else the measured per-stop defaults; a matched leg with no miles (a trip
+// without a mileage log) takes the default miles, no minutes the default
+// minutes. A stop that served several physical visits (one parking spot,
+// shared_stop_count N) splits its drive N ways. The members of one grouped
+// visit share one leg (one leg_group_key): with no closeout marker
+// (`marked` false) only the lowest service id of the group carries it.
+async function loadDriveLeg(db, svc, { ownsDriveCost, marked }) {
+  const none = { minutes: 0, miles: 0, source: 'none' };
+  if (!ownsDriveCost || svc.status !== 'completed') return none;
+  const fallback = { minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default' };
+  try {
+    if (!(await visitGpsLegsTableExists(db))) return fallback;
+    const leg = await db('visit_gps_legs')
+      .where({ scheduled_service_id: svc.id, status: 'matched' })
+      .first('drive_minutes', 'drive_miles', 'shared_stop_count', 'leg_group_key');
+    if (!leg) return fallback;
+    if (!marked && String(leg.leg_group_key) !== String(svc.id)) {
+      const first = await db('visit_gps_legs')
+        .where({ leg_group_key: leg.leg_group_key, status: 'matched' })
+        .orderBy('scheduled_service_id')
+        .first('scheduled_service_id');
+      if (String(first.scheduled_service_id) !== String(svc.id)) return { ...none, source: 'group_member' };
+    }
+    const minutes = leg.drive_minutes == null ? NaN : Number(leg.drive_minutes);
+    const miles = leg.drive_miles == null ? NaN : Number(leg.drive_miles);
+    const sharedBy = Math.max(1, Math.floor(Number(leg.shared_stop_count)) || 1);
+    return {
+      minutes: (Number.isFinite(minutes) && minutes >= 0 ? minutes : DEFAULT_DRIVE_MINUTES_PER_STOP) / sharedBy,
+      miles: (Number.isFinite(miles) && miles >= 0 ? miles : DEFAULT_DRIVE_MILES_PER_STOP) / sharedBy,
+      source: 'gps_leg',
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * deriveRevenue — the per-visit revenue, mirroring the completion handler's
  * `invoiceAmount` (admin-dispatch.js): an explicit visit price wins, else a
@@ -205,6 +369,162 @@ function deriveRevenue({
   return 0;
 }
 
+function positiveMoney(value) {
+  const n = Number(value);
+  return value != null && Number.isFinite(n) && n > 0 ? round2(n) : null;
+}
+
+function isCallbackVisit(svc, rec) {
+  return !!svc.is_callback || rec.is_callback === true;
+}
+
+// A stamped zero price (GATE_STAMPED_ZERO_FREE, billing-lane.js): the visit bills nothing.
+function isStampedZeroVisit(svc) {
+  return stampedZeroFreeLive() && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+}
+
+// Rule 1 of deriveRevenueFromOwnSources: a prepaid visit's share, or null. An always-free type, an included
+// follow-up, a consultation or a callback never takes a share. An add-on invoice on a covered visit is not
+// added: invoice.js voids a covered visit's invoice that carries extras today (invoiceHasNonBaseCharges).
+function prepaidVisitRevenue(svc, rec, serviceType, ownRevenue) {
+  if (svc.followup_included === true || isAlwaysFreeServiceType(serviceType)) return null;
+  if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return null;
+  return positiveMoney(ownRevenue.prepayShare);
+}
+
+// GATE_JOB_COST_STANDARD_MINUTES revenue (owner ruling 2026-10-31). Order:
+//   1. the visit's share of its paid annual-prepay term (prepaidVisitRevenue), even over a recorded amount and
+//      before its price: a covered visit is not billed on its own, so a recorded amount came from the old
+//      fallback (today's monthly rate), and annual prepay keeps the full estimated_price beside the discounted
+//      share it stamps in prepaid_amount; a covered visit can also carry estimated_price 0;
+//   2. a recorded revenue above $0 is kept under keepRecordedRevenue; a recorded $0 falls through to the
+//      visit's OWN sources below, never to customers.monthly_rate (today's plan, not this visit's);
+//   3. always-free types and included follow-ups are $0;
+//   4. the explicit visit price, then an unpriced consultation or a callback is $0 (today's order), then its
+//      linked invoice's service money, $0 included (a fully discounted or fees-only invoice is still the
+//      visit's billing; null = no linked invoice);
+//   5. a stamped zero is $0; the monthly_rate fallback runs only when nothing recorded is being kept.
+// Pure (no I/O): ownRevenue = { prepayShare, invoiceTotal } is loaded by loadOwnRevenueSources.
+function deriveRevenueFromOwnSources({
+  serviceRecord, scheduledService, customer, ignoreExistingRevenue, keepRecordedRevenue, ownRevenue,
+}) {
+  const rec = serviceRecord || {};
+  const svc = scheduledService || {};
+  const serviceType = svc.service_type || rec.service_type;
+  const prepaid = prepaidVisitRevenue(svc, rec, serviceType, ownRevenue);
+  if (prepaid != null) return prepaid;
+  const recorded = positiveMoney(rec.revenue);
+  if (recorded != null && (keepRecordedRevenue || !ignoreExistingRevenue)) return recorded;
+
+  if (svc.followup_included === true || isAlwaysFreeServiceType(serviceType)) return 0;
+  const visitPrice = positiveMoney(svc.estimated_price);
+  if (visitPrice != null) return visitPrice;
+  if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return 0;
+
+  if (ownRevenue.invoiceTotal != null) return ownRevenue.invoiceTotal;
+  if (isStampedZeroVisit(svc)) return 0;
+  return (keepRecordedRevenue ? null : positiveMoney(customer?.monthly_rate)) ?? 0;
+}
+
+// The visit's share of its paid annual-prepay term. "Paid" is the canonical paid-coverage query
+// (coveredTermsAsOf with no date: a paid status, a prepay invoice that is not void or refunded, and a payment
+// that was not fully refunded). The share is the allocation annual prepay stamped on the visit
+// (applyPrepaidCoverageForTerm: prepaid_amount with prepaid_method ANNUAL_PREPAY_PREPAID_METHOD). A visit
+// with no stamp (a legacy term) gets prepay_amount over the larger of the term's covered visit count
+// (coverage_visit_count) and its linked visits that still count: visits not yet scheduled keep their share,
+// and the linked visits together never book more than the prepayment.
+async function loadPrepayVisitShare(db, svc) {
+  if (!svc.annual_prepay_term_id) return 0;
+  try {
+    const { coveredTermsAsOf, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
+    const term = await coveredTermsAsOf(db, null)
+      .where('t.id', svc.annual_prepay_term_id)
+      .first('t.id', 't.prepay_amount', 't.coverage_visit_count');
+    if (!term || !(Number(term.prepay_amount) > 0)) return 0;
+    const stamped = svc.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD ? positiveMoney(svc.prepaid_amount) : null;
+    if (stamped != null) return stamped;
+    const counted = await db('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .whereNotIn('status', PREPAY_UNCOUNTED_VISIT_STATUSES)
+      .count({ c: '*' })
+      .first();
+    const visits = Math.max(Number(counted?.c) || 0, Number.parseInt(term.coverage_visit_count, 10) || 0);
+    return visits >= 1 ? round2(Number(term.prepay_amount) / visits) : 0;
+  } catch (err) {
+    logger.debug(`[job-costing] prepay share error: ${err.message}`);
+    return 0;
+  }
+}
+
+// One invoice's lines, read as invoice.js reads them (amount, else unit_price x quantity): the positive total,
+// and the net of its setup, membership and onboarding fee lines (a fee, less any waiver line). A deposit
+// credit (category deposit_credit) is a prior payment and counts in neither.
+function invoiceLineTotals(rawLineItems) {
+  let items = rawLineItems;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = []; }
+  }
+  const totals = { positive: 0, feeNet: 0 };
+  for (const li of Array.isArray(items) ? items : []) {
+    const line = li || {};
+    const qty = line.quantity != null ? Number(line.quantity) : 1;
+    const amount = line.amount != null ? Number(line.amount) : Number(line.unit_price) * qty;
+    if (line.category === 'deposit_credit' || !Number.isFinite(amount)) continue;
+    if (amount > 0) totals.positive += amount;
+    if (INVOICE_NON_SERVICE_LINE_RE.test(`${line.description || ''} ${line.category || ''}`)) totals.feeNet += amount;
+  }
+  return totals;
+}
+
+// The service money on one invoice, from the totals invoice.js keeps (calculateUpdateFinancials): subtotal
+// (the positive lines) less discount_amount (every discount, line-backed or document-level, once) less the
+// fee lines' net, which discount_amount has already reduced by any waiver. Tax and the card fee sit outside
+// these totals. A legacy invoice with no subtotal uses its positive lines.
+function invoiceServiceRevenue(invoice) {
+  const { positive, feeNet } = invoiceLineTotals(invoice.line_items);
+  const storedSubtotal = invoice.subtotal == null ? NaN : Number(invoice.subtotal);
+  const subtotal = Number.isFinite(storedSubtotal) ? storedSubtotal : positive;
+  return Math.max(0, round2(subtotal - (Number(invoice.discount_amount) || 0) - feeNet));
+}
+
+// The newest non-void invoice written for this visit's service record: its service money (null = none). A
+// prepay invoice bills the whole term, not this visit (its share comes from loadPrepayVisitShare), so it is
+// skipped whether the invoice names the term (annual_prepay_term_id) or only the term names the invoice
+// (prepay_invoice_id, the legacy shape 20260808040000_backfill_self_referential_prepay_credits.js documents).
+async function loadLinkedInvoiceTotal(db, svc, record) {
+  if (!record?.id) return null;
+  try {
+    const termInvoiceIds = (await db('annual_prepay_terms')
+      .where({ customer_id: svc.customer_id })
+      .whereNotNull('prepay_invoice_id')
+      .select('prepay_invoice_id'))
+      .map((term) => term.prepay_invoice_id)
+      .filter(Boolean);
+    const invoice = await db('invoices')
+      .where({ service_record_id: record.id })
+      .whereNotIn('status', INVOICE_NO_REVENUE_STATUSES)
+      .whereNull('annual_prepay_term_id')
+      .whereNotIn('id', termInvoiceIds)
+      .orderBy('created_at', 'desc')
+      .first('line_items', 'subtotal', 'discount_amount');
+    return invoice ? invoiceServiceRevenue(invoice) : null;
+  } catch (err) {
+    logger.debug(`[job-costing] linked invoice error: ${err.message}`);
+    return null;
+  }
+}
+
+// The visit's own revenue sources (GATE_JOB_COST_STANDARD_MINUTES). The prepay share is always read: it wins
+// over a recorded amount, and a visit with no term returns at once. The invoice is read only when no share, no
+// recorded revenue that wins (kept, or not recomputed) and no visit price comes first.
+async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = false, recomputeRevenue = false } = {}) {
+  const prepayShare = await loadPrepayVisitShare(db, svc);
+  const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
+  const readInvoice = !(prepayShare > 0) && !recordedWins && !(Number(svc.estimated_price) > 0);
+  const invoiceTotal = readInvoice ? await loadLinkedInvoiceTotal(db, svc, record) : null;
+  return { prepayShare, invoiceTotal };
+}
+
 /**
  * computeServiceRecordFinancials — pure roll-up of a visit's costs into the
  * derived fields the dashboard reads. margin and rpmh are null (not 0) when
@@ -226,7 +546,11 @@ function computeServiceRecordFinancials({
   const drvCost = round2(driveCost);
   const totalCost = round2(labCost + matCost + drvCost + (Number(expensesCost) || 0));
   const grossProfit = round2(rev - totalCost);
-  const marginPct = rev > 0 ? round2((grossProfit / rev) * 100) : null;
+  // service_records.gross_margin_pct and job_costs.margin_pct are decimal(5,2): a margin past the column's
+  // limit (a few cents of revenue against a visit's costs) is stored at the limit, not a failed write.
+  const marginPct = rev > 0
+    ? Math.min(MARGIN_PCT_LIMIT, Math.max(-MARGIN_PCT_LIMIT, round2((grossProfit / rev) * 100)))
+    : null;
   const rpmh = labHours > 0 ? round2(rev / labHours) : null;
   return {
     revenue: rev,
@@ -331,6 +655,25 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
 
   const hours = minutes / 60;
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
+}
+
+// GATE_JOB_COST_STANDARD_MINUTES labor (owner ruling 2026-10-31), applied to the measured result of
+// calcLaborCost. Order: an admin time-on-site correction (overrideLaborMinutes, resolved by the caller) wins;
+// else the standard for the service type of a completed visit, which replaces measured time, time entries,
+// backfill minutes and a combined-closeout allocation; else the measured result, where one over the
+// stale-span limit books the scheduled estimate (else 0). Pure: no I/O.
+function applyStandardLabor(measured, { svc, rate, overrideLaborMinutes, estimatedLaborMinutes }) {
+  const override = Number(overrideLaborMinutes);
+  if (Number.isFinite(override) && override > 0) return measured;
+  const priced = (minutes, laborEstimated) => ({
+    laborMinutes: minutes, laborHours: minutes / 60, laborCost: round2((minutes / 60) * rate), laborEstimated,
+  });
+  const standard = svc.status === 'completed' ? standardLaborMinutesFor(svc.service_type) : null;
+  if (standard != null) return priced(standard, false);
+  if (measured.laborMinutes <= JOB_COST_STANDARD.staleSpanMinutes) return measured;
+  const estimated = Math.round(Number(estimatedLaborMinutes)) || 0;
+  logger.warn(`[job-costing] ${svc.id} — measured span over ${JOB_COST_STANDARD.staleSpanMinutes} minutes; costing the scheduled estimate`);
+  return priced(estimated, estimated > 0);
 }
 
 async function calcProductsCost(db, serviceRecordId) {
@@ -611,8 +954,16 @@ async function calculateJobCost(scheduledServiceId, db, {
   } catch { /* table may be absent before 20260619000001 */ }
 
   const { laborRate, driveCostPerStop } = await getFinancials(db, svc.scheduled_date);
-  const revenue = intentionallyFree ? 0 : deriveRevenue({
-    serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue,
+  // GATE_JOB_COST_STANDARD_MINUTES, read once for this call: standard labor minutes, the standard drive
+  // cost and the visit's own revenue sources. Off = today's path below, untouched.
+  const standardOn = jobCostStandardOn();
+  const ownRevenue = standardOn && !intentionallyFree
+    ? await loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue, recomputeRevenue })
+    : null;
+  // With the visit's own sources loaded, the standard revenue rules; otherwise today's deriveRevenue, untouched.
+  const deriveVisitRevenue = ownRevenue ? deriveRevenueFromOwnSources : deriveRevenue;
+  const revenue = intentionallyFree ? 0 : deriveVisitRevenue({
+    serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue, ownRevenue,
   });
   // The scheduled estimate is a last resort for COMPLETED visits only: a
   // pending or future visit costed on an expense entry or a manual recalc has
@@ -620,10 +971,21 @@ async function calculateJobCost(scheduledServiceId, db, {
   const estimatedLaborMinutes = svc.status === 'completed'
     ? Number(svc.estimated_duration_minutes) || null
     : null;
-  const { laborCost, laborHours, laborEstimated } = await calcLaborCost(
+  // GATE_TECH_COST_RATES: null unless the gate is on AND the visit's technician
+  // has a cost card in effect on the visit date. Null = today's path below.
+  // (loadVisitRates answers null for a visit with no technician.)
+  const costRates = techCostRatesOn()
+    ? await require('./tech-cost-rates').loadVisitRates(db, svc.technician_id, visitDateString(svc.scheduled_date))
+    : null;
+  const measuredLabor = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
     { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes },
   );
+  const {
+    laborCost: baseLaborCost, laborHours, laborEstimated, laborMinutes,
+  } = standardOn
+    ? applyStandardLabor(measuredLabor, { svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes })
+    : measuredLabor;
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
     : { productsCost: 0, breakdown: [] };
@@ -634,9 +996,41 @@ async function calculateJobCost(scheduledServiceId, db, {
   // Unmarked records outside a new packet retain the legacy one-cost-per-visit
   // behavior; same-stop retained reports receive the packet marker at save.
   const driveAllocation = recordNotes.visitDriveCostAllocation;
-  const driveCost = driveAllocation?.version === 1
-    ? (svc.id === driveAllocation.ownerServiceId ? driveCostPerStop : 0)
-    : driveCostPerStop;
+  const marked = driveAllocation?.version === 1;
+  const ownsDriveCost = marked ? svc.id === driveAllocation.ownerServiceId : true;
+  let laborCost = baseLaborCost;
+  // GATE_JOB_COST_STANDARD_MINUTES: the stop's drive is the Average Drive Time at the loaded labor rate.
+  const stopDriveCost = standardOn ? (standardDriveMinutes() / 60) * laborRate : driveCostPerStop;
+  let driveCost = ownsDriveCost ? stopDriveCost : 0;
+  let costRatesApplied = null;
+  // The vehicle fixed cost inside drive_cost (NULL = no cost card applied).
+  // service_records keeps it beside drive_cost so the adjusted-EBITDA bridge
+  // takes it out of the vehicle overhead (counted once); written with the other
+  // financials, so a recalculation without a card clears an earlier share.
+  let vehicleFixedCost = null;
+  if (costRates) {
+    // Each visit's own on-site minutes (its allocated share in a combined
+    // closeout) carry the technician's labor and the vehicle's fixed cost; the
+    // drive to the stop is charged once per physical stop (loadDriveLeg), so a
+    // stop's members add up to the stop's real minutes with nothing counted
+    // twice. A card that names no vehicle has zero vehicle rates.
+    const driven = await loadDriveLeg(db, svc, { ownsDriveCost, marked });
+    const chargedHours = (laborMinutes + driven.minutes) / 60;
+    const { vehicle } = costRates;
+    laborCost = (costRates.laborPerWorkedHourCents / 100) * chargedHours;
+    const fixedPart = (vehicle.fixedPerWorkedHourCents / 100) * chargedHours;
+    driveCost = (vehicle.perMileTenThousandths / 10000) * driven.miles + fixedPart;
+    vehicleFixedCost = round2(fixedPart);
+    costRatesApplied = {
+      technicianCardId: costRates.cardId,
+      vehicleCardId: vehicle.cardId,
+      onJobMinutes: laborMinutes,
+      driveMinutes: driven.minutes,
+      driveMiles: driven.miles,
+      driveSource: driven.source,
+      vehicleFixedCost,
+    };
+  }
   const recordDriveStamp = serviceRecordDriveAllocationStamp({
     record: resolvedRecord,
     ambiguous,
@@ -664,6 +1058,11 @@ async function calculateJobCost(scheduledServiceId, db, {
     margin_pct: fin.gross_margin_pct,
     products_used: JSON.stringify(breakdown),
   };
+  // L11b: the minutes this cost was charged for, NULL when no cost card applied (a re-cost without a
+  // card clears an earlier pair). Only keys whose column exists, so older schemas see today's row.
+  const chargedColumns = await chargedMinuteColumns(db);
+  if (chargedColumns.onJob) row.charged_on_job_minutes = costRatesApplied ? round2(costRatesApplied.onJobMinutes) : null;
+  if (chargedColumns.drive) row.charged_drive_minutes = costRatesApplied ? round2(costRatesApplied.driveMinutes) : null;
 
   // Correction-stamp fence, ATOMIC with the financial writes (codex P2
   // #3152 rounds 8+9): the durable time_on_site_adjusted_minutes stamp was
@@ -744,6 +1143,7 @@ async function calculateJobCost(scheduledServiceId, db, {
       set('gross_profit', fin.gross_profit);
       set('gross_margin_pct', fin.gross_margin_pct);
       set('revenue_per_man_hour', fin.revenue_per_man_hour);
+      set('vehicle_fixed_cost', vehicleFixedCost);
       if (Object.keys(upd).length) {
         await trx('service_records').where({ id: record.id }).update(upd);
         wroteThrough = true;
@@ -776,7 +1176,12 @@ async function calculateJobCost(scheduledServiceId, db, {
     }
   }
 
-  return { ...row, laborHours: fin.labor_hours, serviceRecordId: wroteThrough ? record.id : null };
+  return {
+    ...row,
+    laborHours: fin.labor_hours,
+    serviceRecordId: wroteThrough ? record.id : null,
+    costRates: costRatesApplied, // null = today's path (gate off or no card)
+  };
 }
 
 /**
@@ -854,5 +1259,11 @@ module.exports = {
   parseJsonObject,
   backfillServiceRecordFinancials,
   deriveRevenue,
+  deriveRevenueFromOwnSources,
   computeServiceRecordFinancials,
+  JOB_COST_STANDARD,
+  standardLaborMinutesFor,
+  DEFAULT_DRIVE_MINUTES_PER_STOP,
+  DEFAULT_DRIVE_MILES_PER_STOP,
+  _resetVisitGpsLegsCache: () => { visitGpsLegsTableKnown = false; visitGpsLegsMissingAt = 0; },
 };

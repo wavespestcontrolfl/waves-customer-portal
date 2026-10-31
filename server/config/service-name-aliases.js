@@ -74,7 +74,10 @@ const LEGACY_BY_PAIR = new Map(
 /** Current catalog name for a pre-convention (label, cadence) pair, or null. */
 function legacyCatalogName(label, recurringPattern) {
   if (!label || !recurringPattern) return null;
-  return LEGACY_BY_PAIR.get(`${String(label).trim().toLowerCase()}|${String(recurringPattern).trim()}`) || null;
+  // Lawn 9x rounds (lawn_rounds_9) is the same plan as every_6_weeks, so it
+  // bridges to the same catalog name. The table above stays the migration's.
+  const pattern = String(recurringPattern).trim() === 'lawn_rounds_9' ? 'every_6_weeks' : String(recurringPattern).trim();
+  return LEGACY_BY_PAIR.get(`${String(label).trim().toLowerCase()}|${pattern}`) || null;
 }
 
 module.exports = {

@@ -1096,7 +1096,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(laneAt).toBeGreaterThan(tierAt);
   });
 
-  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit per_visit / one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
+  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(source).toMatch(/require\('\.\.\/services\/lawn-completion-defaults'\)/);
     expect(source).toMatch(/const \{ [^}]*lawnPlanProgramApplies[^}]* \} = require\('\.\.\/services\/lawn-completion-defaults'\);/);
@@ -1755,7 +1755,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // calcProductsCost, or the job_costs service_record_id linkage.
     expect(costingSource).toMatch(/const record = ambiguous \? null : resolvedRecord;/);
     const nullOutAt = costingSource.indexOf('const record = ambiguous ? null : resolvedRecord;');
-    const deriveRevenueAt = costingSource.indexOf('const revenue = intentionallyFree ? 0 : deriveRevenue({');
+    const deriveRevenueAt = costingSource.indexOf('const revenue = intentionallyFree ? 0 : deriveVisitRevenue({');
     expect(nullOutAt).toBeGreaterThan(-1);
     expect(deriveRevenueAt).toBeGreaterThan(nullOutAt);
   });

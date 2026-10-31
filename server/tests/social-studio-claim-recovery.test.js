@@ -234,9 +234,9 @@ describe('durable stamp at FIRST provider success (r22)', () => {
   const studioSource = fs.readFileSync(path.join(__dirname, '../services/social-content-studio.js'), 'utf8');
   const socialSource = fs.readFileSync(path.join(__dirname, '../services/social-media.js'), 'utf8');
 
-  test('both testimonial publishToAll call sites wire onFirstPlatformSuccess to the durable stamp', () => {
+  test('every testimonial publishToAll call site (run, approved run, approved graphic) wires onFirstPlatformSuccess to the durable stamp', () => {
     const wirings = studioSource.split('onFirstPlatformSuccess:').slice(1);
-    expect(wirings).toHaveLength(2);
+    expect(wirings).toHaveLength(3);
     for (const wiring of wirings) {
       expect(wiring.slice(0, 300)).toContain('recordTestimonialPublished');
     }

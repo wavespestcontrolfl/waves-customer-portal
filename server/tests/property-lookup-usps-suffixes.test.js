@@ -186,6 +186,42 @@ describe('county search candidates and the audit with USPS suffixes', () => {
   });
 });
 
+describe('"Tr" reads as Trail (live miss 10-30)', () => {
+  test('a terminal Tr keys as TRL, before a direction or a unit too; inside a name it is untouched', () => {
+    expect(norm('100 Example River Tr')).toBe('100 EXAMPLE RIVER TRL');
+    expect(norm('100 Example River Tr.')).toBe('100 EXAMPLE RIVER TRL');
+    expect(norm('100 Example Tr E')).toBe('100 EXAMPLE TRL E');
+    expect(norm('100 Example Tr Apt 4')).toBe('100 EXAMPLE TRL APT 4');
+    expect(norm('100 Tr Example Dr')).toBe('100 TR EXAMPLE DR');
+    expect(norm('100 Example Trl')).toBe('100 EXAMPLE TRL');
+    expect(norm('100 Example Trailer')).toBe('100 EXAMPLE TRAILER');
+  });
+
+  test('a typed Tr finds the house on a roll that writes TRL', async () => {
+    mockSitusResponse(['98 EXAMPLE RIVER TRL', '100 EXAMPLE RIVER TRL', '102 EXAMPLE RIVER TRL']);
+
+    const audit = await auditAddressHouseNumber('100 Example River Tr, Bradenton, FL 34212');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+
+  test('a typed Trail finds a house the roll writes as TR beside TRL rows', async () => {
+    mockSitusResponse(['100 EXAMPLE RIVER TR', '102 EXAMPLE RIVER TRL']);
+
+    const audit = await auditAddressHouseNumber('100 Example River Trail, Bradenton, FL 34212');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+
+  test('a typed Tr never matches another suffix on the same name', async () => {
+    mockSitusResponse(['100 EXAMPLE RIVER TER', '100 EXAMPLE RIVER TRCE', '102 EXAMPLE RIVER TRL']);
+
+    const audit = await auditAddressHouseNumber('100 Example River Tr, Bradenton, FL 34212');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: false, nearestNumbers: [102] });
+  });
+});
+
 describe('diagonal post-directions through the suffix helpers', () => {
   const realFetch = global.fetch;
   afterEach(() => { global.fetch = realFetch; });

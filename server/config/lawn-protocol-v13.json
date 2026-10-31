@@ -23,7 +23,7 @@
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista. The app warns on the second Artavia application for Pythium; the label allows two in a row. Headway is not a rotation for it (Headway has the same Group 11 ingredient). Do not make a third Group 11 application in a row: fix the watering or drainage.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
       "Ronstar / oxadiazon: never on residential home lawns (label: not for use on home lawns); commercial turf per label.",
-      "No soil tests.",
+      "Soil tests: triggers only (owner 2026-10-31). Take a sample only when one of these is true: a new sod or new-build lawn is not thriving 60 days after install; yellowing stays after the iron spot test, or the lawn is no better after 2 visits with no pest or disease found (October to May only); it is a bahia or pasture-origin lawn; or phosphorus is planned in Manatee County. One sample per lawn, once (two only when a problem spot differs from the rest of the lawn); never retest. Pull 10 to 15 cores from the top 4 in, mix them, and bag 1 pint; never mix healthy and problem turf, and never sample right after a fertilizer or lime pass. The office mails it to the UF/IFAS Extension Soil Testing Laboratory (standard test, form SL136) and records the test date and pH in the turf profile. Act on three results only: lime at the report's lime rate; magnesium (Epsom salt, rate set by the office) when Mg is below 20 ppm; phosphorus only when P is 20 mg/kg or lower (Mehlich-3) and the report is filed with Manatee County. Any other result changes nothing. A soil test comes before a UF plant lab sample, never both at once. Lab reports are not sent to customers unless the owner says so.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
@@ -67,7 +67,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,
@@ -161,7 +167,7 @@
       {
         "visit": 8,
         "month": "Aug",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment; Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent",
         "tiers": {
           "bronze": true,
@@ -169,12 +175,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days",
         "tiers": {
           "bronze": true,
@@ -182,7 +188,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 10,
@@ -264,7 +270,7 @@
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista. The app warns on the second Artavia application for Pythium; the label allows two in a row. Headway is not a rotation for it (Headway has the same Group 11 ingredient). Do not make a third Group 11 application in a row: fix the watering or drainage.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
       "Ronstar / oxadiazon: never on residential home lawns (label: not for use on home lawns); commercial turf per label.",
-      "No soil tests.",
+      "Soil tests: triggers only (owner 2026-10-31). Take a sample only when one of these is true: a new sod or new-build lawn is not thriving 60 days after install; yellowing stays after the iron spot test, or the lawn is no better after 2 visits with no pest or disease found (October to May only); it is a bahia or pasture-origin lawn; or phosphorus is planned in Manatee County. One sample per lawn, once (two only when a problem spot differs from the rest of the lawn); never retest. Pull 10 to 15 cores from the top 4 in, mix them, and bag 1 pint; never mix healthy and problem turf, and never sample right after a fertilizer or lime pass. The office mails it to the UF/IFAS Extension Soil Testing Laboratory (standard test, form SL136) and records the test date and pH in the turf profile. Act on three results only: lime at the report's lime rate; magnesium (Epsom salt, rate set by the office) when Mg is below 20 ppm; phosphorus only when P is 20 mg/kg or lower (Mehlich-3) and the report is filed with Manatee County. Any other result changes nothing. A soil test comes before a UF plant lab sample, never both at once. Lab reports are not sent to customers unless the owner says so.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
@@ -308,7 +314,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,
@@ -384,7 +396,7 @@
       {
         "visit": 8,
         "month": "Aug",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment; Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent",
         "tiers": {
           "bronze": true,
@@ -392,12 +404,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days",
         "tiers": {
           "bronze": true,
@@ -405,7 +417,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 10,
@@ -487,7 +499,7 @@
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista. The app warns on the second Artavia application for Pythium; the label allows two in a row. Headway is not a rotation for it (Headway has the same Group 11 ingredient). Do not make a third Group 11 application in a row: fix the watering or drainage.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
       "Ronstar / oxadiazon: never on residential home lawns (label: not for use on home lawns); commercial turf per label.",
-      "No soil tests.",
+      "Soil tests: triggers only (owner 2026-10-31). Take a sample only when one of these is true: a new sod or new-build lawn is not thriving 60 days after install; yellowing stays after the iron spot test, or the lawn is no better after 2 visits with no pest or disease found (October to May only); it is a bahia or pasture-origin lawn; or phosphorus is planned in Manatee County. One sample per lawn, once (two only when a problem spot differs from the rest of the lawn); never retest. Pull 10 to 15 cores from the top 4 in, mix them, and bag 1 pint; never mix healthy and problem turf, and never sample right after a fertilizer or lime pass. The office mails it to the UF/IFAS Extension Soil Testing Laboratory (standard test, form SL136) and records the test date and pH in the turf profile. Act on three results only: lime at the report's lime rate; magnesium (Epsom salt, rate set by the office) when Mg is below 20 ppm; phosphorus only when P is 20 mg/kg or lower (Mehlich-3) and the report is filed with Manatee County. Any other result changes nothing. A soil test comes before a UF plant lab sample, never both at once. Lab reports are not sent to customers unless the owner says so.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
@@ -531,7 +543,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "roundVariants": {
+          "lawn_rounds_9": {
+            "primary": "LESCO 24-0-11 with PolyPlus OPTI — 4.17 lb per 1,000 sq ft (1.0 lb N), spreader",
+            "notes": "N rate: 1.0 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. 9x rounds plan, round 3 (Mar 15 to Apr 23): 1.0 lb N, 4.17 lb of the 24-0-11, instead of the 12x plan's 0.75 lb N, 3.1 lb."
+          }
+        }
       },
       {
         "visit": 3,
@@ -625,7 +643,7 @@
       {
         "visit": 8,
         "month": "Aug",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment; Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent",
         "tiers": {
           "bronze": true,
@@ -633,12 +651,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
-        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
+        "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer — 5 fl oz per 1,000 sq ft, hose",
         "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days",
         "tiers": {
           "bronze": true,
@@ -646,7 +664,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip the Nutra-TECH micronutrients and the Nutra-TECH potassium on this visit until the city confirms."
       },
       {
         "visit": 10,

@@ -137,7 +137,17 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
         : null;
     const at = plan ? plan.at : new Date(Date.now() + ReviewService.LEGACY_REVIEW_DELAY_MINUTES * 60000);
     const serviceReportV1Delivery = await serviceRecordsHaveReportTemplateColumn();
+    // GATE_REVIEW_FIRST_ASK_LOCK: with a serviceId, say whether this visit's customer was never
+    // asked for a review (the panel then shows "First review ask", locked on). Gate off, or no
+    // visit named: the key is absent and the answer is byte for byte as before.
+    let firstReviewAsk;
+    if (require('../config/feature-gates').reviewFirstAskLockLive() && typeof req.query.serviceId === 'string' && req.query.serviceId) {
+      // A re-service visit stays off, as the completion's own rule does.
+      const visit = await ReviewService.firstAskLockVisit(req.query.serviceId);
+      firstReviewAsk = Boolean(visit) && await ReviewService.customerNeverAskedForReview(visit.customer_id);
+    }
     res.json({
+      ...(firstReviewAsk === undefined ? {} : { firstReviewAsk }),
       at: at.toISOString(),
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.
@@ -1128,6 +1138,20 @@ router.get('/incentives/attribution-candidates', requireAdmin, async (req, res, 
     });
     res.json(result);
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/:id/name-match/dismiss — rule out the review matcher's suggested customer
+// for this review, or keep a link it disputes (services/review-name-match.js). Writes only the
+// decision columns: no link, no customer change, no send.
+router.post('/:id/name-match/dismiss', requireAdmin, async (req, res, next) => {
+  try {
+    const { dismissNameMatch } = require('../services/review-name-match');
+    const result = await dismissNameMatch({ reviewId: req.params.id, customerId: req.body?.customerId, result: req.body?.result });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode === 400 || err.statusCode === 409) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/reviews/incentives/attribute — manually attribute a confirmed Google review payout

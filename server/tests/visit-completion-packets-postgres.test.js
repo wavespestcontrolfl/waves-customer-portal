@@ -370,35 +370,51 @@ postgres('visit completion packet records on PostgreSQL', () => {
     else process.env.PEST_RECAP = originalPestRecap;
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
-    await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
-    await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
-    await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
-    if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
-    if (fixture.estimateIds.length) {
-      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
-      await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
-      await mockPg('estimates').whereIn('id', fixture.estimateIds).del();
+    const removeFixtureRows = async () => {
+      await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
+      await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
+      await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
+      if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
+      if (fixture.estimateIds.length) {
+        await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
+        await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
+        await mockPg('estimates').whereIn('id', fixture.estimateIds).del();
+      }
+      // Clear movements before cascading customer/service-product deletion.
+      await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
+      await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
+      await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
+      await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
+      await mockPg('product_limits').where({ product_id: fixture.productId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).del();
+      if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
+      if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
+      if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
+      if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
+      if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+      await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
+      await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
+      if (fixture.historyTechId) await mockPg('technicians').where({ id: fixture.historyTechId }).del();
+      await mockPg('technicians').where({ id: fixture.techId }).del();
+      await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
+      await mockPg('services').where({ id: fixture.catalogId }).del();
+      if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
+      await mockPg('products_catalog').where({ id: fixture.productId }).del();
+    };
+    // A test can return while one of its own background writes is still
+    // committing on another pool connection. Postgres then aborts this
+    // cleanup as the deadlock victim (CI 2026-10-28: `delete from "customers"`
+    // deadlock detected, a different test each run). Every step above is
+    // idempotent, so the cleanup runs again once the other side has committed.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await removeFixtureRows();
+        break;
+      } catch (err) {
+        if (err?.code !== '40P01' || attempt === 5) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
     }
-    // Clear movements before cascading customer/service-product deletion.
-    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
-    await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
-    await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
-    await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
-    await mockPg('product_limits').where({ product_id: fixture.productId }).del();
-    await mockPg('customers').where({ id: fixture.customerId }).del();
-    if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
-    if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
-    if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
-    if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
-    if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
-    await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
-    await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
-    if (fixture.historyTechId) await mockPg('technicians').where({ id: fixture.historyTechId }).del();
-    await mockPg('technicians').where({ id: fixture.techId }).del();
-    await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
-    await mockPg('services').where({ id: fixture.catalogId }).del();
-    if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
-    await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 
   test.each([
@@ -485,6 +501,28 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  // Owner 2026-10-30 (pipeline audit item 1, option A): an invoice-mode commercial proposal makes no invoice at the
+  // win, so the visit invoice bills once and carries the agreement's Net term, also for a self-pay customer.
+  test('a visit from an invoice-mode commercial proposal on Net 30 bills once, due 30 days after the visit', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await mockPg('estimates').where({ id: estimateId }).update({
+      bill_by_invoice: true,
+      estimate_data: JSON.stringify({ proposal: {
+        enabled: true, taxRate: 0, buildings: [{ name: 'Main', lineItems: [] }],
+        programs: [{ service: 'pest', label: 'Commercial pest', frequencyPerYear: 4, pricePerApplication: 300 }],
+        commercialTerms: { paymentTerms: 'net30' },
+      } }),
+    });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result).toMatchObject({ status: 202 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    const day = (value) => (value instanceof Date
+      ? Date.UTC(value.getFullYear(), value.getMonth(), value.getDate())
+      : Date.parse(`${String(value).slice(0, 10)}T00:00:00Z`));
+    expect((day(invoices[0].due_date) - day(invoices[0].service_date)) / 86400000).toBe(30);
   });
 
   test.each([

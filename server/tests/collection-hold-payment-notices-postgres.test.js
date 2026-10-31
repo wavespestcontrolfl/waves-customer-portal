@@ -922,6 +922,24 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
           expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).status).toBe('resent');
         } finally { notify.mockRestore(); }
       });
+
+      // Production runs the admin bell policy (GATE_ADMIN_BELL_POLICY), which writes no row for an 'alert' that does not
+      // ask to ring: the sweep would stamp the recovery alerted with no alert standing.
+      test('under the admin bell policy the uncertain-send alert reaches the bell', async () => {
+        const Recovery = require('../services/email-bounce-recovery');
+        const policy = jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(true);
+        let key = null;
+        try {
+          const { rec } = await strandedResent({ withMarker: true });
+          key = `bounce-recovery-resend-uncertain:${rec.id}`;
+          await Recovery.retryHeldRecoveries();
+          expect(await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]).first()).toBeTruthy();
+          expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).metadata.resend_alerted_at).toBeTruthy();
+        } finally {
+          policy.mockRestore();
+          if (key) await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).del();
+        }
+      });
     });
 
     // Codex #5424 r15 P2: runBillingEmailProviderReplayHandoff answers a stored billing.notice held by a

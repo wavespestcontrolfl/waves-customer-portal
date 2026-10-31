@@ -145,13 +145,91 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
-      - name: Grouped closeout transaction tests
+      # The gate-code suites in the second command gate on
+      # `process.env.DATABASE_URL ? describe : describe.skip`, not the
+      # `const SKIP` line the DB-gated step greps for, so until 2026-10-30 they
+      # ran nowhere in CI. They run here, after closeout on the third server:
+      # this lane sits idle for most of the job, while the DB-gated lane already
+      # sets the job's length. Do not add the `const SKIP` line to them, or they
+      # run twice.
+      # The third command runs 61 more suites with that same gate (45 of them
+      # lawn suites), which also ran nowhere in CI until 2026-10-31.
+      # Three suites with the gate stay out until they are fixed:
+      # lawn-bermuda-removal.db (one stale assertion, and Jest never exits),
+      # termite-renewal-bill-to-fence-postgres (two assertions predate #6117's
+      # standalone-send fence) and service-photos-postgres (it accepts only the
+      # managed worktree QA database).
+      - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
+        run: |
+          npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
+            tests/admin-compliance-check-limits-arena.db.test.js \
+            tests/admin-protocols-lawn-window-caps.db.test.js \
+            tests/application-limits-county.db.test.js \
+            tests/compliance-ingredient-cap-scopes.db.test.js \
+            tests/compliance-per-property-caps.db.test.js \
+            tests/compliance-rolling-year.db.test.js \
+            tests/customer-estimates-on-record.test.js \
+            tests/invoice-create-discount-stacking-postgres.test.js \
+            tests/lawn-bermuda-removal-config-migrations.db.test.js \
+            tests/lawn-bermuda-removal-pricing.test.js \
+            tests/lawn-completion-defaults.db.test.js \
+            tests/lawn-reclaimed-half-n.db.test.js \
+            tests/lawn-trouble-areas.db.test.js \
+            tests/lawn-v13-april-polymer-n.db.test.js \
+            tests/lawn-v13-chinch-tetrino-rate.db.test.js \
+            tests/lawn-v13-count-caps.db.test.js \
+            tests/lawn-v13-dec-large-patch-k.db.test.js \
+            tests/lawn-v13-dec-large-patch-k.plan.db.test.js \
+            tests/lawn-v13-december-potash-followup.db.test.js \
+            tests/lawn-v13-december-potash-rollback-guard.db.test.js \
+            tests/lawn-v13-december-potash.db.test.js \
+            tests/lawn-v13-dylox-label-limits.db.test.js \
+            tests/lawn-v13-dylox-two-a-year-description.db.test.js \
+            tests/lawn-v13-dylox-two-a-year.db.test.js \
+            tests/lawn-v13-field-rules-followup.db.test.js \
+            tests/lawn-v13-field-rules-round7.db.test.js \
+            tests/lawn-v13-field-rules-round9.db.test.js \
+            tests/lawn-v13-field-rules.db.test.js \
+            tests/lawn-v13-final-pass-blindside-catalog.db.test.js \
+            tests/lawn-v13-final-pass-limits.db.test.js \
+            tests/lawn-v13-final-pass.db.test.js \
+            tests/lawn-v13-fire-ant-granule-facts.db.test.js \
+            tests/lawn-v13-fire-ant-granule-followup.db.test.js \
+            tests/lawn-v13-fire-ant-granule-guard.db.test.js \
+            tests/lawn-v13-fire-ant-granule.db.test.js \
+            tests/lawn-v13-matrix-adds-fixes.db.test.js \
+            tests/lawn-v13-matrix-adds-round2.db.test.js \
+            tests/lawn-v13-matrix-adds-round3.db.test.js \
+            tests/lawn-v13-matrix-adds-round4.db.test.js \
+            tests/lawn-v13-matrix-adds-round5.db.test.js \
+            tests/lawn-v13-matrix-adds-round6.db.test.js \
+            tests/lawn-v13-matrix-adds-round7.db.test.js \
+            tests/lawn-v13-matrix-adds-round8.db.test.js \
+            tests/lawn-v13-matrix-adds.db.test.js \
+            tests/lawn-v13-matrix-alias-rows-advion-limits.db.test.js \
+            tests/lawn-v13-matrix-remove-july-potash.db.test.js \
+            tests/lawn-v13-mole-cricket-bait.db.test.js \
+            tests/lawn-v13-nov-large-patch-n.db.test.js \
+            tests/lawn-v13-plan.db.test.js \
+            tests/lawn-v13-preflip.db.test.js \
+            tests/lawn-v13-rolling-year.db.test.js \
+            tests/lawn-v13-three-groups.db.test.js \
+            tests/lead-funnel-breakdown-sql.test.js \
+            tests/lead-webhook-triage-carry-forward.test.js \
+            tests/pretreat-sent-snapshot-postgres.test.js \
+            tests/reclaimed-water-meters.db.test.js \
+            tests/scheduled-invoice-mint-refuses-non-live-visit-postgres.test.js \
+            tests/seo-citations-audit-states-migration.test.js \
+            tests/sms-lead-extraction-postgres.test.js \
+            tests/sms-reply-outcomes-postgres.test.js \
+            tests/supplies-consumption.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -308,11 +386,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/billing-email-provider-connection-postgres.test.js tests/billing-email-ownership-lock-postgres.test.js tests/billing-reminder-ledger-postgres.test.js
-      - name: Invoice follow-up held-touch retime tests
+      - name: Invoice follow-up held-touch retime and Auto Pay hold timeout tests
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/invoice-followups-hold-retime-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/invoice-followups-hold-retime-postgres.test.js tests/invoice-followups-autopay-hold-timeout-postgres.test.js
       - name: Customer dunning schedule and reconciliation fence PostgreSQL tests
         working-directory: server
         env:
@@ -525,7 +603,10 @@ jobs:
         run: npx vitest run --silent --shard=${{ matrix.shard }}/3
 
   browser-previews:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: on the Ubuntu 26.04 image (2026-10-31)
+    # `playwright install` fails with "Playwright does not support chromium
+    # on ubuntu26.04-x64". Move back once the pinned Playwright supports it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -561,7 +642,10 @@ jobs:
           retention-days: 7
 
   application-qa:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: on the Ubuntu 26.04 image (2026-10-31)
+    # `playwright install` fails with "Playwright does not support chromium
+    # on ubuntu26.04-x64". Move back once the pinned Playwright supports it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:

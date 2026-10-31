@@ -34,74 +34,30 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { pinParkedCheckLive } = require('../config/feature-gates');
-const { distanceMeters, loadArrivalConfig, validLatitude, validLongitude } = require('./gps-arrival-detector');
+const { distanceMeters, loadArrivalConfig } = require('./gps-arrival-detector');
 const truckStops = require('./bouncie-truck-stops');
 const { effectiveReview, effectiveCustomer, reviewEnabled } = require('./customer-geocode-review');
-const { stampedAddressDiverges } = require('./stamped-address');
 const { isInServiceAreaBox } = require('./service-area');
 const { raiseAdminAlert } = require('./admin-alert-compose');
 const { fitAction, fullName, shortDateET } = require('./admin-alert-names');
 const store = require('./customer-pin-suggestions');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const {
+  usablePin, isWithin, within, etDayBounds, completedVisitQuery, shapeVisits, effectivePinColumns, oneRowPerVisit,
+  loadFences, homeBaseFrom, homeSince, loadHomeBase, dayBeforeMapping, destinationOf,
+} = require('./visit-gps-context');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const LOG = '[pin-parked-check]';
 const REPORT_MIN_STOP_MINUTES = 10;
 const MAX_STOP_DISTANCE_M = 1500;
 // How far back a visit's scheduled or worked day may be before its truck evidence is not read (the visit is skipped).
 const MAX_LOOKBACK_DAYS = 7;
-const HOME_LOOKBACK_DAYS = 30;
-const HOME_MIN_DAYS = 3;
-const FENCE_TYPES = ['business', 'personal', 'supplier'];
 const PENDING_BELL_LIMIT = 50;
 const COMPLETED_WINDOW_DAYS = 3;
 const RETIRE_LIMIT = 500;
 const NEIGHBOUR_LIMIT = 2000;
 
-// A pin the detector's own distance function can measure: latitude in [-90, 90], longitude in [-180, 180], not 0.
-const usablePin = (lat, lng) => {
-  const a = validLatitude(lat);
-  const b = validLongitude(lng);
-  return a != null && b != null && a !== 0 && b !== 0 ? { lat: a, lng: b } : null;
-};
-
-// A distance that could not be measured (null) never matches anything: not "at the pin", not "closest".
-const isWithin = (distance, meters) => distance != null && distance <= meters;
-
-// ET calendar day -> [start, end) in epoch ms.
-function etDayBounds(day) {
-  const start = parseETDateTime(`${day}T00:00`);
-  const next = etDateString(addETDays(start, 1));
-  return { startMs: start.getTime(), endMs: parseETDateTime(`${next}T00:00`).getTime() };
-}
-
 // ---------- reads ----------
-
-function completedVisitQuery(conn) {
-  return conn('scheduled_services as s')
-    .join('customers as c', 'c.id', 's.customer_id')
-    .join('technicians as t', 't.id', 's.technician_id')
-    .leftJoin('customer_properties as p', function joinPrimary() {
-      this.on('p.customer_id', '=', 'c.id').andOnVal('p.active', '=', true).andOnVal('p.is_primary', '=', true);
-    })
-    .where('s.status', 'completed')
-    .whereNull('c.deleted_at')
-    .whereRaw("NULLIF(btrim(t.bouncie_imei), '') IS NOT NULL")
-    .orderBy('s.completed_at', 'desc').orderBy('s.id')
-    .select(
-      's.id', 's.customer_id', 's.technician_id', 's.visit_id', 's.property_id', 's.completed_at', 's.en_route_at', 's.arrived_at', 't.bouncie_imei_changed_at as mapping_changed_at',
-      conn.raw('s.scheduled_date::text as scheduled_day'),
-      's.lat as service_lat', 's.lng as service_lng',
-      's.service_address_line1', 's.service_address_city', 's.service_address_zip',
-      'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
-      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
-      'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
-      'p.id as primary_property_id', 'p.address_line1 as primary_address_line1', 'p.address_line2 as primary_address_line2',
-      'p.city as primary_city', 'p.state as primary_state', 'p.zip as primary_zip',
-      'p.latitude as primary_latitude', 'p.longitude as primary_longitude', 't.bouncie_imei',
-    );
-}
-
-const shapeVisits = (rows) => rows.map((row) => ({ ...row, ...effectivePinColumns(row), bouncie_imei: String(row.bouncie_imei).trim() }));
 
 async function loadCompletedVisits(conn, { fromMs, toMs }) {
   return shapeVisits(await completedVisitQuery(conn)
@@ -133,81 +89,6 @@ async function loadNeighbourVisits(conn, visits, now) {
   return oneRowPerVisit(rows.filter((row) => !known.has(row.id) && visitDays(row).some((day) => days.includes(day))));
 }
 
-/**
- * The saved pin as the review panel shows it: the review store's own effectiveCustomer (the matching primary
- * property's coordinates win over the customer row's). One definition for judging, verifying, storing and showing.
- */
-function effectivePinColumns(row) {
-  const pick = (prefix) => ({
-    address_line1: row[`${prefix}_address_line1`], address_line2: row[`${prefix}_address_line2`], city: row[`${prefix}_city`],
-    state: row[`${prefix}_state`], zip: row[`${prefix}_zip`],
-  });
-  const customer = { ...pick('customer'), latitude: row.customer_latitude, longitude: row.customer_longitude };
-  const primary = row.primary_property_id == null ? null
-    : { ...pick('primary'), latitude: row.primary_latitude, longitude: row.primary_longitude };
-  const effective = effectiveCustomer(customer, primary);
-  return { customer_latitude: effective.latitude, customer_longitude: effective.longitude };
-}
-
-/** One row per physical visit: grouped partners (the same visit_id) are the same stop. */
-function oneRowPerVisit(rows) {
-  const seen = new Set();
-  const out = [];
-  for (const row of rows) {
-    const key = row.visit_id ? `v:${row.visit_id}` : `s:${row.id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(row);
-  }
-  return out;
-}
-
-async function loadFences(conn) {
-  const rows = await conn('geo_fences').where({ is_active: true }).whereIn('fence_type', FENCE_TYPES)
-    .select('lat', 'lng', 'radius_meters');
-  return rows.map((row) => ({ ...usablePin(row.lat, row.lng), radius: Number(row.radius_meters) || 0 }))
-    .filter((fence) => fence.lat != null);
-}
-
-/** The cell (about 110 m) most days of the last month began in; null when no cell began 3+ days. Pure. */
-function homeBaseFrom(rows) {
-  const cells = new Map();
-  for (const row of rows) {
-    const pin = usablePin(row.start_lat, row.start_lng);
-    if (!pin) continue;
-    const key = `${pin.lat.toFixed(3)},${pin.lng.toFixed(3)}`;
-    const cell = cells.get(key) || { days: 0, lat: 0, lng: 0 };
-    cell.days += 1; cell.lat += pin.lat; cell.lng += pin.lng;
-    cells.set(key, cell);
-  }
-  const best = [...cells.values()].sort((a, b) => b.days - a.days)[0];
-  return best && best.days >= HOME_MIN_DAYS ? { lat: best.lat / best.days, lng: best.lng / best.days } : null;
-}
-
-/**
- * First ET day whose trips count toward a vehicle's home base: the lookback start, or the day AFTER the tracker
- * mapping began when that is later (trips before it may be another technician's routine). NULL changed_at = no bound.
- */
-function homeSince(now, mappingChangedAt) {
-  const lookback = etDateString(addETDays(now, -HOME_LOOKBACK_DAYS));
-  if (!mappingChangedAt) return lookback;
-  const changed = new Date(mappingChangedAt);
-  if (!Number.isFinite(changed.getTime())) return lookback;
-  const dayAfter = etDateString(addETDays(changed, 1));
-  return dayAfter > lookback ? dayAfter : lookback;
-}
-
-async function loadHomeBase(conn, imei, now, mappingChangedAt = null) {
-  const since = homeSince(now, mappingChangedAt);
-  const { rows } = await conn.raw(
-    `SELECT DISTINCT ON (trip_date) trip_date, start_lat, start_lng FROM mileage_log
-      WHERE vehicle_id = ? AND trip_date >= ? AND start_lat IS NOT NULL AND start_lng IS NOT NULL
-      ORDER BY trip_date, created_at`,
-    [imei, since],
-  );
-  return homeBaseFrom(rows || []);
-}
-
 // ---------- the flag rules (pure) ----------
 
 /**
@@ -228,23 +109,11 @@ function requiredDays(visit, now) {
   const today = etDateString(now);
   const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
   const days = visitDays(visit).filter((day) => day <= today);
-  // The log is keyed by device, and the technician's CURRENT device is what the visit query joins. A day that
-  // starts before the mapping changed (technicians.bouncie_imei_changed_at; NULL = never remapped) may belong to
-  // another vehicle, so it cannot be judged. The day of the change itself is partly before it: not judged either.
-  const changedMs = visit.mapping_changed_at ? new Date(visit.mapping_changed_at).getTime() : null;
-  const beforeMapping = changedMs != null && Number.isFinite(changedMs) && days.some((day) => etDayBounds(day).startMs < changedMs);
+  // The tracker remap rule (visit-gps-context.js dayBeforeMapping): a day that starts before the mapping changed
+  // may belong to another vehicle, so it cannot be judged.
+  const beforeMapping = days.some((day) => dayBeforeMapping(day, visit.mapping_changed_at));
   const tooOld = days.some((day) => day < cap);
   return { days, tooOld, beforeMapping, unloadable: tooOld || beforeMapping };
-}
-
-/** Where the visit was supposed to be: its own pin, else the customer's. Null for another property or no pin. */
-function destinationOf(visit) {
-  if (visit.property_id != null && visit.primary_property_id != null
-    && String(visit.property_id) !== String(visit.primary_property_id)) return null;
-  const own = usablePin(visit.service_lat, visit.service_lng);
-  if (own) return stampedAddressDiverges(visit) ? null : own;
-  if (stampedAddressDiverges(visit)) return null;
-  return usablePin(visit.customer_latitude, visit.customer_longitude);
 }
 
 /** The shortest measurable distance from a stop to any of the pins; null when none could be measured. */
@@ -252,7 +121,6 @@ const nearestPinDistance = (pins, stop) => {
   const measured = pins.map((pin) => distanceMeters(pin.lat, pin.lng, stop.lat, stop.lng)).filter((d) => d != null);
   return measured.length ? Math.min(...measured) : null;
 };
-const within = (point, stop, meters) => Boolean(point) && isWithin(distanceMeters(point.lat, point.lng, stop.lat, stop.lng), meters);
 
 /** Why a stop is not this job's stop: home base, a fence, or the neighbour's visit. Null when it could be. */
 function excludedStopReason(stop, { radius, home, fences, neighbours }) {

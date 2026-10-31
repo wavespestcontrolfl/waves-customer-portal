@@ -231,15 +231,17 @@ describe('waiting rows and the admin item', () => {
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 
-  test('a waiting row whose brief is too old, or gone, is not offered for writing: the next run briefs it again', async () => {
+  test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {
     const now = new Date('2026-10-09T13:00:00Z');
     const d = deps({ rows: [
       waiting(ID, { brief_created_at: new Date('2026-10-03T13:00:00Z') }),
       waiting(B, { brief_created_at: new Date('2026-10-01T13:00:00Z') }),
       waiting(C, { brief_created_at: null }),
-    ] });
+    ], branches: { [B]: draftFor(B) } });
     const out = await tw.awaitingTerminalDrafts({ now, deps: d });
     expect(out.due.map((r) => r.opportunity_id)).toEqual([ID]);
+    // `written` is what the daily batch claims first; a stale brief never is.
+    expect(out.written).toEqual([]);
     expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 

@@ -83,22 +83,6 @@ function resolveEvclickDirect(body, urlById = new Map()) {
   ));
 }
 
-/**
- * Resolve evclick tokens using the BODY's own event ids (stateless
- * surfaces like the Compose preview have no send row to read event_ids
- * from). Fail-open: lookup errors resolve to the homepage fallback.
- */
-async function resolveEvclickFromBody(body, knex = db) {
-  const ids = evclickIdsInBody(body);
-  if (!ids.length) return String(body || '');
-  let urlById = new Map();
-  try {
-    const rows = await knex('events_raw').whereIn('id', ids).select('id', 'event_url');
-    urlById = new Map(rows.map((r) => [String(r.id).toLowerCase(), r.event_url || null]));
-  } catch { /* homepage fallback */ }
-  return resolveEvclickDirect(body, urlById);
-}
-
 /** Load { eventIdLower → event_url } for a send's locked + alternate ids. */
 async function eventUrlMapForSend(send, knex = db) {
   const { parseLockedEventIds } = require('./newsletter-event-selection');
@@ -477,7 +461,6 @@ module.exports = {
   evclickIdsInBody,
   buildEvclickSubstitutions,
   resolveEvclickDirect,
-  resolveEvclickFromBody,
   eventUrlMapForSend,
   eventRedirectWithoutRecording,
   snapshotEventUrlsForSend,

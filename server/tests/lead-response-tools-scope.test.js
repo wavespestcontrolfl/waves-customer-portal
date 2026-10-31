@@ -1,9 +1,14 @@
 const mockSend = jest.fn();
+const mockRaise = jest.fn();
 const mockContext = jest.fn(async customer => ({ customerId: customer.id }));
 const mockPipeline = jest.fn();
 const mockMessage = jest.fn();
 const mockBridge = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: (...args) => mockRaise(...args),
+}));
 jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: mockContext }));
 jest.mock('../services/pipeline-manager', () => ({ onEvent: mockPipeline }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
@@ -94,11 +99,9 @@ beforeEach(() => {
   mockState.inserts = 0;
   mockState.updates = [];
   mockState.insertFails = false;
-  process.env.ADAM_PHONE = '+19415550101';
-  mockSend.mockResolvedValue({ success: true, sid: 'SM_fixture' });
+  mockRaise.mockReset().mockResolvedValue({ id: 'notification-1', deduped: false });
   mockMessage.mockReset().mockResolvedValue({ sent: false, blocked: true, code: 'QA_BLOCKED' });
 });
-afterAll(() => { delete process.env.ADAM_PHONE; });
 test('requires server context before database lookup', async () => {
   expect(await executeLeadTool('get_customer_context', {})).toHaveProperty('error');
   expect(mockDb).not.toHaveBeenCalled();
@@ -184,47 +187,93 @@ test('maps supported stage to assigned customer', async () => {
 test('failed insert cannot report queued or alert', async () => {
   mockState.insertFails = true;
   await expect(executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context)).rejects.toThrow('storage unavailable');
-  expect(mockSend).not.toHaveBeenCalled();
+  expect(mockRaise).not.toHaveBeenCalled();
 });
 test('saved draft survives alert failure; retry delivers once and closes the receipt', async () => {
-  mockSend.mockRejectedValueOnce(new Error('provider unavailable'));
+  mockRaise.mockRejectedValueOnce(new Error('bell unavailable'));
   const first = await executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context);
   expect(first).toMatchObject({ queued: true, activityId: 'activity-1', alertStatus: 'failed', failed: true, retryable: true });
-  expect(await executeLeadTool('queue_for_adam', { reason: 'Changed retry' }, context)).toMatchObject({ queued: true, activityId: 'activity-1', replayed: true, alertStatus: 'sent' });
-  expect(mockSend.mock.calls[1][1]).toContain('Suggested reply:\n"Draft"');
-  expect(await executeLeadTool('queue_for_adam', {}, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
-  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(await executeLeadTool('queue_for_adam', { reason: 'Changed retry' }, context)).toMatchObject({ queued: true, activityId: 'activity-1', replayed: true, alertStatus: 'notified' });
+  expect(mockRaise.mock.calls[1][2].detail).toContain('Its draft reply: "Draft"');
+  expect(await executeLeadTool('queue_for_adam', {}, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'notified' });
+  expect(mockRaise).toHaveBeenCalledTimes(2);
   expect(mockState.inserts).toBe(1);
 });
 
+// The owner never saw a held draft from Sep to Oct 2026: the old alert texted the owner's
+// phone, and the bell policy drops those texts. The draft now rings the Leads bell instead.
+test('a held draft rings one Leads bell that passes the alert rule, with the agent notes redacted', async () => {
+  Object.assign(mockState.customer, { first_name: 'Pat', last_name: 'Sample' });
+  const result = await executeLeadTool('queue_for_adam', {
+    reason: 'Commercial: owner@example.com, (941) 555-0123, 4521 Sample Ridge Rd office.',
+    draft_response: 'Hello Pat! We can walk the office at 4521 Sample Ridge Rd on Friday.',
+    urgency: 'urgent',
+  }, context);
+  expect(result).toMatchObject({ queued: true, alertStatus: 'notified' });
+  expect(mockRaise).toHaveBeenCalledTimes(1);
+  expect(mockSend).not.toHaveBeenCalled();
+  const [category, spec, opts] = mockRaise.mock.calls[0];
+  expect(category).toBe('lead');
+  const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+  expect(composeAdminAlert(spec)).toMatchObject({
+    headline: 'Leads — reply to Pat Sample',
+    link: `/admin/leads?lead=${context.leadId}`,
+    metadata: { area: 'Leads', severity: 'needs-you', subject: { type: 'lead', id: context.leadId }, doneWhen: 'lead_contacted', who: 'person' },
+  });
+  expect(opts).toMatchObject({
+    bell: true, dedupeKey: `lead-agent-hold:${context.leadId}`, dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true,
+    metadata: { leadId: context.leadId, hold: 'lead_agent' },
+  });
+  expect(opts.detail).toContain('Why the AI held it: Commercial');
+  expect(opts.detail).toContain('Its draft reply: "Hello Pat! We can walk the office');
+  expect(opts.detail).toContain('reply within 15 minutes');
+  for (const raw of ['owner@example.com', '555-0123', '4521 Sample Ridge Rd']) expect(opts.detail).not.toContain(raw);
+});
+
+test('a second hold for the same lead raises the same bell again with its new draft', async () => {
+  await executeLeadTool('queue_for_adam', { reason: 'Bundle', draft_response: 'First draft' }, context);
+  await executeLeadTool('queue_for_adam', { reason: 'Bundle', draft_response: 'Second draft', urgency: 'urgent' }, { ...context, toolUseId: 'tool-2' });
+  expect(mockRaise).toHaveBeenCalledTimes(2);
+  const [first, second] = mockRaise.mock.calls.map(([, , opts]) => opts);
+  expect(second.dedupeKey).toBe(first.dedupeKey);
+  expect(second).toMatchObject({ refreshOnDedupe: true, bumpOnRefresh: true });
+  expect(second.detail).toContain('Its draft reply: "Second draft"');
+  expect(second.detail).toContain('reply within 15 minutes');
+});
+
+test('a lead with no name still gets a bell that passes the alert rule', async () => {
+  await executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
+  const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+  expect(composeAdminAlert(mockRaise.mock.calls[0][1]).headline).toBe('Leads — reply to a new web lead');
+  expect(mockRaise.mock.calls[0][2].detail).toContain('The AI saved no draft.');
+});
+
 test('intentional alert suppression does not report a tool failure or retry delivery', async () => {
-  mockSend.mockResolvedValue({ success: true, suppressed: true });
+  mockRaise.mockResolvedValue({ id: null, suppressed: true, reason: 'bell_policy' });
   for (let replay = 0; replay < 2; replay++) {
     const result = await executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
     expect(result).toMatchObject({ queued: true, alertStatus: 'suppressed' });
     expect(result.failed).toBeUndefined();
     expect(result.error).toBeUndefined();
   }
-  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(mockRaise).toHaveBeenCalledTimes(1);
 });
 
-test('a missing owner phone preserves a retryable draft until configuration recovers', async () => {
-  delete process.env.ADAM_PHONE;
+test('a bell that was not written keeps the draft retryable until it lands', async () => {
+  mockRaise.mockResolvedValueOnce(null);
   const first = await executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Saved draft' }, context);
-  expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'not_configured' });
-  expect(mockSend).not.toHaveBeenCalled();
-  process.env.ADAM_PHONE = '+19415550101';
+  expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'failed' });
   expect(await executeLeadTool('queue_for_adam', {}, context)).toMatchObject({
-    queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent',
+    queued: true, replayed: true, activityId: first.activityId, alertStatus: 'notified',
   });
   expect(mockState.inserts).toBe(1);
-  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(mockRaise).toHaveBeenCalledTimes(2);
 });
 
 test('a concurrent replay reports pending delivery without treating the active claim as an outage', async () => {
   let started; let release;
   const delivering = new Promise(resolve => { started = resolve; });
-  mockSend.mockImplementationOnce(() => { started(); return new Promise(resolve => { release = resolve; }); });
+  mockRaise.mockImplementationOnce(() => { started(); return new Promise(resolve => { release = resolve; }); });
   const first = executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
   await delivering;
   try {
@@ -232,8 +281,8 @@ test('a concurrent replay reports pending delivery without treating the active c
     expect(replay).toMatchObject({ queued: true, replayed: true, alertStatus: 'pending', retryable: true });
     expect(replay.failed).toBeUndefined();
     expect(replay.error).toBeUndefined();
-    expect(mockSend).toHaveBeenCalledTimes(1);
-  } finally { release({ success: true, sid: 'SM_fixture' }); await first; }
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+  } finally { release({ id: 'notification-1', deduped: false }); await first; }
 });
 test('rechecks relationship inside draft transaction', async () => {
   mockDb.transaction.mockImplementationOnce(async callback => {
@@ -242,7 +291,7 @@ test('rechecks relationship inside draft transaction', async () => {
   });
   expect(await executeLeadTool('queue_for_adam', {}, context)).toHaveProperty('error');
   expect(mockState.activity).toBeNull();
-  expect(mockSend).not.toHaveBeenCalled();
+  expect(mockRaise).not.toHaveBeenCalled();
 });
 test('report persistence failure reports unsaved', async () => {
   mockState.insertFails = true;
@@ -252,16 +301,13 @@ test('report persistence failure reports unsaved', async () => {
 
 test.each([
   [undefined, 'failed'],
-  [{ success: false }, 'failed'],
-  [{ success: true, notificationUndelivered: true, suppressed: true }, 'failed'],
-  [{ success: true, notificationError: true, suppressed: true }, 'failed'],
-  [{ success: true, notificationRedirected: true, suppressed: true }, 'notified'],
-  [{ success: true, pushRouted: true, sid: 'push_fixture' }, 'notified'],
-  [{ success: true, gateBlocked: true }, 'suppressed'],
-  [{ success: true, suppressed: true }, 'suppressed'],
-  [{ success: true, sid: 'SM_fixture' }, 'sent'],
-])('reports adapter delivery honestly for %j', async (result, alertStatus) => {
-  mockSend.mockResolvedValue(result);
+  [null, 'failed'],
+  [{ id: null }, 'failed'],
+  [{ id: 'notification-1', deduped: false }, 'notified'],
+  [{ id: 'notification-1', deduped: true }, 'notified'],
+  [{ id: null, suppressed: true, reason: 'bell_policy' }, 'suppressed'],
+])('records what the bell write answered for %j', async (result, alertStatus) => {
+  mockRaise.mockResolvedValue(result);
   expect(await executeLeadTool('queue_for_adam', { reason: 'Review' }, context)).toMatchObject({ queued: true, alertStatus });
 });
 test.each([{ sessionId: 'session-2' }, { toolUseId: 'tool-2' }])('keeps independent queue invocations separate: %j', async different => {
@@ -269,7 +315,7 @@ test.each([{ sessionId: 'session-2' }, { toolUseId: 'tool-2' }])('keeps independ
   const second = await executeLeadTool('queue_for_adam', { reason: 'Review' }, { ...context, ...different });
   expect(first.activityId).not.toBe(second.activityId);
   expect(mockState.inserts).toBe(2);
-  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(mockRaise).toHaveBeenCalledTimes(2);
 });
 
 

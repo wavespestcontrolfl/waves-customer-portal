@@ -77,3 +77,54 @@ describe("two cards of one product (a host and a sold add-on)", () => {
     expect(addOnToggle).toHaveAttribute("aria-expanded", "false");
   });
 });
+
+// Owner 2026-10-29 ("i just want to warn techs", step 2): rain very likely is a Warning that keeps the
+// dose and says what to do. The chip is dark, never the red Hold.
+describe("a weather warning on the job card", () => {
+  const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
+  const product = {
+    id: "cel", rowId: "cel", name: "Celsius WG", role: "base", conditional: false, verdict: "caution", verdictLevel: "warning",
+    verdictReason: "rain 85% inside 3 h", verdictAction: "Skip it today and note why, or plan a re-treat.",
+    planned: { amount: 0.5, unit: "oz" }, short: false, onHand: null, lowStock: false, line: "Celsius WG + NIS broadleaf", governed: undefined,
+  };
+  const card = {
+    serviceId: "visit-1", strip: { name: "Synthetic Customer", program: "Lawn" }, tank: { calibrated: true, rigs: [] },
+    sprayCheck: { window: "today", windowHours: 4, hold: false, forecast: { tempF: [80, 84], windMph: 6, rainPct: 85, shortForecast: "Showers" } },
+    products: [product], addons: [],
+  };
+
+  it("shows the Warning chip, the reason and the action, and no Hold", () => {
+    render(<JobCardTab card={card} D={theme} />);
+    // The spray check header, its product row and the product card's own chip.
+    expect(screen.getAllByText("Warning")).toHaveLength(3);
+    expect(screen.queryByText("Hold")).toBeNull();
+    expect(screen.getByText("rain 85% inside 3 h")).toBeInTheDocument();
+    fireEvent.click(document.getElementById("job-card-product-cel"));
+    expect(screen.getByText("Spray check: rain 85% inside 3 h")).toBeInTheDocument();
+    expect(screen.getByText("Skip it today and note why, or plan a re-treat.")).toBeInTheDocument();
+  });
+});
+
+// Owner 2026-10-31: a heat index line for the tech, beside the weather line. It is not a verdict, a chip or a hold.
+describe("the heat safety line on the job card", () => {
+  const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
+  const base = { window: "today", windowHours: 4, hold: false, forecast: { tempF: [95, 98], windMph: 6, rainPct: 10, shortForecast: "Sunny" } };
+  const cardWith = (heatSafety) => ({
+    serviceId: "visit-1", strip: { name: "Synthetic Customer", program: "Pest" }, tank: { calibrated: true, rigs: [] },
+    sprayCheck: { ...base, ...(heatSafety ? { heatSafety } : {}) }, products: [], addons: [],
+  });
+
+  it("shows the server's text as its own line and adds no chip", () => {
+    const text = "Heat index 106°F at 2 pm. Drink water every 15 minutes. Rest in the shade.";
+    render(<JobCardTab card={cardWith({ heatIndexF: 106, at: "2 pm", level: "high", text })} D={theme} />);
+    expect(screen.getByTestId("job-card-heat-safety")).toHaveTextContent(text);
+    expect(screen.getByText(/Next 4 h:/)).toBeInTheDocument();
+    expect(screen.queryByText("Hold")).toBeNull();
+    expect(screen.queryByText("Warning")).toBeNull();
+  });
+
+  it("shows no line when the server sends none", () => {
+    render(<JobCardTab card={cardWith(null)} D={theme} />);
+    expect(screen.queryByTestId("job-card-heat-safety")).toBeNull();
+  });
+});

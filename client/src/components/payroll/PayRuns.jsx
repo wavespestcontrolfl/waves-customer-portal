@@ -2,14 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
+import { Checkbox } from '../ui/Checkbox';
 import { Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
 import { Field } from '../ui/Field';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { Textarea } from '../ui/Textarea';
+import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../FieldDocument';
 import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
+import TimeOffPanel from './TimeOffPanel';
+import PayLinesPanel from './PayLinesPanel';
+import './pay-runs-print.css';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
 // 1b-2b). The portal works out each paycheck from the approved weekly hours.
@@ -22,6 +27,7 @@ const STATUS = {
   voided: { tone: 'neutral', label: 'Voided' },
 };
 const WEEK_CHOICES = 12;
+const NO_W4_NOTE = 'No W-4 on file: withheld as single, no adjustments (IRS default)';
 
 function StatusChip({ status }) {
   const known = STATUS[status] || { tone: 'neutral', label: status };
@@ -30,8 +36,12 @@ function StatusChip({ status }) {
 
 const hoursWord = hours => `${hours} h`;
 
-// The stub is printed from the page: only the stub shows on paper.
-const PRINT_CSS = '@media print { body * { visibility: hidden !important; } .pay-stub, .pay-stub * { visibility: visible !important; } .pay-stub { position: absolute; left: 0; top: 0; width: 100%; } .pay-stub-actions { display: none !important; } }';
+// Bank status of a final check (GATE_PAYROLL_BANK_MATCH): only a run read with the gate on carries it.
+function bankWords(bank) {
+  if (bank.state === 'matched') return `Bank: matched ${dayLabel(bank.date)}`;
+  if (bank.state === 'needs_pick') return 'Bank: needs your pick (Tax page, Bank Import)';
+  return 'Bank: not seen yet';
+}
 
 function StubLine({ label, value, strong = false }) {
   return <div className={`flex justify-between gap-4 py-0.5 ${strong ? 'font-medium' : ''}`}>
@@ -50,44 +60,74 @@ export function StubDialog({ call, check, onClose }) {
     return () => { live = false; };
   }, [call, check.id]);
 
-  return <Dialog open onClose={onClose} size="lg">
-    <style>{PRINT_CSS}</style>
-    <DialogHeader><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
-    <DialogBody>
+  return <Dialog open onClose={onClose} size="lg" className="pay-stub-dialog">
+    <DialogHeader className="waves-field-no-print"><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
+    <DialogBody className="pay-stub-dialog-body">
       {error && <p role="alert" className="text-ui-caption text-alert-fg">{error}</p>}
       {!stub && !error && <p role="status">Loading…</p>}
-      {stub && <div className="pay-stub grid gap-3 text-ui-body" aria-label="Pay stub">
-        <div>
-          <p className="m-0 font-medium">{stub.employer.name}</p>
-          <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
-        </div>
-        <div>
-          <p className="m-0 font-medium">{stub.employee.name}</p>
-          {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
-          <p className="m-0 text-ui-caption text-ink-secondary">
-            Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
-          </p>
-        </div>
-        <Table aria-label="Pay stub amounts">
-          <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
-          <TBody>
-            <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
-            <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
-            <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
-            <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
-            {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
-            <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
-          </TBody>
-        </Table>
-        <div>
-          <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
-          {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
-        </div>
+      {stub && <div aria-label="Pay stub">
+        <FieldDocumentBody className="pay-stub field-document-scroll">
+          <FieldMasthead variant="staff" />
+          <FieldTitle
+            eyebrow="Payroll record"
+            title="Pay stub"
+            reference={`Pay date ${dayLabel(stub.payDate)}`}
+          />
+
+          <h2 className="field-section-heading">Employer and employee</h2>
+          <div className="field-info-grid pay-stub-meta grid sm:grid-cols-2">
+            <div>
+              <p className="m-0 font-medium">{stub.employer.name}</p>
+              <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
+            </div>
+            <div>
+              <p className="m-0 font-medium">{stub.employee.name}</p>
+              {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
+              <p className="m-0 text-ui-caption text-ink-secondary">
+                Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
+              </p>
+            </div>
+          </div>
+
+          <h2 className="field-section-heading">Earnings and withholding</h2>
+          <Table aria-label="Pay stub amounts" containerClassName="pay-stub-table-wrap">
+            <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
+            <TBody>
+              <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
+              <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
+              {stub.earnings.ptoPayCents > 0 && <TR><TD>Paid time off ({stub.hours.pto} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.ptoPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.holidayPayCents > 0 && <TR><TD>Holiday pay ({stub.hours.holiday} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.holidayPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on bonus, commission and allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
+              <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
+              <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
+              <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
+              <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
+              {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
+              <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
+            </TBody>
+          </Table>
+          {stub.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+
+          {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
+            <h2 className="field-section-heading">Employer contributions</h2>
+            <div className="pay-stub-meta">
+              <StubLine label="HSA from Waves (not part of gross pay or taxes)" value={centsToDollars(stub.employerContributions.hsaCents)} />
+            </div>
+          </>}
+
+          <h2 className="field-section-heading">Payment record</h2>
+          <div className="pay-stub-meta">
+            <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
+            {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
+          </div>
+          <FieldFooter label="Payroll record" reference={`Pay date ${dayLabel(stub.payDate)}`} />
+        </FieldDocumentBody>
       </div>}
     </DialogBody>
-    <DialogFooter>
+    <DialogFooter className="waves-field-no-print">
       <div className="pay-stub-actions flex gap-2">
         <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
         <Button type="button" disabled={!stub} onClick={() => window.print()}>Print</Button>
@@ -135,33 +175,156 @@ function Problems({ title, items }) {
   </div>;
 }
 
+// Mercury paychecks (GATE_PAYROLL_MERCURY_STATUS / _PAY, owner plan A): Mercury sends a bank-transfer paycheck only
+// after the owner approves the request in the Mercury app. Present only when the server sends `payment` on a check.
+const PAYMENT_CHIPS = {
+  queued: { tone: 'warn', label: 'Sending to Mercury' },
+  requested: { tone: 'warn', label: 'Waiting for your approval in Mercury' },
+  approved: { tone: 'neutral', label: 'Approved' },
+  sent: { tone: 'strong', label: 'Sent' },
+  failed: { tone: 'alert', label: 'Failed' },
+  rejected: { tone: 'alert', label: 'Rejected' },
+  cancelled: { tone: 'alert', label: 'Cancelled' },
+  returned: { tone: 'alert', label: 'Returned' },
+  unknown: { tone: 'alert', label: 'Outcome unknown' },
+};
+
+function PaymentChip({ payment }) {
+  if (payment.state === 'none') return <span className="text-ink-secondary">Not sent</span>;
+  if (payment.state === 'paper') return <Badge tone="neutral">Paid by check #{payment.checkNumber}</Badge>;
+  const known = PAYMENT_CHIPS[payment.state] || { tone: 'neutral', label: payment.state };
+  const sentOn = payment.state === 'sent' && payment.postedOn ? ` ${dayLabel(payment.postedOn)}` : '';
+  return <Badge tone={known.tone}>{known.label}{sentOn}</Badge>;
+}
+
+function MercuryCell({ call, check, onSaved }) {
+  const payment = check.payment;
+  const [mode, setMode] = useState(null);
+  const [number, setNumber] = useState('');
+  const [requestId, setRequestId] = useState('');
+  const [nothingWaiting, setNothingWaiting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (check.payMethod !== 'bank_transfer' && payment.state === 'none') return <span className="text-ink-secondary">Paper check</span>;
+
+  async function run(path, body, done) {
+    setBusy(true); setError('');
+    try {
+      const data = await call(path, { method: 'POST', body });
+      setMode(null);
+      // A send-again can answer 200 and still not have reached Mercury: say what happened.
+      const outcome = data && data.result && data.result.outcome;
+      if (outcome === 'failed' || outcome === 'unknown') {
+        onSaved(outcome === 'failed'
+          ? `Mercury did not take the new request for ${check.name}. Look at the payment below.`
+          : `We cannot tell if Mercury got the new request for ${check.name}. Look in Mercury before you send again.`);
+      } else onSaved(done);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <div className="grid gap-2">
+    <div><PaymentChip payment={payment} /></div>
+    {payment.error && <p className="m-0 text-ui-caption text-alert-fg">{payment.error}</p>}
+    {payment.state === 'unknown' && <p className="m-0 text-ui-caption text-ink-secondary">
+      We cannot tell if Mercury got this request. Look in Mercury for a request of this amount before you send again.
+    </p>}
+    {mode === null && <div className="flex flex-wrap gap-2">
+      {payment.canSendAgain && <Button variant="secondary" disabled={busy} onClick={() => setMode('again')} aria-label={`Send again for ${check.name}`}>Send again</Button>}
+      {payment.state === 'unknown' && <Button variant="secondary" disabled={busy} onClick={() => setMode('link')} aria-label={`Link the Mercury request for ${check.name}`}>Link the Mercury request</Button>}
+      {payment.canPaper && <Button variant="secondary" disabled={busy} onClick={() => setMode('paper')} aria-label={`Paid by paper check instead for ${check.name}`}>Paid by paper check instead</Button>}
+    </div>}
+    {mode === 'again' && <div role="group" aria-label={`Confirm send again for ${check.name}`} className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
+      <p className="m-0">Ask Mercury for a new approval request of {centsToDollars(check.netCents)} for {check.name}?</p>
+      {payment.canSendAgain === 'confirm' && <Checkbox
+        id={`nothing-waiting-${check.id}`} label="Nothing is waiting in Mercury"
+        checked={nothingWaiting} onChange={event => setNothingWaiting(event.target.checked)}
+      />}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          disabled={busy || (payment.canSendAgain === 'confirm' && !nothingWaiting)}
+          onClick={() => run(`/checks/${check.id}/send-again`, payment.canSendAgain === 'confirm' ? { confirmNothingWaiting: true } : {}, `Asked Mercury again for ${check.name}. Approve it in the Mercury app.`)}
+        >Yes, send again</Button>
+        <Button variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+      </div>
+    </div>}
+    {mode === 'link' && <form
+      aria-label={`Link request for ${check.name}`} className="grid gap-2"
+      onSubmit={event => { event.preventDefault(); run(`/payments/${payment.id}/link-request`, { requestId }, `Linked the Mercury request for ${check.name}.`); }}
+    >
+      <p className="m-0 text-ui-caption text-ink-secondary">Find the request in Mercury (Send money, approval requests), copy its id and paste it here. Nothing is sent.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input aria-label={`Mercury request id for ${check.name}`} className="w-72" maxLength={64} autoComplete="off" value={requestId} onChange={event => setRequestId(event.target.value)} />
+        <Button type="submit" disabled={busy || !requestId.trim()}>Link request</Button>
+        <Button type="button" variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+      </div>
+    </form>}
+    {mode === 'paper' && <form
+      aria-label={`Paper check for ${check.name}`} className="flex flex-wrap items-center gap-2"
+      onSubmit={event => { event.preventDefault(); run(`/checks/${check.id}/paper`, { checkNumber: number }, `Recorded a paper check for ${check.name}.`); }}
+    >
+      <Input aria-label={`Paper check number for ${check.name}`} className="w-28" maxLength={30} autoComplete="off" value={number} onChange={event => setNumber(event.target.value)} />
+      <Button type="submit" disabled={busy || !number.trim()}>Save paper check</Button>
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => setMode(null)}>Cancel</Button>
+    </form>}
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </div>;
+}
+
 function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   if (run.checks.length === 0) return <p className="m-0">No paychecks in this run yet.</p>;
   const t = run.totals;
+  // Only a pay run drafted with time off turned on carries these figures.
+  const showPto = run.checks.some(check => check.ptoPayCents > 0);
+  const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
+  const showBank = isFinal && run.checks.some(check => check.bank);
+  // Only a run read with GATE_PAYROLL_MERCURY_STATUS on carries each check's payment.
+  const showMercury = isFinal && run.checks.some(check => check.payment);
+  // Only a pay run drafted with pay lines turned on carries these figures.
+  const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.lineOvertimePremiumCents > 0);
+  const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
   return <>
     <Table aria-label="Paychecks">
       <THead><TR>
-        <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH><TH align="right">Rate</TH><TH align="right">Gross</TH>
+        <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH>
+        {showPto && <TH align="right">Paid time off</TH>}
+        {showHoliday && <TH align="right">Holiday</TH>}
+        {showLines && <TH align="right">Bonus, commission, allowance</TH>}
+        {showLines && <TH align="right">Overtime on those</TH>}
+        <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>
+        {showHsa && <TH align="right">HSA from Waves</TH>}
         {isFinal && <TH>Check</TH>}
+        {showBank && <TH>Bank</TH>}
+        {showMercury && <TH>Mercury</TH>}
       </TR></THead>
       <TBody>
         {run.checks.map(check => <TR key={check.id}>
-          <TD>{check.name}</TD>
+          <TD>
+            {check.name}
+            {check.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+          </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
+          {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}
+          {showHoliday && <TD nums align="right">{hoursWord(check.holidayHours)} · {centsToDollars(check.holidayPayCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>
           <TD nums align="right">{centsToDollars(check.grossCents)}</TD>
           <TD nums align="right">{centsToDollars(check.federalIncomeTaxCents)}</TD>
           <TD nums align="right">{centsToDollars(check.socialSecurityCents)}</TD>
           <TD nums align="right">{centsToDollars(check.medicareCents + check.additionalMedicareCents)}</TD>
           <TD nums align="right">{centsToDollars(check.netCents)}</TD>
+          {showHsa && <TD nums align="right">{centsToDollars(check.hsaEmployerCents)}</TD>}
           {isFinal && <TD>
             <div className="grid gap-2">
               <CheckNumberCell call={call} check={check} onSaved={onSaved} />
               <div><Button variant="secondary" onClick={() => onStub(check)} aria-label={`Stub for ${check.name}`}>Stub</Button></div>
             </div>
           </TD>}
+          {showBank && <TD>{check.bank ? bankWords(check.bank) : ''}</TD>}
+          {showMercury && <TD>{check.payment ? <MercuryCell call={call} check={check} onSaved={onSaved} /> : ''}</TD>}
         </TR>)}
       </TBody>
     </Table>
@@ -189,6 +352,93 @@ function VoidForm({ busy, onVoid, onCancel }) {
       <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button>
     </div>
   </form>;
+}
+
+const OUTCOME_WORDS = { requested: 'asked Mercury', failed: 'Mercury did not take it', unknown: 'outcome unknown', skipped: 'not sent' };
+
+// The line after Send. "Nothing was sent" only when no request can have reached Mercury: an unknown one may have.
+function sendSummary(results) {
+  const count = outcome => results.filter(item => item.outcome === outcome).length;
+  const many = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const asked = count('requested');
+  const unknown = count('unknown');
+  const failed = count('failed');
+  const parts = [
+    asked > 0 && `Asked Mercury for ${many(asked, 'payment')}. Approve them in the Mercury app.`,
+    unknown > 0 && `We cannot tell if Mercury got ${many(unknown, 'request')}. Look in Mercury before you send again.`,
+    failed > 0 && `Mercury did not take ${many(failed, 'request')}. Look at the payments below.`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' ') : 'Nothing was sent to Mercury.';
+}
+const SKIP_WORDS = { no_recipient: 'no Mercury recipient id', no_pay: 'no pay', already_has_payment: 'already has a payment' };
+const skipWords = reason => SKIP_WORDS[String(reason).split(':')[0]] || 'not sent';
+
+function Warning({ children, tone = 'neutral' }) {
+  return <li className={`rounded-sm border-hairline p-2 ${tone === 'warn' ? 'border-warn-fg text-warn-fg' : 'border-zinc-200'}`}>{children}</li>;
+}
+
+// GATE_PAYROLL_MERCURY_PAY: ask Mercury for an approval request for each bank-transfer paycheck. The confirm step shows the
+// three warnings (never a block): funding, key health and the approve-by day. Money leaves only when you approve in Mercury.
+function SendToMercury({ call, run, onChanged, onMessage }) {
+  const [step, setStep] = useState('idle');
+  const [preview, setPreview] = useState(null);
+  const [results, setResults] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const info = run.mercury;
+  if (run.status !== 'finalized' || !info || !info.payEnabled) return null;
+
+  async function openConfirm() {
+    setBusy(true); setError(''); setResults(null);
+    try {
+      const data = await call(`/runs/${run.id}/send-preview`);
+      setPreview(data.preview); setStep('confirm');
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  async function send() {
+    setBusy(true); setError('');
+    try {
+      const data = await call(`/runs/${run.id}/send`, { method: 'POST', body: {} });
+      setResults(data.results); setStep('idle');
+      onMessage(sendSummary(data.results));
+      await onChanged(run.id);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <div className="grid gap-2">
+    {info.missingRecipient.length > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+      No Mercury recipient id yet for {info.missingRecipient.join(', ')}. Add it in the employee table above.
+    </p>}
+    {step === 'idle' && info.canSend && <div>
+      <Button disabled={busy} onClick={openConfirm}>Send to Mercury</Button>
+    </div>}
+    {step === 'confirm' && preview && <div role="group" aria-label="Confirm send to Mercury" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
+      <p className="m-0">
+        Ask Mercury to pay {preview.eligible.length} paycheck{preview.eligible.length === 1 ? '' : 's'}
+        {' '}({preview.eligible.map(item => `${item.name} ${centsToDollars(item.netCents)}`).join(', ')}).
+        Nothing is paid until you approve each one in the Mercury app.
+      </p>
+      <ul className="m-0 grid list-none gap-1 p-0" aria-label="Before you send">
+        <Warning tone={preview.funding.short ? 'warn' : 'neutral'}>{preview.funding.text}</Warning>
+        <Warning tone={preview.key.stale ? 'warn' : 'neutral'}>{preview.key.text}</Warning>
+        <Warning>{preview.approveBy.text}</Warning>
+      </ul>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={busy} onClick={send}>Yes, send to Mercury</Button>
+        <Button variant="secondary" disabled={busy} onClick={() => setStep('idle')}>Cancel</Button>
+      </div>
+    </div>}
+    {results && <ul className="m-0 grid list-none gap-1 p-0" aria-label="Send results">
+      {results.map(item => <li key={item.checkId} className="text-ui-caption">
+        {item.name}: {item.outcome === 'skipped' ? skipWords(item.reason) : OUTCOME_WORDS[item.outcome] || item.outcome}
+        {item.message ? ` (${item.message})` : ''}
+      </li>)}
+    </ul>}
+    {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
+  </div>;
 }
 
 export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
@@ -278,6 +528,8 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
       {run.status !== 'voided' && run.checks.length > 0 && <Button variant="secondary" disabled={busy} onClick={exportCsv}>Export CSV</Button>}
     </div>}
 
+    <SendToMercury call={call} run={run} onChanged={onChanged} onMessage={onMessage} />
+
     {stubFor && <StubDialog call={call} check={stubFor} onClose={() => setStubFor(null)} />}
   </Card>;
 }
@@ -353,6 +605,18 @@ export default function PayRuns({ call, onRunsChanged }) {
       key={run.id} call={call} run={run}
       onChanged={open} onMessage={setMessage} onRunsChanged={onRunsChanged}
     />}
+
+    <TimeOffPanel
+      call={call} weekStart={run ? run.weekStart : week}
+      onChanged={() => { if (run) open(run.id); }}
+    />
+
+    <PayLinesPanel
+      call={call} weekStart={run ? run.weekStart : week}
+      // A finalize pays the open lines and a void reopens them: reload when the run's status changes.
+      refreshKey={run ? `${run.id}:${run.status}` : ''}
+      onChanged={() => { if (run) open(run.id); }}
+    />
 
     {runs && runs.length === 0 && <p className="m-0">No pay runs yet.</p>}
     {runs && runs.length > 0 && <Card>

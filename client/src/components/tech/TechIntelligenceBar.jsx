@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
+import { renderAnswerInline } from '../admin/answerInline';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Waves Admin look (DECISIONS 2026-10-03): ink and stone surfaces; `teal` is the ink accent.
@@ -35,20 +36,17 @@ function techFetch(path, options = {}) {
   });
 }
 
+// Bold and links in answer text (components/admin/answerInline).
+const ANSWER_INLINE = { strong: { style: { color: D.text, fontWeight: 500 } } };
+
 function renderMarkdown(text) {
   if (!text) return null;
   return text.split('\n').map((line, i) => {
     if (!line.trim()) return <div key={i} style={{ height: 6 }} />;
     if (line.startsWith('### ') || line.startsWith('## ')) return <div key={i} style={{ fontSize: 14, fontWeight: 500, color: D.text, marginTop: 10, marginBottom: 4 }}>{line.replace(/^#+\s/, '')}</div>;
-    if (line.match(/^[-•*]\s/)) return <div key={i} style={{ display: 'flex', gap: 6, paddingLeft: 2, marginBottom: 2 }}><span style={{ color: D.teal, fontSize: 8, marginTop: 6 }}>●</span><span>{renderBold(line.replace(/^[-•*]\s/, ''))}</span></div>;
-    return <div key={i} style={{ marginBottom: 3 }}>{renderBold(line)}</div>;
+    if (line.match(/^[-•*]\s/)) return <div key={i} style={{ display: 'flex', gap: 6, paddingLeft: 2, marginBottom: 2 }}><span style={{ color: D.teal, fontSize: 8, marginTop: 6 }}>●</span><span>{renderAnswerInline(line.replace(/^[-•*]\s/, ''), ANSWER_INLINE)}</span></div>;
+    return <div key={i} style={{ marginBottom: 3 }}>{renderAnswerInline(line, ANSWER_INLINE)}</div>;
   });
-}
-
-function renderBold(text) {
-  return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
-    p.startsWith('**') && p.endsWith('**') ? <strong key={i} style={{ color: D.text, fontWeight: 500 }}>{p.slice(2, -2)}</strong> : p
-  );
 }
 
 
@@ -88,7 +86,7 @@ export default function TechIntelligenceBar() {
     attachmentConversionRef.current = conversionId;
     setAttachmentBusy(true);
     try {
-      const parts = await filesToImageParts(files, attachments.length);
+      const { parts } = await filesToImageParts(files, attachments.length);
       if (attachmentConversionRef.current === conversionId && parts.length) {
         setAttachments(prev => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
       }
@@ -166,7 +164,7 @@ export default function TechIntelligenceBar() {
           width: 28, height: 28, borderRadius: 4,
           background: D.teal, color: D.white,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 13, flexShrink: 0,
+          fontSize: 14, flexShrink: 0,
         }}>⚡</div>
         <textarea
           ref={inputRef}
@@ -201,17 +199,17 @@ export default function TechIntelligenceBar() {
         <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
           onChange={(e) => { addAttachments(e.target.files); e.target.value = ''; }} />
         {loading || attachmentsLoading ? (
-          <div style={{ padding: '6px 10px', borderRadius: 4, background: `${D.teal}22`, color: D.teal, fontSize: 11, fontWeight: 500, animation: 'pulse 1.5s ease infinite' }}>...</div>
+          <div style={{ padding: '6px 10px', borderRadius: 4, background: `${D.teal}22`, color: D.teal, fontSize: 14, fontWeight: 500, animation: 'pulse 1.5s ease infinite' }}>...</div>
         ) : prompt.trim() ? (
           <button onClick={() => submit()} style={{
             padding: '6px 12px', borderRadius: 4, background: D.teal, color: D.white,
-            border: 'none', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            border: 'none', fontSize: 14, fontWeight: 500, cursor: 'pointer',
           }}>Go</button>
         ) : null}
         {response && (
           <button onClick={clear} style={{
             padding: '6px 8px', background: 'transparent', border: `1px solid ${D.border}`,
-            borderRadius: 4, color: D.muted, fontSize: 10, fontWeight: 500, cursor: 'pointer',
+            borderRadius: 4, color: D.muted, fontSize: 14, fontWeight: 500, cursor: 'pointer',
           }}>✕</button>
         )}
       </div>
@@ -224,7 +222,7 @@ export default function TechIntelligenceBar() {
               <img src={a.previewUrl} alt={a.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               <button onClick={() => removeAttachment(i)} title="Remove" aria-label={`Remove ${a.name}`} style={{
                 position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: '50%',
-                border: 'none', background: 'rgba(28,25,23,0.85)', color: D.white, fontSize: 11, lineHeight: 1,
+                border: 'none', background: 'rgba(28,25,23,0.85)', color: D.white, fontSize: 14, lineHeight: 1,
                 cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
               }}>×</button>
             </div>
@@ -239,7 +237,7 @@ export default function TechIntelligenceBar() {
             <button key={a.id} onClick={() => { setPrompt(a.prompt); submit(a.prompt); }} style={{
               display: 'flex', alignItems: 'center', gap: 6, padding: '10px 10px',
               background: D.bg, border: `1px solid ${D.border}`, borderRadius: 4,
-              color: D.muted, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              color: D.muted, fontSize: 14, fontWeight: 500, cursor: 'pointer',
               fontFamily: "'Roboto', system-ui, sans-serif", textAlign: 'left',
             }}>
               <span style={{ fontSize: 15 }}>{a.icon}</span>
@@ -261,7 +259,7 @@ export default function TechIntelligenceBar() {
       {/* Response */}
       {response && !loading && (
         <div style={{ padding: '0 12px 12px', maxHeight: 350, overflowY: 'auto' }} aria-live="polite">
-          <div role={typeof response === 'string' && response.startsWith('Error:') ? 'alert' : undefined} style={{ fontSize: 13, lineHeight: 1.6, color: D.text, fontFamily: "'Roboto', system-ui, sans-serif" }}>
+          <div role={typeof response === 'string' && response.startsWith('Error:') ? 'alert' : undefined} style={{ fontSize: 14, lineHeight: 1.6, color: D.text, fontFamily: "'Roboto', system-ui, sans-serif" }}>
             {renderMarkdown(response)}
           </div>
           {/* Follow-up */}
@@ -272,9 +270,9 @@ export default function TechIntelligenceBar() {
               aria-label="Follow-up question" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
               enterKeyHint="send"
-              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 4, color: D.text, fontSize: 13, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none', boxSizing: 'border-box', resize: 'none' }} />
+              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 4, color: D.text, fontSize: 14, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none', boxSizing: 'border-box', resize: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || attachmentsLoading} style={{
-              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 4, fontSize: 12, fontWeight: 500,
+              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 4, fontSize: 14, fontWeight: 500,
               cursor: prompt.trim() && !attachmentsLoading ? 'pointer' : 'not-allowed', opacity: prompt.trim() && !attachmentsLoading ? 1 : 0.4,
             }}>Go</button>
           </div>

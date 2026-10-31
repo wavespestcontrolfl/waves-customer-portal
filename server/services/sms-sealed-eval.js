@@ -1187,7 +1187,7 @@ function expectedRunVersion(runPatch) {
  * caller — so a mismatched resume can't grade one leg's run with the other
  * leg's drafts.
  */
-async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', expectedVoiceProfileVersion, promptPatch, dbi = db } = {}) {
+async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', expectedVoiceProfileVersion, promptPatch, onRunCreated, dbi = db } = {}) {
   let run;
   let priorRunNoProgress = false;
   if (runId) {
@@ -1244,6 +1244,9 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     }
   } else {
     run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, expectedVoiceProfileVersion, promptPatch, dbi });
+    // The caller records the new run's id BEFORE any paid item is processed, so a process that exits
+    // mid-run leaves a run its owner can find and resume (the prompt auto-promote loop's baseline).
+    if (typeof onRunCreated === 'function') await onRunCreated(run);
   }
   const route = EXAM_LEG_ROUTES[run.provider_leg];
   if (!route) throw new Error(`run ${String(run.id).slice(0, 8)} has unknown provider leg ${run.provider_leg}`);
@@ -1725,6 +1728,8 @@ module.exports = {
   sealEvalItems,
   createExamRun,
   runSealedExam,
+  expectedRunVersion,
+  loadRunPatch,
   finalizeRun,
   computeSignificance,
   judgeRulerOf,

@@ -593,6 +593,49 @@ async function suggestionAnchorIsStale({ decisionId, dbi = db, excludeSmsLogId }
 }
 
 /**
+ * The newest customer text on a thread (its id), by the same rule suggestionAnchorIsStale uses: inbound, not a job-applicant
+ * reply, matched on the phone's last ten digits. The Intelligence Bar pins it on an Agent Review card and re-reads it at the
+ * provider boundary (pass the held connection as dbi). Null when the thread has none.
+ */
+async function newestInboundIdForThread(last10, dbi = db) {
+  const key = String(last10 || '').replace(/\D/g, '').slice(-10);
+  if (!key) return null;
+  const row = await dbi('sms_log')
+    .where({ direction: 'inbound' })
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('id');
+  return row ? String(row.id) : null;
+}
+
+/**
+ * Staff dismissed ONE pending Agent Review card without sending anything: pending_review -> ignored, with the same fields
+ * ignoreParkedSuggestions writes for a card a staff reply passed over (human_verdict 'ignored', reviewer, time) and the same draft
+ * return to the judge pool (revertDraftsToShadow), in one transaction under the thread lock. Guarded on the status and, when
+ * given, on the exact suggested text (the Intelligence Bar's card pin). Returns true when this call ignored it.
+ */
+async function ignorePendingSuggestion({ decisionId, expectedSuggestedMessage, phoneLast10, reviewedBy, note } = {}) {
+  return db.transaction(async (trx) => {
+    if (phoneLast10) await lockSuggestThread(trx, phoneLast10);
+    const q = trx('agent_decisions').where({ id: decisionId, status: 'pending_review' });
+    if (typeof expectedSuggestedMessage === 'string') q.where('suggested_message', expectedSuggestedMessage);
+    const [row] = await q.update({
+      status: 'ignored',
+      human_verdict: 'ignored',
+      correction_note: note || 'Dismissed by staff without a reply.',
+      reviewed_by: reviewedBy || 'Admin',
+      reviewed_at: new Date(),
+      updated_at: new Date(),
+    }).returning(['id', 'entity_id']);
+    if (!row) return false;
+    await revertDraftsToShadow(trx, [row.entity_id]);
+    return true;
+  });
+}
+
+/**
  * Guardedly retire ONE stale decision at the moment staleness is discovered
  * (send-time 409, or a scheduled send's fire-time re-check): fromStatus →
  * superseded, and a house-voice suggestion's draft returns to the judge
@@ -886,15 +929,28 @@ async function markSuggestionScheduled({ decisionId, scheduledFor }, dbh = db) {
  * decision ids so the scheduled row can record them (fire = ignored,
  * cancel/failure = reopened).
  */
-async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
-  if (!phoneLast10) return [];
-  // Suggest-workflow decisions always link the INBOUND sms_log row, where
-  // from_phone is the customer and to_phone is the Waves line — matching
-  // to_phone would park every suggestion that arrived on that line.
-  const pendingQuery = dbh('agent_decisions as ad')
+// The pending house-voice suggestions on one phone's thread: the query parkThreadSuggestions parks, and
+// threadHasPendingSuggestion asks about without changing anything.
+// Suggest-workflow decisions always link the INBOUND sms_log row, where
+// from_phone is the customer and to_phone is the Waves line — matching
+// to_phone would park every suggestion that arrived on that line.
+function pendingThreadSuggestionsQuery(phoneLast10, dbh = db) {
+  return dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
     .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
+}
+
+// Read-only: is a suggested reply waiting on this phone's thread? The Intelligence Bar's schedule_sms refuses
+// while one is (a queued text would park it and become uncancelable from the bar).
+async function threadHasPendingSuggestion(phoneLast10, dbh = db) {
+  if (!phoneLast10) return false;
+  return !!(await pendingThreadSuggestionsQuery(phoneLast10, dbh).first('ad.id'));
+}
+
+async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
+  if (!phoneLast10) return [];
+  const pendingQuery = pendingThreadSuggestionsQuery(phoneLast10, dbh);
   if (excludeDecisionId) pendingQuery.whereNot('ad.id', excludeDecisionId);
   const pending = await pendingQuery.select('ad.id');
   if (!pending.length) return [];
@@ -1423,6 +1479,8 @@ module.exports = {
   supersedeStaleSuggestions,
   suggestionAnchorIsStale,
   supersedeStaleDecision,
+  newestInboundIdForThread,
+  ignorePendingSuggestion,
   suggestionEligible,
   isPickerOfferSnapshot,
   schedulingOfferSuggestible,
@@ -1442,6 +1500,7 @@ module.exports = {
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  threadHasPendingSuggestion,
   createReplyHoldingReservation,
   settleReplyHoldingReservation,
   reserveHumanReply,

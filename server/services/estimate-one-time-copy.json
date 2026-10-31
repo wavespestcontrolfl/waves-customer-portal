@@ -337,6 +337,25 @@
       "sub": "Droppings, nesting, and the pheromone trail removed and disinfected — approve online and pick a day. Licensed & insured."
     }
   },
+  "rodent_dead_animal_removal": {
+    "outcome": "We search where the smell points, remove the dead rodent, and treat the spot for odor.",
+    "includes": [
+      "A technician searches the spots the smell points to and removes the dead rodent",
+      "The spot is cleaned and treated for odor at its source",
+      "Odor fades over the next few days once the source is removed",
+      "Sometimes a rodent dies where no one can reach it. If we can't find it, we treat the odor where it is strongest, and the smell usually fades in two to four weeks",
+      "The price covers the search, so it is the same whether or not we find it",
+      "We never open a wall or ceiling without your OK. That work is quoted separately",
+      "This visit does not seal the way in. Ask us about exclusion if more rodents may be getting inside"
+    ],
+    "assurance": "If flies or a stronger smell show where it is within 14 days, we come back once at no charge",
+    "terms": "Pay on service day. No contract.",
+    "hero": {
+      "eyebrow": "Your dead rodent removal",
+      "h1": "Hello {first}, your dead rodent removal quote is ready!",
+      "sub": "A technician searches for the animal, removes it and treats the area for odor. Approve online and pick a day. Licensed & insured."
+    }
+  },
   "rodent_bait_setup": {
     "outcome": "Rodent pressure handled outside — before it gets into the structure.",
     "includes": [

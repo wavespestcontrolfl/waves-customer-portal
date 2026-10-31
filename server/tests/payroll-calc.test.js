@@ -1,4 +1,4 @@
-const { computePaycheck, TAX_YEARS } = require('../services/payroll-calc');
+const { computePaycheck, floridaMinimumWageCentsFor, TAX_YEARS } = require('../services/payroll-calc');
 
 const W4_SINGLE = { formYear: 2026, filingStatus: 'single', step2Checkbox: false };
 const FULL_WEEK = { payDate: '2026-06-05', hourlyRate: '23.00', regularMinutes: '2400.00' };
@@ -31,8 +31,11 @@ describe('computePaycheck: federal income tax', () => {
   )));
 
   test.each(cases)('$%i weekly, %s, Step 2 box %s → about $%i', (wage, status, checkbox, dollars) => {
+    // $25.00 an hour for wage / 25 hours (in minutes): the $480 row at $12.00 an hour would sit under
+    // the Florida minimum wage, and only the gross matters to the withholding table.
     const result = paycheck({
-      hourlyRate: String(wage / 40),
+      hourlyRate: '25.00',
+      regularMinutes: String((wage / 25) * 60),
       w4: { formYear: 2026, filingStatus: status, step2Checkbox: checkbox },
     });
     expect(result.grossPayCents).toBe(wage * 100);
@@ -162,6 +165,71 @@ describe('computePaycheck: pay and payroll taxes', () => {
   });
 });
 
+describe('computePaycheck: hourly pay at $25.00 an hour', () => {
+  const AT_25 = { hourlyRate: '25.00' };
+
+  test('39 hours is $975.00 with no overtime', () => {
+    const result = paycheck({ ...AT_25, regularMinutes: '2340' });
+    expect(result.regularPayCents).toBe(97500);
+    expect(result.overtimePayCents).toBe(0);
+    expect(result.grossPayCents).toBe(97500);
+  });
+
+  test('40 hours is $1,000.00 with no overtime', () => {
+    const result = paycheck({ ...AT_25, regularMinutes: '2400' });
+    expect(result.regularPayCents).toBe(100000);
+    expect(result.overtimePayCents).toBe(0);
+    expect(result.overtimePremiumCents).toBe(0);
+    expect(result.grossPayCents).toBe(100000);
+  });
+
+  test('45 hours is 40 at $25.00 plus 5 at $37.50: gross $1,187.50, of which $62.50 is the half-time premium', () => {
+    const result = paycheck({ ...AT_25, regularMinutes: '2400', overtimeMinutes: '300' });
+    expect(result.regularPayCents).toBe(100000);
+    expect(result.overtimePayCents).toBe(18750);
+    expect(result.grossPayCents).toBe(118750);
+    expect(result.overtimePremiumCents).toBe(6250);
+  });
+
+  test('a paycheck that crosses the 2026 Social Security wage base taxes only the $500.00 left under it', () => {
+    // $184,500 base - $184,000 already paid = $500.00 of this $1,000.00 check; 6.2% of $500.00 = $31.00.
+    const result = paycheck({ ...AT_25, regularMinutes: '2400', ytdGrossWages: '184000.00' });
+    expect(result.grossPayCents).toBe(100000);
+    expect(result.taxableWages.socialSecurityCents).toBe(50000);
+    expect(result.socialSecurityEmployeeCents).toBe(3100);
+  });
+});
+
+describe('Florida minimum wage floor (Fla. Const. art. X, s. 24)', () => {
+  test('a rate under the floor on the pay date is refused with the floor and the date', () => {
+    expect(() => paycheck({ payDate: '2026-10-09', hourlyRate: '14.99' }))
+      .toThrow('Hourly rate $14.99 is below the Florida minimum wage of $15.00 on 2026-10-09');
+  });
+
+  test('the floor in force on the pay date decides: $14.50 clears the $14.00 floor before 30 Sep 2026', () => {
+    expect(paycheck({ payDate: '2026-09-25', hourlyRate: '14.50' }).grossPayCents).toBe(58000);
+    expect(paycheck({ payDate: '2026-09-29', hourlyRate: '14.00' }).grossPayCents).toBe(56000);
+    expect(() => paycheck({ payDate: '2026-09-25', hourlyRate: '13.99' }))
+      .toThrow('Hourly rate $13.99 is below the Florida minimum wage of $14.00 on 2026-09-25');
+  });
+
+  test('$15.00 is allowed from 30 Sep 2026, and $14.99 is not', () => {
+    expect(paycheck({ payDate: '2026-09-30', hourlyRate: '15.00' }).grossPayCents).toBe(60000);
+    expect(() => paycheck({ payDate: '2026-09-30', hourlyRate: '14.99' })).toThrow(/below the Florida minimum wage of \$15\.00/);
+  });
+
+  test('the table steps from $14.00 to $15.00 on 30 Sep 2026 and ends on 31 Dec 2027', () => {
+    expect(floridaMinimumWageCentsFor('2025-09-30')).toBe(1400n);
+    expect(floridaMinimumWageCentsFor('2026-09-29')).toBe(1400n);
+    expect(floridaMinimumWageCentsFor('2026-09-30')).toBe(1500n);
+    expect(floridaMinimumWageCentsFor('2027-12-31')).toBe(1500n);
+  });
+
+  test.each(['2025-09-29', '2028-01-01'])('a pay date of %s has no minimum wage on file', (day) => {
+    expect(() => floridaMinimumWageCentsFor(day)).toThrow(`No Florida minimum wage on file for ${day} yet`);
+  });
+});
+
 describe('computePaycheck: refuses to guess', () => {
   test.each([
     ['a pay date in a year without tables', { payDate: '2027-01-08' }, /No federal withholding tables for 2027/],
@@ -178,5 +246,125 @@ describe('computePaycheck: refuses to guess', () => {
     ['an unknown pay frequency', { payFrequency: 'daily' }, /Unknown pay frequency/],
   ])('%s', (_label, overrides, message) => {
     expect(() => paycheck(overrides)).toThrow(message);
+  });
+});
+
+describe('computePaycheck: paid time off and holidays (GATE_PAYROLL_TIME_OFF)', () => {
+  // 10 hours of paid time off at $21.00 and 8 hours of holiday: hours not worked,
+  // paid at the straight rate. Minutes arrive like regularMinutes.
+  const OFF = { hourlyRate: '21.00', regularMinutes: '1800.00' };
+
+  test('pays time off and holiday at the straight rate and sums all four into gross', () => {
+    const result = paycheck({ ...OFF, overtimeMinutes: '120.00', ptoMinutes: '600.00', holidayMinutes: '480.00' });
+    expect(result.regularPayCents).toBe(63000);
+    expect(result.overtimePayCents).toBe(6300);
+    expect(result.ptoPayCents).toBe(21000);
+    expect(result.holidayPayCents).toBe(16800);
+    expect(result.grossPayCents).toBe(63000 + 6300 + 21000 + 16800);
+  });
+
+  test('time off never counts toward overtime: 40 h worked plus a 10 h holiday has no overtime pay', () => {
+    const result = paycheck({ hourlyRate: '22.00', regularMinutes: '2400.00', overtimeMinutes: '0.00', holidayMinutes: '600.00' });
+    expect(result.overtimePayCents).toBe(0);
+    expect(result.overtimePremiumCents).toBe(0);
+    expect(result.holidayPayCents).toBe(22000);
+    expect(result.grossPayCents).toBe(88000 + 22000);
+  });
+
+  test('a week of time off alone is a paycheck', () => {
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0.00', ptoMinutes: '2400.00' });
+    expect(result.grossPayCents).toBe(84000);
+    expect(result.ptoPayCents).toBe(84000);
+  });
+
+  test('rounds each line half-up to the cent like regular pay', () => {
+    // 0.01 h (0.6 min = 60 hundredths) at $21.00 is 0.21 cents; 2.5 min at $21.00 is 87.5 cents.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0', ptoMinutes: '2.50', holidayMinutes: '0.60' });
+    expect(result.ptoPayCents).toBe(88);
+    expect(result.holidayPayCents).toBe(21);
+  });
+
+  test('taxes and withholding run on the full gross', () => {
+    const withOff = paycheck({ ...OFF, ptoMinutes: '600.00', holidayMinutes: '480.00' });
+    const asWorked = paycheck({ hourlyRate: '21.00', regularMinutes: '2880.00' });
+    expect(withOff.grossPayCents).toBe(asWorked.grossPayCents);
+    for (const key of ['federalIncomeTaxCents', 'socialSecurityEmployeeCents', 'medicareEmployeeCents', 'netPayCents', 'futaCents', 'floridaReemploymentCents']) {
+      expect(withOff[key]).toBe(asWorked[key]);
+    }
+    expect(withOff.taxableWages).toEqual(asWorked.taxableWages);
+    expect(withOff.withholdingWorksheet).toEqual(asWorked.withholdingWorksheet);
+  });
+
+  test('the $7,000 FUTA and RT-6 cap counts time off pay in the check', () => {
+    // $6,800 paid: only $200 of this $840 check (all time off) is under the $7,000 base.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0.00', ptoMinutes: '2400.00', ytdGrossWages: '6800.00' });
+    expect(result.taxableWages.futaCents).toBe(20000);
+    expect(result.futaCents).toBe(120);
+    expect(result.floridaReemploymentCents).toBe(540);
+  });
+
+  test('output is identical when neither figure is passed, and carries no time-off keys', () => {
+    const plain = paycheck();
+    expect(plain).not.toHaveProperty('ptoPayCents');
+    expect(plain).not.toHaveProperty('holidayPayCents');
+    expect(JSON.stringify(paycheck({ regularMinutes: '2400.00', overtimeMinutes: '0.00' }))).toBe(JSON.stringify(plain));
+    // Passing zero is a caller that opted in: same numbers, two extra keys.
+    const zero = paycheck({ ptoMinutes: 0, holidayMinutes: 0 });
+    const { ptoPayCents, holidayPayCents, ...rest } = zero;
+    expect([ptoPayCents, holidayPayCents]).toEqual([0, 0]);
+    expect(rest).toEqual(plain);
+  });
+
+  test('a mistyped figure is refused, never read as zero', () => {
+    expect(() => paycheck({ ptoMinutes: '-5' })).toThrow(/Paid time off minutes/);
+    expect(() => paycheck({ holidayMinutes: 'abc' })).toThrow(/Holiday minutes/);
+  });
+});
+
+describe('computePaycheck: family employee (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
+  const stripExempt = ({ unemploymentExempt, ...rest }) => rest;
+
+  test('an exempt check owes no FUTA or Florida tax and counts no unemployment wages; every other figure is unchanged', () => {
+    const normal = paycheck({ ytdGrossWages: '1200.00' });
+    const exempt = paycheck({ ytdGrossWages: '1200.00', unemploymentExempt: true });
+    expect(exempt.unemploymentExempt).toBe(true);
+    expect(exempt.futaCents).toBe(0);
+    expect(exempt.floridaReemploymentCents).toBe(0);
+    expect(exempt.taxableWages.futaCents).toBe(0);
+    expect(exempt.taxableWages.floridaReemploymentCents).toBe(0);
+    expect(normal.futaCents).toBeGreaterThan(0);
+    // Everything but the two taxes and the two taxable wage lines equals the same check not exempt.
+    const without = (check) => {
+      const copy = { ...stripExempt(check), taxableWages: { ...check.taxableWages, futaCents: 0, floridaReemploymentCents: 0 } };
+      copy.futaCents = 0;
+      copy.floridaReemploymentCents = 0;
+      return copy;
+    };
+    expect(without(exempt)).toEqual(without(normal));
+  });
+
+  test('exempt pay never uses up the $7,000 base: exempt pay earlier leaves the full base', () => {
+    // ytdGrossWages (Social Security, Medicare) counts the earlier pay; ytdUnemploymentWages (the base) does not.
+    const later = paycheck({ ytdGrossWages: '6500.00', ytdUnemploymentWages: '0.00', unemploymentExempt: false });
+    expect(later.taxableWages.futaCents).toBe(92000);
+    expect(later.futaCents).toBe(552);
+    expect(later.floridaReemploymentCents).toBe(2484);
+    // Without the new year-to-date the base is figured from all wages, as it always was.
+    expect(paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: false }).taxableWages.futaCents).toBe(50000);
+    // Social Security still follows the gross year to date.
+    expect(later.socialSecurityEmployeeCents).toBe(paycheck({ ytdGrossWages: '6500.00' }).socialSecurityEmployeeCents);
+  });
+
+  test('passing false changes nothing but the extra key; omitting both is byte for byte today', () => {
+    const plain = paycheck({ ytdGrossWages: '6500.00' });
+    expect(plain).not.toHaveProperty('unemploymentExempt');
+    expect(JSON.stringify(paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: undefined, ytdUnemploymentWages: undefined }))).toBe(JSON.stringify(plain));
+    const off = paycheck({ ytdGrossWages: '6500.00', unemploymentExempt: false });
+    expect(off.unemploymentExempt).toBe(false);
+    expect(stripExempt(off)).toEqual(plain);
+  });
+
+  test('a mistyped year-to-date figure is refused', () => {
+    expect(() => paycheck({ unemploymentExempt: false, ytdUnemploymentWages: '-1' })).toThrow(/Year-to-date unemployment wages/);
   });
 });

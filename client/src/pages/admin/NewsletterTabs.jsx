@@ -1,35 +1,17 @@
 // client/src/pages/admin/NewsletterTabs.jsx
 //
-// In-house newsletter composer (replaces Beehiiv). Exposes the three
-// content views (Compose / History / Subscribers) as named exports so
-// NewsletterPage.jsx can host them as tabs alongside its Dashboard
-// tab. The Automations tab is wired separately via
-// EmailAutomationsPanelV2 — imported directly by NewsletterPage.
+// Exposes the History and Subscribers views as named exports so
+// NewsletterPage.jsx can host them as tabs alongside its Dashboard tab.
+// The Automations tab is wired separately via EmailAutomationsPanelV2 —
+// imported directly by NewsletterPage. There is no manual composer: the
+// weekly issue is drafted and sent by the autopilot + proof flow.
 
-import React, {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from "react";
-import { useSearchParams } from "react-router-dom";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
-  AlertTriangle,
-  CalendarClock,
-  CalendarDays,
-  CheckCircle2,
   Download,
-  Eye,
-  MailCheck,
-  Save,
   Search,
-  Send,
-  Sparkles,
   Upload,
   UserPlus,
-  Wand2,
-  XCircle,
 } from "lucide-react";
 import {
   Dialog,
@@ -45,14 +27,9 @@ import {
   Field,
   Input,
   Checkbox,
-  Select,
-  Textarea,
   UiSurface,
 } from "../../components/ui";
-import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const INPUT_CLS = "w-full";
-const TEXTAREA_CLS = "w-full leading-relaxed";
 // Mirrors the server QUIZ_TOKEN_PATTERN (newsletter-quiz.js) — matches
 // {{quiz}}, {{quiz:id}}, {{quiz-text}}, {{quiz-text:id}}. Used to detect
 // whether the body already carries a quiz (one quiz per email).
@@ -119,200 +96,6 @@ function parseSubscriberCsv(text) {
     }))
     .filter((subscriber) => subscriber.email);
 }
-const SOURCE_SEGMENTS = [
-  {
-    value: "footer",
-    label: "Footer",
-  },
-  {
-    value: "newsletter_landing",
-    label: "Landing",
-  },
-  {
-    value: "newsletter_archive",
-    label: "Archive",
-  },
-  {
-    value: "portal_learn",
-    label: "Portal Learn",
-  },
-  {
-    value: "quote_wizard",
-    label: "Quote Wizard",
-  },
-  {
-    value: "quote_wizard_deferred",
-    label: "Quote Deferred",
-  },
-  {
-    value: "public_form",
-    label: "Public Form",
-  },
-  {
-    value: "admin_manual",
-    label: "Manual",
-  },
-  {
-    value: "beehiiv_import",
-    label: "Admin Import",
-  },
-  {
-    value: "beehiiv_migration",
-    label: "Beehiiv Migration",
-  },
-  {
-    value: "beehiiv_migration_orphan",
-    label: "Beehiiv Orphans",
-  },
-  {
-    value: "website",
-    label: "Website Legacy",
-  },
-];
-
-// Cross-sell service lines — must mirror SELLABLE_LINES in
-// server/services/newsletter-audience-profiles.js (the server classifies each
-// customer's active recurring lines from scheduled_services and resolves these
-// to a customer-id set). Labels are client-only display copy.
-const SERVICE_LINES = [
-  {
-    value: "pest",
-    label: "Pest",
-  },
-  {
-    value: "lawn",
-    label: "Lawn",
-  },
-  {
-    value: "mosquito",
-    label: "Mosquito",
-  },
-  {
-    value: "tree_shrub",
-    label: "Tree & Shrub",
-  },
-  {
-    value: "termite",
-    label: "Termite",
-  },
-  {
-    value: "rodent",
-    label: "Rodent",
-  },
-];
-
-// region_zone values stored on newsletter_subscribers (see segment preview).
-const REGION_ZONES = [
-  {
-    value: "manatee",
-    label: "Manatee",
-  },
-  {
-    value: "sarasota",
-    label: "Sarasota",
-  },
-  {
-    value: "south_sarasota",
-    label: "S. Sarasota",
-  },
-  {
-    value: "pinellas",
-    label: "Pinellas",
-  },
-  {
-    value: "tampa",
-    label: "Tampa",
-  },
-];
-
-// Membership / line-count buckets → min/max_line_count on the server.
-const LINE_COUNT_OPTIONS = [
-  {
-    key: "any",
-    label: "Any",
-  },
-  {
-    key: "members",
-    label: "Members (1+)",
-  },
-  {
-    key: "single",
-    label: "Single-line",
-  },
-  {
-    key: "multi",
-    label: "Multi-line (2+)",
-  },
-];
-
-// One-click cross-sell segments (the "Agora play" campaigns). Each sets the
-// service-line controls below; all imply customers-only.
-const CAMPAIGN_PRESETS = [
-  {
-    label: "Pest → Lawn",
-    has: ["pest"],
-    missing: ["lawn"],
-  },
-  {
-    label: "Pest+Lawn → Mosquito",
-    has: ["pest", "lawn"],
-    missing: ["mosquito"],
-  },
-  {
-    label: "Single-line members",
-    lineCount: "single",
-  },
-  {
-    label: "Members w/o mosquito",
-    missing: ["mosquito"],
-    lineCount: "members",
-  },
-];
-function FieldLabel({ children }) {
-  return (
-    <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
-      {children}
-    </label>
-  );
-}
-
-// Pill-style multi-select chip row (matches the source/tag chip styling).
-function ChipRow({ options, selected, onToggle }) {
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {options.map((o) => {
-        const on = selected.includes(o.value);
-        return (
-          <Button
-            key={o.value}
-            type="button"
-            onClick={() => onToggle(o.value)}
-            className="gap-1.5 rounded-full"
-                    aria-pressed={on}
-                    variant={on ? "primary" : "secondary"}
-          >
-            {o.label}
-          </Button>
-        );
-      })}
-    </div>
-  );
-}
-function PanelHeader({ title, hint, action }) {
-  return (
-    <div className="flex items-start justify-between gap-3 p-4 border-b border-hairline border-zinc-200">
-      {" "}
-      <div className="min-w-0">
-        {" "}
-        <h3 className="text-14 font-medium text-zinc-900">{title}</h3>
-        {hint && (
-          <p className="text-ui-body text-ink-tertiary mt-0.5">{hint}</p>
-        )}
-      </div>
-      {action}
-    </div>
-  );
-}
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -327,2168 +110,26 @@ function adminFetch(path, options = {}) {
   });
 }
 
-// Starter HTML templates. Operator picks one → seeds the HTML body textarea.
-// Waves Newsletter is the flagship — ~60% of
-// historical sends and highest-engagement format. Blank is the escape
-// hatch for rare one-off free-form sends. Headlines are deliberately
-// placeholder-y so the operator (or AI Draft) can rewrite them per send —
-// the value here is the structure + voice cues, not literal headlines.
-// Deliberately minimal markup — SendGrid footer is appended automatically.
-// Drafts persist the {{greeting-name}} substitution token (resolved per
-// recipient at send time by SendGrid). Previews have no recipient — strip
-// it so the operator never sees the literal token.
-const stripGreetingToken = (s) =>
-  String(s || "")
-    .split("{{greeting-name}}")
-    .join("");
-const TEMPLATES = [
-  {
-    key: "blank",
-    label: "Blank",
-    newsletterType: "free-form",
-    html: "",
-  },
-  {
-    key: "weekend",
-    label: NEWSLETTER_UI_COPY.name,
-    newsletterType: "local-weekly-fresh-events",
-    html: `<h1>[Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
-<p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
-<h2>[Event 1 name]</h2>
-<p><strong>[City] · [Day, time]</strong>— [One or two sentences on why it's worth going. Keep it casual, drop a vibe.]</p>
-<h2>[Event 2 name]</h2>
-<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
-<h2>[Event 3 name]</h2>
-<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
-<h2>[Optional event 4 / 5]</h2>
-<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
-<h2>One more thing</h2>
-<p>[Optional pest/lawn tie-in — e.g., "If your yard's looking rough before guests come over, we've got a same-week slot." Drop this section if you'd rather keep it pure events.]</p>
-<p>Have a good one out there.</p>
-<p>— The Waves crew</p>`,
-  },
-  {
-    key: "pest_insider",
-    label: "Pest Insider",
-    newsletterType: "pest-insider-monthly",
-    html: `<h1>[PSA-energy subject — e.g., "🦟 PSA: Mosquitoes Are Back and Hungrier Than Ever"]</h1>
-<p>[Seasonal hook — why THIS pest matters right now in SWFL. Biological urgency, never commercial.]</p>
-<h2>[🦟 Curiosity-gap facts heading — e.g., "Alright, Let's Talk About Mosquitoes"]</h2>
-<p>✔ <strong>[Fact title]</strong> – [Real biology + punchline. Jokes at the pest's expense.]</p>
-<p>✔ <strong>[Fact title]</strong> – [6-9 of these carry the issue.]</p>
-<h2>[Benefit-framed pitch heading — e.g., "Turn Your Yard Into a No-Fly Zone"]</h2>
-<p>[ONE sincere section: what Waves does about it. Plain feature-benefit, no jokes inside, no prices, no invented tech names.]</p>
-<p>🔹 <strong>[Capability]</strong> – [Honest benefit.]</p>
-<h2>[Voice-y close heading]</h2>
-<p>[Close + call CTA. The AI draft attaches the phone number automatically.]</p>
-<p>— The Waves Team 🌊</p>`,
-  },
-];
-
-// ── Compose ────────────────────────────────────────────────────────
-
-// Format an ingested event into a concise AI Draft prompt seed. Keeps
-// the operator-facing prompt short — Claude handles the voice + the
-// extra padding events. Strips obvious HTML from descriptions since
-// some RSS feeds embed markup in the contentSnippet/summary fields.
-function buildEventPrompt(event) {
-  if (!event) return "";
-  const dateLabel = event.startAt
-    ? new Date(event.startAt).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      })
-    : "Ongoing";
-  const cityLabel = event.city
-    ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase())
-    : null;
-  const desc = (event.description || "")
-    .replace(/<[^>]*>/g, " ") // strip HTML
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 280);
-  const lines = [
-    `Anchor this ${NEWSLETTER_UI_COPY.name} issue on this event:`,
-    `- ${event.title}`,
-    `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ""}${event.venueName ? ` · ${event.venueName}` : ""}`,
-  ];
-  // Include venueAddress when populated by the P3b leg 3 normalizer.
-  // Helps Claude write specific where-to-find-it copy ("Bayfront Park,
-  // 5 Bayfront Dr, Sarasota — free parking on Tamiami") instead of
-  // generic ("at the Sarasota waterfront"). Some events have venueName
-  // but no address (yet) → omit this line in that case.
-  if (event.venueAddress) lines.push(`- Address: ${event.venueAddress}`);
-  if (desc) lines.push(`- ${desc}`);
-  if (event.eventUrl) lines.push(`- ${event.eventUrl}`);
-  lines.push("");
-  lines.push(
-    "Pad with 2-3 other typical SWFL weekend activities for the same window.",
-  );
-  return lines.join("\n");
-}
-export function ComposeView({
-  pendingEvent,
-  onPendingEventConsumed,
-  onSendComplete,
-} = {}) {
-  // Autopilot notifications deep-link their lane (?autopilotType=…) so
-  // the monthly Pest Insider notification hydrates ITS draft, not the
-  // weekly one.
-  const [searchParams] = useSearchParams();
-  const autopilotTypeParam = searchParams.get("autopilotType");
-  const editDraftIdParam = searchParams.get("draftId");
-  const [draftId, setDraftId] = useState(null);
-  const [subject, setSubject] = useState("");
-  const [subjectB, setSubjectB] = useState("");
-  const [abEnabled, setAbEnabled] = useState(false);
-  const [autoShareSocial, setAutoShareSocial] = useState(true);
-  const [previewText, setPreviewText] = useState("");
-  const [htmlBody, setHtmlBody] = useState("");
-  const [textBody, setTextBody] = useState("");
-  // Ref on the HTML body textarea so quiz/image snippets insert at the cursor.
-  const htmlBodyRef = useRef(null);
-  // Available in-email quizzes (server config via /quizzes) + the one the
-  // operator will insert. Defaults to the first (lawn) once loaded.
-  const [quizOptions, setQuizOptions] = useState([]);
-  const [selectedQuizId, setSelectedQuizId] = useState("");
-  // Inline image inserter (toggle + fields).
-  const [showImageInsert, setShowImageInsert] = useState(false);
-  const [imageUrl, setImageUrl] = useState("");
-  const [imageAlt, setImageAlt] = useState("");
-  // Locked event ids from the last AI draft — carried into the /sends save so
-  // the sent newsletter can advance events_raw.times_featured for what shipped.
-  const [draftEventIds, setDraftEventIds] = useState([]);
-  // { [eventId]: ISO start } locked into the last AI draft, saved with the ids.
-  const [draftEventOccurrences, setDraftEventOccurrences] = useState({});
-  // Only true when the event association changed THIS session (fresh AI draft
-  // or template swap). Gates whether the save sends eventIds: on an ordinary
-  // manual edit — or when editing a loaded draft whose ids the client never set
-  // — we omit them so the server preserves the stored ids instead of blanking.
-  const [eventIdsDirty, setEventIdsDirty] = useState(false);
-  const [fromName, setFromName] = useState("Waves Pest Control");
-  const [fromEmail, setFromEmail] = useState("newsletter@wavespestcontrol.com");
-  // Defaults to the logged-in admin's email (populated below) so test
-  // sends don't fire into the shared contact@ inbox by default. Falls
-  // back to '' if /me is unreachable — operator types their own.
-  const [testEmail, setTestEmail] = useState("");
-  const [status, setStatus] = useState("");
-  const [activeCount, setActiveCount] = useState(null);
-  const [segmentCount, setSegmentCount] = useState(null);
-  const [autopilotBanner, setAutopilotBanner] = useState(false);
-
-  // Track the latest pendingEvent value so the mount-only autopilot
-  // preload effect can read a fresh value without adding pendingEvent
-  // to its dependency array (which would re-fire the fetch).
-  const pendingEventRef = useRef(pendingEvent);
-  pendingEventRef.current = pendingEvent;
-
-  // Track whether the user has interacted with any compose field.
-  // Prevents the autopilot preload from binding draftId to the
-  // autopilot row when the user has already started typing.
-  const userHasEdited = useRef(false);
-
-  // Insert a snippet into the HTML body at the cursor (falls back to append).
-  const insertIntoHtmlBody = useCallback((snippet) => {
-    userHasEdited.current = true;
-    const el = htmlBodyRef.current;
-    setHtmlBody((cur) => {
-      if (el && typeof el.selectionStart === "number") {
-        const start = el.selectionStart;
-        const end = el.selectionEnd;
-        return `${cur.slice(0, start)}${snippet}${cur.slice(end)}`;
-      }
-      return `${cur}${snippet}`;
-    });
-  }, []);
-
-  // Insert the chosen quiz token at the cursor. At send time each recipient's
-  // {{quiz}}/{{quiz:id}} resolves to tap-to-answer buttons whose links tag the
-  // subscriber by interest (lawn-interested, lawn:brown-patch, …) — that tag
-  // then feeds the Tags segment filter above. The default lawn quiz uses the
-  // bare {{quiz}} token; others use {{quiz:id}}. Also seeds the matching
-  // {{quiz-text}} into the plain-text fallback when one already exists.
-  const insertQuizBlock = useCallback(() => {
-    const quizId = selectedQuizId || quizOptions[0]?.id || "lawn-headache-v1";
-    const isDefault = quizId === "lawn-headache-v1";
-    const htmlToken = isDefault ? "{{quiz}}" : `{{quiz:${quizId}}}`;
-    const textToken = isDefault ? "{{quiz-text}}" : `{{quiz-text:${quizId}}}`;
-    if (QUIZ_TOKEN_RE.test(htmlBody)) return; // one quiz per email
-    insertIntoHtmlBody(`\n<!-- quiz: ${quizId} -->\n${htmlToken}\n`);
-    // Only add the text-part quiz when a plain-text fallback already exists —
-    // seeding it into an empty text body would ship a text part that is ONLY
-    // the quiz (worse than no text part, which lets clients render the HTML).
-    setTextBody((cur) =>
-      !cur || QUIZ_TOKEN_RE.test(cur) ? cur : `${cur}\n${textToken}`,
-    );
-    setStatus(
-      "Quiz inserted — each recipient gets tap-to-answer buttons that tag them by interest for segmentation.",
-    );
-  }, [selectedQuizId, quizOptions, htmlBody, insertIntoHtmlBody]);
-
-  // Insert a responsive image block at the cursor. URL is required; alt is
-  // optional but encouraged. The body is operator-authored HTML inserted as-is
-  // by the send pipeline, so this is just a styled <img> convenience.
-  const insertImage = useCallback(() => {
-    const url = imageUrl.trim();
-    if (!url) return;
-    const altAttr = imageAlt.trim().replace(/"/g, "&quot;");
-    insertIntoHtmlBody(
-      `\n<div style="text-align:center;margin:20px 0;"><img src="${url.replace(/"/g, "&quot;")}" alt="${altAttr}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" /></div>\n`,
-    );
-    setImageUrl("");
-    setImageAlt("");
-    setShowImageInsert(false);
-  }, [imageUrl, imageAlt, insertIntoHtmlBody]);
-
-  // Load available quizzes for the picker (server config is source of truth).
-  useEffect(() => {
-    adminFetch("/admin/newsletter/quizzes")
-      .then((d) => {
-        const list = d.quizzes || [];
-        setQuizOptions(list);
-        setSelectedQuizId((cur) => cur || list[0]?.id || "");
-      })
-      .catch(() => {});
-  }, []);
-
-  // Segment
-  const [segmentMode, setSegmentMode] = useState("all"); // all | customers | leads | custom
-  const [segmentSources, setSegmentSources] = useState([]);
-  // Tags filter — additive on top of the audience mode (e.g. "Customers
-  // only AND tagged 'platinum-tier'"). Maps to f.tags on the server, which
-  // matches against newsletter_subscribers.tags (JSONB array) via the
-  // ?| operator. Free-form so operators can use whatever taxonomy fits
-  // the campaign — the column is JSONB with no enum.
-  const [segmentTags, setSegmentTags] = useState([]);
-  const [tagDraft, setTagDraft] = useState("");
-  // Existing distinct tags pulled from the DB — fed into the tag input's
-  // <datalist>so the operator picks an existing tag instead of typing
-  // a near-miss that matches zero subscribers.
-  const [tagSuggestions, setTagSuggestions] = useState([]);
-  // Service-line cross-sell constraints (resolved server-side to a customer-id
-  // set via newsletter-audience-profiles). has = holds ALL listed lines,
-  // missing = holds NONE of the listed lines; both AND together.
-  const [segmentHasLines, setSegmentHasLines] = useState([]);
-  const [segmentMissingLines, setSegmentMissingLines] = useState([]);
-  const [segmentRegions, setSegmentRegions] = useState([]);
-  const [segmentLineCount, setSegmentLineCount] = useState("any"); // any | members | single | multi
-
-  // Schedule
-  const [scheduleAt, setScheduleAt] = useState("");
-
-  // Preview dialog
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewHtml, setPreviewHtml] = useState("");
-  const [previewLoading, setPreviewLoading] = useState(false);
-
-  // Send confirm dialog
-  const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
-  const [sendConfirmId, setSendConfirmId] = useState(null);
-
-  // AI modal
-  const [aiOpen, setAiOpen] = useState(false);
-  // Last template the operator chose (via the Template button row OR the
-  // AI Draft modal). Plumbed into /draft-ai so AI drafts land in the
-  // selected template's structure + voice.
-  const [selectedTemplate, setSelectedTemplate] = useState(null);
-  // newsletter_type of a loaded draft that has NO template card (e.g. the
-  // sunset job's 'reengagement' win-back). While set, it is what saveDraft
-  // persists — so editing the draft can't relabel it to a template lane.
-  // Cleared when the operator explicitly applies a template.
-  const [loadedNewsletterType, setLoadedNewsletterType] = useState(null);
-  // Initial prompt seed for the AI Draft modal. Set when an event was
-  // handed off from DashboardView's "Draft newsletter" click; cleared
-  // after the modal opens (so reopening from the regular button isn't
-  // re-seeded).
-  const [aiInitialPrompt, setAiInitialPrompt] = useState("");
-
-  // Consume pendingEvent on mount (or whenever a new one arrives via
-  // tab switch). Apply the flagship template so the body is
-  // pre-seeded, then auto-open the AI Draft modal with the event-shaped
-  // prompt. Acknowledge consumption so NewsletterPage clears the
-  // handoff state.
-  useEffect(() => {
-    if (!pendingEvent) return;
-    const weekend = TEMPLATES.find((t) => t.key === "weekend");
-    if (weekend) setHtmlBody(weekend.html);
-    setSelectedTemplate("weekend");
-    setAiInitialPrompt(buildEventPrompt(pendingEvent));
-    setAiOpen(true);
-    if (onPendingEventConsumed) onPendingEventConsumed();
-  }, [pendingEvent]);
-
-  // Auto-select the flagship template for brand-new composes so the
-  // operator lands in the flagship newsletter flow by default. Skip when
-  // loading an existing draft (draftId) or when event-seeded
-  // (pendingEvent) — those paths set their own template.
-  useEffect(() => {
-    if (!draftId && !pendingEvent && !selectedTemplate) {
-      const weekend = TEMPLATES.find((t) => t.key === "weekend");
-      if (weekend) {
-        setHtmlBody(weekend.html);
-        setSelectedTemplate("weekend");
-      }
-    }
-  }, []);
-  const segmentFilter = useMemo(() => {
-    const f = {};
-    if (segmentMode === "customers") f.customersOnly = true;
-    if (segmentMode === "leads") f.leadsOnly = true;
-    // Source chips are only visible in 'custom' mode — scope the filter
-    // to that mode so a stale segmentSources selection doesn't leak
-    // through after the operator switches back to "All active" /
-    // "Customers only" / "Leads only". Tags remain additive across all
-    // modes by design.
-    if (segmentMode === "custom" && segmentSources.length)
-      f.sources = segmentSources;
-    if (segmentTags.length) f.tags = segmentTags;
-    // Service-line cross-sell constraints. The server resolves these to a
-    // customer-id set (inherently customer-only) and ANDs them with the
-    // audience mode above.
-    if (segmentHasLines.length) f.has_service = segmentHasLines;
-    if (segmentMissingLines.length) f.missing_service = segmentMissingLines;
-    if (segmentRegions.length) f.region_zone = segmentRegions;
-    if (segmentLineCount === "members") f.min_line_count = 1;
-    else if (segmentLineCount === "single") {
-      f.min_line_count = 1;
-      f.max_line_count = 1;
-    } else if (segmentLineCount === "multi") f.min_line_count = 2;
-    return Object.keys(f).length ? f : null;
-  }, [
-    segmentMode,
-    segmentSources,
-    segmentTags,
-    segmentHasLines,
-    segmentMissingLines,
-    segmentRegions,
-    segmentLineCount,
-  ]);
-
-  // Dirty flag for the segment controls, set ONLY by the interactive
-  // handlers below — never by programmatic hydration. saveDraft omits
-  // segmentFilter on PATCH while clean (the route preserves the stored
-  // value), so merely loading/editing a draft can't overwrite its saved
-  // audience — e.g. retargeting the sunset win-back's
-  // { tags: ['reengagement_due'] } at every active subscriber.
-  const segmentDirtyRef = useRef(false);
-  const markSegmentDirty = () => {
-    segmentDirtyRef.current = true;
-  };
-
-  // Reflect a loaded draft's stored segment_filter into the compose controls
-  // so the audience the operator SEES (and anything a dirty save writes)
-  // matches the saved one. Programmatic — does not mark the segment dirty.
-  const applySegmentFromFilter = (f) => {
-    const sf = f || {};
-    setSegmentMode(
-      sf.customersOnly || sf.audience === "customers"
-        ? "customers"
-        : sf.leadsOnly || sf.audience === "leads"
-          ? "leads"
-          : Array.isArray(sf.sources) && sf.sources.length
-            ? "custom"
-            : "all",
-    );
-    setSegmentSources(Array.isArray(sf.sources) ? sf.sources : []);
-    setSegmentTags(Array.isArray(sf.tags) ? sf.tags : []);
-    setSegmentHasLines(Array.isArray(sf.has_service) ? sf.has_service : []);
-    setSegmentMissingLines(
-      Array.isArray(sf.missing_service) ? sf.missing_service : [],
-    );
-    setSegmentRegions(Array.isArray(sf.region_zone) ? sf.region_zone : []);
-    setSegmentLineCount(
-      sf.min_line_count === 1 && sf.max_line_count === 1
-        ? "single"
-        : sf.min_line_count === 2
-          ? "multi"
-          : sf.min_line_count === 1
-            ? "members"
-            : "any",
-    );
-  };
-
-  // Apply a one-click cross-sell preset (sets the service-line controls and
-  // forces customers-only, since service-line membership implies a customer).
-  const applyCampaignPreset = (p) => {
-    markSegmentDirty();
-    setSegmentMode("customers");
-    setSegmentHasLines(p.has || []);
-    setSegmentMissingLines(p.missing || []);
-    setSegmentLineCount(p.lineCount || "any");
-    setSegmentRegions([]);
-  };
-  const clearServiceLineSegment = () => {
-    markSegmentDirty();
-    setSegmentHasLines([]);
-    setSegmentMissingLines([]);
-    setSegmentRegions([]);
-    setSegmentLineCount("any");
-  };
-  const serviceLineActive =
-    segmentHasLines.length > 0 ||
-    segmentMissingLines.length > 0 ||
-    segmentRegions.length > 0 ||
-    segmentLineCount !== "any";
-  const hydrateSavedSend = (saved, { autopilot = false } = {}) => {
-    setDraftId(saved.id);
-    setSubject(saved.subject || "");
-    setSubjectB(saved.subject_b || "");
-    setAbEnabled(!!saved.subject_b);
-    setPreviewText(saved.preview_text || "");
-    setHtmlBody(saved.html_body || "");
-    setTextBody(saved.text_body || "");
-    setFromName(saved.from_name || "Waves Pest Control");
-    setFromEmail(saved.from_email || "newsletter@wavespestcontrol.com");
-    setAutoShareSocial(saved.auto_share_social !== false);
-    const eventIds = Array.isArray(saved.event_ids)
-      ? saved.event_ids
-      : (() => {
-          try {
-            return JSON.parse(saved.event_ids || "[]");
-          } catch {
-            return [];
-          }
-        })();
-    setDraftEventIds(Array.isArray(eventIds) ? eventIds : []);
-    setDraftEventOccurrences({});
-    setEventIdsDirty(false);
-    const filter = saved.segment_filter || {};
-    setSegmentMode(
-      filter.customersOnly
-        ? "customers"
-        : filter.leadsOnly
-          ? "leads"
-          : Array.isArray(filter.sources) && filter.sources.length
-            ? "custom"
-            : "all",
-    );
-    setSegmentSources(Array.isArray(filter.sources) ? filter.sources : []);
-    setSegmentTags(Array.isArray(filter.tags) ? filter.tags : []);
-    setSegmentHasLines(
-      Array.isArray(filter.has_service) ? filter.has_service : [],
-    );
-    setSegmentMissingLines(
-      Array.isArray(filter.missing_service) ? filter.missing_service : [],
-    );
-    setSegmentRegions(
-      Array.isArray(filter.region_zone) ? filter.region_zone : [],
-    );
-    setSegmentLineCount(
-      Number(filter.min_line_count) >= 2
-        ? "multi"
-        : Number(filter.min_line_count) === 1 &&
-            Number(filter.max_line_count) === 1
-          ? "single"
-          : Number(filter.min_line_count) === 1
-            ? "members"
-            : "any",
-    );
-    // Legacy pre-registry drafts carry newsletter_type NULL. Only the
-    // calendar-LINKED ones are promoted flagships (the detail payload's
-    // `flagship` flag is the server's isFlagshipSend verdict) — those must
-    // hydrate as the flagship template or the next save would PATCH away
-    // the type and silently drop the cadence/lineup/claim-validation gates
-    // (the server retype guard mirrors this). An UNLINKED null draft stays
-    // untyped: forcing it to flagship would wrongly impose the event-id and
-    // Tuesday-cadence gates on a non-flagship row.
-    const tplForType =
-      saved.newsletter_type == null
-        ? saved.flagship || autopilot
-          ? TEMPLATES.find(
-              (t) => t.newsletterType === "local-weekly-fresh-events",
-            )
-          : null
-        : TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
-    if (saved.newsletter_type && !tplForType) {
-      // A draft whose type has no template card (e.g. 'reengagement' from
-      // the sunset job): keep ITS type authoritative so saving the draft
-      // doesn't relabel it to a template lane — a rewrite would break the
-      // sunset job's newsletter_type join and leak it into other lanes.
-      setSelectedTemplate(null);
-      setLoadedNewsletterType(saved.newsletter_type);
-    } else {
-      setSelectedTemplate(tplForType?.key || null);
-      setLoadedNewsletterType(null);
-    }
-    // Loading is not an operator edit — re-baseline the audience dirty flag.
-    segmentDirtyRef.current = false;
-    setAutopilotBanner(autopilot);
-  };
-  useEffect(() => {
-    adminFetch("/admin/newsletter/subscribers?status=active&limit=1")
-      .then((d) => setActiveCount(d.counts?.active || 0))
-      .catch(() => setActiveCount(null));
-    adminFetch("/admin/auth/me")
-      .then((me) => {
-        if (me?.email) setTestEmail(me.email);
-      })
-      .catch(() => {
-        /* leave blank, operator types */
-      });
-    adminFetch("/admin/newsletter/tags")
-      .then((d) => setTagSuggestions(Array.isArray(d?.tags) ? d.tags : []))
-      .catch(() => setTagSuggestions([]));
-  }, []);
-
-  // Auto-load pending autopilot draft on mount (if compose form is empty).
-  // Uses a cancelled flag so a late-resolving fetch won't overwrite
-  // fields the user has started editing during the round-trip.
-  // userHasEdited ref is the authoritative guard — if the user typed
-  // anything into subject/htmlBody/previewText/textBody before the
-  // fetch resolves, we skip hydration entirely (including draftId)
-  // so the user's new content doesn't get saved to the autopilot row.
-  // pendingEventRef reads the latest value without adding it to deps.
-  useEffect(() => {
-    if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
-    let cancelled = false;
-    if (editDraftIdParam) {
-      adminFetch(`/admin/newsletter/sends/${encodeURIComponent(editDraftIdParam)}`)
-        .then((d) => {
-          if (!cancelled && d?.send && !userHasEdited.current)
-            hydrateSavedSend(d.send);
-        })
-        .catch((e) => {
-          if (!cancelled) setStatus(`Draft load failed: ${e.message}`);
-        });
-      return () => {
-        cancelled = true;
-      };
-    }
-    // ?autopilotType= comes from autopilot/sunset notifications (e.g. the
-    // monthly Pest Insider, or the newsletter-sunset win-back bell) so the
-    // click lands on THAT lane's draft instead of the weekly default.
-    const laneParam =
-      autopilotTypeParam === "pest-insider-monthly"
-        ? "?type=pest-insider-monthly"
-        : autopilotTypeParam === "reengagement"
-          ? "?type=reengagement"
-          : "";
-    adminFetch(`/admin/newsletter/sends/latest-autopilot${laneParam}`)
-      .then((d) => {
-        if (cancelled || pendingEventRef.current || userHasEdited.current)
-          return;
-        if (!d?.draft) return;
-        // Centralized hydration (hydrateSavedSend) carries the sunset rule:
-        // a template-less type (e.g. 'reengagement') stays authoritative via
-        // loadedNewsletterType, and a null-typed autopilot draft defaults to
-        // the weekly flagship template.
-        hydrateSavedSend(d.draft, {
-          autopilot: true,
-        });
-      })
-      .catch(() => {
-        /* no autopilot draft — nothing to do */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Recalculate segment match count when the filter changes.
-  useEffect(() => {
-    let cancelled = false;
-    adminFetch("/admin/newsletter/segment-preview", {
-      method: "POST",
-      body: JSON.stringify({ segmentFilter }),
-    })
-      .then((d) => {
-        if (!cancelled) setSegmentCount(d.count);
-      })
-      .catch(() => {
-        if (!cancelled) setSegmentCount(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [segmentFilter]);
-  const activeNewsletterType = (() => {
-    // A loaded draft whose type has no template card (e.g. 'reengagement')
-    // keeps its own type until the user explicitly picks a template.
-    if (loadedNewsletterType) return loadedNewsletterType;
-    const key = selectedTemplate || "blank";
-    const t = TEMPLATES.find((x) => x.key === key);
-    return t?.newsletterType || null;
-  })();
-  const applyTemplate = (key) => {
-    const t = TEMPLATES.find((x) => x.key === key);
-    if (!t) return;
-    if (
-      htmlBody &&
-      !confirm("Replace the current HTML body with this template?")
-    )
-      return;
-    userHasEdited.current = true;
-    setHtmlBody(t.html);
-    setSelectedTemplate(key === "blank" ? null : key);
-    // Explicit template choice overrides a loaded draft's off-template type.
-    setLoadedNewsletterType(null);
-    // A hand-picked template body isn't anchored to AI-locked events — clear the
-    // ids and mark dirty so the save writes the empty set (the prior AI events
-    // no longer match this body).
-    setDraftEventIds([]);
-    setDraftEventOccurrences({});
-    setEventIdsDirty(true);
-  };
-  const saveDraft = async () => {
-    setStatus("Saving...");
-    try {
-      const body = {
-        subject,
-        subjectB: abEnabled ? subjectB : null,
-        previewText,
-        htmlBody,
-        textBody,
-        fromName,
-        fromEmail,
-        newsletterType: activeNewsletterType,
-        autoShareSocial,
-      };
-      // Send segmentFilter on create always; on edit only when the operator
-      // touched the segment controls. The PATCH route preserves the stored
-      // segment when the field is omitted, so an untouched edit of a loaded
-      // draft keeps its saved audience (see segmentDirtyRef above).
-      if (!draftId || segmentDirtyRef.current)
-        body.segmentFilter = segmentFilter;
-      // Send eventIds only when the event association changed this session
-      // (dirty). Omitting them lets the server preserve the stored ids on an
-      // ordinary edit or when editing a loaded draft; including them on a fresh
-      // AI re-draft (even of an already-saved campaign) updates them in step
-      // with the new body.
-      const saveBody = eventIdsDirty
-        ? {
-            ...body,
-            eventIds: draftEventIds,
-            // The dates the drafted email shows, so the sender records the
-            // occurrence that actually went out.
-            eventOccurrences: draftEventOccurrences,
-          }
-        : body;
-      if (draftId) {
-        await adminFetch(`/admin/newsletter/sends/${draftId}`, {
-          method: "PATCH",
-          body: JSON.stringify(saveBody),
-        });
-        setEventIdsDirty(false);
-        setStatus("Draft saved.");
-        return draftId;
-      } else {
-        const d = await adminFetch("/admin/newsletter/sends", {
-          method: "POST",
-          body: JSON.stringify(saveBody),
-        });
-        setDraftId(d.send.id);
-        setEventIdsDirty(false);
-        setStatus("Draft saved.");
-        return d.send.id;
-      }
-    } catch (e) {
-      setStatus("Save failed: " + e.message);
-      return null;
-    }
-  };
-  const openPreview = async () => {
-    setPreviewOpen(true);
-    setPreviewLoading(true);
-    setPreviewHtml("");
-    try {
-      const res = await adminFetch("/admin/newsletter/preview", {
-        method: "POST",
-        body: JSON.stringify({ htmlBody, previewText, newsletterType: activeNewsletterType }),
-      });
-      setPreviewHtml(res.html || "");
-    } catch (e) {
-      setPreviewHtml(
-        `<p style="font-family:sans-serif;color:#C8312F;padding:20px;">Preview failed: ${e.message}</p>`,
-      );
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-  const sendTest = async () => {
-    const savedId = await saveDraft();
-    if (!savedId) return;
-    setStatus(`Sending test to ${testEmail}...`);
-    try {
-      await adminFetch(`/admin/newsletter/sends/${savedId}/test`, {
-        method: "POST",
-        body: JSON.stringify({ email: testEmail }),
-      });
-      setStatus(`Test sent to ${testEmail}.`);
-    } catch (e) {
-      setStatus("Test failed: " + e.message);
-    }
-  };
-
-  // Open the typed-confirm modal. The actual fetch happens in confirmSend
-  // once the operator types SEND and clicks the button.
-  const [validationResult, setValidationResult] = useState(null);
-  const sendNow = async () => {
-    const savedId = await saveDraft();
-    if (!savedId) return;
-    try {
-      setStatus("Validating…");
-      const v = await adminFetch(`/admin/newsletter/sends/${savedId}/validate`, {
-        method: "POST",
-      });
-      setValidationResult(v);
-      if (v.errors?.length > 0) {
-        setStatus("Validation failed — fix errors before sending.");
-        return;
-      }
-      setSendConfirmId(savedId);
-      setSendConfirmOpen(true);
-    } catch (e) {
-      setStatus("Validation check failed: " + e.message);
-    }
-  };
-  const confirmSend = async () => {
-    setSendConfirmOpen(false);
-    const id = sendConfirmId || draftId;
-    if (!id) {
-      setStatus("Send cancelled: the saved draft could not be identified.");
-      return;
-    }
-    const audience = segmentCount ?? activeCount ?? "?";
-    setStatus(`Queuing send to ${audience} subscribers...`);
-    try {
-      // Server returns 202 — campaign runs asynchronously now (a long
-      // synchronous send was timing out the proxy and prompting double-
-      // clicks). Operator polls History for the final delivered/failed
-      // counts.
-      await adminFetch(`/admin/newsletter/sends/${id}/send`, {
-        method: "POST",
-      });
-      setStatus(`Send queued. Opening History…`);
-      resetForm();
-      setSendConfirmId(null);
-      // Brief delay so the operator sees the status before the tab
-      // switches; History view will refresh when the parent flips
-      // refreshKey, surfacing the new row at status='sending'.
-      if (onSendComplete) setTimeout(onSendComplete, 1200);
-    } catch (e) {
-      setStatus("Send failed: " + e.message);
-    }
-  };
-  const schedule = async () => {
-    if (!scheduleAt) {
-      setStatus("Pick a date/time first.");
-      return;
-    }
-    const when = new Date(scheduleAt);
-    if (when.getTime() <= Date.now()) {
-      setStatus("Pick a time in the future.");
-      return;
-    }
-    const savedId = await saveDraft();
-    if (!savedId) return;
-    setStatus("Scheduling...");
-    try {
-      const res = await adminFetch(
-        `/admin/newsletter/sends/${savedId}/schedule`,
-        {
-          method: "POST",
-          body: JSON.stringify({ scheduledFor: when.toISOString() }),
-        },
-      );
-      setStatus(`Scheduled for ${formatEtDateTime(res.send.scheduled_for)}.`);
-      resetForm();
-    } catch (e) {
-      setStatus("Schedule failed: " + e.message);
-    }
-  };
-  const resetForm = () => {
-    setDraftId(null);
-    setSubject("");
-    setSubjectB("");
-    setAbEnabled(false);
-    setAutoShareSocial(true);
-    setPreviewText("");
-    setHtmlBody("");
-    setTextBody("");
-    setDraftEventIds([]);
-    setDraftEventOccurrences({});
-    setEventIdsDirty(false);
-    setSendConfirmId(null);
-    setScheduleAt("");
-    setSelectedTemplate(null);
-    // A fresh compose is no longer the loaded off-template draft — without
-    // this, the next save would mislabel new content with its type (e.g.
-    // 'reengagement'), skipping claim validation and the public archive.
-    setLoadedNewsletterType(null);
-    // Reset the audience too: a segment hydrated from the previous draft
-    // (e.g. the win-back's reengagement_due tag) must not silently carry
-    // into the NEXT campaign's POST and shrink its audience.
-    applySegmentFromFilter(null);
-    segmentDirtyRef.current = false;
-  };
-  const handleAiDraft = async ({
-    prompt,
-    template,
-    audience,
-    tone,
-    includeCTA,
-    eventIds,
-  }) => {
-    userHasEdited.current = true;
-    const tpl = template ? TEMPLATES.find((t) => t.key === template) : null;
-    const newsletterType = tpl?.newsletterType || null;
-    const res = await adminFetch("/admin/newsletter/draft-ai", {
-      method: "POST",
-      body: JSON.stringify({
-        prompt,
-        template,
-        newsletterType,
-        eventIds,
-        audience,
-        tone,
-        includeCTA,
-        issueReference: scheduleAt || undefined,
-      }),
-    });
-    const d = res.draft || {};
-    if (d.subject || d.selectedSubject)
-      setSubject(d.subject || d.selectedSubject);
-    if (d.previewText) setPreviewText(d.previewText);
-    if (d.htmlBody) setHtmlBody(d.htmlBody);
-    if (d.textBody) setTextBody(d.textBody);
-    // Carry the locked event ids so saveDraft persists them for times_featured.
-    // Mark dirty so the next save (POST or PATCH) writes the new set — covers
-    // re-drafting an already-saved campaign with a different event lineup.
-    setDraftEventIds(Array.isArray(res.eventIds) ? res.eventIds : []);
-    setDraftEventOccurrences(res.eventOccurrences || {});
-    setEventIdsDirty(true);
-    // Always sync — `template` is null when operator picks "Free-form" in
-    // the modal, and we want that to clear the prior selection so the
-    // next modal opens defaulting to no template.
-    setSelectedTemplate(template || null);
-    // An AI redraft replaces the loaded draft's content wholesale — the
-    // off-template type (e.g. 'reengagement') no longer describes it.
-    setLoadedNewsletterType(null);
-    setAiOpen(false);
-    // Clear the event-seeded prompt on success too (mirror of the
-    // onClose handler). Otherwise the next "Draft with AI" toolbar
-    // click would prefill with the stale event seed.
-    setAiInitialPrompt("");
-    setStatus("AI draft inserted. Review before saving.");
-  };
-  const audienceLabel =
-    segmentCount !== null && segmentFilter
-      ? `${segmentCount} of ${activeCount ?? "?"} subscribers match segment`
-      : activeCount !== null
-        ? `${activeCount} active subscriber${activeCount === 1 ? "" : "s"}`
-        : "Loading subscribers…";
-  return (
-    <UiSurface density="comfortable" className="space-y-4">
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
-        {autopilotBanner && (
-          <div className="col-span-full flex items-center justify-between bg-warn-bg border-hairline border-warn-fg/30 rounded-sm px-4 py-3 text-ui-body text-warn-fg">
-            <span>
-              <strong>Autopilot draft</strong> — This draft was auto-generated
-              by the weekly autopilot. Review and send when ready.
-            </span>
-            <Button
-              onClick={() => setAutopilotBanner(false)}
-              className="ml-3"
-              aria-label="Dismiss banner"
-              variant="secondary"
-            >
-              <XCircle size={16} strokeWidth={1.75} />
-            </Button>
-          </div>
-        )}{" "}
-        <Card>
-          {" "}
-          <PanelHeader
-            title="Campaign content"
-            hint="Write the message body, subject, preview text, and sender details."
-            action={
-              <div className="flex items-center gap-2">
-                {draftId && <Badge tone="neutral">Draft saved</Badge>}
-                {/* Off-template loaded drafts (e.g. the sunset win-back) are
-                  house-written by type contract — /draft-ai also refuses them
-                  server-side, so disable the affordance rather than surface
-                  the 400. */}
-                <Button
-                  onClick={() => setAiOpen(true)}
-                  variant="secondary"
-                  disabled={!!loadedNewsletterType}
-                  title={
-                    loadedNewsletterType
-                      ? "This draft's type is house-written — AI drafting is disabled for it"
-                      : undefined
-                  }
-                >
-                  {" "}
-                  <Wand2
-                    size={14}
-                    strokeWidth={1.75}
-                    className="mr-2"
-                    aria-hidden
-                  />
-                  Draft With AI
-                </Button>{" "}
-              </div>
-            }
-          />{" "}
-          <div className="p-4 space-y-4">
-            {" "}
-            <div>
-              {" "}
-              <FieldLabel>Template</FieldLabel>{" "}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Button
-                  type="button"
-                  onClick={() => applyTemplate("weekend")}
-                  className=""
-                  variant="secondary"
-                >
-                  {NEWSLETTER_UI_COPY.name}
-                </Button>
-                <Button
-                  type="button"
-                  onClick={() => applyTemplate("blank")}
-                  className=""
-                  variant="secondary"
-                >
-                  Start from scratch
-                </Button>
-              </div>{" "}
-            </div>{" "}
-            {activeNewsletterType === "local-weekly-fresh-events" && (
-              <DigestPlanner
-                onDraftFromPlan={async ({ eventIds, prompt }) => {
-                  try {
-                    setStatus("Drafting from plan…");
-                    await handleAiDraft({
-                      prompt,
-                      template: "weekend",
-                      audience: "Waves subscribers — North Port to Tampa",
-                      tone: "Neighborly, FOMO-driven, local friend energy",
-                      includeCTA: true,
-                      eventIds,
-                    });
-                  } catch (e) {
-                    setStatus("Draft failed: " + e.message);
-                  }
-                }}
-              />
-            )}
-            <div>
-              {" "}
-              <FieldLabel>
-                Subject{" "}
-                {abEnabled && (
-                  <span className="text-ink-tertiary normal-case">(A)</span>
-                )}
-              </FieldLabel>{" "}
-              <Input
-                type="text"
-                value={subject}
-                onChange={(e) => {
-                  userHasEdited.current = true;
-                  setSubject(e.target.value);
-                }}
-                className={INPUT_CLS}
-                placeholder="e.g. Florida spring pest alert — what to watch for"
-                aria-label="Newsletter subject"
-              />{" "}
-              <label className="mt-2 inline-flex items-center gap-2 text-ui-body text-ink-secondary">
-                {" "}
-                <Checkbox
-                  checked={abEnabled}
-                  onChange={(e) => setAbEnabled(e.target.checked)}
-                  className="shrink-0"
-                />
-                A/B test a second subject (random 50/50 split)
-              </label>{" "}
-            </div>
-            {abEnabled && (
-              <div>
-                {" "}
-                <FieldLabel>Subject (B)</FieldLabel>{" "}
-                <Input
-                  type="text"
-                  value={subjectB}
-                  onChange={(e) => setSubjectB(e.target.value)}
-                  className={INPUT_CLS}
-                  placeholder="Alternative subject line"
-                  aria-label="Alternative subject line"
-                />{" "}
-              </div>
-            )}
-            <div>
-              {" "}
-              <FieldLabel>Preview text</FieldLabel>{" "}
-              <Input
-                type="text"
-                value={previewText}
-                onChange={(e) => {
-                  userHasEdited.current = true;
-                  setPreviewText(e.target.value);
-                }}
-                className={INPUT_CLS}
-                placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
-                aria-label="One-line preview that renders after the subject in Gmail/Apple Mail."
-              />{" "}
-            </div>{" "}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {" "}
-              <div>
-                {" "}
-                <FieldLabel>From name</FieldLabel>{" "}
-                <Input
-                  type="text"
-                  value={fromName}
-                  onChange={(e) => setFromName(e.target.value)}
-                  className={INPUT_CLS}
-                />{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <FieldLabel>From email</FieldLabel>{" "}
-                <Input
-                  type="text"
-                  value={fromEmail}
-                  onChange={(e) => setFromEmail(e.target.value)}
-                  className={`${INPUT_CLS} u-nums`}
-                />{" "}
-              </div>{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                <FieldLabel>HTML body</FieldLabel>{" "}
-                <div className="flex items-center gap-1.5">
-                  <Button
-                    type="button"
-                    onClick={() => setShowImageInsert((v) => !v)}
-                    className=""
-                    title="Insert a responsive image at the cursor."
-                    variant="secondary"
-                    aria-label="Insert a responsive image at the cursor."
-                  >
-                    Insert image
-                  </Button>
-                  <Select
-                    value={selectedQuizId}
-                    onChange={(e) => setSelectedQuizId(e.target.value)}
-                    disabled={
-                      QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0
-                    }
-                    className=""
-                    title="Choose which quiz to insert"
-                    aria-label="Choose which quiz to insert"
-                  >
-                    {quizOptions.map((q) => (
-                      <option key={q.id} value={q.id}>
-                        {q.label}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button
-                    type="button"
-                    onClick={insertQuizBlock}
-                    disabled={
-                      QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0
-                    }
-                    className=""
-                    title="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
-                    variant="secondary"
-                    aria-label="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
-                  >
-                    {QUIZ_TOKEN_RE.test(htmlBody)
-                      ? "Quiz added"
-                      : "Insert quiz"}
-                  </Button>
-                </div>
-              </div>
-              {showImageInsert && (
-                <div className="flex items-end gap-2 mb-2 p-2 border-hairline border-zinc-200 rounded-sm bg-zinc-50 flex-wrap">
-                  <div className="flex-1 min-w-[180px]">
-                    <FieldLabel>Image URL</FieldLabel>
-                    <Input
-                      type="url"
-                      value={imageUrl}
-                      onChange={(e) => setImageUrl(e.target.value)}
-                      className={`${INPUT_CLS} u-nums`}
-                      placeholder="https://…/image.jpg"
-                      aria-label="https://…/image.jpg"
-                    />
-                  </div>
-                  <div className="flex-1 min-w-[140px]">
-                    <FieldLabel>Alt text</FieldLabel>
-                    <Input
-                      type="text"
-                      value={imageAlt}
-                      onChange={(e) => setImageAlt(e.target.value)}
-                      className={INPUT_CLS}
-                      placeholder="Describe the image"
-                      aria-label="Describe the image"
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    onClick={insertImage}
-                    disabled={!imageUrl.trim()}
-                    className=""
-                    variant="secondary"
-                  >
-                    Insert
-                  </Button>
-                </div>
-              )}
-              <Textarea
-                ref={htmlBodyRef}
-                value={htmlBody}
-                onChange={(e) => {
-                  userHasEdited.current = true;
-                  setHtmlBody(e.target.value);
-                }}
-                rows={16}
-                className={TEXTAREA_CLS}
-                placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
-                aria-label="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
-              />{" "}
-              <p className="text-ui-body text-ink-tertiary mt-1">
-                The unsubscribe footer + List-Unsubscribe header are added
-                automatically — do not include your own.{" "}
-                {QUIZ_TOKEN_RE.test(htmlBody) && (
-                  <span className="text-ink-secondary">
-                    The quiz token renders per-recipient tap-to-answer buttons
-                    that tag the subscriber by interest.
-                  </span>
-                )}
-              </p>{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <FieldLabel>
-                Plain-text fallback{" "}
-                <span className="text-ink-tertiary normal-case">
-                  (optional — improves deliverability)
-                </span>{" "}
-              </FieldLabel>{" "}
-              <Textarea
-                value={textBody}
-                onChange={(e) => {
-                  userHasEdited.current = true;
-                  setTextBody(e.target.value);
-                }}
-                rows={5}
-                className={INPUT_CLS}
-                placeholder="Same content in plain text for mail clients that don't render HTML."
-                aria-label="Same content in plain text for mail clients that don't render HTML."
-              />{" "}
-            </div>{" "}
-          </div>{" "}
-        </Card>{" "}
-        <aside className="space-y-4">
-          {" "}
-          <Card>
-            {" "}
-            <PanelHeader title="Audience" hint={audienceLabel} />{" "}
-            <div className="p-4 space-y-3">
-              {" "}
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  {
-                    key: "all",
-                    label: "All active",
-                  },
-                  {
-                    key: "customers",
-                    label: "Customers only",
-                  },
-                  {
-                    key: "leads",
-                    label: "Non-customers only",
-                  },
-                  {
-                    key: "custom",
-                    label: "By source…",
-                  },
-                ].map((o) => (
-                  <Button
-                    key={o.key}
-                    type="button"
-                    onClick={() => {
-                      markSegmentDirty();
-                      setSegmentMode(o.key);
-                    }}
-                    className="rounded-sm"
-                    aria-pressed={segmentMode === o.key}
-                    variant={segmentMode === o.key ? "primary" : "secondary"}
-                  >
-                    {o.label}
-                  </Button>
-                ))}
-              </div>
-              {segmentMode === "custom" && (
-                <div className="flex flex-wrap gap-1.5">
-                  {SOURCE_SEGMENTS.map((src) => {
-                    const on = segmentSources.includes(src.value);
-                    return (
-                      <Button
-                        key={src.value}
-                        type="button"
-                        onClick={() => {
-                          markSegmentDirty();
-                          setSegmentSources((cur) =>
-                            on
-                              ? cur.filter((x) => x !== src.value)
-                              : [...cur, src.value],
-                          );
-                        }}
-                        className="gap-1.5 rounded-full"
-                    aria-pressed={on}
-                    variant={on ? "primary" : "secondary"}
-                      >
-                        {src.label}
-                      </Button>
-                    );
-                  })}
-                </div>
-              )}
-              <div className="mt-3">
-                {" "}
-                <FieldLabel>
-                  Tags{" "}
-                  <span className="normal-case tracking-normal text-ink-tertiary">
-                    (optional, additive)
-                  </span>{" "}
-                </FieldLabel>{" "}
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {segmentTags.map((t) => (
-                    <Button
-                      key={t}
-                      type="button"
-                      onClick={() => {
-                        markSegmentDirty();
-                        setSegmentTags((cur) => cur.filter((x) => x !== t));
-                      }}
-                      className=""
-                      title="Click to remove"
-                      variant="secondary"
-                      aria-label="Click to remove"
-                    >
-                      {t} ×
-                    </Button>
-                  ))}
-                  <Input
-                    type="text"
-                    value={tagDraft}
-                    onChange={(e) => setTagDraft(e.target.value)}
-                    list="newsletter-tag-suggestions"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === ",") {
-                        e.preventDefault();
-                        const v = tagDraft.trim().toLowerCase();
-                        if (v && !segmentTags.includes(v)) {
-                          markSegmentDirty();
-                          setSegmentTags((cur) => [...cur, v]);
-                        }
-                        setTagDraft("");
-                      } else if (
-                        e.key === "Backspace" &&
-                        !tagDraft &&
-                        segmentTags.length
-                      ) {
-                        markSegmentDirty();
-                        setSegmentTags((cur) => cur.slice(0, -1));
-                      }
-                    }}
-                    placeholder={
-                      segmentTags.length
-                        ? "add another…"
-                        : "e.g. platinum-tier, hurricane-prep"
-                    }
-                    className="flex-1 min-w-[160px]"
-                    aria-label={
-                      segmentTags.length
-                        ? "add another…"
-                        : "e.g. platinum-tier, hurricane-prep"
-                    }
-                  />{" "}
-                  <datalist id="newsletter-tag-suggestions">
-                    {tagSuggestions
-                      .filter((t) => !segmentTags.includes(t))
-                      .map((t) => (
-                        <option key={t} value={t} />
-                      ))}
-                  </datalist>{" "}
-                </div>{" "}
-                <div className="text-ui-body text-ink-tertiary mt-1">
-                  Press Enter or comma to add. Matches subscribers tagged with
-                  ANY of the listed tags.
-                </div>{" "}
-              </div>{" "}
-              {/* Service-line cross-sell — the "Agora play". Resolves server-side
-                to the customers who hold / lack the selected recurring lines. */}
-              <div className="mt-3 pt-3 border-t border-hairline border-zinc-200">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <FieldLabel>
-                    Service line{" "}
-                    <span className="normal-case tracking-normal text-ink-tertiary">
-                      (cross-sell, customers)
-                    </span>
-                  </FieldLabel>
-                  {serviceLineActive && (
-                    <Button
-                      type="button"
-                      onClick={clearServiceLineSegment}
-                      className=""
-                      variant="secondary"
-                    >
-                      Reset
-                    </Button>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-1.5 mb-3">
-                  {CAMPAIGN_PRESETS.map((p) => (
-                    <Button
-                      key={p.label}
-                      type="button"
-                      onClick={() => applyCampaignPreset(p)}
-                      className=""
-                      title="One-click cross-sell segment"
-                      variant="secondary"
-                    >
-                      {p.label}
-                    </Button>
-                  ))}
-                </div>
-                <div className="text-ui-body text-ink-secondary mb-1">
-                  Has all of
-                </div>
-                <ChipRow
-                  options={SERVICE_LINES}
-                  selected={segmentHasLines}
-                  onToggle={(v) => {
-                    markSegmentDirty();
-                    setSegmentHasLines((cur) =>
-                      cur.includes(v)
-                        ? cur.filter((x) => x !== v)
-                        : [...cur, v],
-                    );
-                  }}
-                />
-                <div className="text-ui-body text-ink-secondary mt-2 mb-1">
-                  Missing all of
-                </div>
-                <ChipRow
-                  options={SERVICE_LINES}
-                  selected={segmentMissingLines}
-                  onToggle={(v) => {
-                    markSegmentDirty();
-                    setSegmentMissingLines((cur) =>
-                      cur.includes(v)
-                        ? cur.filter((x) => x !== v)
-                        : [...cur, v],
-                    );
-                  }}
-                />
-                <div className="text-ui-body text-ink-secondary mt-3 mb-1">
-                  Membership
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {LINE_COUNT_OPTIONS.map((o) => (
-                    <Button
-                      key={o.key}
-                      type="button"
-                      onClick={() => {
-                        markSegmentDirty();
-                        setSegmentLineCount(o.key);
-                      }}
-                      className="rounded-sm"
-                    aria-pressed={segmentLineCount === o.key}
-                    variant={segmentLineCount === o.key ? "primary" : "secondary"}
-                    >
-                      {o.label}
-                    </Button>
-                  ))}
-                </div>
-                <div className="text-ui-body text-ink-secondary mt-3 mb-1">
-                  Region
-                </div>
-                <ChipRow
-                  options={REGION_ZONES}
-                  selected={segmentRegions}
-                  onToggle={(v) => {
-                    markSegmentDirty();
-                    setSegmentRegions((cur) =>
-                      cur.includes(v)
-                        ? cur.filter((x) => x !== v)
-                        : [...cur, v],
-                    );
-                  }}
-                />
-                <div className="text-ui-body text-ink-tertiary mt-2">
-                  Lines come from each customer&rsquo;s active recurring
-                  services. A customer must hold ALL of &ldquo;Has&rdquo;, none
-                  of &ldquo;Missing&rdquo;.
-                </div>
-              </div>{" "}
-            </div>{" "}
-          </Card>{" "}
-          <Card>
-            {" "}
-            <PanelHeader
-              title="Review + Send"
-              hint="Save before test sends, live sends, or scheduling."
-            />{" "}
-            <div className="p-4 space-y-3">
-              {" "}
-              <Button
-                onClick={saveDraft}
-                variant="secondary"
-                disabled={!subject}
-                className="w-full"
-              >
-                {" "}
-                <Save
-                  size={14}
-                  strokeWidth={1.75}
-                  className="mr-2"
-                  aria-hidden
-                />
-                {draftId ? "Update draft" : "Save draft"}
-              </Button>{" "}
-              <Button
-                onClick={openPreview}
-                variant="secondary"
-                disabled={!htmlBody}
-                className="w-full"
-              >
-                {" "}
-                <Eye
-                  size={14}
-                  strokeWidth={1.75}
-                  className="mr-2"
-                  aria-hidden
-                />
-                Preview
-              </Button>{" "}
-              <div>
-                {" "}
-                <FieldLabel>Test recipient</FieldLabel>{" "}
-                <Input
-                  type="text"
-                  value={testEmail}
-                  onChange={(e) => setTestEmail(e.target.value)}
-                  className={`${INPUT_CLS} u-nums`}
-                  placeholder="test@wavespestcontrol.com"
-                  aria-label="test@wavespestcontrol.com"
-                />{" "}
-              </div>{" "}
-              <Button
-                onClick={sendTest}
-                variant="secondary"
-                disabled={!testEmail}
-                className="w-full"
-              >
-                {" "}
-                <MailCheck
-                  size={14}
-                  strokeWidth={1.75}
-                  className="mr-2"
-                  aria-hidden
-                />
-                Send Test
-              </Button>{" "}
-              <Button
-                onClick={sendNow}
-                disabled={!htmlBody || segmentCount === 0}
-                className="w-full"
-              >
-                {" "}
-                <Send
-                  size={14}
-                  strokeWidth={1.75}
-                  className="mr-2"
-                  aria-hidden
-                />
-                Send To Audience
-              </Button>{" "}
-              {validationResult && (
-                <div className="mt-2 space-y-1">
-                  {validationResult.errors?.map((e, i) => (
-                    <div
-                      key={`e${i}`}
-                      className="flex items-start gap-1.5 text-ui-body text-alert-fg bg-alert-bg rounded px-2 py-1"
-                    >
-                      <XCircle size={11} className="mt-0.5 shrink-0" />
-                      {e}
-                    </div>
-                  ))}
-                  {validationResult.warnings?.map((w, i) => (
-                    <div
-                      key={`w${i}`}
-                      className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
-                    >
-                      <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-                      {w}
-                    </div>
-                  ))}
-                  {validationResult.valid &&
-                    !validationResult.warnings?.length && (
-                      <div className="flex items-center gap-1.5 text-ui-body text-green-700 bg-green-50 rounded px-2 py-1">
-                        <CheckCircle2 size={11} className="shrink-0" />
-                        Validation passed
-                      </div>
-                    )}
-                </div>
-              )}
-            </div>{" "}
-          </Card>{" "}
-          <Card>
-            {" "}
-            <PanelHeader
-              title="Schedule"
-              hint={
-                activeNewsletterType === "local-weekly-fresh-events"
-                  ? NEWSLETTER_UI_COPY.scheduleHint
-                  : "Queued sends fire within one minute of the target time."
-              }
-            />{" "}
-            <div className="p-4 space-y-3">
-              {" "}
-              <Input
-                type="datetime-local"
-                value={scheduleAt}
-                onChange={(e) => setScheduleAt(e.target.value)}
-                className={`${INPUT_CLS} u-nums`}
-              />{" "}
-              <Button
-                onClick={schedule}
-                variant="secondary"
-                disabled={!scheduleAt || !htmlBody}
-                className="w-full"
-              >
-                {" "}
-                <CalendarClock
-                  size={14}
-                  strokeWidth={1.75}
-                  className="mr-2"
-                  aria-hidden
-                />
-                Schedule Send
-              </Button>{" "}
-              <div className="text-ui-body text-ink-tertiary">
-                {scheduleAt
-                  ? `Fires ${new Date(scheduleAt).toLocaleString("en-US", {
-                      timeZone: "America/New_York",
-                      month: "short",
-                      day: "numeric",
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })} ET`
-                  : activeNewsletterType === "local-weekly-fresh-events"
-                    ? NEWSLETTER_UI_COPY.scheduleHint
-                    : "America/New_York timezone"}
-              </div>{" "}
-            </div>{" "}
-          </Card>
-          <Card>
-            <PanelHeader title="Social" />
-            <div className="p-4 space-y-2">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <Checkbox
-                  checked={autoShareSocial}
-                  onChange={(e) => {
-                    setAutoShareSocial(e.target.checked);
-                    userHasEdited.current = true;
-                  }}
-                  className="mt-0.5"
-                />
-                <span className="text-ui-body text-ink-secondary leading-snug">
-                  Auto-post a teaser after this newsletter is sent
-                </span>
-              </label>
-              <div className="text-ui-body text-ink-tertiary pl-6">
-                Facebook, Instagram, LinkedIn & Google Business Profile. Links
-                to the public newsletter archive. Test sends are never posted.
-              </div>
-            </div>
-          </Card>
-          {status && (
-            <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-ui-body text-ink-secondary">
-              {status}
-            </div>
-          )}
-        </aside>
-        {aiOpen && (
-          <AiDraftModal
-            initialNewsletterType={activeNewsletterType}
-            initialPrompt={aiInitialPrompt}
-            onClose={() => {
-              setAiOpen(false);
-              setAiInitialPrompt("");
-            }}
-            onDraft={handleAiDraft}
-          />
-        )}
-        {previewOpen && (
-          <PreviewDialog
-            html={previewHtml}
-            loading={previewLoading}
-            onClose={() => setPreviewOpen(false)}
-          />
-        )}
-        {sendConfirmOpen && (
-          <SendConfirmDialog
-            subject={subject}
-            subjectB={abEnabled ? subjectB : null}
-            previewText={previewText}
-            fromName={fromName}
-            fromEmail={fromEmail}
-            audience={segmentCount ?? activeCount ?? null}
-            activeCount={activeCount}
-            segmentFilter={segmentFilter}
-            htmlBody={htmlBody}
-            onCancel={() => setSendConfirmOpen(false)}
-            onConfirm={confirmSend}
-          />
-        )}
-      </div>
-    </UiSurface>
-  );
-}
-
-// ── Send confirm dialog ──────────────────────────────────────────────
-//
-// Replaces window.confirm() for the most consequential button in the admin
-// app. Shows a rendered preview of the body, the resolved audience, and a
-// type-SEND gate — the goal is to make a destructive double-click much
-// less likely than a stray Enter on the browser modal.
-
-function SendConfirmDialog({
-  subject,
-  subjectB,
-  previewText,
-  fromName,
-  fromEmail,
-  audience,
-  activeCount,
-  segmentFilter,
-  htmlBody,
-  onCancel,
-  onConfirm,
-}) {
-  const [typed, setTyped] = useState("");
-  const ready = typed.trim().toUpperCase() === "SEND" && audience > 0;
-  const segmentSummary = useMemo(() => {
-    if (!segmentFilter) return `All active (${activeCount ?? "?"})`;
-    const parts = [];
-    if (segmentFilter.customersOnly) parts.push("Customers only");
-    else if (segmentFilter.leadsOnly) parts.push("Non-customers only");
-    if (Array.isArray(segmentFilter.sources) && segmentFilter.sources.length) {
-      parts.push(`Sources: ${segmentFilter.sources.join(", ")}`);
-    }
-    if (Array.isArray(segmentFilter.tags) && segmentFilter.tags.length) {
-      parts.push(`Tags: ${segmentFilter.tags.join(", ")}`);
-    }
-    return parts.length ? parts.join(" · ") : "Filtered";
-  }, [segmentFilter, activeCount]);
-
-  // Body-only preview — no chrome wrap. The wrap is server-side and
-  // identical for every campaign, so the operator's review value is
-  // entirely in the body. Sandbox tight (no scripts, no same-origin)
-  // since the operator authored the HTML and may have pasted anything.
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${stripGreetingToken(htmlBody) || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
-  return (
-    <Dialog open onClose={onCancel} size="lg">
-      <DialogHeader className="flex items-start justify-between gap-3">
-        {" "}
-        <div className="min-w-0">
-          {" "}
-          <DialogTitle className="text-16 font-medium text-zinc-900">
-            Send to {audience != null ? audience.toLocaleString() : "?"}{" "}
-            subscriber{audience === 1 ? "" : "s"}?
-          </DialogTitle>{" "}
-          <p className="text-ui-body text-ink-secondary mt-0.5">
-            This can't be undone. Each recipient is contacted at the SendGrid
-            send below.
-          </p>{" "}
-        </div>{" "}
-        <Button
-          type="button"
-          onClick={onCancel}
-          className="ml-3"
-          aria-label="Close"
-          variant="secondary"
-        >
-          ×
-        </Button>{" "}
-      </DialogHeader>
-      <DialogBody className="min-h-0 space-y-3">
-        {" "}
-        <ConfirmRow
-          label="Subject"
-          value={subject || <em className="text-ink-tertiary">(missing)</em>}
-        />
-        {subjectB && (
-          <ConfirmRow
-            label="Subject (B)"
-            value={subjectB}
-            hint="A/B 50/50 random split"
-          />
-        )}
-        {previewText && <ConfirmRow label="Preview text" value={previewText} />}
-        <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />{" "}
-        <ConfirmRow label="Audience" value={segmentSummary} />{" "}
-        <div>
-          {" "}
-          <div className="text-ui-body uppercase tracking-label text-ink-secondary mb-1">
-            Body preview
-          </div>{" "}
-          <iframe
-            title="Body preview"
-            srcDoc={srcDoc}
-            sandbox=""
-            className="w-full h-[320px] border-hairline border-zinc-200 rounded-xs bg-white"
-          />{" "}
-          <p className="text-ui-body text-ink-tertiary mt-1">
-            Body only — Waves header + unsubscribe footer are added server-side.
-            Send a test if you want to see the full chrome.
-          </p>{" "}
-        </div>{" "}
-      </DialogBody>
-      <DialogFooter className="flex flex-wrap items-center gap-3">
-        {" "}
-        <label className="text-ui-body text-ink-secondary flex-shrink-0">
-          Type SEND to confirm:
-        </label>{" "}
-        <Input
-          type="text"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          autoFocus
-          spellCheck={false}
-          autoComplete="off"
-          className=""
-          placeholder="SEND"
-          aria-label="Type SEND to confirm:"
-        />{" "}
-        <div className="ml-auto flex items-center gap-2">
-          {" "}
-          <Button onClick={onCancel} variant="secondary">
-            Cancel
-          </Button>{" "}
-          <Button onClick={onConfirm} disabled={!ready}>
-            Send to all
-          </Button>{" "}
-        </div>{" "}
-      </DialogFooter>
-    </Dialog>
-  );
-}
-
-// ── Preview dialog ───────────────────────────────────────────────────
-//
-// Renders the operator's draft inside the same chrome the live send uses
-// (server returns the wrapped HTML from POST /admin/newsletter/preview).
-// Sandboxed iframe — no scripts, no same-origin — since the body is
-// operator-authored.
-
-function PreviewDialog({ html, loading, onClose }) {
-  return (
-    <Dialog open onClose={onClose} size="lg">
-      <DialogHeader className="flex items-start justify-between gap-3">
-        {" "}
-        <div>
-          {" "}
-          <DialogTitle className="text-16 font-medium text-zinc-900">
-            Preview
-          </DialogTitle>{" "}
-          <p className="text-ui-body text-ink-secondary mt-0.5">
-            How the email looks with header + footer chrome. Unsubscribe link is
-            a demo token; real recipients get their own.
-          </p>{" "}
-        </div>{" "}
-        <Button
-          type="button"
-          onClick={onClose}
-          className="ml-3"
-          aria-label="Close"
-          variant="secondary"
-        >
-          ×
-        </Button>{" "}
-      </DialogHeader>
-      <DialogBody className="min-h-0 space-y-3">
-        {loading ? (
-          <div className="text-ui-body text-ink-secondary p-8 text-center">
-            Rendering…
-          </div>
-        ) : (
-          <iframe
-            title="Newsletter preview"
-            srcDoc={html}
-            sandbox=""
-            className="w-full min-h-[60vh] border-hairline border-zinc-200 rounded-xs bg-white"
-          />
-        )}
-      </DialogBody>
-      <DialogFooter className="flex flex-wrap items-center gap-3">
-        {" "}
-        <Button onClick={onClose} variant="secondary">
-          Close
-        </Button>{" "}
-      </DialogFooter>
-    </Dialog>
-  );
-}
-function ConfirmRow({ label, value, hint }) {
-  return (
-    <div className="flex items-baseline gap-3">
-      {" "}
-      <div className="text-ui-body uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">
-        {label}
-      </div>{" "}
-      <div className="flex-1 min-w-0">
-        {" "}
-        <div className="text-ui-body text-zinc-900 break-words">{value}</div>
-        {hint && (
-          <div className="text-ui-body text-ink-tertiary mt-0.5">{hint}</div>
-        )}
-      </div>{" "}
-    </div>
-  );
-}
-
-// ── Digest Planner ────────────────────────────────────────────────
-
-const SECTION_LABELS = {
-  fresh_this_week: NEWSLETTER_UI_COPY.name,
-  just_starting: "Just Starting",
-  weekend_picks: "Weekend Picks",
-  family_or_low_key_pick: "Family / Low-Key Pick",
-  road_trip_pick: "Road Trip Pick",
-};
-function DigestPlanner({ onDraftFromPlan }) {
-  const [plan, setPlan] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [weekStart, setWeekStart] = useState("");
-  const [homeownerTopic, setHomeownerTopic] = useState("");
-  const [suppressedOpen, setSuppressedOpen] = useState(false);
-  const generatePlan = async () => {
-    setLoading(true);
-    try {
-      const body = {};
-      if (weekStart) body.weekStart = weekStart;
-      const res = await adminFetch("/admin/newsletter/events/digest-plan", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      setPlan(res);
-    } catch (e) {
-      setPlan({
-        error: e.message,
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-  const draftFromPlan = () => {
-    if (!plan?.sections) return;
-    const allEvents = Object.values(plan.sections).flat();
-    const ids = allEvents.map((e) => e.id);
-    const summary = allEvents
-      .slice(0, 8)
-      .map((e) => `${e.title} (${e.city || "SWFL"})`)
-      .join(", ");
-    // Homeowner Minute retired from the flagship (owner 2026-07-30) —
-    // the planner field no longer reaches the prompt.
-    const prompt = `Build this ${NEWSLETTER_UI_COPY.name} issue with events from North Port to Tampa: ${summary}.`;
-    onDraftFromPlan({
-      eventIds: ids,
-      prompt,
-    });
-  };
-  const fmtDate = (d) => {
-    if (!d) return "—";
-    return new Date(d).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      weekday: "short",
-      timeZone: "America/New_York",
-    });
-  };
-  return (
-    <div className="border-hairline border-zinc-200 rounded-sm bg-zinc-50 p-3 space-y-3">
-      <div className="flex items-center gap-2">
-        <CalendarDays
-          size={14}
-          strokeWidth={1.75}
-          className="text-ink-secondary"
-        />
-        <span className="text-ui-body font-medium text-ink-primary">
-          Digest planner
-        </span>
-      </div>
-      <div className="flex items-end gap-2">
-        <div className="flex-1">
-          <label className="block text-ui-body text-ink-tertiary mb-0.5">
-            {NEWSLETTER_UI_COPY.weekStartLabel}
-          </label>
-          <Input
-            type="date"
-            value={weekStart}
-            onChange={(e) => setWeekStart(e.target.value)}
-            className="w-full"
-          />
-        </div>
-        <Button size="sm" onClick={generatePlan} disabled={loading}>
-          <Sparkles size={12} className="mr-1" />
-          {loading ? "Planning…" : "Generate Plan"}
-        </Button>
-      </div>
-      {plan?.error && (
-        <div className="text-ui-body text-alert-fg bg-alert-bg rounded p-2">
-          {plan.error}
-        </div>
-      )}
-      {plan?.sections && (
-        <>
-          <div className="text-ui-body text-ink-tertiary">
-            {plan.weekStart} — {plan.weekEnd} · {plan.stats?.totalEligible || 0}{" "}
-            eligible · {plan.stats?.totalAssigned || 0} assigned
-          </div>
-          {plan.warnings?.length > 0 && (
-            <div className="space-y-1">
-              {plan.warnings.map((w, i) => (
-                <div
-                  key={i}
-                  className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
-                >
-                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-                  {w}
-                </div>
-              ))}
-            </div>
-          )}
-          {Object.entries(SECTION_LABELS).map(([key, label]) => {
-            const events = plan.sections[key] || [];
-            return (
-              <div key={key}>
-                <div className="text-ui-body font-medium text-ink-secondary uppercase tracking-label mb-1">
-                  {label} ({events.length})
-                </div>
-                {events.length === 0 ? (
-                  <div className="text-ui-body text-ink-tertiary italic">
-                    None assigned
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {events.map((ev) => (
-                      <div
-                        key={ev.id}
-                        className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded px-2 py-1.5"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-ui-body font-medium text-ink-primary truncate">
-                            {ev.title}
-                          </div>
-                          <div className="text-ui-body text-ink-tertiary">
-                            {ev.city || "—"} · {fmtDate(ev.startAt)}
-                          </div>
-                        </div>
-                        <span className="text-ui-body text-ink-tertiary u-nums ml-2 shrink-0">
-                          {ev.compositeScore}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {plan.suppressed?.length > 0 && (
-            <div>
-              <Button
-                type="button"
-                onClick={() => setSuppressedOpen(!suppressedOpen)}
-                className=""
-                variant="secondary"
-              >
-                {suppressedOpen ? "Hide" : "Show"} suppressed (
-                {plan.suppressed.length})
-              </Button>
-              {suppressedOpen && (
-                <div className="mt-1 space-y-0.5">
-                  {plan.suppressed.map((s) => (
-                    <div
-                      key={s.id}
-                      className="text-ui-body text-ink-tertiary line-through"
-                    >
-                      {s.title} — {s.reason}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          <div>
-            <label className="block text-ui-body text-ink-tertiary mb-0.5">
-              Homeowner Minute topic (optional)
-            </label>
-            <Input
-              type="text"
-              value={homeownerTopic}
-              onChange={(e) => setHomeownerTopic(e.target.value)}
-              placeholder="e.g. Check patio planters for standing water"
-              className="w-full"
-              aria-label="Homeowner Minute topic (optional)"
-            />
-          </div>
-          <Button onClick={draftFromPlan} className="w-full">
-            <Wand2 size={13} className="mr-1.5" />
-            Draft Newsletter from Plan
-          </Button>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── AI draft modal ────────────────────────────────────────────────
-
-function AiDraftModal({
-  initialNewsletterType,
-  initialPrompt,
-  onClose,
-  onDraft,
-}) {
-  const [prompt, setPrompt] = useState(initialPrompt || "");
-  const [audience, setAudience] = useState("Existing Waves customers");
-  const [tone, setTone] = useState("Neighborly, owner-operator");
-  const [includeCTA, setIncludeCTA] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
-  const run = async () => {
-    if (prompt.trim().length < 8) {
-      setErr("Describe the newsletter (at least 8 characters)");
-      return;
-    }
-    setLoading(true);
-    setErr("");
-    try {
-      // Map the active newsletter type back to its template card so the
-      // server's /draft-ai routes to the matching structured flow (a Pest
-      // Insider compose must NOT fall back to the weekend/flagship path).
-      const tplForType = TEMPLATES.find(
-        (t) => t.newsletterType === initialNewsletterType,
-      );
-      const effectiveTemplate =
-        initialNewsletterType === "free-form"
-          ? null
-          : tplForType?.key || "weekend";
-      await onDraft({
-        prompt,
-        template: effectiveTemplate,
-        audience,
-        tone,
-        includeCTA,
-      });
-    } catch (e) {
-      setErr(e.message);
-      setLoading(false);
-    }
-  };
-  return (
-    <Dialog open onClose={onClose} layer={140}>
-      <DialogHeader className="flex items-center justify-between">
-        {" "}
-        <DialogTitle>Draft with AI</DialogTitle>{" "}
-        <Button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="shrink-0"
-          variant="secondary"
-        >
-          ×
-        </Button>{" "}
-      </DialogHeader>
-      <DialogBody className="flex-1 space-y-3">
-        <div>
-          {" "}
-          <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
-            What's the newsletter about?
-          </label>{" "}
-          <Textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-            className="w-full"
-            placeholder="e.g. Spring uptick in no-see-ums and what homeowners can do this week. Want to mention our mosquito service as a soft CTA."
-            aria-label="What's the newsletter about?"
-          />{" "}
-        </div>{" "}
-        <div className="grid grid-cols-2 gap-3">
-          {" "}
-          <div>
-            {" "}
-            <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
-              Audience
-            </label>{" "}
-            <Input
-              type="text"
-              value={audience}
-              onChange={(e) => setAudience(e.target.value)}
-              className="w-full"
-              aria-label="Audience"
-            />{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
-              Tone
-            </label>{" "}
-            <Input
-              type="text"
-              value={tone}
-              onChange={(e) => setTone(e.target.value)}
-              className="w-full"
-              aria-label="Tone"
-            />{" "}
-          </div>{" "}
-        </div>{" "}
-        <label className="inline-flex items-center gap-2 text-ui-body text-ink-secondary">
-          {" "}
-          <Checkbox
-            checked={includeCTA}
-            onChange={(e) => setIncludeCTA(e.target.checked)}
-            className="shrink-0"
-          />
-          Include a call to action at the end
-        </label>
-      </DialogBody>
-      <DialogFooter className="flex-wrap">
-        {err && (
-          <div role="alert" className="basis-full text-ui-body text-alert-fg">
-            {err}
-          </div>
-        )}{" "}
-        <Button onClick={onClose} variant="secondary" disabled={loading}>
-          Cancel
-        </Button>{" "}
-        <Button onClick={run} disabled={loading}>
-          {loading ? "Drafting…" : "Draft it"}
-        </Button>{" "}
-      </DialogFooter>
-    </Dialog>
-  );
-}
-
 // ── History ────────────────────────────────────────────────────────
 
-export function HistoryView() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [sends, setSends] = useState([]);
-  const [aggregate, setAggregate] = useState(null);
-  const [loading, setLoading] = useState(true);
+// History reads the page-level /sends payload (NewsletterPage re-reads it
+// when History opens, on focus, on an interval and after any action here),
+// so delivery status and recovery controls stay current while the tab is
+// open. Until a read that finished after History opened lands, it shows
+// Loading, never an older list. A failed refresh keeps the last loaded rows
+// on screen, marked as not refreshed, with a retry.
+export function HistoryView({ sendsData, sendsLoading, sendsReads, onRefresh }) {
+  const [openedAtRead] = useState(sendsReads);
+  const fresh = sendsReads > openedAtRead;
+  const [lastLoaded, setLastLoaded] = useState(null);
+  useEffect(() => {
+    if (fresh && sendsData) setLastLoaded(sendsData);
+  }, [fresh, sendsData]);
+  const shown = fresh ? sendsData || lastLoaded : null;
+  const sends = shown?.sends || [];
+  const aggregate = shown?.aggregate;
+  const loading = !fresh || (sendsLoading && !shown);
+  const readFailed = fresh && !sendsLoading && !sendsData;
   // Per-send variant breakdown (a vs b counts) — fetched lazily when the
   // operator expands an A/B row, then cached.
   const [variantStats, setVariantStats] = useState({});
@@ -2499,22 +140,7 @@ export function HistoryView() {
   const [quizOpenId, setQuizOpenId] = useState(null);
   const [feedbackResults, setFeedbackResults] = useState({});
   const [feedbackOpenId, setFeedbackOpenId] = useState(null);
-  const load = useCallback(() => {
-    setLoading(true);
-    adminFetch("/admin/newsletter/sends")
-      .then((d) => {
-        setSends(d.sends || []);
-        setAggregate(d.aggregate || null);
-      })
-      .catch(() => {
-        setSends([]);
-        setAggregate(null);
-      })
-      .finally(() => setLoading(false));
-  }, []);
-  useEffect(() => {
-    load();
-  }, [load]);
+  const load = onRefresh;
   const cancelSchedule = async (id) => {
     if (!confirm("Cancel this scheduled send and return it to draft?")) return;
     try {
@@ -2525,13 +151,6 @@ export function HistoryView() {
     } catch (e) {
       alert("Cancel failed: " + e.message);
     }
-  };
-  const editDraft = (id) => {
-    const next = new URLSearchParams(searchParams);
-    next.set("tab", "compose");
-    next.set("draftId", id);
-    next.delete("autopilotType");
-    setSearchParams(next);
   };
   const deleteDraft = async (id) => {
     if (
@@ -2571,37 +190,41 @@ export function HistoryView() {
 
   // Toggle the A/B breakdown panel. First open lazy-loads /sends/:id (the
   // detail endpoint includes variantStats); subsequent toggles read from
-  // the cache.
-  const toggleVariants = async (id) => {
-    if (expandedId === id) {
-      setExpandedId(null);
-      return;
+  // the cache. A failed read is cached as { error: true }, so the panel
+  // shows it with a retry (retry=true re-reads without toggling), and
+  // reopening a failed panel reads again. The feedback and quiz panels
+  // below work the same way.
+  const toggleVariants = async (id, retry = false) => {
+    if (!retry) {
+      if (expandedId === id) {
+        setExpandedId(null);
+        return;
+      }
+      setExpandedId(id);
+      if (variantStats[id] && !variantStats[id].error) return;
     }
-    setExpandedId(id);
-    if (variantStats[id]) return;
+    setVariantStats((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
-      if (d.variantStats) {
-        setVariantStats((prev) => ({
-          ...prev,
-          [id]: d.variantStats,
-        }));
-      }
+      setVariantStats((prev) => ({ ...prev, [id]: d.variantStats || {} }));
     } catch {
-      /* surfaces as 'no breakdown available' below */
+      setVariantStats((prev) => ({ ...prev, [id]: { error: true } }));
     }
   };
 
   // Toggle the reaction-feedback panel. First open lazy-loads /sends/:id
   // (the detail endpoint includes the 👍/😐/👎 rollup); subsequent toggles
   // read from the cache.
-  const toggleFeedback = async (id) => {
-    if (feedbackOpenId === id) {
-      setFeedbackOpenId(null);
-      return;
+  const toggleFeedback = async (id, retry = false) => {
+    if (!retry) {
+      if (feedbackOpenId === id) {
+        setFeedbackOpenId(null);
+        return;
+      }
+      setFeedbackOpenId(id);
+      if (feedbackResults[id] && !feedbackResults[id].error) return;
     }
-    setFeedbackOpenId(id);
-    if (feedbackResults[id]) return;
+    setFeedbackResults((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
       setFeedbackResults((prev) => ({
@@ -2622,13 +245,16 @@ export function HistoryView() {
 
   // Toggle the quiz-results panel. First open lazy-loads the aggregated answer
   // breakdown; subsequent toggles read from the cache.
-  const toggleQuiz = async (id) => {
-    if (quizOpenId === id) {
-      setQuizOpenId(null);
-      return;
+  const toggleQuiz = async (id, retry = false) => {
+    if (!retry) {
+      if (quizOpenId === id) {
+        setQuizOpenId(null);
+        return;
+      }
+      setQuizOpenId(id);
+      if (quizResults[id] && !quizResults[id].error) return;
     }
-    setQuizOpenId(id);
-    if (quizResults[id]) return;
+    setQuizResults((prev) => ({ ...prev, [id]: undefined }));
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}/quiz-results`);
       setQuizResults((prev) => ({
@@ -2700,13 +326,23 @@ export function HistoryView() {
             </p>
           </div>
         )}
+        {readFailed && shown && (
+          <ActionFeedback error onRetry={onRefresh} className="mx-4 mt-3">
+            Campaigns could not be refreshed. This list may be out of date.
+          </ActionFeedback>
+        )}
         {loading ? (
           <div className="text-ui-body text-ink-secondary p-6 text-center">
             Loading…
           </div>
+        ) : !shown ? (
+          // Not loading with nothing to show: the read failed.
+          <ActionFeedback error onRetry={onRefresh} className="m-4">
+            Campaigns could not be loaded.
+          </ActionFeedback>
         ) : sends.length === 0 ? (
           <div className="text-ui-body text-ink-secondary p-8 text-center">
-            No campaigns yet. Compose your first newsletter in the Compose tab.
+            No campaigns yet. The weekly issue appears here after the Monday autopilot drafts it.
           </div>
         ) : (
           <div className="space-y-0">
@@ -2815,16 +451,6 @@ export function HistoryView() {
                       )}
                     </div>{" "}
                     <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-ui-body flex-shrink-0">
-                      {(s.status === "draft" || s.correctable) && (
-                        <Button
-                          type="button"
-                          onClick={() => editDraft(s.id)}
-                          className=""
-                          variant="secondary"
-                        >
-                          {s.status === "draft" ? "Edit" : "Correct copy"}
-                        </Button>
-                      )}
                       {s.status === "draft" && (
                         <Button
                           type="button"
@@ -2891,13 +517,20 @@ export function HistoryView() {
                       stats={variantStats[s.id]}
                       subjectA={s.subject}
                       subjectB={s.subject_b}
+                      onRetry={() => toggleVariants(s.id, true)}
                     />
                   )}
                   {hasQuiz && quizIsOpen && (
-                    <QuizResultsBreakdown data={quizResults[s.id]} />
+                    <QuizResultsBreakdown
+                      data={quizResults[s.id]}
+                      onRetry={() => toggleQuiz(s.id, true)}
+                    />
                   )}
                   {feedbackOpenId === s.id && (
-                    <FeedbackBreakdown data={feedbackResults[s.id]} />
+                    <FeedbackBreakdown
+                      data={feedbackResults[s.id]}
+                      onRetry={() => toggleFeedback(s.id, true)}
+                    />
                   )}
                 </div>
               );
@@ -2915,7 +548,16 @@ export function HistoryView() {
 // counts (labeled via the server quiz config), total responses, and the
 // response rate over recipients. Monochrome bars (zinc) — this is data, not
 // an alert, so no decorative color.
-function QuizResultsBreakdown({ data }) {
+// A failed panel read, with a retry, so it never reads as "loading" or "none".
+function BreakdownReadError({ what, onRetry }) {
+  return (
+    <ActionFeedback error onRetry={onRetry} className="mx-5 mb-3 -mt-2">
+      Couldn't load {what}.
+    </ActionFeedback>
+  );
+}
+
+function QuizResultsBreakdown({ data, onRetry }) {
   if (!data) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
@@ -2924,11 +566,7 @@ function QuizResultsBreakdown({ data }) {
     );
   }
   if (data.error) {
-    return (
-      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
-        Couldn't load quiz results.
-      </div>
-    );
+    return <BreakdownReadError what="quiz results" onRetry={onRetry} />;
   }
   if (!data.totalResponses) {
     return (
@@ -3017,7 +655,7 @@ const FEEDBACK_MISSING_LABELS = {
   "family-activities": "Family activities",
   "home-tips": "Home tips",
 };
-function FeedbackBreakdown({ data }) {
+function FeedbackBreakdown({ data, onRetry }) {
   if (!data) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
@@ -3026,11 +664,7 @@ function FeedbackBreakdown({ data }) {
     );
   }
   if (data.error) {
-    return (
-      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
-        Couldn't load reader feedback.
-      </div>
-    );
+    return <BreakdownReadError what="reader feedback" onRetry={onRetry} />;
   }
   const reactions = data.feedback?.reactions || {};
   const missing = data.feedback?.missing || {};
@@ -3110,13 +744,16 @@ function FeedbackBreakdown({ data }) {
 // most ESPs use; falls back to no-winner when both rates are within
 // half a percentage point.
 
-function VariantBreakdown({ stats, subjectA, subjectB }) {
+function VariantBreakdown({ stats, subjectA, subjectB, onRetry }) {
   if (!stats) {
     return (
       <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
         Loading variant breakdown…
       </div>
     );
+  }
+  if (stats.error) {
+    return <BreakdownReadError what="the A/B breakdown" onRetry={onRetry} />;
   }
   const a = stats.a;
   const b = stats.b;
@@ -3244,12 +881,21 @@ function AggStat({ label, value, alert }) {
 // ── Subscribers ───────────────────────────────────────────────────
 
 const SUBSCRIBERS_PAGE_SIZE = 100;
+function subscriberQuery(filter, q, offset) {
+  const qs = new URLSearchParams();
+  if (filter !== "all") qs.set("status", filter);
+  if (q) qs.set("q", q);
+  qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
+  qs.set("offset", String(offset));
+  return qs;
+}
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState("active");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -3294,17 +940,17 @@ export function SubscribersView() {
   };
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
-  // the filter or search query changes (via the useEffect below).
+  // the filter or search query changes (via the useEffect below). Each run
+  // gets a new controller, which loadMore uses to drop a page that belongs
+  // to an older query.
   const load = useCallback(() => {
     subscribersAbortRef.current?.abort();
     const controller = new AbortController();
     subscribersAbortRef.current = controller;
     setLoading(true);
-    const qs = new URLSearchParams();
-    if (filter !== "all") qs.set("status", filter);
-    if (q) qs.set("q", q);
-    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set("offset", "0");
+    setLoadingMore(false);
+    setLoadError("");
+    const qs = subscriberQuery(filter, q, 0);
     adminFetch(`/admin/newsletter/subscribers?${qs}`, { signal: controller.signal })
       .then((d) => {
         if (controller.signal.aborted) return;
@@ -3315,10 +961,12 @@ export function SubscribersView() {
         setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
       .catch((e) => {
-        if (e.name !== "AbortError") {
-          setSubs([]);
-          setHasMore(false);
-        }
+        if (controller.signal.aborted || e.name === "AbortError") return;
+        // The rows on screen belong to the previous query, so they go; the
+        // failure shows with Retry instead of reading as an empty filter.
+        setSubs([]);
+        setHasMore(false);
+        setLoadError(e.message || "Subscribers could not be loaded.");
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -3329,22 +977,28 @@ export function SubscribersView() {
     return () => subscribersAbortRef.current?.abort();
   }, [load]);
   const loadMore = async () => {
+    // The list's controller stands for its query: load() aborts and
+    // replaces it on every filter or search change (and on unmount), so a
+    // page that answers after that belongs to an old query and is dropped
+    // before it can touch the rows, offset or hasMore.
+    const listController = subscribersAbortRef.current;
+    const stale = () =>
+      subscribersAbortRef.current !== listController || listController.signal.aborted;
+    if (!listController || stale()) return;
     setLoadingMore(true);
-    const qs = new URLSearchParams();
-    if (filter !== "all") qs.set("status", filter);
-    if (q) qs.set("q", q);
-    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set("offset", String(offset));
+    const qs = subscriberQuery(filter, q, offset);
     try {
       const d = await adminFetch(`/admin/newsletter/subscribers?${qs}`);
+      if (stale()) return;
       const next = d.subscribers || [];
       setSubs((prev) => [...prev, ...next]);
       setOffset((cur) => cur + next.length);
       setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
     } catch (e) {
+      if (stale()) return;
       showStatus("Load more failed: " + e.message, true);
     } finally {
-      setLoadingMore(false);
+      if (!stale()) setLoadingMore(false);
     }
   };
   const exportCsv = async () => {
@@ -3589,6 +1243,10 @@ export function SubscribersView() {
           <div className="text-ui-body text-ink-secondary p-6 text-center">
             Loading…
           </div>
+        ) : loadError ? (
+          <ActionFeedback error onRetry={load} className="m-4">
+            Subscribers could not be loaded: {loadError}
+          </ActionFeedback>
         ) : subs.length === 0 ? (
           <div className="text-ui-body text-ink-secondary p-8 text-center">
             No subscribers in this filter.

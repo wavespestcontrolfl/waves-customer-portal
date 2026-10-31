@@ -111,11 +111,42 @@ describe('defaults and withPlace', () => {
   test('the tech\'s tap beats the default; a tap on a place not on the list is ignored; the row says what holds it', () => {
     const a = troubleAreasOf(data({ known: [area('a', 'back', 'fungus')], blocked: { p1: { front: 'closed up front' } } }));
     const defaulted = withPlace(row(), { areas: a, chosen: '' });
-    expect(defaulted).toMatchObject({ placeRule: true, place: 'back', placeDefaulted: true, placeBlock: null, placeNowhere: null, placeLabels: { front: 'Front', back: 'Back' } });
-    expect(withPlace(row(), { areas: a, chosen: 'front' })).toMatchObject({ place: 'front', placeDefaulted: false, placeBlock: 'closed up front' });
+    expect(defaulted).toMatchObject({ placeRule: true, place: 'back', placeDefaulted: true, placeBlock: null, placeWarning: null, placeNowhere: null, placeLabels: { front: 'Front', back: 'Back' } });
+    // A yearly limit is a warning (owner 2026-10-30): the row keeps the place, nothing holds it, and the limit's words ride placeWarning.
+    expect(withPlace(row(), { areas: a, chosen: 'front' })).toMatchObject({ place: 'front', placeDefaulted: false, placeBlock: null, placeWarning: 'closed up front', placeHolds: { front: null, back: null } });
     expect(withPlace(row(), { areas: a, chosen: 'roof' })).toMatchObject({ place: 'back', placeDefaulted: true });
     const every = troubleAreasOf(data({ blocked: { p1: { front: 'no', back: 'no' } } }));
-    expect(withPlace(row(), { areas: every, chosen: '' })).toMatchObject({ place: '', placeNowhere: 'no' });
+    // Every place limit-closed is still no hold: the tech picks where it went (the place is still asked for), with a warning.
+    expect(withPlace(row(), { areas: every, chosen: '' })).toMatchObject({ place: '', placeNowhere: null, placeWarning: null });
+    expect(withPlace(row(), { areas: every, chosen: 'back' })).toMatchObject({ place: 'back', placeBlock: null, placeNowhere: null, placeWarning: 'no' });
+  });
+
+  test('several places on one row: the list is kept in the closed list\'s order, the first is `place`, each limit warning is named by place, a list (even empty) beats the default', () => {
+    const a = troubleAreasOf(data({ known: [area('a', 'back', 'fungus')], blocked: { p1: { front: 'closed up front', back: 'closed at the back' } } }));
+    const both = withPlace(row(), { areas: a, chosen: ['back', 'front', 'roof', 'front'] });
+    expect(both).toMatchObject({ places: ['front', 'back'], place: 'front', placeDefaulted: false, placeBlock: null, placeWarning: 'closed up front' });
+    expect(both.placeWarnings).toEqual([{ place: 'front', text: 'closed up front' }, { place: 'back', text: 'closed at the back' }]);
+    // One place of the two with a limit: only that one is named.
+    expect(withPlace(row(), { areas: troubleAreasOf(data({ blocked: { p1: { back: 'closed at the back' } } })), chosen: ['front', 'back'] }).placeWarnings).toEqual([{ place: 'back', text: 'closed at the back' }]);
+    // The default is one place; the tech un-tapping everything (an empty list) is his choice, and the row asks for a place again.
+    expect(withPlace(row(), { areas: a, chosen: '' })).toMatchObject({ places: ['back'], place: 'back', placeDefaulted: true });
+    expect(withPlace(row(), { areas: a, chosen: [] })).toMatchObject({ places: [], place: '', placeDefaulted: false, placeWarning: null, placeWarnings: [] });
+    expect(withPlace(row(), { areas: a, chosen: ['roof'] })).toMatchObject({ places: [], place: '' });
+    // The old single string still reads as a list of one.
+    expect(withPlace(row(), { areas: a, chosen: 'front' })).toMatchObject({ places: ['front'], place: 'front' });
+  });
+
+  test('a hold on any picked place holds the row there (the first held place is named); a hold on a place that is not picked does not', () => {
+    const base = troubleAreasOf(data({}));
+    const held = { ...base, refused: { p1: { front: 'Take-all is treated on mapped take-all areas only.' } }, refusedCard: { p1: { front: true } } };
+    const guideRow = row({ troubleSource: 'guide_card' });
+    expect(withPlace(guideRow, { areas: held, chosen: ['back', 'front'] })).toMatchObject({ placeBlock: expect.stringMatching(/mapped take-all/), placeBlockPlace: 'front' });
+    expect(withPlace(guideRow, { areas: held, chosen: ['back'] })).toMatchObject({ placeBlock: null, placeBlockPlace: '' });
+  });
+
+  test('a known place closed by a yearly limit is still the default (the limit only warns)', () => {
+    const closed = troubleAreasOf(data({ known: [area('a', 'front', 'fungus')], blocked: { p1: { front: 'closed up front' } } }));
+    expect(withPlace(row(), { areas: closed, chosen: '' })).toMatchObject({ place: 'front', placeDefaulted: true, placeBlock: null, placeWarning: 'closed up front' });
   });
 });
 
@@ -125,7 +156,7 @@ describe('a place whose limit read failed', () => {
     const weedMix = { byPlace: { front: { mode: 'unavailable', productIds: [] }, back: { mode: 'none', productIds: [], note: 'Limit.' } } };
     const weedRows = [row({ productId: 'w1', weedGroup: true })];
     expect(withPlace(weedRows[0], { areas, chosen: 'front', weedMix, weedRows })).toMatchObject({ placeBlock: null, placeUnreadable: true });
-    expect(withPlace(weedRows[0], { areas, chosen: 'back', weedMix, weedRows })).toMatchObject({ placeBlock: 'Limit.', placeUnreadable: false });
+    expect(withPlace(weedRows[0], { areas, chosen: 'back', weedMix, weedRows })).toMatchObject({ placeBlock: null, placeWarning: 'Limit.', placeUnreadable: false });
     const chinch = { byPlace: { front: { item: null, note: 'n', unreadableIds: ['C1'] }, back: { item: { productId: 'C1' }, note: null, unreadableIds: [] } } };
     expect(withPlace(row({ productId: 'c1', guided: 'chinch' }), { areas, chosen: 'front', chinch })).toMatchObject({ placeBlock: null, placeUnreadable: true });
     expect(withPlace(row({ productId: 'c1', guided: 'chinch' }), { areas, chosen: 'back', chinch })).toMatchObject({ placeUnreadable: false });
@@ -141,6 +172,20 @@ describe('rows that stay on the sheet without the tag of the entry that opened t
   test('a chinch rung is judged by the ladder\'s decision at each place, not by the generic closed list: Arena is closed where the ladder blocked it, the second rung is open', () => {
     expect(placeProblems(row({ productId: 'c1' }), { areas, chinch })).toEqual({ front: 'Arena is at its limit up front.', back: null });
     expect(placeProblems(row({ productId: 'C2' }), { areas, chinch })).toEqual({ front: null, back: null });
+  });
+
+  // Owner 2026-10-30: a limit is a warning. The ladder stops at an open Arena, so Talak is in no blockedIds, but its own limit was read.
+  test('a later rung at its own limit at a place warns there in its own words, even with an open rung before it', () => {
+    const talakCapped = { rungIds: ['C1', 'C2'], byPlace: {
+      front: { item: { productId: 'C1' }, note: null, unreadableIds: [], blockedIds: [], limitedIds: ['C2'], limitMessages: { c2: 'Talak: 2/2 applications this year — LIMIT REACHED.' } },
+      back: { item: { productId: 'C1' }, note: null, unreadableIds: [], blockedIds: [], limitedIds: ['C2'] },
+    } };
+    expect(placeProblems(row({ productId: 'C2' }), { areas, chinch: talakCapped })).toEqual({
+      front: 'Talak: 2/2 applications this year — LIMIT REACHED.', back: 'A yearly limit is reached for this product at this place.',
+    });
+    expect(withPlace(row({ productId: 'C2' }), { areas, chosen: 'front', chinch: talakCapped })).toMatchObject({ placeBlock: null, placeWarning: 'Talak: 2/2 applications this year — LIMIT REACHED.' });
+    // The open rung is unchanged.
+    expect(placeProblems(row({ productId: 'C1' }), { areas, chinch: talakCapped })).toEqual({ front: null, back: null });
   });
 
   test('without the blocked ids (an older answer) the place offers its one product', () => {
@@ -177,7 +222,8 @@ describe('a sibling\'s failed read never releases a product that read as capped'
     expect(placeProblems(row({ productId: 'W2' }), { areas, weedMix })).toEqual({ front: null, back: null });
     const celsius = withPlace(row({ productId: 'W1' }), { areas, chosen: 'front', weedMix });
     expect(celsius).toMatchObject({ placeUnreadable: false });
-    expect(celsius.placeBlock).toMatch(/yearly limit is reached/);
+    expect(celsius.placeBlock).toBeNull();
+    expect(celsius.placeWarning).toMatch(/yearly limit is reached/);
     expect(withPlace(row({ productId: 'W2' }), { areas, chosen: 'front', weedMix })).toMatchObject({ placeBlock: null, placeUnreadable: true });
   });
 
@@ -247,6 +293,8 @@ describe('a take-all row from the guide card is held to the mapped places', () =
     // Moved to an unmapped place, the row says so and Complete holds on it.
     const moved = withPlace(fungicide(), { areas, chosen: 'front', takeAll: new Set(['t1']), takeAllPlaces: mapped });
     expect(moved.placeBlock).toMatch(/mapped take-all areas only/);
+    // The mapping is a hold, not a yearly limit: the chip is closed and no warning line stands in for it.
+    expect(moved).toMatchObject({ placeWarning: null, placeHolds: { front: expect.stringMatching(/mapped take-all areas only/), back: null } });
   });
 
   test('a Search-added take-all row (tech_tap) may map any open place; so may a row with no allowlist', () => {

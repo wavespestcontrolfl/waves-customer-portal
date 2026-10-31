@@ -725,6 +725,21 @@ describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
     expect(missing).toEqual([]);
   });
 
+  // Owner 2026-10-26, "say both": the LED finding every source agrees on, then
+  // UF/IFAS Extension Sarasota County's warm-white advice.
+  test('the porch-bulb tip says both the LED finding and UF/IFAS\'s warm-white advice, each from its own quote', () => {
+    const tip = TIPS.find((t) => t.id === 'light_warm_bulbs');
+    const quoteOf = (label) => factBySlug.get(tip.sources.find((source) => source.label === label).fact).quote;
+    expect(quoteOf('Ecology and Evolution, 2016')).toContain('approximately four times fewer insects than traditional FIL lighting');
+    expect(quoteOf('UF/IFAS')).toContain('least attractive to insects, so the most effective lightbulb to use, are those labeled warm white');
+    expect(quoteOf('UF/IFAS')).toContain('LED bulbs below 3600K will emit warm or ultra warm white light');
+    expect(tip.copy).toMatch(/^Go LED on the porch\. In a 2016 field study, LEDs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents\./);
+    expect(tip.copy).toMatch(/UF\/IFAS says the best LEDs outdoors are warm white, below 3600K/);
+    // The first copy's remark about colour is gone.
+    expect(tip.copy).not.toMatch(/no difference|made no/i);
+    expect(tip.copy.length).toBeLessThanOrEqual(300);
+  });
+
   test('an unsourced tip states no figure, except an example of what to write down', () => {
     const offenders = TIPS.filter((tip) => !tip.sources && figures(tip.copy).length && !INSTRUCTION_FIGURES.has(tip.id)).map((tip) => tip.id);
     expect(offenders).toEqual([]);
@@ -895,14 +910,13 @@ describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES
       expect(tip.lines.some((line) => line !== 'tree_shrub')).toBe(true);
     }
     for (const tip of named) expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
-    // The six posts titled for one town (2026-10-24), and the porch-light post
-    // that still says warm bulbs draw fewer insects (held until the blog is
-    // corrected), are named by no tip.
+    // The six posts titled for one town (2026-10-24) are named by no tip. The
+    // porch-light post is named by the three lighting tips once its warm-bulb
+    // claim follows the 2016 LED study (astro #731).
     const NEVER = [
       '/pest-control/get-rid-of-roof-rats-lakewood-ranch/', '/termite/termite-infestation-in-venice/',
       '/mosquito/professional-mosquito-treatment/', '/pest-control/get-rid-of-ghost-ants-in-sarasota/',
       '/pest-control/get-rid-of-cockroaches/', '/pest-control/get-rid-of-fleas/',
-      '/pest-control/why-spiders-come-back-after-treatment/',
     ];
     expect(named.filter((tip) => NEVER.includes(tip.blog.path)).map((tip) => tip.id)).toEqual([]);
   });
@@ -978,6 +992,56 @@ describe('tips written for tips with facts exist only behind the gate (sourcedOn
     expect(ids({ ...july, yard: { county: 'Sarasota', city: 'venice' } }).has('lawn_fertilizer_season')).toBe(true);
     expect(ids({ ...july, yard: { county: 'Sarasota', city: 'north port' } }).has('lawn_fertilizer_season')).toBe(false);
     expect(ids({ ...july, yard: { county: 'Charlotte', city: 'port charlotte' } }).has('lawn_fertilizer_season')).toBe(false);
+  });
+
+  // The weekday depends on the yard's own city or county, so the filter is what
+  // keeps it true (owner 2026-10-26). Read that day: Manatee County, Bradenton,
+  // unincorporated Sarasota County, the City of Sarasota and North Port publish
+  // the district's table; the City of Venice's own sheet says even numbers
+  // Tuesday and odd Thursday; the order covers only portions of Charlotte.
+  test('the watering-day tip shows only where the yard\'s own city or county follows the district\'s table', () => {
+    const tip = TIPS.find((t) => t.id === 'lawn_watering_day');
+    const sprinklers = { irrigationSystem: true };
+    for (const [county, city] of [['Manatee', 'bradenton'], ['Manatee', 'lakewood ranch'], ['Sarasota', 'sarasota'], ['Sarasota', 'north port']]) {
+      expect([county, city, yardMatches(tip.yard, { ...sprinklers, county, city })]).toEqual([county, city, true]);
+    }
+    for (const [county, city] of [['Sarasota', 'venice'], ['Sarasota', 'nokomis'], ['Manatee', 'palmetto'], ['Manatee', 'holmes beach'], ['Charlotte', 'port charlotte'], ['Charlotte', 'babcock ranch'], [null, 'sarasota'], ['Sarasota', null]]) {
+      expect([county, city, yardMatches(tip.yard, { ...sprinklers, county, city })]).toEqual([county, city, false]);
+    }
+    expect(yardMatches(tip.yard, { county: 'Manatee', city: 'bradenton', irrigationSystem: false })).toBe(false);
+  });
+
+  // A tip with facts speaks its facts' words, so a fact's expiry takes the tip
+  // out of the picker and the freeze that day, in any year (a month list
+  // repeats every year; pre-push Codex P1, 2026-10-26).
+  test('a tip with facts is dropped from the day a fact it cites expires, in the picker and at the freeze', () => {
+    const { FACTS } = require('../services/email-division/fact-register-data');
+    const tip = TIPS.find((t) => t.id === 'lawn_watering_day');
+    expect(FACTS.find((fact) => fact.slug === tip.sources[0].fact).expiresOn).toBe('2027-04-01');
+    const visit = { serviceLine: 'lawn', sourced: true, yard: { irrigationSystem: true, county: 'Manatee', city: 'bradenton' } };
+    const freeze = (date) => freezeTechTips({ ids: ['lawn_watering_day'] }, { sourced: true, date });
+    for (const date of ['2026-10-26', '2027-03-31']) {
+      expect([date, ids({ ...visit, date }).has('lawn_watering_day')]).toEqual([date, true]);
+      expect(freeze(date).tips.map((t) => t.id)).toEqual(['lawn_watering_day']);
+    }
+    for (const date of ['2027-04-01', '2027-10-26', '2028-01-15']) {
+      expect([date, ids({ ...visit, date }).has('lawn_watering_day')]).toEqual([date, false]);
+      expect(freeze(date).tips).toEqual([]);
+      // Retired, not over the cap: the completion route words the two differently.
+      expect(freeze(date).dropped).toEqual([{ id: 'lawn_watering_day', violations: ['unknown_tip'] }]);
+    }
+  });
+
+  test('the weekdays in the watering-day tip are the ones its fact quotes, and it claims nothing for reclaimed-only sprinklers', () => {
+    const { FACTS } = require('../services/email-division/fact-register-data');
+    const tip = TIPS.find((t) => t.id === 'lawn_watering_day');
+    const { quote } = FACTS.find((fact) => fact.slug === tip.sources[0].fact);
+    for (const [digits, day] of [['0 or 1', 'Monday'], ['2 or 3', 'Tuesday'], ['4 or 5', 'Wednesday'], ['6 or 7', 'Thursday'], ['8 or 9', 'Friday']]) {
+      expect(tip.copy).toMatch(new RegExp(`${digits}, (?:your day is )?${day}`));
+      expect(quote).toMatch(new RegExp(`${digits}(?: shall only water on|, on) ${day}`));
+    }
+    expect(tip.copy).not.toMatch(/Saturday|Sunday/);
+    expect(tip.copy).toMatch(/^Unless your sprinklers run only on reclaimed water/);
   });
 });
 

@@ -289,6 +289,75 @@ function pickWinner(rows, extraScore = () => 0) {
     || String(a.id).localeCompare(String(b.id)))[0];
 }
 
+// ---------------------------------------------------------------------------
+// Same-person cluster (public quote wizard)
+// ---------------------------------------------------------------------------
+
+const SAME_PERSON_MAX_ROWS = 10;
+
+function isLiveRow(row) {
+  return row.active !== false && !row.deleted_at;
+}
+
+// addressCompat is permissive on purpose (a missing unit or locality is not a
+// conflict, and two identical unparseable lines match). Linking a public
+// quote needs POSITIVE agreement instead, read through the shared address
+// normalizer (Codex #7249 rounds 1-2 found three unit shapes this file's own
+// first-token unit parse merged: "Floor 2"/"Floor 3", "Bldg C Apt 2"/"Bldg C
+// Apt 3", and inline "Bldg 2"/"Apt 2"):
+// - the street part (any trailing inline unit peeled by splitStreetLineUnit)
+//   parses to the same street key, with no unit text left inside it;
+// - the full unit keys are equal (premiseUnitKey: the inline unit and line 2
+//   joined, then keyed by unitLineValueKey, where Apt/Unit/Suite/# are one
+//   dwelling designator while Bldg/Floor/Space/Lot stay, so "Bldg 2" never
+//   equals "Apt 2", and a multi-part unit compares every part; no unit on
+//   both rows counts as equal);
+// - the ZIPs are equal, or, when either ZIP is blank, both cities are
+//   present and equal.
+function strictPremise(row) {
+  const { splitStreetLineUnit, premiseUnitKey } = require('../utils/address-normalizer');
+  const streetKey = normalizeStreetKey(splitStreetLineUnit(String(row.address_line1 || '')).street);
+  if (!streetKey || streetKey.unit) return null;
+  return { street: streetKey.key, unit: premiseUnitKey(row.address_line1, row.address_line2) };
+}
+
+function samePremiseStrict(a, b) {
+  if (addressCompat(a, b).status !== 'match') return false;
+  const pa = strictPremise(a);
+  const pb = strictPremise(b);
+  if (!pa || !pb || pa.street !== pb.street || pa.unit !== pb.unit) return false;
+  const az = String(a.zip || '').slice(0, 5);
+  const bz = String(b.zip || '').slice(0, 5);
+  if (az && bz) return az === bz;
+  const ac = String(a.city || '').trim().toLowerCase();
+  return Boolean(ac) && ac === String(b.city || '').trim().toLowerCase();
+}
+
+function everySamePerson(a, b) {
+  return namesCompatible(a, b) && samePremiseStrict(a, b);
+}
+
+// A phone that matches 2..10 customer rows which are ALL one person at ONE
+// premise (names compatible, the same parsed street, unit and ZIP or city,
+// pairwise AND against what the visitor typed) resolves to the row the nightly sweep would keep.
+// Anything else returns null: a shared household or business line is not
+// one person, so the caller must not link to an arbitrary row of it.
+// typed = { first_name, last_name, address_line1, address_line2, city, zip }.
+async function resolveSamePersonCluster(database, rows, typed = {}) {
+  if (!Array.isArray(rows) || rows.length < 2 || rows.length > SAME_PERSON_MAX_ROWS) return null;
+  if (!rows.every(isLiveRow)) return null;
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!everySamePerson(typed, rows[i])) return null;
+    for (let j = i + 1; j < rows.length; j += 1) {
+      if (!everySamePerson(rows[i], rows[j])) return null;
+    }
+  }
+  const blockersById = await batchAutoBlockers(database, rows);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  return pickWinner(rows, businessBoost);
+}
+
 function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
@@ -4393,7 +4462,14 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
     for (const candidate of group.candidates) {
       if (onlyPair && String(candidate.loser.id) !== String(onlyPair.loserId)) continue;
       if (candidate.tier !== 'green') {
-        results.skipped.push({ loserId: candidate.loser.id, tier: candidate.tier, reasons: candidate.reasons });
+        // Say why a pair stays for review (owner 2026-10-31: the sweep merged
+        // 3 pairs in 3 months and logged nothing about the rest, so a pair
+        // stuck yellow on a packed street line looked like a working merge).
+        // Ids, tier, reasons and both rows' intake sources only, never names:
+        // enough to see a stuck pair and which intake path made the extra row.
+        // A non-green pair always has reasons; a missing source prints null.
+        logger.info(`[customer-dedupe] auto-merge left ${candidate.loser.id} -> ${group.winner.id} for review: tier=${candidate.tier} reasons=${candidate.reasons.join(',')} sources=${group.winner.lead_source}/${candidate.loser.lead_source}`);
+        results.skipped.push({ loserId: candidate.loser.id, winnerId: group.winner.id, tier: candidate.tier, reasons: candidate.reasons });
         continue;
       }
       try {
@@ -4454,6 +4530,20 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
   return results;
 }
 
+
+// One short reason count for the sweep's log line ("address_conflict:3,
+// name_conflict:1"): the first token of every skipped pair's reasons
+// ("merge_failed: <message>" counts as merge_failed). Pure.
+function summarizeSweepSkips(skipped = []) {
+  const counts = new Map();
+  for (const entry of skipped || []) {
+    for (const reason of entry?.reasons || []) {
+      const key = String(reason).split(':')[0].trim() || 'unknown';
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].map(([key, n]) => `${key}:${n}`).join(',');
+}
 
 // ---------------------------------------------------------------------------
 // Red-pair auto-dismiss sweep (cron entry point — caller owns the gate)
@@ -7472,6 +7562,9 @@ module.exports = {
   // counts — customer-empty-loser.js (the delete_duplicate_customer
   // emptiness scan) reads the same lists.
   loserAutoBlockers,
+  // Public quote wizard: 2..10 phone matches that are one person at one address
+  // resolve to the sweep's winner row, else null.
+  resolveSamePersonCluster,
   REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
@@ -7559,3 +7652,5 @@ module.exports = {
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };
+// The sweep's reason count, read by the scheduler's log line. Own line: a shared export block conflicts between PRs.
+module.exports.summarizeSweepSkips = summarizeSweepSkips;

@@ -182,9 +182,10 @@ const NEWSLETTER_TYPES = {
     coverage: null,
     requiredSections: [],
     sourceRequirements: null,
-    // Seeded as a parked draft by the weekly sunset job
-    // (newsletter-sunset.js); copy is house-written and the owner edits,
-    // approves, and sends. Never AI-drafted, never auto-sent.
+    // Seeded by the weekly sunset job (newsletter-sunset.js); copy is
+    // house-written. Never AI-drafted. The flags below describe the switch-off
+    // default: with GATE_NEWSLETTER_AUTO_SEND on it queues itself (owner
+    // 2026-10-30, option A); off, it is parked for the owner to send.
     autonomy: {
       aiDraftAllowed: false,
       autoScheduleAllowed: false,
@@ -209,6 +210,7 @@ const TEMPLATE_TO_TYPE = {
 };
 
 const FLAGSHIP_TYPE_KEY = 'local-weekly-fresh-events';
+const PEST_INSIDER_TYPE = 'pest-insider-monthly';
 
 function getNewsletterType(key) {
   return NEWSLETTER_TYPES[key] || null;
@@ -232,6 +234,7 @@ module.exports = {
   NEWSLETTER_TYPES,
   TEMPLATE_TO_TYPE,
   FLAGSHIP_TYPE_KEY,
+  PEST_INSIDER_TYPE,
   getNewsletterType,
   getFlagshipType,
   isFlagshipType,

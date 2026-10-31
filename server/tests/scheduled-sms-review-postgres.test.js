@@ -15,6 +15,8 @@ const { randomUUID } = require('node:crypto');
 const { dispatchScheduledSms, markScheduledSmsSent } = require('../services/scheduled-sms-delivery');
 const { recoverStaleScheduledSmsClaims } = require('../services/scheduler');
 const { lastManualAskAt } = require('../services/review-ask-history');
+// The first dispatch of a row with no entry_point loads the link check (comms-tools), which takes several seconds cold.
+jest.setTimeout(30000);
 
 postgres('queued review ask settlement against migrated PostgreSQL', () => {
   let database, trx, customerId;

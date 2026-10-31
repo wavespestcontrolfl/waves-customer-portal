@@ -148,13 +148,39 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/communications?thread=customer-123');
   });
 
+  test('job complete bell opens that visit on its day (the dispatch page reads appointment + date, not service)', () => {
+    const base = { techName: 'Adam', serviceName: 'Pest Control', customerName: 'Pat Demo' };
+    expect(TRIGGER_REGISTRY.job_complete.build({ ...base, serviceId: 'svc-1', serviceDate: '2026-10-28' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-28&appointment=svc-1');
+    // No date: the page cannot find the visit, so fall back to the plain schedule.
+    expect(TRIGGER_REGISTRY.job_complete.build({ ...base, serviceId: 'svc-1' }).link).toBe('/admin/schedule');
+    expect(TRIGGER_REGISTRY.job_complete.build(base).link).toBe('/admin/schedule');
+  });
+
+  test('SEO sync failure links to the Advisor view the SEO page reads', () => {
+    const built = TRIGGER_REGISTRY.seo_sync_failed.build({ source: 'GSC', reason: 'quota' });
+    expect(built.link).toBe('/admin/seo?workspace=command&view=advisor');
+  });
+
+  test('newsletter notices open History and no longer point at the removed composer', () => {
+    // Owner 2026-10-30: the weekly issue is autonomous; there is no Compose tab.
+    const draft = TRIGGER_REGISTRY.newsletter_autopilot_draft.build({ subject: 'Weekly', eventCount: 6 });
+    expect(draft.link).toBe('/admin/newsletter?tab=history');
+    expect(draft.body).toMatch(/It is in Newsletter → History\.$/);
+    expect(draft.body).not.toMatch(/send when ready/i);
+    expect(TRIGGER_REGISTRY.newsletter_proof_sent.build({ sendId: 'send-7', subject: 'x', recipient: 'r', recipientCount: 1 }).link).toBe('/admin/newsletter?tab=history');
+    const blocked = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['e'] });
+    expect(blocked.link).toBe('/admin/newsletter?tab=history');
+    expect(blocked.body).toMatch(/Nothing was sent\.$/);
+    expect(blocked.body).not.toMatch(/composer/i);
+    expect(TRIGGER_REGISTRY.newsletter_send_not_dispatched).toBeUndefined();
+    expect(TRIGGER_REGISTRY.pest_insider_draft).toBeUndefined();
+    for (const type of Object.keys(TRIGGER_REGISTRY).filter((t) => t.startsWith('newsletter_'))) {
+      expect(TRIGGER_REGISTRY[type].build({ sendId: 'send-7' }).link).not.toMatch(/tab=compose/);
+    }
+  });
+
   test('KB audit trigger summarizes flagged entries for the admin bell', () => {
-    const notDispatched = TRIGGER_REGISTRY.newsletter_send_not_dispatched.build({ sendId: 'send-42', subject: 'Pest Insider' });
-    expect(notDispatched.link).toBe('/admin/newsletter?tab=compose&draftId=send-42'); // codex round 14 P2: THE affected draft
-    // the proof notices deep-link their draft too (codex round 16 P2); without an id the generic tab stays
-    expect(TRIGGER_REGISTRY.newsletter_proof_sent.build({ sendId: 'send-7', subject: 'x', recipient: 'r', recipientCount: 1 }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
-    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
-    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose');
     const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
       count: 2,
       entries: [
@@ -704,6 +730,32 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     gateSpy.mockRestore(); allowSpy.mockRestore();
   });
 
+  // GATE_ALERT_CATALOG=watch (bell rebuild step D1): this silence returns before NotificationService.create, so it
+  // leaves the muted record itself; otherwise every muted registry event (payments, dashboard alerts) went uncounted.
+  test.each([['watch', 1], [undefined, 0]])('GATE_ALERT_CATALOG=%p: a registry event the bell policy silences leaves %p muted record(s)', async (mode, rows) => {
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+    const auditInsert = jest.fn(async () => []);
+    db.mockImplementation((table) => (
+      table === 'audit_log' ? { insert: auditInsert }
+        : table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
+    ));
+    if (mode) process.env.GATE_ALERT_CATALOG = mode;
+    try {
+      const stats = await triggerNotification('dashboard_alert', { title: `Catalog check ${mode}`, body: 'y' });
+      expect(stats.policySilenced).toBe(true);
+      expect(auditInsert).toHaveBeenCalledTimes(rows);
+      if (rows) {
+        expect(JSON.parse(auditInsert.mock.calls[0][0].metadata))
+          .toMatchObject({ category: TRIGGER_REGISTRY.dashboard_alert.category, triggerKey: 'dashboard_alert' });
+      }
+    } finally {
+      delete process.env.GATE_ALERT_CATALOG;
+      gateSpy.mockRestore(); allowSpy.mockRestore();
+    }
+  });
+
   // codex review, PR #4341 r1 P1: customer_landline_from_call's category
   // ('alert') default-denies under the gated policy — it must instead ring
   // via its own DEFAULT_ON_CATEGORIES membership (notification-bell-policy.js),
@@ -746,6 +798,59 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     );
     gateSpy.mockRestore();
     bellPolicy.clearOverrideCache();
+  });
+
+  // GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1): a bundle quote request is declared a customer contact.
+  // Its 'estimate' category is muted by the bell policy; with the gate on it passes, and its bell write carries
+  // bell: true so NotificationService.create's own check (category + trigger key only) agrees.
+  test.each([[undefined, false], ['true', true]])('GATE_CUSTOMER_ALERTS_RING=%p: a bundle quote request rings: %p', async (mode, rings) => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const prefsChain = {
+      where: jest.fn(() => prefsChain),
+      join: jest.fn(() => prefsChain),
+      select: jest.fn(() => Promise.resolve([])),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences' ? prefsChain
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    if (mode) process.env.GATE_CUSTOMER_ALERTS_RING = mode;
+    try {
+      const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
+      expect(Boolean(stats.policySilenced)).toBe(!rings);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rings ? 1 : 0);
+      if (rings) {
+        expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('estimate');
+        expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
+      }
+    } finally {
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      gateSpy.mockRestore();
+      bellPolicy.clearOverrideCache();
+    }
+  });
+
+  test('GATE_CUSTOMER_ALERTS_RING on: an undeclared type keeps today\'s answer and its bell write gets no bell tag', async () => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(true);
+    NotificationService.notifyAdmin.mockClear();
+    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
+    try {
+      await triggerNotification('dashboard_alert', { title: 'x', body: 'y' });
+      expect(allowSpy).toHaveBeenCalledWith(expect.objectContaining({ triggerKey: 'dashboard_alert', declared: TRIGGER_REGISTRY.dashboard_alert.rule }));
+      expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('bell');
+    } finally {
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      gateSpy.mockRestore(); allowSpy.mockRestore();
+    }
   });
 });
 

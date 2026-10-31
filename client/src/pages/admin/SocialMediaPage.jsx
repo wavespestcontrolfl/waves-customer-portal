@@ -17,6 +17,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { formatETDate } from "../../lib/timezone";
 import {
+  ActionFeedback,
   Badge,
   Button,
   Card as UiCard,
@@ -475,9 +476,14 @@ export default function SocialMediaPage() {
         alert={alert}
         onDismiss={async () => {
           loadGen.current += 1;
-          await adminFetch("/admin/social-media/alerts", {
-                method: "DELETE",
-              }).catch(() => {});
+          try {
+            await adminFetch("/admin/social-media/alerts", {
+              method: "DELETE",
+            });
+          } catch (e) {
+            showToast(`Failed to dismiss alert: ${e.message}`);
+            return;
+          }
           setAlert(null);
           showToast("Alert dismissed");
         }}
@@ -689,17 +695,23 @@ function autonomousRunMessage(result, mode) {
 }
 
 function autonomousStateLabel(status) {
-  if (status?.paused) return "Paused";
-  return status?.enabled && status?.globalAutomationEnabled ? "Autonomous" : "Not fully enabled";
+  if (!status) return "Status unknown";
+  if (status.paused) return "Paused";
+  return status.enabled && status.globalAutomationEnabled ? "Autonomous" : "Not fully enabled";
 }
 
 function AutonomousStudioPanel({ showToast, onRan }) {
   const [status, setStatus] = useState(null);
+  const [statusError, setStatusError] = useState("");
   const [running, setRunning] = useState("");
   const load = useCallback(() => {
+    setStatusError("");
     adminFetch("/admin/social-media/autonomous/status")
       .then(setStatus)
-      .catch(() => setStatus(null));
+      .catch((e) => {
+        setStatus(null);
+        setStatusError(e.message);
+      });
   }, []);
   useEffect(() => {
     load();
@@ -738,11 +750,17 @@ function AutonomousStudioPanel({ showToast, onRan }) {
           <Badge tone={stateIsAlert ? "alert" : "neutral"}>{stateLabel}</Badge>
           {status?.dryRun && <Badge>Dry run</Badge>}
         </div>
-        <div className="text-ui-body text-ink-secondary">
-          Mode: {status?.mode || "publish"} · Cadence: every{" "}
-          {status?.intervalHours || 24}h · Channels:{" "}
-          {(status?.channels || []).join(", ") || "gbp, facebook, instagram"}
-        </div>
+        {statusError ? (
+          <ActionFeedback error onRetry={load}>
+            Autonomous studio status unavailable: {statusError}
+          </ActionFeedback>
+        ) : (
+          <div className="text-ui-body text-ink-secondary">
+            Mode: {status?.mode || "publish"} · Cadence: every{" "}
+            {status?.intervalHours || 24}h · Channels:{" "}
+            {(status?.channels || []).join(", ") || "gbp, facebook, instagram"}
+          </div>
+        )}
         {latest && (
           <div className="text-ui-body text-ink-secondary mt-1">
             Last run: {latest.status} · {latest.topic || "no topic"} ·{" "}
@@ -1356,32 +1374,43 @@ function CampaignBuilderTab({ showToast, onSaved }) {
   const [drafts, setDrafts] = useState({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const update = (key, value) =>
+  const previewGen = useRef(0);
+  // Every form field feeds the preview request, so any edit invalidates the
+  // preview and its edited captions (including one still being generated).
+  const update = (key, value) => {
+    previewGen.current += 1;
+    setLoading(false);
+    setPreview(null);
+    setDrafts({});
     setForm((prev) => ({
       ...prev,
       [key]: value,
     }));
+  };
   const generate = async () => {
     if (!form.topic.trim()) {
       showToast("Enter a campaign topic");
       return;
     }
+    const gen = ++previewGen.current;
     setLoading(true);
     try {
       const data = await adminFetch("/admin/social-media/campaign-builder/preview", {
         method: "POST",
         body: JSON.stringify(form),
       });
+      if (gen !== previewGen.current) return;
       setPreview(data);
       setDrafts(data.drafts || {});
     } catch (e) {
-      showToast(`Campaign preview failed: ${e.message}`);
+      if (gen === previewGen.current) showToast(`Campaign preview failed: ${e.message}`);
     } finally {
-      setLoading(false);
+      if (gen === previewGen.current) setLoading(false);
     }
   };
   const saveDraft = async () => {
     if (!preview) return;
+    const gen = previewGen.current;
     setSaving(true);
     try {
       const result = await adminFetch("/admin/social-media/campaign-builder/save", {
@@ -1392,7 +1421,9 @@ function CampaignBuilderTab({ showToast, onSaved }) {
           preview: { ...preview, drafts },
         }),
       });
-      if (result.preview) setPreview(result.preview);
+      // A source edit while the save was in flight already dropped this
+      // preview; the saved copy must not come back as the current one.
+      if (result.preview && gen === previewGen.current) setPreview(result.preview);
       showToast("Campaign saved as social draft");
       onSaved();
     } catch (e) {
@@ -1620,18 +1651,15 @@ function ReviewGraphicsTab({ showToast }) {
     saved: [],
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [privacy, setPrivacy] = useState({});
   const [savingId, setSavingId] = useState(null);
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError("");
     adminFetch("/admin/social-media/review-graphics?limit=30")
       .then(setData)
-      .catch(() =>
-        setData({
-          candidates: [],
-          saved: [],
-        }),
-      )
+      .catch((e) => setLoadError(e.message))
       .finally(() => setLoading(false));
   }, []);
   useEffect(() => {
@@ -1659,8 +1687,12 @@ function ReviewGraphicsTab({ showToast }) {
   };
   const approveGraphic = async (graphic) => {
     try {
-      await adminFetch(`/admin/social-media/review-graphics/${graphic.id}/approve`, { method: "POST" });
-      showToast("Review graphic approved");
+      const result = await adminFetch(`/admin/social-media/review-graphics/${graphic.id}/approve`, { method: "POST" });
+      showToast(
+        result.published
+          ? "Review graphic approved and posted"
+          : "Approve ran in dry-run mode — nothing was posted"
+      );
       load();
     } catch (e) {
       showToast(`Approve failed: ${e.message}`);
@@ -1671,6 +1703,13 @@ function ReviewGraphicsTab({ showToast }) {
       <div className="text-ink-secondary p-10 text-center">
         Loading review graphics...
       </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <ActionFeedback error onRetry={load}>
+        Review graphics unavailable: {loadError}
+      </ActionFeedback>
     );
   }
   return (
@@ -1788,7 +1827,7 @@ function ReviewGraphicsTab({ showToast }) {
                       onClick={() => approveGraphic(graphic)}
                       className="mt-2 px-2.5 py-1.5 text-ui-body"
                     >
-                      Approve
+                      Approve &amp; post
                     </Button>
                   )}
                   {safeHttpHref(graphic.image_url) && (
@@ -1825,6 +1864,7 @@ function CompetitorSwipeTab({ showToast }) {
     patterns: [],
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [capture, setCapture] = useState({
     companyName: "Prodigy Pest Solutions",
@@ -1843,15 +1883,10 @@ function CompetitorSwipeTab({ showToast }) {
   });
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError("");
     adminFetch("/admin/social-media/competitor-swipe")
       .then(setData)
-      .catch(() =>
-        setData({
-          profiles: [],
-          posts: [],
-          patterns: [],
-        }),
-      )
+      .catch((e) => setLoadError(e.message))
       .finally(() => setLoading(false));
   }, []);
   useEffect(() => {
@@ -1897,6 +1932,13 @@ function CompetitorSwipeTab({ showToast }) {
       <div className="text-ink-secondary p-10 text-center">
         Loading competitor swipe file...
       </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <ActionFeedback error onRetry={load}>
+        Competitor swipe file unavailable: {loadError}
+      </ActionFeedback>
     );
   }
   return (
@@ -2144,23 +2186,36 @@ function ComposeTab({ showToast, onPublished }) {
   const [generating, setGenerating] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [customContent, setCustomContent] = useState({});
+  const previewGen = useRef(0);
+  // The preview is generated from title, description and link, so editing any
+  // of them drops the preview (and a request still in flight); Publish All
+  // stays disabled until the operator regenerates.
+  const editSource = (setter) => (e) => {
+    previewGen.current += 1;
+    setGenerating(false);
+    setPreview(null);
+    setCustomContent({});
+    setter(e.target.value);
+  };
   const handlePreview = async () => {
     if (!title.trim()) {
       showToast("Enter a title");
       return;
     }
+    const gen = ++previewGen.current;
     setGenerating(true);
     try {
       const data = await adminFetch("/admin/social-media/preview", {
         method: "POST",
         body: JSON.stringify({ title, description, link }),
       });
+      if (gen !== previewGen.current) return;
       setPreview(data);
       setCustomContent(data);
     } catch (e) {
-      showToast(`Preview failed: ${e.message}`);
+      if (gen === previewGen.current) showToast(`Preview failed: ${e.message}`);
     } finally {
-      setGenerating(false);
+      if (gen === previewGen.current) setGenerating(false);
     }
   };
   const handlePublish = async () => {
@@ -2205,7 +2260,7 @@ function ComposeTab({ showToast, onPublished }) {
             </label>{" "}
             <Input
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={editSource(setTitle)}
               placeholder="Blog post title or topic..."
             />{" "}
           </div>{" "}
@@ -2216,7 +2271,7 @@ function ComposeTab({ showToast, onPublished }) {
             </label>{" "}
             <Textarea
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={editSource(setDescription)}
               rows={3}
               placeholder="Brief description or excerpt..."
               className="resize-y"
@@ -2229,7 +2284,7 @@ function ComposeTab({ showToast, onPublished }) {
             </label>{" "}
             <Input
               value={link}
-              onChange={(e) => setLink(e.target.value)}
+              onChange={editSource(setLink)}
               placeholder="https://www.wavespestcontrol.com/blog/..."
             />{" "}
           </div>{" "}
@@ -2304,25 +2359,52 @@ function ComposeTab({ showToast, onPublished }) {
 }
 
 // ── RSS Feed Tab ──
+// First human-readable reason a checked item did not publish: the item's own
+// error, else the first platform error or skip text.
+function rssFirstReason(results) {
+  for (const r of results || []) {
+    if (r?.error) return String(r.error);
+    for (const p of r?.platforms || []) {
+      const reason = p?.error || (typeof p?.skipped === "string" ? p.skipped : null);
+      if (reason) return String(reason);
+    }
+  }
+  return null;
+}
+function rssCheckMessage(result) {
+  if (result.locked) return "RSS check skipped: another RSS check is running";
+  if (!result.processed) return "RSS check done: no new items";
+  const count = (v) => (typeof v === "number" ? v : 0);
+  const published = count(result.published);
+  const reason = published === 0 ? rssFirstReason(result.results) : null;
+  return (
+    `RSS check done: ${published} published, ${count(result.skipped)} skipped, ` +
+    `${count(result.failed)} failed${reason ? ` (${reason})` : ""}`
+  );
+}
 function RSSTab({ showToast, onPublished }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [checking, setChecking] = useState(false);
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/social-media/rss")
-      .then((d) => {
-        setItems(d.items || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      .then((d) => setItems(d.items || []))
+      .catch((e) => setLoadError(e.message || "request failed"))
+      .finally(() => setLoading(false));
   }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
   const handleAutoPublish = async () => {
     setChecking(true);
     try {
       const result = await adminFetch("/admin/social-media/check-rss", {
         method: "POST",
       });
-      showToast(`RSS check done: ${result.processed} new post(s) published`);
+      showToast(rssCheckMessage(result));
       onPublished();
       // Refresh
       const d = await adminFetch("/admin/social-media/rss");
@@ -2337,6 +2419,12 @@ function RSSTab({ showToast, onPublished }) {
       <div className="text-ink-secondary p-10 text-center">
         Loading RSS feed...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback error onRetry={load}>
+        RSS feed unavailable: {loadError}
+      </ActionFeedback>
     );
   return (
     <div>
@@ -2403,7 +2491,6 @@ function RSSTab({ showToast, onPublished }) {
 
 // ── History Tab ──
 function HistoryTab({ history }) {
-  const isMobile = useIsMobile();
   return (
     <div>
       {" "}
@@ -2432,11 +2519,11 @@ function HistoryTab({ history }) {
           return (
             <Card key={post.id} className="mb-2">
               {" "}
-              <div className="flex justify-between items-start mb-2">
+              <div className="flex flex-wrap justify-between items-start gap-x-3 gap-y-1 mb-2">
                 {" "}
-                <div>
+                <div className="min-w-0 max-w-full">
                   {" "}
-                  <div className="text-ui-body font-medium text-zinc-900">
+                  <div className="text-ui-body font-medium text-zinc-900 break-words">
                     {post.title}
                   </div>
                   {post.source_url && (
@@ -2444,16 +2531,13 @@ function HistoryTab({ history }) {
                       href={post.source_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{
-                        maxWidth: isMobile ? 200 : 400,
-                      }}
-                      className="text-ui-body text-zinc-900 no-underline overflow-hidden text-ellipsis whitespace-nowrap block"
+                      className="text-ui-body text-zinc-900 no-underline overflow-hidden text-ellipsis whitespace-nowrap block max-w-full md:max-w-[400px]"
                     >
                       {post.source_url}
                     </a>
                   )}
                 </div>{" "}
-                <div className="flex gap-1 items-center">
+                <div className="flex flex-wrap gap-1 items-center">
                   {" "}
                   <Badge tone={postStatusTone(post.status)}>
                     {post.status}
@@ -2464,24 +2548,32 @@ function HistoryTab({ history }) {
                 </div>{" "}
               </div>{" "}
               <div className="flex gap-1.5 flex-wrap">
-                {platforms.map((p, i) => (
-                  <Badge
-                    key={i}
-                    tone={!p.success && !p.skipped ? "alert" : "neutral"}
-                  >
-                    {p.platform}
-                    {p.location ? ` (${p.location})` : ""}:{" "}
-                    {p.success
-                      ? ""
-                      : p.skipped
-                        ? "skipped"
-                        : p.error
-                          ? p.error.length > 30
-                            ? p.error.substring(0, 30) + "..."
-                            : p.error
-                          : "No"}
-                  </Badge>
-                ))}
+                {platforms.map((p, i) =>
+                  typeof p === "string" ? (
+                    // A saved draft stores plain channel names: a target that
+                    // has not been attempted, not a failed publication.
+                    <Badge key={i} tone="neutral">
+                      {p}
+                    </Badge>
+                  ) : (
+                    <Badge
+                      key={i}
+                      tone={!p.success && !p.skipped ? "alert" : "neutral"}
+                    >
+                      {p.platform}
+                      {p.location ? ` (${p.location})` : ""}:{" "}
+                      {p.success
+                        ? ""
+                        : p.skipped
+                          ? "skipped"
+                          : p.error
+                            ? p.error.length > 30
+                              ? p.error.substring(0, 30) + "..."
+                              : p.error
+                            : "No"}
+                    </Badge>
+                  ),
+                )}
               </div>{" "}
             </Card>
           );
@@ -2510,17 +2602,29 @@ function CalendarTab() {
 function AnalyticsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
+  const [loadError, setLoadError] = useState(null);
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch("/admin/social-media/analytics")
       .then(setData)
-      .catch(() => {})
+      .catch((e) => setLoadError(e.message || "request failed"))
       .finally(() => setLoading(false));
   }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
   if (loading)
     return (
       <div className="text-ink-secondary p-10 text-center">
         Loading analytics...
       </div>
+    );
+  if (loadError)
+    return (
+      <ActionFeedback error onRetry={load}>
+        Analytics unavailable: {loadError}
+      </ActionFeedback>
     );
   if (!data)
     return (
@@ -2580,6 +2684,9 @@ function AnalyticsTab() {
                 <span className="text-zinc-900">{stats.success} </span>{" "}
                 <span className={stats.failed > 0 ? "text-alert-fg" : "text-ink-secondary"}>
                   {stats.failed} No
+                </span>{" "}
+                <span className="text-ink-secondary">
+                  {stats.skipped || 0} skipped
                 </span>{" "}
                 <span className="text-ink-secondary">
                   {stats.total} total

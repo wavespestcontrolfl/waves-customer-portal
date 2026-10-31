@@ -79,7 +79,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),
   gateEnvValue: (gate) => process.env[gate] === 'true',
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
+  smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
 }));
+// The bare-YES decision's own reads are covered in sms-bare-yes-reply.test.js.
+jest.mock('../services/messaging/bare-yes-reply', () => ({ bareYesIsReply: jest.fn(async () => true) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -129,12 +132,15 @@ const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { markRecipientOptin } = require('../services/recipient-optin');
+const { bareYesIsReply } = require('../services/messaging/bare-yes-reply');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
 const handler = router.stack.find((layer) => layer.route?.path === '/sms').route.stack[0].handle;
 const PITCH = 'Are you open to more booked jobs? Reply "NO" if you need me to stop texting';
 const savedGate = process.env.GATE_SMS_SPAM_CLASSIFIER;
 const savedOwner = process.env.ADAM_PHONE;
+const savedBareYes = process.env.GATE_SMS_BARE_YES_REPLY;
 
 async function receive(body, to = numbers.locations.parrish.number, expectedStatus = 200, messageSid = 'SM-synthetic-solicitation') {
   const res = new EventEmitter();
@@ -163,6 +169,7 @@ beforeEach(() => {
   mockOptoutReceipts.clear();
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
+  delete process.env.GATE_SMS_BARE_YES_REPLY;
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   findKnownCallerCustomer.mockResolvedValue(null);
 });
@@ -171,6 +178,8 @@ afterAll(() => {
   else process.env.GATE_SMS_SPAM_CLASSIFIER = savedGate;
   if (savedOwner === undefined) delete process.env.ADAM_PHONE;
   else process.env.ADAM_PHONE = savedOwner;
+  if (savedBareYes === undefined) delete process.env.GATE_SMS_BARE_YES_REPLY;
+  else process.env.GATE_SMS_BARE_YES_REPLY = savedBareYes;
 });
 
 test('a shadow pitch stays unread, records its verdict, and follows ordinary estimator and alert handling', async () => {
@@ -223,7 +232,8 @@ test('a non-eligible sender\'s natural-language opt-out phrasing reaches the mod
 });
 
 test.each([
-  ['STOP', 'opt_out'], ['START', 'opt_in'], ['HELP', 'help_request'],
+  // YES with GATE_SMS_BARE_YES_REPLY unset: still START, as before the gate.
+  ['STOP', 'opt_out'], ['START', 'opt_in'], ['YES', 'opt_in'], ['HELP', 'help_request'],
 ])('a known sender\'s standalone %s retains its carrier response without classification', async (body, messageType) => {
   findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
   const res = await receive(body);
@@ -232,6 +242,64 @@ test.each([
   expect(updateByTwilioSid).toHaveBeenCalledWith('SM-synthetic-solicitation', expect.objectContaining({ message_type: messageType }));
   expect(dispatchWithFallback).not.toHaveBeenCalled();
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
+  expect(bareYesIsReply).not.toHaveBeenCalled();
+});
+
+// Weekly sweep #5007 B3: a bare YES used to be START for every eligible
+// sender, so an answer to "Reply YES to …" got "You've been re-subscribed"
+// and never reached the office.
+describe('GATE_SMS_BARE_YES_REPLY=true', () => {
+  beforeEach(() => { process.env.GATE_SMS_BARE_YES_REPLY = 'true'; });
+
+  test('a bare YES with nothing to re-subscribe takes the ordinary inbound path', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+    const res = await receive('Yes!');
+    expect(bareYesIsReply).toHaveBeenCalledWith({ phone: '+12025550101', customerId: null });
+    expect(res.body).toBe('<Response></Response>');
+    expect(clearSuppression).not.toHaveBeenCalled();
+    expect(markRecipientOptin).not.toHaveBeenCalled();
+    expect(mockWrites.some(({ table, row }) => table === 'sms_log' && row.message_type === 'opt_in')).toBe(false);
+    expect(updateByTwilioSid).not.toHaveBeenCalledWith('SM-synthetic-solicitation', expect.objectContaining({ message_type: 'opt_in' }));
+    // The owner forward a known contact's ordinary text gets: the YES is heard.
+    expect(sendSMS).toHaveBeenCalledTimes(1);
+    const line = require('../services/logger').info.mock.calls.map(([msg]) => msg).find((msg) => /bare YES/.test(msg));
+    expect(line).toContain('handled as a reply');
+    expect(line).not.toContain('2025550101');
+  });
+
+  test('a bare YES that can still restore something stays START', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+    bareYesIsReply.mockResolvedValueOnce(false);
+    const res = await receive('YES');
+    expect(res.body).toContain('re-subscribed');
+    expect(clearSuppression).toHaveBeenCalledTimes(1);
+    expect(markRecipientOptin).toHaveBeenCalledWith('+12025550101', 'confirmed', expect.anything());
+  });
+
+  test('a bare YES called a reply takes the ordinary recruiting lookup, which fails closed for a plausible applicant', async () => {
+    // As a command the lookup is best-effort (a STOP must never wait on it);
+    // as an ordinary text it defers for a Twilio retry, so an applicant's
+    // answer never lands in technician-visible readers untyped.
+    const recruiting = require('../services/recruiting-inbound');
+    recruiting.matchApplicantReply.mockRejectedValueOnce(Object.assign(new Error('recruiting store down'), { code: '08006' }));
+    recruiting.isPlausibleRecruitingPhone = jest.fn(async () => true);
+    try {
+      findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+      const res = await receive('YES', undefined, 503);
+      expect(res.body).toBe('<Response></Response>');
+      expect(releaseInboundWebhook).toHaveBeenCalledWith('SM-synthetic-solicitation');
+      expect(clearSuppression).not.toHaveBeenCalled();
+    } finally {
+      delete recruiting.isPlausibleRecruitingPhone;
+    }
+  });
+
+  test('START never consults the bare-YES rule', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+    const res = await receive('START');
+    expect(bareYesIsReply).not.toHaveBeenCalled();
+    expect(res.body).toContain('re-subscribed');
+  });
 });
 
 test.each([

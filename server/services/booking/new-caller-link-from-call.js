@@ -11,10 +11,11 @@
 //  - D4(a): the pass left the visit with no customer (the call has none, or
 //    the link was refused). Key new-caller-visit:<id>; a link closes it.
 //  - After a link, one check bell: the caller gave a different address (D2)
-//    or time (D7), the confirmation text was held or has not gone out, or
-//    the reminders failed. Key new-caller-visit-check:<id>, its own: the link
-//    has just closed the first key, and a closed row still answers that
-//    key's dedupe.
+//    or time (D7), the confirmation text was held or has not gone out, the
+//    reminders failed, or the call agreed a plan price (D8 bell first,
+//    new-caller-plan-check.js: the office sets the plan up by hand). Key
+//    new-caller-visit-check:<id>, its own: the link has just closed the first
+//    key, and a closed row still answers that key's dedupe.
 // The visit keeps the address and time the office booked (D2, D7). Never
 // throws: the call pass goes on whatever happens here.
 
@@ -31,6 +32,7 @@ const {
   NEW_CALLER_SOURCE_ACTION, linkNewCallerVisit, armLinkedVisitComms, newCallerVisitAlertKey,
   slotWords, bookedSlot, newCallerVisitLink: visitLink, raiseWhileVisitWaits,
 } = require('./new-caller-visit');
+const { loadPlanCheck, planCheckDetail, planCheckRecord } = require('./new-caller-plan-check');
 
 // The owner can silence it in Settings → Notifications (bellDefault, below).
 const CATEGORY = 'schedule';
@@ -167,6 +169,11 @@ const CHECKS = {
     why: 'The confirmation text has not gone out, so check the visit.',
     detail: () => 'Confirmation: it has not gone out. It may be held until the morning, or the number may not take texts. The reminders are set up.',
   },
+  plan: {
+    noun: 'the plan price',
+    why: 'The call agreed a plan price; set up the plan by hand, as today.',
+    detail: ({ plan }) => planCheckDetail(plan),
+  },
 };
 
 function listWords(nouns) {
@@ -192,11 +199,16 @@ async function ringCheck(conn, visit, checks, context) {
     dedupeKey: checkAlertKey(visit.id),
     bellDefault: true,
     detail: ['The call recording linked this visit, booked by address, to its customer.', ...checks.map((c) => `- ${CHECKS[c].detail(context)}`)].join('\n'),
-    metadata: { scheduled_service_id: visit.id, call_log_id: visit.source_call_log_id || null, checks },
+    metadata: {
+      scheduled_service_id: visit.id,
+      call_log_id: visit.source_call_log_id || null,
+      checks,
+      ...(context.plan ? { plan_check: planCheckRecord(context.plan) } : {}),
+    },
   });
 }
 
-async function checkLinkedVisit(conn, { visit, extracted, createdCustomerId, decision, comms }) {
+async function checkLinkedVisit(conn, { visit, extracted, extraction, createdCustomerId, decision, comms }) {
   const checks = [];
   // Only a customer this call created carries the call's address; an older
   // customer at a new address is D6 (one more property), not a difference.
@@ -211,7 +223,16 @@ async function checkLinkedVisit(conn, { visit, extracted, createdCustomerId, dec
   if (!comms.remindersArmed) checks.push('reminders');
   else if (!decision.send) checks.push(`text_${decision.held}`);
   else if (!comms.confirmationSent) checks.push('text_failed');
-  if (checks.length) await ringCheck(conn, visit, checks, { spoken, booked });
+  // A failed read costs the bell its plan lines only.
+  const plan = await loadPlanCheck(conn, visit, extraction).catch((err) => {
+    logger.warn(`[new-caller] plan check for visit ${visit.id} failed: ${err.code || err.name || 'error'}`);
+    return null;
+  });
+  if (plan) {
+    checks.push('plan');
+    logger.info(`[new-caller] visit ${visit.id} plan from the call: ${plan.allPass ? 'all six checks pass' : `not passed [${plan.failed.join(' ')}]`}`);
+  }
+  if (checks.length) await ringCheck(conn, visit, checks, { spoken, booked, plan });
   return checks;
 }
 
@@ -219,7 +240,8 @@ async function checkLinkedVisit(conn, { visit, extracted, createdCustomerId, dec
  * The processor calls this right after its token-fenced customer checkpoint.
  *   call, procToken   the call row and this pass's processing claim
  *   text              { passBlocked, extraction, impliedConsent, callerPhone }: the pass's SMS
- *                     block, its v2 extraction, its implied-consent eligibility, the caller's number
+ *                     block, its v2 extraction (also the plan check's), its implied-consent
+ *                     eligibility, the caller's number
  *   extracted         the pass's extraction (appointment_confirmed, preferred_date_time: D7)
  *   createdCustomerId the customer this pass created, if any (D2 compares its address)
  * Returns { outcome } (off | none | claim_lost | unlinked | settled | linked | error); a linked
@@ -263,7 +285,9 @@ async function linkOfficeVisitFromCall({ call, procToken, text = {}, extracted =
         return { remindersArmed: false, confirmationSent: false };
       });
     const heldText = decision.held || null;
-    const checks = await checkLinkedVisit(conn, { visit: linked.visit, extracted, createdCustomerId, decision, comms });
+    const checks = await checkLinkedVisit(conn, {
+      visit: linked.visit, extracted, extraction: text.extraction, createdCustomerId, decision, comms,
+    });
     logger.info(`[new-caller] call ${call.id} linked visit ${linked.visit.id}: reminders ${comms.remindersArmed}, confirmation ${comms.confirmationSent}, checks [${checks.join(' ')}]`);
     return { outcome: 'linked', visitId: linked.visit.id, ...comms, heldText, checks };
   } catch (err) {

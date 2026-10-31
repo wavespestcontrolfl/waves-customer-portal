@@ -834,6 +834,79 @@ function PolicyInfoCard({ Icon, label, value, sub, color }) {
 // One customer row in the attribution repair panel — used by both the
 // click-correlated "likely reviewers" list (with a badge) and the plain
 // name/phone/address search results.
+// Queue reasons that always render (no 25-row cap): probabilistic links and the review matcher's
+// open decisions (server review-name-match.js).
+const UNCAPPED_QUEUE_REASONS = new Set([
+  "click_auto_confirm",
+  "name_match_link",
+  "name_match_confirm",
+  "name_match_pause",
+  "name_match_household",
+  "name_match_disputed",
+]);
+
+// Rows whose match may be confirmed with no visit on file (the server relaxes the payout rules for
+// exactly these): click auto-links and the matcher's suggestions on unlinked reviews. A disputed link
+// is kept with Keep link, or moved under the usual rules.
+const NO_VISIT_CONFIRM_REASONS = new Set([
+  "click_auto_confirm",
+  "name_match_link",
+  "name_match_confirm",
+  "name_match_pause",
+  "name_match_household",
+]);
+
+function nameMatchReasonText(review) {
+  const name = review.suggestedCustomerName || "a customer";
+  switch (review.reason) {
+    case "name_match_link":
+      return `Same name as ${name}`;
+    case "name_match_confirm":
+      return `Likely ${name}: close name, with recent activity`;
+    case "name_match_pause":
+      return `Possibly ${name}: close name`;
+    case "name_match_household":
+      return `Possibly a family member of ${name}`;
+    case "name_match_disputed":
+      return `Linked to ${name}, but their first contact came after this review`;
+    default:
+      return null;
+  }
+}
+
+// The evidence the review matcher weighs (server review-link-evidence.js), so a person sees why a
+// candidate fits this review or not before matching it.
+const NAME_EVIDENCE = {
+  exact: "Same name",
+  variant: "Nickname or one-letter spelling",
+  // A surname one letter off, or a shortened first name with the same surname.
+  near: "Close name, not the same",
+  initial: "Last initial only",
+  household: "Same surname, different first name",
+  first_only: "First name only",
+};
+
+function linkEvidenceFacts(evidence) {
+  const facts = [NAME_EVIDENCE[evidence.nameKind] || "Name does not match"];
+  if (evidence.nameKind && evidence.role === "contact") facts.push("a listed contact");
+  if (evidence.dates === "unknown" || !evidence.firstContactAt) {
+    facts.push("First contact unknown");
+  } else {
+    const firstContact = new Date(evidence.firstContactAt).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "America/New_York",
+    });
+    facts.push(`First contact ${firstContact}${evidence.contactAfterReview ? ", after this review" : ""}`);
+  }
+  if (evidence.tap) facts.push("Tapped the review link within 3 hours");
+  if (evidence.recent) facts.push("Visit or review text in the 14 days before");
+  if (evidence.saidReviewed) facts.push('Texted "I left a review"');
+  if (evidence.alreadyLinkedHere) facts.push("Already linked to another review on this profile");
+  return facts;
+}
+
 function RepairCandidateCard({
   review,
   candidate,
@@ -841,6 +914,17 @@ function RepairCandidateCard({
   onAttribute,
   badge,
 }) {
+  // A first contact after the review asks for a second click before matching (review matching plan:
+  // "a manual match warns on a date clash").
+  const lateContact = Boolean(candidate.evidence?.contactAfterReview);
+  const [confirmLate, setConfirmLate] = useState(false);
+  const attribute = (service) => {
+    if (lateContact && !confirmLate) {
+      setConfirmLate(true);
+      return;
+    }
+    onAttribute(review, candidate, service);
+  };
   return (
     <Card className="p-[10px]">
       <div className="flex items-center gap-[8px] flex-wrap">
@@ -854,15 +938,28 @@ function RepairCandidateCard({
           .filter(Boolean)
           .join(" | ")}
       </div>
+      {candidate.evidence && (
+        <div
+          className="text-ui-body text-zinc-900 mt-[4px]"
+          data-testid="link-evidence"
+        >
+          {linkEvidenceFacts(candidate.evidence).join(" | ")}
+        </div>
+      )}
+      {confirmLate && (
+        <div className="text-ui-body font-medium text-zinc-900 mt-[6px]" role="status">
+          This customer's first contact came after the review. Click the same button again to match anyway.
+        </div>
+      )}
       <div className="flex gap-[8px] flex-wrap mt-[10px]">
         {(candidate.services || []).length === 0 ? (
-          review.reason === "click_auto_confirm" ? (
+          NO_VISIT_CONFIRM_REASONS.has(review.reason) ? (
             // Click-auto rows must stay correctable even with no recent
             // technician visit: the payout stays unminted server-side, so a
             // technician-less confirm is allowed for exactly these rows
             // (GH codex #3483 r2 P1).
             <Button
-              onClick={() => onAttribute(review, candidate, null)}
+              onClick={() => attribute(null)}
               disabled={Boolean(matching[`${review.id}:${candidate.id}:none`])}
               variant="primary"
               className="inline-flex items-center gap-[6px]"
@@ -883,7 +980,7 @@ function RepairCandidateCard({
             return (
               <Button
                 key={service.id}
-                onClick={() => onAttribute(review, candidate, service)}
+                onClick={() => attribute(service)}
                 disabled={Boolean(matching[matchKey]) || !service.technicianId}
                 variant="primary"
                 className="inline-flex items-center gap-[6px]"
@@ -916,6 +1013,7 @@ function ReviewIncentivesPanel() {
   const [likelyReviewers, setLikelyReviewers] = useState([]);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [matching, setMatching] = useState({});
+  const [dismissing, setDismissing] = useState({});
   // Monotonic guard: candidate state is shared across repair panels, so a
   // slow response for review A must never land after review B's panel opened
   // — the rendered candidates would belong to A while the attribute POST
@@ -1064,6 +1162,27 @@ function ReviewIncentivesPanel() {
       if (candidateReqRef.current === reqId) setActionError(e.message);
     } finally {
       if (candidateReqRef.current === reqId) setCandidateLoading(false);
+    }
+  };
+  // Rule the matcher's suggested customer out for this review (or keep a disputed link). The server
+  // checks the suggestion is still the one shown and answers 409 when it moved.
+  const dismissNameMatch = async (review) => {
+    loadGen.current += 1;
+    setLoading(false);
+    setQueueLoading(false);
+    setDismissing((prev) => ({ ...prev, [review.id]: true }));
+    setActionError(null);
+    try {
+      await adminFetch(`/admin/reviews/${review.id}/name-match/dismiss`, {
+        method: "POST",
+        body: JSON.stringify({ customerId: review.suggestedCustomerId, result: review.nameMatchResult }),
+      });
+      if (activeRepairId === review.id) setActiveRepairId(null);
+      load();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      setDismissing((prev) => ({ ...prev, [review.id]: false }));
     }
   };
   const attributeCandidate = async (review, candidate, service) => {
@@ -1299,11 +1418,13 @@ function ReviewIncentivesPanel() {
                     repairs, never consuming it: a full confirm backlog must
                     not hide missing_customer/missing_technician rows the
                     backend returned (GH codex #3483 r10). */}
+                {/* The review matcher's open decisions render uncapped too: a
+                    pause can only be settled here. */}
                 {queue
-                  .filter((r) => r.reason === "click_auto_confirm")
+                  .filter((r) => UNCAPPED_QUEUE_REASONS.has(r.reason))
                   .concat(
                     queue
-                      .filter((r) => r.reason !== "click_auto_confirm")
+                      .filter((r) => !UNCAPPED_QUEUE_REASONS.has(r.reason))
                       .slice(0, 25),
                   )
                   .map((review) => {
@@ -1330,7 +1451,8 @@ function ReviewIncentivesPanel() {
                               </span>
                             </div>
                             <div className="text-ui-body text-ink-secondary mt-[4px]">
-                              {review.customerName ||
+                              {nameMatchReasonText(review) ||
+                                review.customerName ||
                                 review.reason?.replace("_", " ")}
                             </div>
                             {review.reviewText && (
@@ -1341,14 +1463,28 @@ function ReviewIncentivesPanel() {
                               </div>
                             )}
                           </div>
-                          <Button
-                            onClick={() => openRepair(review)}
-                            variant="secondary"
-                            className="inline-flex items-center justify-center gap-[6px] whitespace-nowrap"
-                          >
-                            <Search size={14} />
-                            Match
-                          </Button>
+                          <div className="flex gap-[8px] flex-wrap">
+                            <Button
+                              onClick={() => openRepair(review)}
+                              variant="secondary"
+                              className="inline-flex items-center justify-center gap-[6px] whitespace-nowrap"
+                            >
+                              <Search size={14} />
+                              Match
+                            </Button>
+                            {nameMatchReasonText(review) && (
+                              <Button
+                                onClick={() => dismissNameMatch(review)}
+                                disabled={Boolean(dismissing[review.id])}
+                                variant="secondary"
+                                className="whitespace-nowrap"
+                              >
+                                {review.reason === "name_match_disputed"
+                                  ? "Keep link"
+                                  : "Not this customer"}
+                              </Button>
+                            )}
+                          </div>
                         </div>
 
                         {isOpen && (
@@ -1985,15 +2121,17 @@ export default function ReviewsPage() {
       {/* ====================== TAB: REVIEWS ====================== */}
       {activeTab === "reviews" && (
         <div>
-          {/* Loading state */}
-          {loading && (
+          {/* Loading + error pages are for the FIRST load only. A refresh (a
+              filter or search change, a visible-page refresh) keeps the list,
+              the filter bar and every unsaved reply editor mounted. */}
+          {loading && !data && (
             <div className="text-ink-secondary p-[60px] text-center text-ui-body">
               Loading reviews...
             </div>
           )}
 
           {/* Error state */}
-          {!loading && error && (
+          {!loading && error && !data && (
             <div className="text-alert-fg p-[60px] text-center">
               {" "}
               <div className="text-ui-body mb-[12px]">
@@ -2009,8 +2147,22 @@ export default function ReviewsPage() {
           )}
 
           {/* Reviews content */}
-          {!loading && !error && data && (
+          {data && (
             <>
+              {!loading && error && (
+                <div
+                  role="alert"
+                  className="border-hairline border-zinc-200 text-alert-fg rounded-md mb-[14px] text-ui-body flex flex-wrap items-center justify-between gap-[8px] p-[12px]"
+                >
+                  <span>
+                    Could not refresh reviews: {error}. The list below is
+                    from the last successful load.
+                  </span>
+                  <Button onClick={loadData} variant="secondary">
+                    Retry
+                  </Button>
+                </div>
+              )}
               {fallbackLocations.length > 0 && (
                 <div className="border-hairline border-zinc-200 text-zinc-900 rounded-md mb-[14px] text-ui-body">
                   {fallbackLocations.map((l) => l.name).join(", ")} currently
@@ -2114,8 +2266,10 @@ export default function ReviewsPage() {
                   placeholder="Search reviews..."
                   className="flex-[1_1_180px] min-w-[160px]"
                 />{" "}
-                <span className="text-ui-body text-ink-secondary">
-                  {filtered.length} review{filtered.length !== 1 ? "s" : ""}
+                <span className="text-ui-body text-ink-secondary" role="status">
+                  {loading
+                    ? "Updating..."
+                    : `${filtered.length} review${filtered.length !== 1 ? "s" : ""}`}
                 </span>{" "}
               </Card>
               {/* Reviews feed */}

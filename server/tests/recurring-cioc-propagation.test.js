@@ -20,8 +20,8 @@ const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'),
 function connWithSibling(siblingResult) {
   return () => {
     const b = {};
-    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'orderBy']) {
-      b[m] = () => b;
+    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy']) {
+      b[m] = (arg) => { if (typeof arg === 'function') arg.call(b); return b; };
     }
     b.first = () => (siblingResult instanceof Error
       ? Promise.reject(siblingResult)
@@ -62,6 +62,63 @@ describe('resolveSeriesCreateInvoiceOnComplete', () => {
     await expect(resolveSeriesCreateInvoiceOnComplete(
       connWithSibling(undefined), 10, null,
     )).resolves.toBeUndefined();
+  });
+});
+
+describe('a visit off for its own reason does not set the series flag', () => {
+  // A tiny row-filtering fake: the builder records the WHERE tree and evaluates it over rows, so the test checks
+  // which sibling the real query shape picks, not just which calls it makes.
+  function rowConn(rows) {
+    return () => {
+      const make = (preds) => {
+        const b = {};
+        const nested = (fn) => { const inner = make([]); fn.call(inner); return inner._preds; };
+        b._preds = preds;
+        b.where = (a, v) => {
+          if (typeof a === 'function') { const sub = nested(a); preds.push((r) => sub.every((p) => p(r))); }
+          else if (typeof a === 'object') preds.push((r) => Object.entries(a).every(([k, val]) => r[k] === val));
+          else preds.push((r) => r[a] === v);
+          return b;
+        };
+        b.orWhere = (a, v) => {
+          const left = preds.splice(0, preds.length);
+          const right = typeof a === 'function' ? nested(a) : [(r) => r[a] === v];
+          preds.push((r) => left.every((p) => p(r)) || right.every((p) => p(r)));
+          return b;
+        };
+        b.whereNull = (c) => { preds.push((r) => r[c] == null); return b; };
+        b.whereNotNull = (c) => { preds.push((r) => r[c] != null); return b; };
+        b.whereNotIn = (c, vals) => { preds.push((r) => !vals.includes(r[c])); return b; };
+        b.orderBy = () => b;
+        b.first = async () => rows.filter((r) => preds.every((p) => p(r)))
+          .sort((x, y) => (x.scheduled_date < y.scheduled_date ? 1 : -1))[0];
+        return b;
+      };
+      return make([]);
+    };
+  }
+  const visit = (date, flag, extra = {}) => ({
+    recurring_parent_id: 10, status: 'pending', scheduled_date: date, create_invoice_on_complete: flag,
+    annual_prepay_term_id: null, prepaid_at: null, is_callback: false, ...extra,
+  });
+
+  test.each([
+    ['a prepay-linked visit', { annual_prepay_term_id: 'term-1' }],
+    ['a prepaid-stamped visit', { prepaid_at: '2026-06-01' }],
+    ['a free callback', { is_callback: true }],
+  ])('%s that is off does not set the flag; the newest regular visit does', async (_label, extra) => {
+    const conn = rowConn([visit('2026-09-01', true), visit('2026-12-01', false, extra)]);
+    await expect(resolveSeriesCreateInvoiceOnComplete(conn, 10, { create_invoice_on_complete: false })).resolves.toBe(true);
+  });
+
+  test('a prepaid visit that is ON still states the series intent over an older parent', async () => {
+    const conn = rowConn([visit('2026-12-01', true, { annual_prepay_term_id: 'term-1' })]);
+    await expect(resolveSeriesCreateInvoiceOnComplete(conn, 10, { create_invoice_on_complete: false })).resolves.toBe(true);
+  });
+
+  test('an office "don\'t charge" on a regular visit still carries over', async () => {
+    const conn = rowConn([visit('2026-09-01', true), visit('2026-12-01', false)]);
+    await expect(resolveSeriesCreateInvoiceOnComplete(conn, 10, { create_invoice_on_complete: true })).resolves.toBe(false);
   });
 });
 

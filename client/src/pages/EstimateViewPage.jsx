@@ -76,10 +76,11 @@ import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_T
 // appearance variables instead. Visual-only, applied whenever the glass theme is mounted.
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
+import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
-import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
+import { firstVisitLabel } from '../components/estimate/CommercialFirstVisitPicker';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
@@ -220,8 +221,9 @@ function scrollToPaymentSection() {
 }
 
 // Primary booking CTA — same navy treatment as the add-service button;
-// jumps the customer straight to the scheduling section.
-function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, microText = null }) {
+// jumps the customer straight to the scheduling section. onPickTime is the
+// page's no-time-yet handler (scroll + "pick a visit time" banner).
+function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, microText = null, onPickTime = scrollToBookingSection }) {
   const glass = glassCopyActive();
   // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
   // action reads as confirming THAT visit rather than restarting the flow.
@@ -232,7 +234,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
-        onClick={slotMeta ? scrollToPaymentSection : scrollToBookingSection}
+        onClick={slotMeta ? scrollToPaymentSection : onPickTime}
         style={{
           minHeight: 44,
           minWidth: 220,
@@ -373,6 +375,7 @@ function serviceLabelForKey(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'lawn_care': return 'Lawn Care';
     case 'mosquito': return 'Mosquito Control';
+    case 'mosquito_misting': return 'Mosquito Misting Service Plan';
     case 'termite_bait': return 'Termite Bait';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
@@ -908,9 +911,13 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null }) {
   const phone = useIsMobile(560);
+  // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
+  // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
+  const [mistingFailed, setMistingFailed] = useState(false);
   if (!intelligence) return null;
+  const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
@@ -938,7 +945,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       </div>
 
       <p style={{
-        margin: satelliteUrl || metrics.length ? '0 0 14px' : '0',
+        margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
         lineHeight: 1.5,
@@ -946,7 +953,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         {intelligence.body || copy?.aiBody || 'We reviewed the available property details and pricing rules before preparing this estimate.'}
       </p>
 
-      {satelliteUrl ? (
+      {showMisting ? (
+        <MistingLayoutCard layout={mistingLayout} address={address} onImageError={() => setMistingFailed(true)} />
+      ) : satelliteUrl ? (
         <img
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
@@ -963,7 +972,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         />
       ) : null}
 
-      {showYourWork?.overlaySatelliteUrl ? (
+      {showYourWork?.overlaySatelliteUrl && !showMisting ? (
         <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
@@ -1746,7 +1755,8 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
       <button
         type="button"
         disabled={disabled}
-        onClick={() => onChange('recurring')}
+        // The active option is a no-op: a mode change clears the picked visit time.
+        onClick={() => { if (mode !== 'recurring') onChange('recurring'); }}
         style={{
           ...pillBase,
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
@@ -1756,7 +1766,7 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
       <button
         type="button"
         disabled={disabled}
-        onClick={() => onChange('one_time')}
+        onClick={() => { if (mode !== 'one_time') onChange('one_time'); }}
         style={{
           ...pillBase,
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
@@ -4671,13 +4681,24 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   // may still be offering it and the correct options stay hidden (codex r10
   // P2). Its own copy, because neither "expired" nor "taken" is true.
   const staleHold = kind === 'stale_hold';
+  // 'pick_time': an approve tap with no visit time picked. The approve step
+  // needs a time, and a bare scroll back to the times read as the page
+  // starting over (a customer gave up and phoned in).
+  const pickTime = kind === 'pick_time';
   return (
-    <div style={{
+    <div role="status" style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {staleHold
+        {pickTime ? (
+          <>
+            <strong>Pick a visit time below to approve your plan.</strong>{' '}
+            Starting later? Use &ldquo;Can&apos;t find a date?&rdquo; under the times, or call{' '}
+            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.navy, fontWeight: 600 }}>{WAVES_PHONE_DISPLAY}</a>
+            {' '}and we&apos;ll set it up.
+          </>
+        ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
@@ -4821,8 +4842,10 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   const carried = {};
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
   // The offer is bound to the property it was matched against (GH codex
-  // #4853 r3 P0): a staff revision to another address drops it.
-  if (prev?.consultationOffer && !body.consultationOffer
+  // #4853 r3 P0): a staff revision to another address drops it. A refresh
+  // that now offers the free Waves Assessment (GATE_ESTIMATE_ASSESSMENT_FIRST,
+  // composed on every load) drops it too: the page carries one offer, never two.
+  if (prev?.consultationOffer && !body.consultationOffer && !body.assessmentFirst
     && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
 }
@@ -4855,6 +4878,36 @@ export function ConsultationOfferSection({ consultationOffer }) {
   );
 }
 
+// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+// renders ONLY from /data's `assessmentFirst` ({ url }); the server decides eligibility (an open estimate the customer
+// is viewing, a customer account at the estimate's property, no open assessment). It links to the estimate-token
+// booking page (/estimate/:token/assessment) in a new tab, so a customer mid-configuration keeps their choices. It
+// replaces the lead-only consultation offer and never disables or replaces the estimate's own accept CTA. Glass card
+// (owner 2026-10-26: web pages keep the glass UI).
+export function AssessmentFirstSection({ assessmentFirst }) {
+  if (!assessmentFirst?.url) return null;
+  return (
+    <section data-glass="card" data-testid="assessment-first" aria-labelledby="assessment-first-title" style={estimateCard()}>
+      <h2 id="assessment-first-title" style={{ fontSize: 26, lineHeight: 1.25, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
+        Book a free Waves Assessment first
+      </h2>
+      <p style={{ fontSize: 16, color: W.textBody, lineHeight: 1.5, margin: 0 }}>
+        Want us to look before you decide? A Waves technician can visit, walk the property with you and answer your
+        questions. It&rsquo;s free, and there&rsquo;s no commitment.
+      </p>
+      <a
+        href={assessmentFirst.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-glass-accent=""
+        style={{ ...estimateCallCtaStyle, display: 'block', width: 'fit-content', marginLeft: 'auto', marginRight: 'auto' }}
+      >
+        Pick a time
+      </a>
+    </section>
+  );
+}
+
 // Service-related card headlines (owner directive 2026-07-10): every service
 // box leads with copy about ITS service — the generic "Same protection" line
 // only survives as the fallback for unmapped/bundle sections. Pest keeps its
@@ -4863,6 +4916,8 @@ const SERVICE_CARD_HEADLINES = {
   pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
   commercial_pest: 'Commercial Pest Protection by Waves — priced from your property, built for your business',
   mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
+  // The misting SYSTEM plan is its own service (owner 2026-10-30, item A): never the barrier line above.
+  mosquito_misting: 'Mosquito Misting Service Plan',
   termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
   lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
   tree_shrub: 'Tree & Shrub Care by Waves — ornamental protection through the seasons',
@@ -5360,6 +5415,7 @@ export function ServiceSection({
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
+  onPickTime,
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
   termiteComparison = null,
@@ -5565,6 +5621,8 @@ export function ServiceSection({
             suppressCombinedTotal={section.key === 'bundle' && !billsMonthly}
             monthlyAverageLine={monthlyAverageLine}
             monthlyAverageContext={monthlyAverageContext}
+            // The misting plan's refill line (null on every other section).
+            refill={section.refill || null}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -5824,6 +5882,7 @@ export function ServiceSection({
           <GetServiceTodayCta
             showGuaranteeMicro
             slotMeta={ctaSlotMeta}
+            onPickTime={onPickTime}
             // Synthetic unsplit-bundle sections resolve their terms from the
             // member services; a lone unresolvable key stays terms-neutral.
             microText={glassCtaMicroForKeys(
@@ -5986,6 +6045,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
   // 9:00 AM") — SlotPicker reports it alongside the id; cleared with it.
   const [selectedSlotMeta, setSelectedSlotMeta] = useState(null);
+  // An approve tap with no visit time picked can't open the payment step: it
+  // scrolls to the times and the booking section shows the pick_time banner.
+  // A counter, so each tap remounts the banner and it is announced again.
+  // Picking a time answers it; a later slot reset never re-raises it.
+  const [pickTimePrompt, setPickTimePrompt] = useState(0);
+  useEffect(() => { if (selectedSlotId) setPickTimePrompt(0); }, [selectedSlotId]);
+  const promptPickTime = useCallback(() => {
+    if (!selectedSlotId) setPickTimePrompt((n) => n + 1);
+    scrollToBookingSection();
+  }, [selectedSlotId]);
   // Curated Google-review pool for the glass hero proof strip (PR C) —
   // fetched only when the glass copy is active.
   const featuredReviews = useFeaturedReviews(glassCopyActive(), 12);
@@ -6432,25 +6501,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The priced offer wins the card whenever one exists; the inquiry card is
   // the fallback for mixes with no stamped add.
   const offerCardOffer = pricedAddOffer || addServiceOffer;
-  // Download PDF / Share / Print / Portal Login at the top of every estimate
-  // render (owner ask 2026-07-09, live review screen) — the same shared bar
-  // as the report/pay/receipt/contract pages. The PDF endpoint streams the
-  // same proposal generator as the admin download and the emailed attachment.
-  const estimateActionBar = readOnlyPreview ? (
-    <div style={{ marginBottom: 16 }}>
-      <button type="button" onClick={() => window.print()} style={{ minHeight: 44, padding: "10px 16px", fontSize: 16 }}>Print preview</button>
-    </div>
-  ) : (
-    // /data may serve an expired group anchor for navigation, while /pdf
-    // still withholds its expired offer. Keep the other document tools.
-    <DocumentActionBar
-      pdfUrl={data?.cta?.terminalState === 'expired' ? null : `${API_BASE}/estimates/${token}/pdf`}
-      printFallbackDownload={data?.cta?.terminalState !== 'expired'}
-      pdfFileName="Waves_Estimate.pdf"
-      shareTitle="Your Waves estimate"
-    />
-  );
-
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
   }, [selectedFrequency]);
@@ -6469,7 +6519,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // COUNT this open — the revived fetch after an expired-screen extension is
   // a real visit, and tagging it refresh=1 would leave the returning-visitor
   // projection one session behind (GH codex P2 on #3708).
-  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false } = {}) => {
+  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false, documentMode = pdfDocumentMode } = {}) => {
     const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
@@ -6479,7 +6529,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setLoadError(false);
     const params = [];
     if (isRefresh && !countView) params.push('refresh=1');
-    if (pdfDocumentMode) {
+    if (documentMode) {
       params.push('mode=pdf');
       if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
     }
@@ -6562,10 +6612,126 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return body;
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
 
-  // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
-  // sees it signed without a manual reload. Listens only while the notice blocks the accept.
+  const [staffPrintRequested, setStaffPrintRequested] = useState(false);
+  const [staffPrintError, setStaffPrintError] = useState('');
+  const staffPrintRestoreStartedRef = useRef(false);
+
+  const restoreStaffPrintPreview = useCallback(() => {
+    if (staffPrintRestoreStartedRef.current) return;
+    staffPrintRestoreStartedRef.current = true;
+    setStaffPrintRequested(false);
+    // Put the inert interactive preview back after printing (or from the
+    // screen-only fallback). This is another GET through the same verified
+    // staff route; it does not select, reserve, accept, or record a view.
+    loadEstimate({ preserveSelection: true, documentMode: false }).catch(() => {
+      setStaffPrintError('The print preview closed, but the on-screen estimate could not be refreshed.');
+    });
+  }, [loadEstimate]);
+
+  // A staff preview's ordinary /data payload intentionally does not carry the
+  // normalized proposal for a residential draft. Printing that interactive
+  // tree would both lose the Field document and tempt a second client-side
+  // pricing projection. Re-enter the same server-verified payload route in
+  // document mode instead: the server keeps staff auth/viewability, proposal
+  // normalization, snapshot and render-pin decisions authoritative.
+  const handleStaffPrintPreview = useCallback(async () => {
+    if (!readOnlyPreview || staffPrintRequested) return;
+    staffPrintRestoreStartedRef.current = false;
+    setStaffPrintError('');
+    setStaffPrintRequested(true);
+    try {
+      const body = await loadEstimate({ preserveSelection: true, documentMode: true });
+      const verifiedPreview = body?.adminDraftPreview === true || body?.verifiedStaffPreview === true;
+      if (body?.documentRender !== true || !verifiedPreview) {
+        setStaffPrintRequested(false);
+        setStaffPrintError('Print preview is unavailable right now. Refresh the staff preview and try again.');
+      }
+    } catch {
+      setStaffPrintRequested(false);
+      setStaffPrintError('Print preview is unavailable right now. Refresh the staff preview and try again.');
+    }
+  }, [loadEstimate, readOnlyPreview, staffPrintRequested]);
+
+  // The state above swaps in EstimateProposalDocument only after the server
+  // affirms `documentRender`. Effects run after that document is committed;
+  // additionally wait for its Inter face before asking the browser to capture
+  // pages, otherwise the print dialog can snapshot fallback-font line wraps.
   useEffect(() => {
-    if (!consumerNoticeBlocked) return undefined;
+    if (!staffPrintRequested || data?.documentRender !== true || !readOnlyPreview) return undefined;
+    let cancelled = false;
+    // Register before print(): some browsers dispatch afterprint while the
+    // call is still on the stack. Successful return is NOT a completion
+    // signal — Safari and resource-deferred printing may return immediately.
+    const onAfterPrint = () => restoreStaffPrintPreview();
+    window.addEventListener('afterprint', onAfterPrint, { once: true });
+    const printWhenReady = async () => {
+      try {
+        if (document.fonts?.ready) await document.fonts.ready;
+      } catch {
+        // Font loading is best-effort; a browser without FontFaceSet support
+        // still gets the fully committed canonical document.
+      }
+      // Let the font-ready layout reach a paint boundary before print() asks
+      // the browser for pagination. (The fallback covers older WebViews.)
+      await new Promise((resolve) => {
+        if (typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(() => resolve());
+        } else {
+          window.setTimeout(resolve, 0);
+        }
+      });
+      if (cancelled) return;
+      try {
+        window.print();
+      } catch {
+        setStaffPrintError('Your browser could not open the print dialog. Please try again.');
+        if (!cancelled) restoreStaffPrintPreview();
+      }
+    };
+    void printWhenReady();
+    return () => {
+      cancelled = true;
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, [data, readOnlyPreview, restoreStaffPrintPreview, staffPrintRequested]);
+
+  // Download PDF / Share / Print / Portal Login at the top of every estimate
+  // render (owner ask 2026-07-09, live review screen) — the same shared bar
+  // as the report/pay/receipt/contract pages. Staff Print preview uses the
+  // canonical document-mode projection above, never the interactive page.
+  const estimateActionBar = readOnlyPreview ? (
+    <div style={{ marginBottom: 16 }}>
+      <button
+        type="button"
+        onClick={handleStaffPrintPreview}
+        disabled={staffPrintRequested}
+        style={{ minHeight: 44, padding: '10px 16px', fontSize: 16 }}
+      >
+        {staffPrintRequested ? 'Preparing print preview…' : 'Print preview'}
+      </button>
+      {staffPrintError ? <div role="alert" style={{ marginTop: 8, color: ESTIMATE_BODY, fontSize: 14 }}>{staffPrintError}</div> : null}
+    </div>
+  ) : (
+    // /data may serve an expired group anchor for navigation, while /pdf
+    // still withholds its expired offer. Keep the other document tools.
+    <DocumentActionBar
+      pdfUrl={data?.cta?.terminalState === 'expired' ? null : `${API_BASE}/estimates/${token}/pdf`}
+      printFallbackDownload={data?.cta?.terminalState !== 'expired'}
+      pdfFileName="Waves_Estimate.pdf"
+      shareTitle="Your Waves estimate"
+    />
+  );
+
+  // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
+  // sees it signed without a manual reload; so does the signer of a commercial agreement, whose page then shows the
+  // signed card (or the first-visit picker, GATE_COMMERCIAL_FIRST_VISIT) instead of a sign button the server now
+  // refuses as already signed. Listens only while one of them waits.
+  const commercialAgreementUnsigned = data?.cta?.commercialAgreement?.canSign === true
+    && data.cta.commercialAgreement.state !== 'signed';
+  const awaitingSignature = consumerNoticeBlocked || commercialAgreementUnsigned
+    || data?.cta?.commercialFirstVisit?.state === 'after_signing';
+  useEffect(() => {
+    if (!awaitingSignature) return undefined;
     const refresh = () => {
       if (ctaPhaseRef.current === 'submitting') return;
       loadEstimate({ preserveSelection: true }).catch(() => {});
@@ -6578,7 +6744,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       window.removeEventListener('pageshow', onPageShow);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [consumerNoticeBlocked, loadEstimate]);
+  }, [awaitingSignature, loadEstimate]);
 
 
   // A different estimate token is a fresh session — let its first load count.
@@ -7610,7 +7776,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
-    reserveAttemptRef.current += 1;
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
     // INDEPENDENT — only the changed section moves (so sections sharing a tier
     // key, e.g. lawn + tree both having "standard", don't move together). But
@@ -7626,6 +7791,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         section.key === sectionKey
         || section.frequencies?.some((item) => item.key === nextFrequency)
       ));
+    // Re-tapping the cadence already chosen changes nothing, so it keeps the
+    // picked visit time and add-ons (it used to clear both and refetch slots).
+    if (affectedSections.every((section) => selected[section.key] === nextFrequency)) return;
+    reserveAttemptRef.current += 1;
     setSelected((prev) => affectedSections.reduce((next, section) => ({
       ...next,
       [section.key]: nextFrequency,
@@ -7646,7 +7815,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, [services, comboAxisKeys, comboModeActive]);
+  }, [services, comboAxisKeys, comboModeActive, selected]);
 
   // contactGaps is booleans-only (server never sends the linked customer's
   // real name/email) — lastName is REQUIRED (Accept stays disabled and shows
@@ -8850,8 +9019,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // kill switch also kills this mode (fail-closed — a bare ?mode=pdf with
   // the gate off falls through to the normal page rather than rendering an
   // official-looking document with no pricing).
-  if (pdfDocumentMode && data.documentRender === true) {
-    return <EstimateProposalDocument data={data} token={token} />;
+  if ((pdfDocumentMode || staffPrintRequested) && data.documentRender === true) {
+    return (
+      <>
+        {staffPrintRequested ? (
+          <div className="waves-field-no-print" style={{ maxWidth: 816, margin: '16px auto 0', padding: '0 16px', textAlign: 'right' }}>
+            <button type="button" onClick={restoreStaffPrintPreview} style={{ minHeight: 44, padding: '10px 16px', fontSize: 16 }}>
+              Return to preview
+            </button>
+          </div>
+        ) : null}
+        <EstimateProposalDocument data={data} token={token} />
+      </>
+    );
   }
 
   const { estimate, pricing, cta } = data;
@@ -9300,6 +9480,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
+                onPickTime={promptPickTime}
                 selectedFrequencyKey={selected[section.key]}
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
@@ -9550,7 +9731,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             />
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} onPickTime={promptPickTime} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             // Tier-aware fee state on the plan-level card too (codex r24 P2):
@@ -9631,7 +9812,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               noGuarantee={pageGuaranteeScope !== 'all'}
             />
           )}
-        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
+        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} onPickTime={promptPickTime} /> : null}
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
@@ -9715,8 +9896,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             state="accepted"
             customerFirstName={estimate.customerFirstName}
             address={estimate.address}
-            // Booked + upcoming visit → show the date, not "we'll follow up".
-            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            // Booked + upcoming visit → show the date, not "we'll follow up". A commercial proposal's
+            // self-booked first visit (GATE_COMMERCIAL_FIRST_VISIT) rides cta.commercialFirstVisit.
+            appointmentLabel={existingAppointment
+              ? formatAppointmentLabel(existingAppointment)
+              : (cta?.commercialFirstVisit?.state === 'booked' ? firstVisitLabel(cta.commercialFirstVisit.visit) : null)}
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
@@ -9752,11 +9936,25 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
-        {/* Commercial proposal: the what-happens-next card sits directly under
-            the hero identity block (owner 2026-08-08) — at the bottom it
-            repeated the hero's "your formal proposal is ready" and read as a
-            duplicate. Every other terminal state keeps the card in its
-            original slot below the content. */}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
+        {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
+            → /data ships `proposal`): the line items + totals + included-service
+            terms the customer used to get only inside the emailed PDF. Rendered
+            BEFORE the AI card — the price-before-AI ordering rule applies to a
+            proposal's price content too. Keyed off the payload's own enabled
+            flag, NOT isCommercialProposal: a higher-priority quote reason
+            (manager approval, quote-required line) outranks commercial_proposal
+            in resolveEstimateQuoteRequirement, and exactly those customers
+            still need their itemization (codex #3281 r1). It stays glass: the
+            Field layout is the emailed / printed PDF only (owner 2026-10-26). */}
+        {data.proposal?.enabled === true
+          ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
+          : null}
+        {/* Commercial proposal: the what-happens-next card sits below the
+            proposal (owner 2026-10-26; it replaces the 2026-08-08 slot under the
+            hero) and above the Accept & sign card its wording points to
+            ("below"). Every other terminal state keeps the card in its original
+            slot below the content. */}
         {isCommercialProposal ? (
           <TerminalStateCard
             state={cta.terminalState}
@@ -9769,29 +9967,20 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             cta={cta}
           />
         ) : null}
-        {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
-            → /data ships `proposal`): the line items + totals + included-service
-            terms the customer used to get only inside the emailed PDF. Rendered
-            BEFORE the AI card — the price-before-AI ordering rule applies to a
-            proposal's price content too. Keyed off the payload's own enabled
-            flag, NOT isCommercialProposal: a higher-priority quote reason
-            (manager approval, quote-required line) outranks commercial_proposal
-            in resolveEstimateQuoteRequirement, and exactly those customers
-            still need their itemization (codex #3281 r1). */}
-        {data.proposal?.enabled === true ? (
-          <FieldDocumentBody className="estimate-proposal-document-body">
-            <FieldMasthead />
-            <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
-          </FieldDocumentBody>
-        ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
-        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
+        <CommercialAgreementSign
+          token={token}
+          commercialAgreement={cta?.commercialAgreement}
+          firstVisit={cta?.commercialFirstVisit}
+          // Booking the first visit accepts the proposal: reload, so the page shows the accepted card with the visit.
+          onFirstVisitBooked={() => { loadEstimate({ preserveSelection: true }).catch(() => {}); }}
+        />
         {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -9813,9 +10002,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             isProposal={isCommercialProposal}
           />
         )}
-        {/* The Waves app pitch ("the whole household") and the neighbor / pool-cage
-            reviews are residential: hidden on an authored commercial proposal. */}
-        {authoredProposalOnPage ? null : (
+        {/* The Waves app pitch ("the whole household") is residential: hidden on an
+            authored commercial proposal. Its reviews show only the ones that fit a
+            business, under a business heading (owner 2026-10-26, choice 2A). */}
+        {authoredProposalOnPage ? <CustomerReviews commercial /> : (
           <>
             <AppShowcaseCard />
             <CustomerReviews />
@@ -9878,7 +10068,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -9921,6 +10111,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -10295,6 +10486,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
             <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
+            {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
+              ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
             {canShowSlotPicker ? (
               // SlotPicker takes no disabled prop, so freeze it from out here
               // while a reserve/accept is in flight (ctaPhase 'submitting'
@@ -10532,6 +10725,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {glassContent ? null : aiPanelBlock}
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+          {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
 
           {bookingContent}
 
@@ -10583,8 +10777,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 address={estimate.address}
                 copy={copy}
                 showYourWork={data.showYourWork || null}
+                mistingLayout={data.mistingLayout || null}
                 lockInCta={canShowSlotPicker
-                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
+                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}
               />
               {/* GBP proof directly after the review quotes. The report
@@ -10637,7 +10832,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <GlassStickyBookBar
           show={stickyBarPriced}
           slotMeta={selectedSlotMeta}
-          onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
+          onApprove={selectedSlotMeta ? scrollToPaymentSection : promptPickTime}
         />
       ) : null}
     </Page>

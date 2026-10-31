@@ -199,7 +199,21 @@ describe('ContractSignPage "Back to your estimate" (Florida consumer notice)', (
   });
 
   it('is hidden for any other document, even one carrying the marker', async () => {
-    const { queryByText } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest' });
+    const { queryByText } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.termite_annual_protection' });
+    expect(queryByText(BACK)).toBeNull();
+  });
+
+  // GATE_COMMERCIAL_FIRST_VISIT: the server marks a commercial agreement issued from the proposal page only while the
+  // gate is on, because the first visit is picked back on the estimate page.
+  it('after signing a commercial agreement the server marked, the button goes back to pick the first visit', async () => {
+    const { getByRole, back } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest', title: 'Commercial Pest Service Agreement' });
+    fireEvent.click(getByRole('button', { name: BACK }));
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+
+  it('is hidden for a commercial agreement the server did not mark (the gate off)', async () => {
+    const { fromEstimate: _drop, ...unmarked } = NOTICE;
+    const { queryByText } = await signContract({ ...unmarked, documentTemplateKey: 'service_agreement.commercial_pest' });
     expect(queryByText(BACK)).toBeNull();
   });
 });
@@ -294,5 +308,23 @@ describe('ContractSignPage drawn signature', () => {
     const body = await signWith({ draw: false });
     expect(body).toMatchObject({ initials: 'AA', signedName: 'Alice Anderson' });
     expect(body).not.toHaveProperty('signatureImage');
+  });
+});
+
+describe('ContractSignPage layout and printing', () => {
+  it('keeps the earlier web layout (no Field paper body) and prints the whole terms box', async () => {
+    const contract = { ...CONTRACT_A, contractTextSnapshot: 'First clause.\nSecond clause.' };
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ contract })));
+    const { findByText, container } = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await findByText(/First clause\./);
+    expect(container.querySelector('.waves-field-document-body, .field-document-masthead')).toBeNull();
+    expect(container.querySelector('.waves-contract-terms')).not.toBeNull();
+    const printRules = Array.from(container.querySelectorAll('style')).map((el) => el.textContent).join(' ');
+    expect(printRules).toContain('@media print');
+    expect(printRules).toContain('.waves-contract-terms { max-height: none !important; overflow: visible !important; }');
   });
 });

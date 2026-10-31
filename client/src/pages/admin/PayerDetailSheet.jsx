@@ -218,7 +218,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
 }
 
 function termLabel(v) {
-  return { due_on_receipt: "Due on receipt", net15: "Net 15", net30: "Net 30" }[v] || v || "—";
+  return { due_on_receipt: "Due on receipt", net15: "Net 15", net30: "Net 30", net60: "Net 60" }[v] || v || "—";
 }
 
 function StatementRow({ payerId, statement, expanded, onToggle, onChanged, pending, onPendingChange }) {

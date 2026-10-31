@@ -1,22 +1,22 @@
 // client/src/pages/admin/NewsletterPage.jsx
 //
 // Top-level newsletter dashboard — first-class admin page under the
-// Marketing sidebar group. Seven tabs:
-//   - Dashboard     stats + sample events + quick actions + recent posts
-//   - Calendar      editorial plan (16-week rolling view)
-//   - Compose       draft + send a newsletter
-//   - History       past sends
+// Marketing sidebar group. Five tabs:
+//   - Dashboard     stats + upcoming events + recent posts
+//   - History       past sends and their results
 //   - Subscribers   list + manage
 //   - Events        inbox + sources
 //   - Automations   drip + trigger flows
 //
-// Per-tab URL state via ?tab=dashboard|calendar|compose|history|subscribers|events|automations
+// There is no manual composer or editorial calendar: the weekly issue is
+// drafted by the Monday autopilot and sent through the proof flow. Retired
+// ?tab=compose and ?tab=calendar links open History (RETIRED_TABS).
+//
+// Per-tab URL state via ?tab=dashboard|history|subscribers|events|automations
 // so a refresh or a shared link lands on the right view. Default = dashboard.
 //
-// Compose / History / Subscribers render named exports from
-// ./NewsletterTabs (formerly NewsletterTabV2 — consolidated under
-// /admin/newsletter when newsletter-v1 was rolled out). Automations
-// renders EmailAutomationsPanelV2 directly.
+// History / Subscribers render named exports from ./NewsletterTabs.
+// Automations renders EmailAutomationsPanelV2 directly.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -42,10 +42,8 @@ import {
   Users,
   Zap,
   Calendar,
-  CalendarDays,
   FileText,
   TrendingUp,
-  Sparkles,
   Upload,
   MapPin,
   MailPlus,
@@ -57,9 +55,8 @@ import {
   Search,
   GitMerge,
 } from "lucide-react";
-import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
+import { HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
-import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -83,18 +80,6 @@ const TABS = [
     label: "Dashboard",
     desc: "Overview",
     Icon: TrendingUp,
-  },
-  {
-    key: "calendar",
-    label: "Calendar",
-    desc: NEWSLETTER_UI_COPY.sendCadence,
-    Icon: CalendarDays,
-  },
-  {
-    key: "compose",
-    label: "Compose",
-    desc: "Draft + send",
-    Icon: MailPlus,
   },
   {
     key: "history",
@@ -123,7 +108,11 @@ const TABS = [
 ];
 const TAB_BY_KEY = Object.fromEntries(TABS.map((t) => [t.key, t]));
 
-// The 7-tab bar is grouped into parent sections, each revealing its leaf
+// Tabs that no longer exist. Old bookmarks, notification links and emailed
+// links to them open History, where the weekly issue and its results are.
+const RETIRED_TABS = { compose: "history", calendar: "history" };
+
+// The 5-tab bar is grouped into parent sections, each revealing its leaf
 // tabs in a sub-row. `tab` still holds the LEAF key (URL ?tab=…), so every
 // {tab === "..."} render block below is unchanged. Default/primary tab
 // (dashboard) is the first group.
@@ -135,16 +124,10 @@ const NEWSLETTER_TAB_GROUPS = [
     tabs: ["dashboard"],
   },
   {
-    key: "compose",
-    label: "Compose",
-    Icon: MailPlus,
-    tabs: ["compose"],
-  },
-  {
-    key: "schedule",
-    label: "Schedule",
-    Icon: CalendarDays,
-    tabs: ["calendar", "history"],
+    key: "history",
+    label: "History",
+    Icon: FileText,
+    tabs: ["history"],
   },
   {
     key: "automation",
@@ -216,7 +199,7 @@ function safeHttpUrl(raw) {
 //     city, geoLat, geoLng, eventUrl, imageUrl, categories, sourceName }
 // startAt + city + sourceName + description + venue fields may be
 // null for some feeds — render gracefully.
-function EventCard({ event, onDraft }) {
+function EventCard({ event }) {
   const dateLabel = event.startAt
     ? new Date(event.startAt).toLocaleDateString("en-US", {
         month: "short",
@@ -305,66 +288,14 @@ function EventCard({ event, onDraft }) {
             View source
           </a>
         )}
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={onDraft || undefined}
-          disabled={!onDraft}
-          title={
-            onDraft
-              ? "Switch to Compose with this event pre-loaded for AI Draft"
-              : "Wire-up pending"
-          }
-        >
-          {" "}
-          <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
-          Draft newsletter
-        </Button>{" "}
       </div>{" "}
     </div>
   );
 }
 function QuickActions({ onSelectTab }) {
-  // "Draft from event" was retired — that workflow is the "Draft
-  // newsletter" button on each EventCard tile in the section below.
-  // Keep this grid 2-up.
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {" "}
-      <Card
-        className="cursor-pointer hover:bg-zinc-50 transition-colors"
-        onClick={() => onSelectTab("compose")}
-      >
-        {" "}
-        <CardBody>
-          {" "}
-          <div className="flex items-center gap-2 mb-2">
-            {" "}
-            <FileText
-              size={18}
-              strokeWidth={1.75}
-              className="text-zinc-900"
-            />{" "}
-            <span className="text-14 font-medium text-ink-primary">
-              Compose manually
-            </span>{" "}
-          </div>{" "}
-          <div className="text-ui-body text-ink-tertiary">
-            Start a blank draft in the composer.
-          </div>{" "}
-          <Button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onSelectTab("compose");
-            }}
-            className="inline-block mt-3"
-            variant="secondary"
-          >
-            Open composer →
-          </Button>{" "}
-        </CardBody>{" "}
-      </Card>{" "}
       <Card
         className="cursor-pointer hover:bg-zinc-50 transition-colors"
         onClick={() => onSelectTab("subscribers")}
@@ -454,7 +385,7 @@ function RecentPosts({ posts, loading }) {
           {" "}
           <div className="text-14 text-ink-primary mb-1">No posts yet</div>{" "}
           <div className="text-ui-body text-ink-tertiary">
-            Draft your first newsletter from an event, or compose manually.
+            The weekly issue appears here after the Monday autopilot drafts it.
           </div>{" "}
         </CardBody>{" "}
       </Card>
@@ -503,7 +434,6 @@ function RecentPosts({ posts, loading }) {
 }
 function DashboardView({
   onSelectTab,
-  onDraftFromEvent,
   sendsData,
   sendsLoading,
   subscribersActive,
@@ -600,10 +530,7 @@ function DashboardView({
       {/* Quick actions */}
       <div className="mb-6">
         {" "}
-        <SectionHeader
-          title="Quick start"
-          hint="Pick a starting point — or use the event tiles below for an event-anchored draft"
-        />{" "}
+        <SectionHeader title="Quick start" />{" "}
         <QuickActions onSelectTab={onSelectTab} />{" "}
       </div>
       {/* Upcoming events — pulled from event_sources via the daily
@@ -612,7 +539,7 @@ function DashboardView({
       <div className="mb-6">
         {" "}
         <SectionHeader
-          title="Upcoming events worth writing about"
+          title="Upcoming events"
           hint="Pulled from local SWFL feeds (Tampa.gov, Bay News 9, Manatee Chamber, Sarasota Magazine, The Gabber, Lakewood Ranch). Refreshes daily 4am ET."
         />
         {eventsError && (
@@ -645,11 +572,7 @@ function DashboardView({
         ) : events.length > 0 ? (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
             {events.map((e) => (
-              <EventCard
-                key={e.id}
-                event={e}
-                onDraft={onDraftFromEvent ? () => onDraftFromEvent(e) : null}
-              />
+              <EventCard key={e.id} event={e} />
             ))}
           </div>
         ) : null}
@@ -749,7 +672,22 @@ function AdminStatusBadge({ status }) {
     </span>
   );
 }
-function EventInboxView({ onDraftFromEvent }) {
+// The bulk-action and merge routes refuse more ids than this per request.
+const EVENT_BULK_BATCH = 50;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// The notice reports what the server actually updated, never the selection.
+function bulkActionNotice(action, requested, updated, failure) {
+  const left = requested - updated;
+  if (!failure && left === 0) return `${plural(updated, "event")} updated.`;
+  const done = `${updated} of ${plural(requested, "event")} updated.`;
+  if (failure) {
+    return `${done} Bulk ${action} failed: ${failure.message}. ${left} still selected.`;
+  }
+  return `${done} ${left} could not be updated and ${left === 1 ? "is" : "are"} still selected.`;
+}
+
+function EventInboxView() {
   const [events, setEvents] = useState([]);
   const [counts, setCounts] = useState({});
   const [sources, setSources] = useState([]);
@@ -853,18 +791,27 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     setActionStatus(`${action} in progress…`);
-    try {
-      await adminFetch("/admin/newsletter/events/bulk-action", {
-        method: "POST",
-        body: JSON.stringify({ action, ids: [...selected] }),
-      });
-      setActionStatus(
-        `${selected.size} event${selected.size === 1 ? "" : "s"} updated.`,
-      );
-      fetchEvents();
-    } catch (e) {
-      setActionStatus(`Bulk ${action} failed: ${e.message}`);
+    // The route takes at most EVENT_BULK_BATCH ids, so a larger selection
+    // goes in batches. Only ids the server reports as updated leave the
+    // selection; the rest stay selected and the notice says so.
+    const ids = [...selected];
+    const updated = new Set();
+    let failure = null;
+    for (let i = 0; i < ids.length && !failure; i += EVENT_BULK_BATCH) {
+      try {
+        const result = await adminFetch("/admin/newsletter/events/bulk-action", {
+          method: "POST",
+          body: JSON.stringify({ action, ids: ids.slice(i, i + EVENT_BULK_BATCH) }),
+        });
+        (result.updatedIds || []).forEach((id) => updated.add(id));
+      } catch (e) {
+        failure = e;
+      }
     }
+    const remaining = ids.filter((id) => !updated.has(id));
+    setSelected(new Set(remaining));
+    setActionStatus(bulkActionNotice(action, ids.length, updated.size, failure));
+    fetchEvents(true);
   };
 
   // Merge duplicates. The survivor is chosen by a visible, deterministic rule
@@ -885,6 +832,14 @@ function EventInboxView({ onDraftFromEvent }) {
     const duplicateIds = chosen
       .filter((e) => e.id !== primaryId)
       .map((e) => e.id);
+    // The merge route refuses more duplicates than one batch; say so before
+    // the confirm instead of promising a merge of the whole selection.
+    if (duplicateIds.length > EVENT_BULK_BATCH) {
+      setActionStatus(
+        `Merge up to ${EVENT_BULK_BATCH + 1} events at a time. ${selected.size} are selected.`,
+      );
+      return;
+    }
     if (
       !confirm(
         `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
@@ -894,11 +849,14 @@ function EventInboxView({ onDraftFromEvent }) {
       return;
     cancelPendingEventRead();
     try {
-      await adminFetch("/admin/newsletter/events/merge", {
+      const result = await adminFetch("/admin/newsletter/events/merge", {
         method: "POST",
         body: JSON.stringify({ primaryId, duplicateIds }),
       });
       setSelected(new Set());
+      setActionStatus(
+        `Merged ${plural(result.merged ?? 0, "duplicate")} into "${primary.title}".`,
+      );
       fetchEvents();
     } catch (e) {
       alert("Merge failed: " + e.message);
@@ -1239,16 +1197,6 @@ function EventInboxView({ onDraftFromEvent }) {
                   </TD>
                   <TD className="px-3 py-2">
                     <div className="flex items-center gap-1">
-                      <Button
-                        type="button"
-                        onClick={() => onDraftFromEvent?.(ev)}
-                        className=""
-                        title="Draft a newsletter with this event preloaded"
-                        variant="secondary"
-                        aria-label="Draft a newsletter with this event preloaded"
-                      >
-                        <FileText size={13} strokeWidth={2} />
-                      </Button>
                       {ev.adminStatus !== "approved" &&
                         ev.adminStatus !== "featured" && (
                           <Button
@@ -1311,349 +1259,23 @@ function EventInboxView({ onDraftFromEvent }) {
   );
 }
 
-// ── Calendar View ───────────────────────────────────────────────────
-
-function CalendarRow({
-  row,
-  isPast,
-  isCurrent,
-  rowCls,
-  saving,
-  onSave,
-  onDraft,
-  drafting,
-  fmtWeekLabel,
-  STATUS_STYLE,
-}) {
-  const [editTopic, setEditTopic] = useState(row.topic || "");
-  const [editTip, setEditTip] = useState(row.homeownerMinuteTopic || "");
-  const [dirty, setDirty] = useState(false);
-
-  // Reset local state when row data changes (after save/fetch)
-  useEffect(() => {
-    setEditTopic(row.topic || "");
-    setEditTip(row.homeownerMinuteTopic || "");
-    setDirty(false);
-  }, [row.topic, row.homeownerMinuteTopic]);
-  const handleTopicChange = (e) => {
-    setEditTopic(e.target.value);
-    setDirty(true);
-  };
-  const handleTipChange = (e) => {
-    setEditTip(e.target.value);
-    setDirty(true);
-  };
-  const handleSave = () => {
-    if (!dirty) return;
-    onSave({
-      topic: editTopic || null,
-      homeownerMinuteTopic: editTip || null,
-    });
-  };
-  const handleBlur = () => {
-    if (dirty) handleSave();
-  };
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter") {
-      e.target.blur();
-    }
-  };
-
-  // Draft button is enabled only for planned rows that are not past
-  const canDraft = !isPast && row.status === "planned" && !drafting;
-  return (
-    <TR className={`border-b border-zinc-50 hover:bg-zinc-25 ${rowCls}`}>
-      <TD className="px-3 py-2">
-        <div className="text-ui-body font-medium text-ink-primary">
-          {fmtWeekLabel(row.weekOf)}
-        </div>
-        {isCurrent && (
-          <div className="text-ui-body text-ink-tertiary font-medium">
-            This week
-          </div>
-        )}
-      </TD>
-      <TD className="px-3 py-2">
-        {isPast ? (
-          <span className="text-ui-body text-ink-secondary">
-            {row.topic || "—"}
-          </span>
-        ) : (
-          <Input
-            type="text"
-            value={editTopic}
-            onChange={handleTopicChange}
-            onBlur={handleBlur}
-            onKeyDown={handleKeyDown}
-            placeholder="Add topic..."
-            className="w-full"
-            aria-label="Add topic..."
-          />
-        )}
-      </TD>
-      <TD className="px-3 py-2">
-        {isPast ? (
-          <span className="text-ui-body text-ink-secondary">
-            {row.homeownerMinuteTopic || "—"}
-          </span>
-        ) : (
-          <Input
-            type="text"
-            value={editTip}
-            onChange={handleTipChange}
-            onBlur={handleBlur}
-            onKeyDown={handleKeyDown}
-            placeholder="Tip topic..."
-            className="w-full"
-            aria-label="Tip topic..."
-          />
-        )}
-      </TD>
-      <TD className="px-3 py-2">
-        <span
-          className={`inline-block px-1.5 py-0.5 rounded text-ui-body font-medium ${STATUS_STYLE[row.status] || STATUS_STYLE.planned}`}
-        >
-          {row.status}
-        </span>
-      </TD>
-      <TD className="px-3 py-2 text-ui-body text-ink-secondary u-nums">
-        {(row.eventIds || []).length || "—"}
-      </TD>
-      <TD className="px-3 py-2">
-        {row.send ? (
-          <div className="text-ui-body text-ink-tertiary u-nums">
-            <span>{row.send.deliveredCount || 0} delivered</span>
-            {row.send.openedCount > 0 && (
-              <span> · {row.send.openedCount} opened</span>
-            )}
-          </div>
-        ) : (
-          <span className="text-ui-body text-ink-tertiary">—</span>
-        )}
-      </TD>
-      <TD className="px-3 py-2">
-        {canDraft ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() =>
-              onDraft({
-                ...row,
-                topic: editTopic || null,
-                homeownerMinuteTopic: editTip || null,
-              })
-            }
-            disabled={drafting}
-          >
-            <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
-            Draft
-          </Button>
-        ) : drafting ? (
-          <span className="text-ui-body text-ink-tertiary">Drafting...</span>
-        ) : null}
-      </TD>
-    </TR>
-  );
-}
-function CalendarView() {
-  const [calendar, setCalendar] = useState([]);
-  const [currentWeek, setCurrentWeek] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(null); // weekOf being saved
-  const [calendarStatus, setCalendarStatus] = useState("");
-  const [draftingWeek, setDraftingWeek] = useState(null); // weekOf being drafted
-
-  const fetchCalendar = () => {
-    setLoading(true);
-    adminFetch('/admin/newsletter/calendar?pastWeeks=4&futureWeeks=12')
-      .then((d) => {
-        setCalendar(d.calendar || []);
-        setCurrentWeek(d.currentWeek || null);
-      })
-      .catch(() => setCalendar([]))
-      .finally(() => setLoading(false));
-  };
-  useEffect(() => {
-    fetchCalendar();
-  }, []);
-  const saveEntry = async (weekOf, updates) => {
-    setSaving(weekOf);
-    setCalendarStatus("Saving calendar…");
-    try {
-      const entry = calendar.find((c) => c.weekOf === weekOf);
-      if (entry && entry.id) {
-        await adminFetch(`/admin/newsletter/calendar/${entry.id}`, {
-          method: 'PATCH',
-          body: JSON.stringify(updates),
-        });
-      } else {
-        await adminFetch('/admin/newsletter/calendar', {
-          method: 'POST',
-          body: JSON.stringify({ weekOf, ...updates }),
-        });
-      }
-      fetchCalendar();
-      setCalendarStatus("Calendar saved.");
-    } catch (e) {
-      setCalendarStatus(`Calendar save failed: ${e.message}`);
-    } finally {
-      setSaving(null);
-    }
-  };
-  const handleDraft = async (row) => {
-    setDraftingWeek(row.weekOf);
-    setCalendarStatus("Drafting newsletter…");
-    try {
-      let calendarId = row.id;
-
-      // Save current editor values first (create or update)
-      if (!calendarId) {
-        // Placeholder — create the row
-        const created = await adminFetch('/admin/newsletter/calendar', {
-          method: 'POST',
-          body: JSON.stringify({
-            weekOf: row.weekOf,
-            topic: row.topic || null,
-            homeownerMinuteTopic: row.homeownerMinuteTopic || null,
-          }),
-        });
-        calendarId = created.entry?.id;
-        if (!calendarId) throw new Error("Failed to create calendar entry");
-      } else {
-        // Existing row — persist any pending edits
-        await adminFetch(`/admin/newsletter/calendar/${calendarId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({
-            topic: row.topic || null,
-            homeownerMinuteTopic: row.homeownerMinuteTopic || null,
-          }),
-        });
-      }
-
-      // Now draft from the saved row
-      await adminFetch(`/admin/newsletter/calendar/${calendarId}/draft-from-plan`, {
-        method: 'POST',
-      });
-      fetchCalendar();
-      setCalendarStatus("Draft created. Open Compose to review it.");
-    } catch (e) {
-      setCalendarStatus(`Draft failed: ${e.message}`);
-    } finally {
-      setDraftingWeek(null);
-    }
-  };
-  const fmtWeekLabel = (weekOf) => {
-    const start = new Date(weekOf + "T12:00:00Z");
-    const end = new Date(start);
-    end.setDate(end.getDate() + 6);
-    return `${start.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    })} – ${end.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    })}`;
-  };
-  const STATUS_STYLE = {
-    planned: "bg-zinc-200 text-zinc-600",
-    drafted: "bg-zinc-700 text-white",
-    scheduled: "bg-zinc-800 text-white",
-    sent: "bg-zinc-900 text-white",
-    skipped: "bg-zinc-100 text-zinc-400 line-through",
-  };
-  if (loading) {
-    return (
-      <div className="p-8 text-center text-ui-body text-ink-tertiary">
-        Loading calendar...
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-4 mt-4">
-      {calendarStatus && (
-        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-ui-body text-ink-secondary">
-          {calendarStatus}
-        </div>
-      )}
-      <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
-        <Table className="w-full text-left">
-          <THead>
-            <TR className="border-b border-zinc-100">
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-44">
-                {NEWSLETTER_UI_COPY.calendarWeekHeading}
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary">
-                Topic
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-40">
-                Homeowner Tip
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-20">
-                Status
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-16">
-                Events
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-32">
-                Performance
-              </TH>
-              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-24"></TH>
-            </TR>
-          </THead>
-          <TBody>
-            {calendar.map((row) => {
-              const isPast = row.weekOf < currentWeek;
-              const isCurrent = row.weekOf === currentWeek;
-              const rowCls = isCurrent
-                ? "bg-zinc-50 border-l-2 border-l-zinc-900"
-                : isPast
-                  ? "opacity-60"
-                  : "";
-              return (
-                <CalendarRow
-                  key={row.weekOf}
-                  row={row}
-                  isPast={isPast}
-                  isCurrent={isCurrent}
-                  rowCls={rowCls}
-                  saving={saving === row.weekOf}
-                  onSave={(updates) => saveEntry(row.weekOf, updates)}
-                  onDraft={handleDraft}
-                  drafting={draftingWeek === row.weekOf}
-                  fmtWeekLabel={fmtWeekLabel}
-                  STATUS_STYLE={STATUS_STYLE}
-                />
-              );
-            })}
-          </TBody>
-        </Table>
-      </div>
-    </div>
-  );
-}
 export default function NewsletterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = useMemo(() => {
     const requested = searchParams.get("tab");
-    return TABS.find((t) => t.key === requested)?.key || "dashboard";
+    const key = RETIRED_TABS[requested] || requested;
+    return TABS.find((t) => t.key === key)?.key || "dashboard";
   }, [searchParams]);
 
   // Usage beacon for the leaf that actually RENDERS: the ordinary
   // query-less landing resolves to 'dashboard' here, which the layout's
   // raw ?tab= beacon can't see — without this, explicit ?tab= leaves
   // outrank the actual default in the Portal Usage report (Codex #2961
-  // r16). Deliberately NO active-re-click guard on setTab below: same-tab
-  // calls carry real side effects there (New Campaign clears ?draftId);
-  // the lib's dedupe absorbs repeated beacon assertions instead.
+  // r16). A retired ?tab=compose or ?tab=calendar link beacons as
+  // 'history', the tab it opens. There is deliberately NO active-re-click
+  // guard on setTab below: the lib's dedupe absorbs repeated beacon
+  // assertions instead.
   useRenderedTabBeacon("/admin/newsletter", tab, [searchParams]);
-
-  // Cross-tab handoff for "Draft newsletter" clicks on EventCard.
-  // DashboardView calls onDraftFromEvent(event) → we stash the event +
-  // switch to the Compose tab. ComposeView consumes pendingDraftEvent
-  // on mount (applies the flagship template + opens the AI Draft
-  // modal pre-filled with the event facts), then clears it via
-  // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
-  const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
 
   // Sends + subscribers are fetched once at the page level and shared with
   // DashboardView (avoids the duplicate /sends call on the default dashboard
@@ -1666,6 +1288,9 @@ export default function NewsletterPage() {
   // brand-new install with no sent campaigns would silently drop the badge.
   const [sendsData, setSendsData] = useState(null);
   const [sendsLoading, setSendsLoading] = useState(true);
+  // Completed /sends reads (success or failure). History shows only rows
+  // from a read that finished after it opened.
+  const [sendsReads, setSendsReads] = useState(0);
   const [subscribersActive, setSubscribersActive] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const summaryRequest = useRef(0);
@@ -1682,6 +1307,7 @@ export default function NewsletterPage() {
             },
           );
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       })
       // Clear sendsData on error so a failed refresh doesn't silently keep
@@ -1691,6 +1317,7 @@ export default function NewsletterPage() {
         if (request === summaryRequest.current) {
           setSendsData(null);
           setSendsLoading(false);
+          setSendsReads((n) => n + 1);
         }
       });
     adminFetch("/admin/newsletter/subscribers?limit=1")
@@ -1723,6 +1350,7 @@ export default function NewsletterPage() {
             ? sends.value || { sends: [], counts: {} }
             : null,
         );
+        setSendsReads((n) => n + 1);
         setSubscribersActive(
           subscribers.status === "fulfilled"
             ? subscribers.value.counts?.active ?? 0
@@ -1733,13 +1361,13 @@ export default function NewsletterPage() {
     { intervalMs: 120_000 },
   );
 
-  // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
-  // remount so a campaign sent in Compose or a subscriber added in Subscribers
-  // is reflected when the user returns to the dashboard. Skips refetch on
-  // tab switches that don't land on dashboard (e.g. Compose → Subscribers).
+  // Refetch on Dashboard or History entry — mirrors the prior per-tab
+  // remounts so a send that changed state, or a subscriber added in
+  // Subscribers, is reflected when the user lands there. Skips refetch on
+  // tab switches that land elsewhere (e.g. Events → Subscribers).
   const prevTabRef = useRef(tab);
   useEffect(() => {
-    if (tab === "dashboard" && prevTabRef.current !== "dashboard") {
+    if ((tab === "dashboard" || tab === "history") && prevTabRef.current !== tab) {
       setRefreshKey((k) => k + 1);
     }
     prevTabRef.current = tab;
@@ -1756,19 +1384,13 @@ export default function NewsletterPage() {
     const newParams = new URLSearchParams(searchParams);
     if (next === "dashboard") newParams.delete("tab");
     else newParams.set("tab", next);
-    // Draft deep links are single-compose context. Normal navigation to a new
-    // campaign (or away from Compose) must not silently rehydrate an old row.
+    // Retired composer deep-link params must not follow the user to another tab.
     newParams.delete("draftId");
-    if (next === "compose") newParams.delete("autopilotType");
+    newParams.delete("autopilotType");
     setSearchParams(newParams, {
       replace: true,
     });
   };
-  const onDraftFromEvent = (event) => {
-    setPendingDraftEvent(event);
-    setTab("compose");
-  };
-  const clearPendingDraftEvent = () => setPendingDraftEvent(null);
 
   // `tab` holds the LEAF key; resolve its parent group for the top-level nav.
   const activeGroup =
@@ -1801,12 +1423,7 @@ export default function NewsletterPage() {
             if (g) setTab(g.tabs[0]);
           }}
           ariaLabel="Newsletter section"
-          navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-5"
-          action={{
-            label: "New Campaign",
-            icon: MailPlus,
-            onClick: () => setTab("compose"),
-          }}
+          navGridClassName="grid-cols-2 md:grid-cols-4"
           variant="workspace"
         />
         {/* Leaf sub-tab pill row — only when the active group has >1 leaf. */}
@@ -1843,28 +1460,21 @@ export default function NewsletterPage() {
         {tab === "dashboard" && (
           <DashboardView
             onSelectTab={setTab}
-            onDraftFromEvent={onDraftFromEvent}
             sendsData={sendsData}
             sendsLoading={sendsLoading}
             subscribersActive={subscribersActive}
           />
         )}
-        {tab === "calendar" && <CalendarView />}
-        {tab === "compose" && (
-          <ComposeView
-            pendingEvent={pendingDraftEvent}
-            onPendingEventConsumed={clearPendingDraftEvent}
-            onSendComplete={() => {
-              setRefreshKey((k) => k + 1);
-              setTab("history");
-            }}
+        {tab === "history" && (
+          <HistoryView
+            sendsData={sendsData}
+            sendsLoading={sendsLoading}
+            sendsReads={sendsReads}
+            onRefresh={() => setRefreshKey((k) => k + 1)}
           />
         )}
-        {tab === "history" && <HistoryView />}
         {tab === "subscribers" && <SubscribersView />}
-        {tab === "events" && (
-          <EventInboxView onDraftFromEvent={onDraftFromEvent} />
-        )}
+        {tab === "events" && <EventInboxView />}
         {tab === "automations" && <EmailAutomationsPanelV2 />}
       </div>
     </UiSurface>

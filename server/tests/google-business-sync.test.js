@@ -302,6 +302,7 @@ describe('Google Business review sync', () => {
     service._clients = {};
     service._getClient = jest.fn(async () => ({}));
     service._getHeaders = jest.fn(async () => ({ Authorization: 'Bearer test' }));
+    service._reviewRetryDelaysMs = [0, 0]; // keep the reviews.list backoff instant
   });
 
   afterEach(() => {
@@ -326,6 +327,49 @@ describe('Google Business review sync', () => {
     const err = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((e) => e);
     expect(err.message).toMatch(/429/);
     expect(err.transport).toBeUndefined();
+  });
+
+  describe('getReviews transient retry', () => {
+    const failRes = (status) => ({ ok: false, status, headers: { get: () => 'application/json' }, text: async () => `{"error":{"status":"E${status}"}}` });
+    const loc = 'accounts/1/locations/2';
+
+    test('503 then 200 returns the data after two fetches without throwing', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(failRes(503))
+        .mockResolvedValueOnce(jsonResponse({ reviews: [{ name: 'r1' }] }));
+      await expect(service.getReviews(loc, 'bradenton')).resolves.toEqual({ reviews: [{ name: 'r1' }] });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('503 on every attempt throws the unchanged message after three fetches', async () => {
+      global.fetch = jest.fn(async () => failRes(503));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503: /);
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    test('403 throws immediately after one fetch', async () => {
+      global.fetch = jest.fn(async () => failRes(403));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 403: /);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a signal that aborts during the backoff throws and starts no further fetch', async () => {
+      service._reviewRetryDelaysMs = [60000, 60000];
+      const ac = new AbortController();
+      global.fetch = jest.fn(async () => failRes(503));
+      const p = service.getReviews(loc, 'bradenton', 50, null, { signal: ac.signal });
+      await new Promise(r => setImmediate(r));
+      ac.abort();
+      await expect(p).rejects.toThrow(/aborted/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a signal already aborted when the retry wait starts does not fetch again', async () => {
+      const ac = new AbortController();
+      global.fetch = jest.fn(async () => { ac.abort(); return failRes(503); });
+      await expect(service.getReviews(loc, 'bradenton', 50, null, { signal: ac.signal })).rejects.toThrow(/aborted/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   test('paginates GBP reviews and upserts each page by GBP resource name', async () => {
@@ -423,7 +467,7 @@ describe('Google Business review sync', () => {
 
     expect(mark).toHaveBeenCalled();
     // Independent side effects: the failed suppression mark must not skip the attribution-moment thank-you.
-    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
+    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review', reviewCreatedAt: '2026-05-14T01:22:29Z' }));
     expect(result.synced).toBe(1);
     // Surfaced, but not as a storage failure.
     // The first failure is the one reported; a RESOLVED failure marker from the enrollment helper counts too.
@@ -985,6 +1029,28 @@ describe('Google Business review sync', () => {
       auto_reply_draft: null,
       auto_reply_attempts: 0,
     });
+  });
+
+  test('Places fallback: a newly matched review hands the thank-you its Google post time (the 14-day age rule reads it)', async () => {
+    db.__state.rows.customers.push({ id: 'cust-9', first_name: 'Reviewer', last_name: 'Delta', active: true, has_left_google_review: false });
+    service._getClient = jest.fn(async () => null); // force Places fallback
+    const postedSeconds = 1778721749;
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{ author_name: 'Reviewer Delta', rating: 5, text: 'Great', time: postedSeconds }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+    const enroll = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'review_too_old' });
+
+    await service.syncAllReviews();
+
+    expect(enroll).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-9',
+      source: 'google_review_places',
+      reviewCreatedAt: new Date(postedSeconds * 1000).toISOString(),
+    }));
+    enroll.mockRestore();
   });
 
   test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {

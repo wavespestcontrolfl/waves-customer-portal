@@ -193,7 +193,7 @@ async function executeScheduleTool(toolName, input, actionContext = {}) {
       case 'move_stops_to_day': return await moveStopsToDay(input, actionContext);
       case 'swap_tech_assignments': return await swapTechAssignments(input, actionContext);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
-      case 'find_available_slots': return await findAvailableSlotsTool(input);
+      case 'find_available_slots': return await findAvailableSlotsTool(input, actionContext);
       case 'get_day_summary': return await getDaySummary(input.date);
       case 'get_zone_density': return await getZoneDensity(input.date);
       case 'cancel_and_reschedule_far_out': return await cancelAndRescheduleFarOut(input);
@@ -1553,6 +1553,18 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
       if (!again.length && at !== -1) overlappedIds.splice(at, 1);
     }
   }
+  // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op when
+  // off): once every stop sits in its new place, each moved stop gets the
+  // arrival-window check Edit's save runs, on the road times the pickers
+  // already bought. ADVISORY ONLY: the warnings ride on the stops
+  // (`routeWarnings`) into the result's warning; a route result never refuses
+  // or rolls back the batch, and the overlap probes above are unchanged.
+  for (const c of classified) {
+    const { start, end } = probeWindowOf(c.s);
+    c.routeWarnings = await require('../scheduling/staff-save-route-check').staffSaveRouteWarnings(trx, {
+      serviceId: c.s.id, date: dateStr, windowStart: start, windowEnd: end, technicianId: c.committedTechId,
+    });
+  }
   return overlappedIds;
 }
 
@@ -1762,7 +1774,7 @@ function moveWarning(plan, run, movedCount) {
   const auditNote = run.auditFailures.length
     ? `${run.auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
     : null;
-  return [overlapNote, notifyNote, lifecycleNote, run.moveGroupWarning, auditNote].filter(Boolean).join(' ');
+  return [overlapNote, ...(run.routeWarnings || []), notifyNote, lifecycleNote, run.moveGroupWarning, auditNote].filter(Boolean).join(' ');
 }
 
 function moveResult(plan, run) {
@@ -1797,11 +1809,12 @@ async function commitMove(plan, actionContext) {
     return moveBatchFailure(err);
   }
   const movedIds = new Set(classified.map((c) => c.s.id));
+  const routeWarnings = [...new Set(classified.flatMap((c) => c.routeWarnings || []))];
   notifyTechsOfMove(classified, plan.dateStr, actionContext);
   const post = await applyPostCommit(classified, plan.dateStr, plan.reason);
   const notices = await notifyMovedCustomers(plan, movedIds);
   const moveGroupWarning = await repairMovedGroups(movedIds, plan.movable);
-  return moveResult(plan, { movedIds, overlapMovedIds, moveGroupWarning, ...post, ...notices });
+  return moveResult(plan, { movedIds, overlapMovedIds, routeWarnings, moveGroupWarning, ...post, ...notices });
 }
 
 // The skipped lists that hold a stop, named as the card and the result show
@@ -2095,6 +2108,17 @@ async function findScheduleGaps(input) {
 }
 
 
+// A visit's own price: its set price (a deliberate $0 included), else what was
+// prepaid for it (billing-lane.js treats a prepayment on an unpriced visit as its
+// payment). A visit with neither (a plan visit billed monthly, or one not priced
+// yet) returns null, so the day summary counts it and never guesses an amount.
+function visitOwnPrice(s) {
+  const set = s.estimated_price == null || s.estimated_price === '' ? NaN : Number(s.estimated_price);
+  if (Number.isFinite(set)) return set;
+  const prepaid = Number(s.prepaid_amount);
+  return prepaid > 0 ? prepaid : null;
+}
+
 async function getDaySummary(date) {
   const services = await db('scheduled_services')
     .where({ 'scheduled_services.scheduled_date': date })
@@ -2112,14 +2136,17 @@ async function getDaySummary(date) {
   const unassigned = [];
   const byZone = {};
   let completed = 0;
-  let estRevenue = 0;
+  let visitPriceTotal = 0;
+  let visitsWithoutPrice = 0;
 
   services.forEach(s => {
     const zone = getZone(s.city);
     byZone[zone] = (byZone[zone] || 0) + 1;
 
     if (s.status === 'completed') completed++;
-    estRevenue += (parseFloat(s.estimated_price) || 125);
+    const price = visitOwnPrice(s);
+    if (price == null) visitsWithoutPrice++;
+    else visitPriceTotal += price;
 
     if (!s.tech_name) {
       unassigned.push({
@@ -2169,7 +2196,9 @@ async function getDaySummary(date) {
     total_services: services.length,
     completed,
     remaining: services.length - completed,
-    estimated_revenue: estRevenue,
+    visit_price_total: Math.round(visitPriceTotal * 100) / 100,
+    visits_with_price: services.length - visitsWithoutPrice,
+    visits_without_price: visitsWithoutPrice,
     unassigned,
     unassigned_count: unassigned.length,
     new_customer_count: newCustomerIds.size,
@@ -2221,7 +2250,7 @@ async function getZoneDensity(date) {
 }
 
 
-async function findAvailableSlotsTool(input) {
+async function findAvailableSlotsTool(input, actionContext) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, service_name, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
@@ -2268,7 +2297,15 @@ async function findAvailableSlotsTool(input) {
   const dateFrom = date_from || today;
   const dateTo = date_to || weekOut;
 
-  const result = await findAvailableSlots({
+  // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the new stop is checked
+  // by the dispatcher's arrival-window route check instead of the gap search.
+  // Only an admin caller's search may buy Google road times (the acting
+  // user's technician id is the spender); anyone else stays on the estimate.
+  // Needs the stop's coordinates; without them the old search runs.
+  const rankedDays = require('../scheduling/route-ranked-days');
+  const routeCheck = rankedDays.newStopRouteOptions({ lat, lng, durationMinutes, caller: actionContext });
+
+  let result = await findAvailableSlots({
     // Staff tool: tech start points apply (GATE_TECH_START_POINTS).
     techStartPoints: true,
     lat, lng,
@@ -2277,6 +2314,7 @@ async function findAvailableSlotsTool(input) {
     dateFrom,
     dateTo,
     technicianId: technician_id,
+    ...routeCheck,
     // Every feasible slot comes back, so each day's count is real; the
     // operator's top N is cut in describeSlotSearch.
     topN: SLOT_SEARCH_ALL,
@@ -2289,6 +2327,7 @@ async function findAvailableSlotsTool(input) {
     includeBlackoutDates: true,
   });
   if (result.error) return result;
+  result = rankedDays.withSearchedDays(result, routeCheck, dateFrom, dateTo);
   return describeSlotSearch(result, {
     dateFrom, dateTo, today, durationMinutes, durationSource, service, technicianId: technician_id,
     topN: top_n || 10,
@@ -2345,6 +2384,8 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   const slotCount = new Map();
   for (const slot of allSlots) slotCount.set(slot.date, (slotCount.get(slot.date) || 0) + 1);
   const slots = allSlots.slice(0, topN).map((slot, i) => ({ ...slot, rank: i + 1, day_label: slotDayLabel(slot.date) }));
+  // GATE_ROUTE_CHECK_LATE_DAYS: days whose existing stops already arrive late, listed by hours that add no new late stop.
+  const lateDates = new Set(allSlots.filter((slot) => slot.day_already_late === true).map((slot) => slot.date));
   const searchedDates = result.searched_dates || [];
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   const { dateOnlyString } = require('../../utils/datetime-et');
@@ -2378,6 +2419,10 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
     const row = { date, day_label: slotDayLabel(date), stops_booked: byDay ? Number(day?.stops || 0) : null,
       unassigned_stops: byDay ? Number(day?.unassigned || 0) : null,
       first_start: day?.first_start || null, last_end: day?.last_end || null, feasible_slots: feasible };
+    if (lateDates.has(date)) {
+      row.already_late = true;
+      row.note = 'Stops already booked on this day arrive after their windows. The slots listed add no new late stop.';
+    }
     if (feasible) return row;
     // Only the engine's own rejection counts are a reason; without them (the
     // legacy path keeps none) the row says so instead of inventing one.

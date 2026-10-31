@@ -72,7 +72,7 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
-const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
+const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -251,7 +251,7 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   const explicit = normalizeServiceReportApplicationMethod(
     productInput.applicationMethod || productInput.method || product.application_method || product.method,
   );
-  // GATE_REPORT_CLEANUP_1020: a granular product is never stored with a broadcast spray method, whatever the sheet sent.
+  // A granular product is never stored with a broadcast spray method, whatever the sheet sent.
   if (explicit) return correctedGranularMethod(explicit, product);
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
@@ -759,6 +759,16 @@ function backfillTimeOnSiteMinutes(timeOnSite) {
 // completion instant − duration; service-duration-capture.js). Enumerated so
 // the backfill policy strips exactly what the helper fabricates — no more.
 const BACKFILL_INFERRED_START_FIELDS = ['actual_start_time', 'check_in_time', 'arrived_at'];
+
+// The tech's real arrival instant on the pre-update scheduled_services row, or
+// null. The pre-update row carries only stamps a person or the check-in flow
+// wrote (the completion's own inferred start is built later), so the weather
+// capture can read it as the start of the visit's wind record.
+function realArrivalInstant(service = {}) {
+  return BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+}
 
 // The end fields the completion path stamps with the closeout instant: on the
 // scheduled_services row via buildCompletionLifecycleUpdates, and on the
@@ -1578,6 +1588,67 @@ function tankCleanoutWarnings(cleanout, selectedCalibration) {
   return [];
 }
 
+// Why a product line cannot come off stock before any conversion, or null when it can.
+function notDeductibleInputWarning(inventoryProduct, amount, amountUnit) {
+  if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) {
+    return 'No confirmed product amount was provided, so inventory was not deducted.';
+  }
+  if (inventoryProduct.inventory_on_hand == null || inventoryProduct.inventory_on_hand === '') {
+    return 'Product has no inventory_on_hand value, so inventory was not deducted.';
+  }
+  return null;
+}
+
+// The usage movement for a visit done before the product's latest count: the same quantity and cost a deduction
+// writes, with stock_before = stock_after and no products_catalog update (GATE_STOCK_COUNT_AWARE_USAGE).
+async function recordCountedUsage(trx, {
+  snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
+  amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
+}) {
+  const { unitCost, costUsed } = calculateInventoryCost({
+    product: inventoryProduct,
+    deductedAmount,
+    inventoryUnit,
+    amount,
+    amountUnit,
+  });
+  const [movement] = await trx('product_inventory_movements').insert({
+    product_id: inventoryProduct.id,
+    service_record_id: serviceRecord.id,
+    service_product_id: serviceProduct.id,
+    scheduled_service_id: scheduledService.id,
+    customer_id: scheduledService.customer_id,
+    technician_id: scheduledService.technician_id,
+    movement_type: 'usage',
+    quantity: deductedAmount,
+    unit: inventoryUnit,
+    unit_cost: unitCost,
+    cost_used: costUsed,
+    stock_before: stockBefore,
+    stock_after: stockBefore,
+    lot_number: productInput.lotNumber || productInput.lot_number || null,
+    metadata: {
+      enteredAmount: amount,
+      enteredUnit: amountUnit,
+      insufficientStock: false,
+      ...countHold,
+    },
+  }).returning('*');
+  return {
+    ...snapshot,
+    status: 'not_deducted_counted',
+    movementId: movement.id,
+    deductedAmount,
+    inventoryUnit,
+    unitCost,
+    costUsed,
+    stockBefore,
+    stockAfter: stockBefore,
+    remainingStock: stockBefore,
+    warning: require('./inventory-count-guard').COUNTED_USAGE_WARNING,
+  };
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -1604,19 +1675,8 @@ async function deductProductInventory(trx, {
     warning: null,
   };
 
-  if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) {
-    return {
-      ...snapshot,
-      warning: 'No confirmed product amount was provided, so inventory was not deducted.',
-    };
-  }
-
-  if (inventoryProduct.inventory_on_hand == null || inventoryProduct.inventory_on_hand === '') {
-    return {
-      ...snapshot,
-      warning: 'Product has no inventory_on_hand value, so inventory was not deducted.',
-    };
-  }
+  const notDeductibleWarning = notDeductibleInputWarning(inventoryProduct, amount, amountUnit);
+  if (notDeductibleWarning) return { ...snapshot, warning: notDeductibleWarning };
 
   const inventoryUnit = inventoryProduct.inventory_unit || amountUnit;
   const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
@@ -1635,6 +1695,15 @@ async function deductProductInventory(trx, {
       inventoryUnit,
       warning: 'Product inventory_on_hand is not numeric, so inventory was not deducted.',
     };
+  }
+  // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest physical count was already
+  // counted out of stock. Record the use (cost and forecasts keep seeing it); leave stock and the lockout alone.
+  const countHold = await require('./inventory-count-guard').stockHoldFor(trx, inventoryProduct.id, { scheduledService, serviceRecord });
+  if (countHold) {
+    return recordCountedUsage(trx, {
+      snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
+      amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
+    });
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
@@ -1990,10 +2059,21 @@ async function hardLimitedProductNames(database, ids) {
 // so a backdated closeout is judged against the applications recorded after it too.
 async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null, addOnRows }) {
   try {
-    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
-    const violations = await savepointRead(database, async (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(place ? { place } : {}) }));
-    return violations.map((violation) => overLimitFinding(productId, productName, violation));
+    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries places (`place`: one id, or the list of its places) is audited at EACH place
+    // (the yearly limits are per place, and one application on two places is one application at each). A limit it breaks at several places
+    // is one finding: the office hears of it once per product and limit type.
+    const placeList = [].concat(place || []);
+    const found = new Map();
+    for (const at of placeList.length ? placeList : [null]) {
+      const violations = await savepointRead(database, async (k) => require('../services/application-limits')
+        .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (at && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(at ? { place: at } : {}) }));
+      for (const violation of violations) {
+        const finding = overLimitFinding(productId, productName, violation);
+        const key = `${finding.code}:${finding.limitType || ''}`;
+        if (!found.has(key)) found.set(key, finding);
+      }
+    }
+    return [...found.values()];
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
     return [limitCheckUnavailableFinding(productId)];
@@ -2027,6 +2107,16 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
 // The hard-limit audit has always covered lawn visits under GATE_LAWN_V13.
 const lawnHostAudited = (svc) => require('../config/feature-gates').lawnV13Live?.() === true && detectServiceLine(svc.service_type) === 'lawn';
 
+// Product id -> every place its recorded rows name (a row names a list of places; a row with none is left out: it is judged lawn-wide).
+function placesByProduct(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    const places = require('../services/lawn-trouble-areas').placesOfRecord(row);
+    if (places.length) out.set(String(row.product_id), [...new Set([...(out.get(String(row.product_id)) || []), ...places])]);
+  }
+  return out;
+}
+
 // The findings for the products a committed closeout recorded, read from its ledger rows (so a
 // resume re-derives them). Lawn visits under GATE_LAWN_V13, and, whatever the host's line or the gate, the products of the rows
 // tagged to an area add-on (`addOnRows: true`). Never throws: ANY failure on the
@@ -2040,7 +2130,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
     // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
     const placed = require('../config/feature-gates').lawnTroubleAreasLive();
     const recorded = await savepointRead(database, (k) => k('property_application_history')
-      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place', 'treated_places'] : ['product_id'])));
     // Not a lawn host under the gate: only the add-on rows' products.
     const tagged = lawnHost ? null : await savepointRead(database, (k) => areaAddOnGovernedRate.taggedProductIds(k, record.id));
     const rows = (recorded || []).filter((row) => !tagged || tagged.has(String(row.product_id)));
@@ -2050,7 +2140,7 @@ async function recordedProductLimitFindings({ svc, record, database = db, addOnR
       serviceDate: serviceDateOnly(record.service_date),
       database,
       addOnRows,
-      ...(placed ? { places: new Map(rows.filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
+      ...(placed ? { places: placesByProduct(rows) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -3002,7 +3092,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // services/reservice-fixed-recap.js. Honored only below, once the live
       // completion profile and both dark gates are known.
       customerRecapMode,
-      requestReview,
+      requestReview: requestReviewPosted,
+      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK): the one reason a never-asked customer's review ask
+      // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
+      reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
       wrapUpReviewAsk,
@@ -3103,6 +3196,36 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Re-checked under the visit row lock against the registry's active stations.
       stationRosterSeen,
     } = completionInput.body;
+    // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
+    // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
+    // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
+    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
+    // off: no read at all, requestReview is the posted value.
+    let requestReview = requestReviewPosted;
+    let reviewFirstAskLock = null;
+    let reviewTimingBody = completionInput.body || {};
+    if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && backfill !== true
+      && (!reviewSuppression || reviewSuppression === 'invoice_created')
+      && customerRecapMode !== require('./reservice-fixed-recap').MODE
+      && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
+      // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
+      && !(sendCompletionSmsRequested === false && includePayLink === false)
+      && require('../config/feature-gates').reviewFirstAskLockLive()) {
+      const reviewRequest = require('./review-request');
+      // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
+      const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
+      if (lockVisit) {
+        reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
+          customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
+        }, db);
+      }
+      if (reviewFirstAskLock?.forcedOn) {
+        requestReview = true;
+        // The tech cleared the box, so a timing left in the form is not a choice: Automatic.
+        const { reviewTiming: _t, reviewDelayMinutes: _d, reviewScheduledFor: _s, ...rest } = reviewTimingBody;
+        reviewTimingBody = { ...rest, requestReview: true };
+      }
+    }
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
@@ -3325,7 +3448,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionReviewDelayMinutes;
     let customerRequestedReview = null;
     try {
-      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(reviewTimingBody);
       // The timing selector can be retained after the review checkbox is
       // cleared or a client suppression turns the ask off; the stamp must not
       // claim the customer asked when nothing was authorized (codex #4140
@@ -4914,8 +5037,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           lawnFast,
           products,
           technicianNotes,
-          propertyServiceArea,
-          actor: completionInput.actor,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -5187,7 +5308,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             svc.customer_id,
             svc.service_type,
             Number(invoiceAmount) || 0,
-            { database: db, skipCustomerExemption: visitIsPayerBilled },
+            { database: db, skipCustomerExemption: visitIsPayerBilled, propertyId: svc.property_id || undefined },
           );
           const r = Number(taxResult?.rate);
           if (Number.isFinite(r) && r >= 0 && r < 1) return r;
@@ -5984,6 +6105,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && typeof resumedStructuredNotes.customerRequestedReview === 'object'
         ? resumedStructuredNotes.customerRequestedReview
         : null;
+      // A kept-on first review ask was frozen with the record: a resumed retry (the customer may have been
+      // asked since) finishes the choice the record holds (GATE_REVIEW_FIRST_ASK_LOCK).
+      if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
+        requestReview = true;
+        completionReviewDelayMinutes = undefined;
+      } else if (reviewFirstAskLock?.forcedOn) {
+        // The committed record decides. It holds no kept-on marker (the gate was off then, or the customer
+        // was asked since), so this run's preflight override is undone: the posted choice and the posted
+        // timing stand, as for any committed retry.
+        requestReview = requestReviewPosted;
+        reviewFirstAskLock = null;
+        try {
+          completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+        } catch {
+          // A chosen time that has passed by now means "due now", as the committed-retry catch above does.
+          completionReviewDelayMinutes = 0;
+        }
+      }
       durableCompletionCommitted = true;
       // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
       // its address — released only now that the completion is durably committed (a rejected
@@ -6038,6 +6177,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             fetchApplicationConditions({
               latitude: svc.customer_latitude,
               longitude: svc.customer_longitude,
+              arrivedAt: realArrivalInstant(svc),
             }).catch(() => null),
             capturePestRainOutlook({ svc }),
           ]).then(([captured, rainOutlook]) => {
@@ -6931,6 +7071,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (treatment-zone-maps.js traceJudgedAllows).
             ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
+            // The operator's "report only, no pay link" choice on a real
+            // completion. A tech cannot record cash or a check, so the next-day
+            // office check (report-only-payment-alert.js) reads this marker to
+            // find a bill that stayed open.
+            ...(includePayLink === false && visitOutcome === 'completed' && !isBackfillCompletion
+              && !systemQuietCloseout && !issuedInvoiceCloseout && !invoiceAlreadySent
+              ? { payLinkOmitted: true } : {}),
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
             // (stripe-webhook.js) also suppresses it for a billed assessment.
@@ -6940,9 +7087,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
-            reviewTiming: reviewTiming || null,
+            // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
+            // turned off with the "Complaint on site" reason. Absent when the lock did not act.
+            ...(reviewFirstAskLock && (reviewFirstAskLock.forcedOn || reviewFirstAskLock.optOutReason)
+              ? { reviewFirstAskLock: { neverAsked: true, forcedOn: reviewFirstAskLock.forcedOn, optOutReason: reviewFirstAskLock.optOutReason } }
+              : {}),
+            reviewTiming: (!reviewFirstAskLock?.forcedOn && reviewTiming) || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
-            reviewScheduledFor: reviewScheduledFor || null,
+            reviewScheduledFor: (!reviewFirstAskLock?.forcedOn && reviewScheduledFor) || null,
             // Who captured "Customer asked for the link", when, and where —
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
             // Frozen off with requestReview: an incomplete / internal-only /
@@ -7059,8 +7211,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
-            // GATE_LAWN_MIX_HELP: the rows whose spot area the server derived from gallons sprayed (the record says so).
-            ...require('./lawn-mix-help').sprayedGallonsFreeze(products),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -7621,7 +7771,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             throw err;
           }
           // The billing lane likewise (Codex #4365 P2): lawnPlanProgramApplies
-          // lets an explicit per_visit / one_time lane defeat the tier, so a
+          // lets an explicit one_time lane defeat the tier (per_visit does not, owner 2026-10-26), so a
           // billing_mode edit that committed between the plan build and this
           // customer share lock would stamp attribution the current lane
           // denies (or omit attribution it now allows). Same retryable shape;
@@ -8368,7 +8518,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // carrier is still the visit's measured carrier (Codex #4113 P2).
             // The legacy (gate-off) writer keeps its attribution rules but
             // shares the program predicate with the lawn_protocol_* stamp: a
-            // per_visit / one_time customer's lingering tier is not a program
+            // one_time customer's lingering tier is not a program
             // there either (Codex #4365 r6 P2).
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
@@ -8442,7 +8592,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               (block) => !(
                 block.code === 'actual_inventory_insufficient_stock'
                 && block.productId != null
-                && ['deducted', 'deducted_insufficient_stock'].includes(
+                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted'].includes(
                   deductionStatusByProductId.get(String(block.productId)),
                 )
               ),
@@ -8543,7 +8693,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
         }
         // The closeout stamp follows the same program-attribution predicate
-        // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
+        // as the ledger (Codex #4365 r2 P2): a one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
         // lockouts, but the calendar-resolved plan is not a protocol the
         // technician was assigned. Stamping it would mint a COMPLETE
@@ -11373,6 +11523,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceRecordId: record.id,
         } });
       }
+      // GATE_SETUP_FEE_APPLICATION_SETTLED: the shared reconciler also knows
+      // the prepay-year and visit-add-on coverage this transaction does not,
+      // so it runs now rather than at the next daily sweep. The alert row
+      // stays the durable follow-up: a coverage regression reopens it.
+      if (require('../config/feature-gates').setupFeeApplicationSettledLive()) setupFeeReconcileAfterCommit = true;
       if (setupFeeReconcileAfterCommit) {
         // Multi-visit resolution deferred from the alert transaction
         // (Codex P0): the shared reconciler proves EVERY parked visit
@@ -11842,6 +11997,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
+        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+        // amount_paid. The office settles it from the Invoices page.
+        if (toCents(lockedInvoice.amount_paid) > 0) {
+          logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
+          return lockedInvoice;
+        }
         const existingCredit = await trx('payments')
           .where({ customer_id: svc.customer_id, status: 'paid' })
           .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
@@ -12097,6 +12258,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // visit row lock (see refuseCoveredMemberMintInTrx).
         // Same shape gate as every other sibling-coverage check (pre-push P1
         // on 645ccccaee): a callback or always-free visit is never refused.
+        // A visit from an invoice-mode commercial proposal is due on the agreement's Net term (owner 2026-10-30): the
+        // win makes no invoice, so this one carries the terms. Counted from the visit date (today for a backfill, so a
+        // backlog closeout is never minted overdue). A failed read mints nothing: the catch below releases the
+        // closeout for resume, so no invoice is ever created due on the wrong date.
+        let proposalTermsDue = null;
+        try {
+          proposalTermsDue = await require('./proposal-win').proposalTermsDueDate(
+            db, svc.source_estimate_id, isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          );
+        } catch (termsErr) {
+          throw Object.assign(new Error(`The proposal payment terms could not be read: ${termsErr.message}`), { code: 'PROPOSAL_TERMS_UNREAD' });
+        }
         const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
         })
@@ -12193,7 +12366,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
-          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          dueDate: proposalTermsDue || (isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date)),
           // Claimed plan-choice setup fee rides the SAME mint (one invoice,
           // one auto-charge) — the claim above is the idempotency authority.
           extraLineItems: secureSetupFee
@@ -12309,7 +12482,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               taxRate: mintInvoiceTaxRate,
               frozenTaxAuthority: true,
               frozenPayerId: mintInvoicePayerId,
-              dueDate: serviceDateOnly(record.service_date),
+              dueDate: proposalTermsDue || serviceDateOnly(record.service_date),
               trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
             }),
           });
@@ -12451,7 +12624,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const { isEnabled } = require('../config/feature-gates');
             if (isEnabled('payerStatements')) {
               const payerRow = await db('payers').where({ id: invoice.payer_id }).first('payment_terms');
-              if (['net15', 'net30'].includes(payerRow?.payment_terms)) {
+              if (require('./payer').isNetPaymentTerm(payerRow?.payment_terms)) {
                 logger.info(`[dispatch] backfill completion: payer-statement accrual SKIPPED for visit ${svc.id} — ${payerRow.payment_terms} invoice ${invoice.invoice_number || invoice.id} minted OFF the payer's open statement for review; to bill it on the monthly statement, void + re-create it (attach happens only at create), or send it individually to the AP`);
               }
             }
@@ -12618,7 +12791,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   svc.customer_id,
                   svc.service_type,
                   Number(mintInvoiceAmount) || 0,
-                  currentPayerBilled ? { skipCustomerExemption: true } : {},
+                  { ...(currentPayerBilled ? { skipCustomerExemption: true } : {}), propertyId: svc.property_id || undefined },
                 );
                 const r = Number(rr?.rate);
                 if (!(Number.isFinite(r) && r >= 0 && r < 1)) {
@@ -12694,6 +12867,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The proposal's Net term could not be read before the mint (proposalTermsDueDate): nothing was minted.
+        // Release for resume on EVERY lane (a required lane already took the release above), so the retry bills with the
+        // agreement's due date (pre-push Codex P1).
+        if (invErr?.code === 'PROPOSAL_TERMS_UNREAD' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: the proposal payment terms could not be read — releasing for resume instead of minting: ${invErr.message}`);
+          const termsReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: termsReleased
+              ? 'The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. Retry the closeout.'
+              : `The proposal payment terms for this visit could not be read — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'proposal_terms_unread',
+            ...(termsReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
         }
@@ -13000,6 +13188,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } = await resolveExtendedLane({
       svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, apptCardOneTimeCharge, apptCardLaneUnresolved, customerAutopayActive,
     });
+    // The per-application Auto Pay lane skips a visit from a won
+    // Bill-by-invoice proposal (owner 2026-10-30, bill-by-invoice.js): its
+    // bill stays open on its Net term. An unreadable agreement charges
+    // nothing (the pay-link fallback below).
+    const perApplicationCharge = await resolvePerApplicationCharge({ svc, perApplicationBilling });
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
@@ -13061,7 +13254,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
-            .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
+            .first('status', 'credit_applied', 'amount_paid', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
           if (fresh) invoice = { ...invoice, ...fresh };
           if (invoice.status === 'prepaid') { alreadyPaid = true; invoiceCreated = false; }
         }
@@ -13106,7 +13299,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
       logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
@@ -13114,7 +13307,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? 'per_application_completion'
       : (apptCardOneTimeCharge ? 'appointment_card_completion' : 'autopay_completion');
     if (!isBackfillCompletion
-      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationCharge || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && !annualPrepayOfficeReview
       && customerAutopayActive) {
@@ -13256,7 +13449,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // without moving the subtotal the cap compares — the
               // due-cents ceiling refuses instead of charging the larger
               // amount.
-              maxAuthorizedChargeCents: Math.max(0, Math.round((Number(invoice.total || 0) - Number(invoice.credit_applied || 0)) * 100)),
+              maxAuthorizedChargeCents: Math.round(require('../services/invoice-helpers').invoiceAmountDue(invoice) * 100),
             } : {}),
             deferReceiptDelivery: combinedReceiptArmed,
           });
@@ -14640,36 +14833,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // today's renders are byte-identical. Never throws.
         const { reserviceLineForCustomer } = require('../services/reservice-link');
         const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
-        // {past_due_line} for the with-invoice completion texts (EXPAND half —
-        // same rollout discipline as {reservice_line} above: supplied at every
-        // completion-family render site BEFORE any body carries the token, so
-        // neither deploy ordering can suppress a send). Computed only when the
-        // text will carry a pay link — a paid/prepaid or report-only
-        // completion supplies '' — and excluding the visit's own invoice
-        // (today's bill is not a past-due balance). '' unless
-        // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older
-        // open self-pay balance; never throws.
-        // Suppressed outside the 8AM-8PM send window (codex P1): a late
-        // completion's rendered body is FROZEN into the scheduled-SMS queue
-        // (dispatch_completion_deferred below) and replayed verbatim at the
-        // window open — a balance settled overnight (portal payment, sweep)
-        // would still be asserted at 8 AM with no recheck. The pay link
-        // tolerates that staleness (its target renders live paid state); a
-        // static sentence claiming money owed does not, so a deferred
-        // completion simply carries no balance line. The precheck MIRRORS
-        // the authoritative validator's gating (codex r3 P2): with
-        // GATE_SMS_SEND_WINDOW off the validator never defers — nighttime
-        // completions send immediately, no frozen replay exists, and the
-        // line rides; only a window that can actually hold suppresses. The
-        // residual precheck→handoff race is closed by the
-        // stripBalanceLineFromBody pass at the QUIET_HOURS_HOLD below.
-        const { isWithinSendWindowET } = require('../services/messaging/send-window');
-        const { isEnabled: gateEnabled } = require('../config/feature-gates');
-        const { pastDueSmsLineForCustomer } = require('../services/open-balance');
-        const completionSmsCanDefer = gateEnabled('smsSendWindow') && !isWithinSendWindowET();
-        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && !completionSmsCanDefer)
-          ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
-          : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -14678,7 +14841,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
             reserviceLine: completionReserviceLine,
-            pastDueLine: completionPastDueLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -14781,7 +14943,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -14798,7 +14960,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
             reservice_line: completionReserviceLine,
-            past_due_line: completionPastDueLine,
+            past_due_line: '',
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -14821,7 +14983,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -14888,7 +15050,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
-              past_due_line: completionPastDueLine,
+              past_due_line: '',
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -15115,23 +15277,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 // completion retry despite a definite non-delivery.
                 completionSmsDeliveryUnverifiedAt: null,
               };
-              // The balance clause never rides a frozen replay body (codex
-              // P2, round 2): the send-window PREcheck at the line's compute
-              // site can pass at 19:5x while the authoritative validator at
-              // the provider handoff defers the send — this hold IS that
-              // deferral, so strip the clause here and the queued body
-              // matches what the precheck-suppressed path would have
-              // rendered. The pay link stays (its target renders live paid
-              // state); only the static balance sentence is removed.
-              const deferredReplayBody = require('../services/open-balance')
-                .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {
                 await trx('sms_log').insert({
                 customer_id: svc.customer_id,
                 direction: 'outbound',
                 from_phone: TWILIO_NUMBERS.getOutboundNumber(),
                 to_phone: svc.cust_phone,
-                message_body: deferredReplayBody,
+                message_body: sentSmsBody,
                 status: 'scheduled',
                 scheduled_for: new Date(smsResult.nextAllowedAt),
                 message_type: sentSmsType,
@@ -15623,6 +15775,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const notification = await triggerNotification('job_complete', {
           techName: svc.tech_name, serviceName: svc.service_type,
           customerName: `${svc.first_name} ${svc.last_name}`, serviceId: svc.id, customerId: svc.customer_id,
+          serviceDate: serviceDateOnly(svc.scheduled_date),
         }, packetEffects ? {
           dedupeKey: `visit_member_complete:${record.id}`,
           beforePush: async ({ dispatching }) => {
@@ -15821,13 +15974,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // #4127): the invoice event is the proof the service happened, and this
     // may be the referred customer's first qualifying visit — withholding
     // the credit here would delay it to a later completion or lose it. The
-    // credits post; the referrer's reward SMS / email stay suppressed so the
-    // closeout remains quiet.
+    // credits post; the closeout itself stays quiet, and the referrer's one
+    // thank-you email goes out at the next 9:00 AM ET as on every credit
+    // (referral-engine sendDueReferralRewardEmails, owner 2026-10-29).
     const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);
     if (referralVisitPerformed && !packetEffects) {
       try {
         const referralEngine = require('../services/referral-engine');
-        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id, notify: !issuedInvoiceCloseout });
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }

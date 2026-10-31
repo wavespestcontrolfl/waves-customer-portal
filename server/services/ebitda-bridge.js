@@ -8,6 +8,7 @@
  *   − COGS (labor + materials + drive — already burdened into job costing;
  *     optionally split into those components from job_costs actuals)
  *   = Gross profit
+ *   − Open time (optional, GATE_TECH_OPEN_TIME: paid tech hours no visit carries)
  *   − Marketing (ad platforms + channel retainers + referral rewards, actuals)
  *   = Contribution
  *   − Operating overhead (prorated monthly figures — see basis below)
@@ -50,11 +51,17 @@ function pct(part, whole) {
  *   drive } from job_costs — rendered as indented COGS detail; any gap vs the
  *   headline COGS (revenue − GP from service_records, which stays
  *   authoritative) surfaces as an "unsplit" line so the detail reconciles
+ * @param {number} openTime optional, dollars >= 0 (L11b, GATE_TECH_OPEN_TIME): the labor cost of the paid
+ *   technician minutes no visit carries (open-time.js). Above 0 it adds one minus row after gross profit and
+ *   comes out of contribution; absent or 0 leaves the rows and numbers exactly as before. Tech pay is not in
+ *   any overhead component, so it counts once.
  * @param {number} monthFraction fraction of the month the window covers —
  *   prorates the MONTHLY overhead figures onto the window (marketing and
  *   cogsSplit amounts are actuals for the window and are never prorated)
  */
-function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = null, cogsSplit = null, monthFraction = 1 } = {}) {
+function buildEbitdaBridge({
+  revenue, grossProfit, marketing = {}, overhead = null, cogsSplit = null, monthFraction = 1, allocated = {}, openTime = 0,
+} = {}) {
   const rev = money(revenue);
   const gp = money(grossProfit);
   const cogs = money(rev - gp);
@@ -63,7 +70,8 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
   const fixedCosts = money(marketing.fixedCosts);
   const referralRewards = money(marketing.referralRewards);
   const marketingTotal = money(adSpend + fixedCosts + referralRewards);
-  const contribution = money(gp - marketingTotal);
+  const open = Number(openTime) > 0 ? money(openTime) : 0;
+  const contribution = money(gp - open - marketingTotal);
 
   const frac = Number.isFinite(Number(monthFraction)) && Number(monthFraction) > 0
     ? Math.min(Number(monthFraction), 1)
@@ -79,8 +87,16 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
   };
   const components = {};
   for (const [k, v] of Object.entries(rawComponents)) components[k] = money((Number(v) || 0) * frac);
-  const componentSum = money(Object.values(components).reduce((t, v) => t + v, 0));
-  const overheadEntered = overheadBasis === 'entered' ? true : componentSum > 0;
+  const sumOf = (parts) => money(Object.values(parts).reduce((t, v) => t + v, 0));
+  const overheadEntered = overheadBasis === 'entered' ? true : sumOf(components) > 0;
+  // Vehicle fixed cost the window's visits already carry in COGS (vehicle cost cards,
+  // GATE_TECH_COST_RATES; service_records.vehicle_fixed_cost): the vehicle overhead keeps only the
+  // rest, so it is counted once. It nets at most the vehicle overhead itself; none allocated
+  // (or no vehicle line) leaves the overhead as it was.
+  // (money() reads anything that is not a number, such as a missing amount or line, as 0.)
+  const vehicleFixedInCogs = money(Math.min(Math.max(0, allocated.vehicle), Math.max(0, components.vehicle)));
+  if (vehicleFixedInCogs > 0) components.vehicle = money(components.vehicle - vehicleFixedInCogs);
+  const componentSum = sumOf(components);
   const overheadTotal = overheadEntered ? componentSum : null;
 
   // COGS detail (job-costing actuals). The headline COGS row stays revenue −
@@ -109,6 +125,7 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
     { key: 'revenue', label: 'Revenue', amount: rev, kind: 'start' },
     { key: 'cogs', label: 'COGS (labor · materials · drive)', amount: -cogs, kind: 'minus' },
     { key: 'gross_profit', label: 'Gross profit', amount: gp, kind: 'subtotal', marginPct: pct(gp, rev) },
+    ...(open > 0 ? [{ key: 'open_time', label: 'Open time (paid tech hours with no visit)', amount: -open, kind: 'minus' }] : []),
     { key: 'marketing', label: 'Marketing (ads · retainers · referral rewards)', amount: -marketingTotal, kind: 'minus' },
     {
       key: 'contribution',
@@ -143,6 +160,8 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
     ebitda,
     ebitdaMarginPct: overheadEntered ? pct(ebitda, rev) : null,
     monthFraction: frac,
+    vehicleFixedInCogs,
+    ...(open > 0 ? { openTime: open } : {}),
   };
 }
 

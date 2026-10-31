@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const mockStartBreak = jest.fn();
+const mockGetEntries = jest.fn();
 const mockGetPendingWeeks = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -16,6 +17,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/time-tracking', () => ({
   startBreak: (...args) => mockStartBreak(...args),
+  getEntries: (...args) => mockGetEntries(...args),
 }));
 jest.mock('../services/timesheet-approval', () => ({
   getPendingWeeks: (...args) => mockGetPendingWeeks(...args),
@@ -142,6 +144,38 @@ describe('Staff timer conflict responses', () => {
       error: 'Already on break. End the current break first.',
     });
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('Technician time history paging', () => {
+  afterEach(() => jest.clearAllMocks());
+
+  test('caps the page, floors the offset, and refuses a malformed date before the query', async () => {
+    mockGetEntries.mockResolvedValue({ entries: [], total: 0 });
+    const handler = routeHandler(techTimeTrackingRouter, 'get', '/history');
+    const call = async (query) => {
+      const res = responseDouble();
+      const next = jest.fn();
+      await handler({ technicianId: 'tech-1', query }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      return res;
+    };
+
+    await call({ limit: '5000', offset: '-20' });
+    expect(mockGetEntries).toHaveBeenLastCalledWith(expect.objectContaining({ technicianId: 'tech-1', limit: 100, offset: 0 }));
+    await call({ limit: '-5', offset: '99999999999999999999' });
+    expect(mockGetEntries).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 }));
+    await call({ limit: '25', offset: '50', startDate: '2026-10-01', endDate: '2026-10-31' });
+    expect(mockGetEntries).toHaveBeenLastCalledWith(expect.objectContaining({
+      limit: 25, offset: 50, startDate: '2026-10-01', endDate: '2026-10-31',
+    }));
+
+    mockGetEntries.mockClear();
+    for (const query of [{ startDate: '2026-02-30' }, { endDate: '10/31/2026' }, { startDate: ['2026-10-01'] }]) {
+      const res = await call(query);
+      expect(res.status).toHaveBeenCalledWith(400);
+    }
+    expect(mockGetEntries).not.toHaveBeenCalled();
   });
 });
 

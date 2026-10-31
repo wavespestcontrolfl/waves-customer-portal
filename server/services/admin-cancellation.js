@@ -395,6 +395,11 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
     perApp: impact && Array.isArray(impact.perAppChanges)
       ? impact.perAppChanges.map((r) => `${r.id}:${r.before}:${r.after}`).sort()
       : null,
+    // The series price template future visits bill from — approved per root
+    // and field; an edit between preview and commit must trip preview_changed.
+    templates: impact && Array.isArray(impact.templateChanges)
+      ? require('./cancellation-resolution/template-keys').scopedTemplateKeys(impact.templateChanges)
+      : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
 }
@@ -1839,6 +1844,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         // tier or billing-mode edit during the sweep must be re-approved.
         `tierbefore=${liveImpact.tierBefore ?? ''}`,
         `mode=${liveImpact.billingMode ?? ''}`,
+        // The ONE formatter the processor's scopedPricingFingerprint uses.
+        require('./cancellation-resolution/template-keys').scopedTemplatesPart(liveImpact.templateChanges),
       ].join('|');
     }
   }
@@ -2265,7 +2272,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // claim "will not renew" with the decision unpersisted. Any accumulated
   // error downgrades to the manual-review wording; the API response keeps
   // the honest processor verdict + errors for the operator.
-  const confirmationVerdict = processed && errors.length === 0;
+  // A visit stuck "on site" from an EARLIER day (a tech never closed it
+  // out) still bells the office, but the plan itself wound down (churned,
+  // or the scoped families pulled): a run whose ONLY errors are such visits
+  // confirms as done, not "a team member will confirm" (owner 2026-10-30).
+  const staleVisitErrors = new Set((result && Array.isArray(result.staleInProgressVisitIds) ? result.staleInProgressVisitIds : [])
+    .map((id) => `in_progress_visit:${id}`));
+  const onlyStaleVisitErrors = errors.length > 0 && errors.every((e) => staleVisitErrors.has(e));
+  const confirmationVerdict = (processed && errors.length === 0)
+    || (onlyStaleVisitErrors && !!result && !!(result.churned || result.scopedWoundDown));
   let confirmations = { smsSent: false, emailSent: false, channels: [] };
   if (input.sendConfirmation) {
     confirmations = await sendCancellationConfirmations({

@@ -1,4 +1,4 @@
-const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
+const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches, lawnPlanAttributesVisit, lawnPlanProgramApplies } = require('../services/lawn-completion-defaults');
 
 function fixture() {
   return {
@@ -101,9 +101,9 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   if (reason === 'version') plan.appointmentAssignment.protocolVersion = 'missing';
   if (reason === 'archived') plan.protocol.structured.status = 'archived';
   if (reason === 'nonmember') plan.propertyGate.serviceTier = null;
-  // A legacy tier lingering on an explicit per_visit / one_time customer is
-  // not a program (Codex #4113 batch 12 follow-up); the assignment is also
-  // withdrawn so the tier is the only claim.
+  // A legacy tier lingering on an explicit one_time customer is not a program
+  // (Codex #4113 batch 12 follow-up; per_visit with a tier IS one, owner
+  // 2026-10-26); the assignment is also withdrawn so the tier is the only claim.
   if (reason === 'nonmember_lane') { plan.propertyGate.billingMode = 'one_time'; plan.appointmentAssignment = {}; }
   if (reason === 'nonlawn') context.isLawn = false;
   const result = buildLawnCompletionDefaults(plan, context);
@@ -241,22 +241,49 @@ test.each([
   ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],
   ['member with the property proof never evaluated (defaults gates off)', {}, 'Silver', 'unevaluated'],
   ['legacy tier on an explicit one_time customer, no assignment', {}, 'Silver', 'one_time'],
-  ['legacy tier on an explicit per_visit customer, no assignment', {}, 'Silver', 'per_visit'],
+  ['tier on an explicit per_visit customer, no assignment (owner 2026-10-26: a program like a member)', {}, 'Silver', true, 'per_visit'],
+  ['no tier on an explicit per_visit customer, no assignment', {}, null, false, 'per_visit'],
+  ['explicit per_visit customer whose appointment carries a COMPLETE assignment', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true, 'per_visit'],
   ['legacy tier on an explicit per_application customer (membership lane)', {}, 'Silver', 'per_application'],
   ['legacy tier on an explicit annual_prepay customer (membership lane)', {}, 'Silver', 'annual_prepay'],
   ['explicit one_time customer whose appointment carries a COMPLETE assignment', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'one_time_assigned'],
-])('ledger attribution — %s', (_label, assignment, tier, expected) => {
+])('ledger attribution — %s', (_label, assignment, tier, expected, billingMode = null) => {
   const { plan } = fixture();
   plan.appointmentAssignment = assignment;
   plan.propertyGate.serviceTier = tier;
   if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
   if (expected === 'unproven') { plan.propertyGate.propertyMatchesProfile = false; expected = false; }
   if (expected === 'unevaluated') { plan.propertyGate.propertyMatchesProfile = null; expected = false; }
-  if (['one_time', 'per_visit'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = false; }
+  if (billingMode) plan.propertyGate.billingMode = billingMode;
+  if (['one_time'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = false; }
   if (['per_application', 'annual_prepay'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = true; }
   if (expected === 'one_time_assigned') { plan.propertyGate.billingMode = 'one_time'; expected = true; }
   expect(lawnPlanAttributesVisit(plan)).toBe(expected);
   expect(lawnPlanAttributesVisit(null)).toBe(false);
+});
+
+test.each([
+  ['per_visit', {}, 'Silver', true],
+  ['one_time', {}, 'Silver', false],
+  ['per_application', {}, 'Silver', true],
+  ['annual_prepay', {}, 'Gold', true],
+  [null, {}, 'Bronze', true],
+  ['per_visit', {}, null, false],
+  [null, {}, null, false],
+  ['per_visit', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
+  ['one_time', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', true],
+])('lawnPlanProgramApplies — billing lane %s, assignment %j, tier %s → %s (owner 2026-10-26)', (billingMode, assignment, tier, expected) => {
+  expect(lawnPlanProgramApplies({ appointmentAssignment: assignment, propertyGate: { serviceTier: tier, billingMode } })).toBe(expected);
+});
+
+test('a tiered per_visit customer gets the v13 completion defaults; a tiered one_time customer does not (owner 2026-10-26)', () => {
+  const perVisit = fixture();
+  perVisit.plan.propertyGate.billingMode = 'per_visit';
+  expect(buildLawnCompletionDefaults(perVisit.plan, perVisit.context).eligible).toBe(true);
+  expect(buildLawnCompletionDefaults(perVisit.plan, perVisit.context).items.map((i) => i.product.id)).toEqual(['product']);
+  const oneTime = fixture();
+  oneTime.plan.propertyGate.billingMode = 'one_time';
+  expect(buildLawnCompletionDefaults(oneTime.plan, oneTime.context).eligible).toBe(false);
 });
 
 // GATE_LAWN_BERMUDA_REMOVAL: the bermuda removal step's three options carry one

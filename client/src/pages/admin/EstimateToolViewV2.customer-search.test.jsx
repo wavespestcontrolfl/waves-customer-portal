@@ -84,6 +84,15 @@ it('lists an open lead that has no customer record, and picking it fills the con
   expect(screen.queryByText(/Linked to lead:/)).not.toBeInTheDocument();
 });
 
+it('picking a lead whose city and ZIP sit in their own columns fills the whole address', async () => {
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValue(leadResponse([{ ...lead, address: '100 Test Palm Way', city: 'Parrish', zip: '34219' }]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
+  expect(screen.getByRole('textbox', { name: 'Service address' })).toHaveValue('100 Test Palm Way, Parrish, FL 34219');
+});
+
 it('a failed lead search still shows the customer results and says the lead search failed', async () => {
   leadSearch.mockResolvedValue({ ok: false });
   mount();

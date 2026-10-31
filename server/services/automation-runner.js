@@ -23,18 +23,35 @@ const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./ema
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
 
-function substitute(text, customer) {
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Names and emails come from lead forms and calls, so in the HTML arm they are
+// escaped: a form that puts a link in the name field and a stranger's address
+// in the email field must not make Waves send that stranger a live link
+// (sweep #4616 B2). Text bodies and subjects are plain text and stay raw.
+// Replacer functions, not strings: a value holding `$&` or `$'` must not pull
+// template text back in.
+function substitute(text, customer, { html = false } = {}) {
   if (!text) return text;
+  const value = html ? escapeHtml : String;
   // 'there' for a customer with no first name on file (call-created on a last
   // name alone): never "Hi  —".
-  const first = customer.first_name || customer.firstName || 'there';
-  const last = customer.last_name || customer.lastName || '';
+  const first = value(customer.first_name || customer.firstName || 'there');
+  const last = value(customer.last_name || customer.lastName || '');
+  const email = value(customer.email || '');
   return text
-    .replace(/\{\{\s*first_name\s*\}\}/g, first)
-    .replace(/\{\{\s*last_name\s*\}\}/g, last)
-    .replace(/\{\{\s*email\s*\}\}/g, customer.email || '')
-    .replace(/\{first_name\}/g, first)          // also support single-brace for parity with SMS templates
-    .replace(/\{last_name\}/g, last);
+    .replace(/\{\{\s*first_name\s*\}\}/g, () => first)
+    .replace(/\{\{\s*last_name\s*\}\}/g, () => last)
+    .replace(/\{\{\s*email\s*\}\}/g, () => email)
+    .replace(/\{first_name\}/g, () => first)          // also support single-brace for parity with SMS templates
+    .replace(/\{last_name\}/g, () => last);
 }
 
 // The consultation-booking placeholders, whitespace-tolerant like every
@@ -128,6 +145,39 @@ function requiresTermiteBond(templateKey) {
   return templateKey === 'service_renewal';
 }
 
+// OWNER RULING (2026-10-29, "fix estimate email"): the estimate_sent
+// follow-up ("did your estimate land? any questions?") stops once the
+// customer accepts; 19 of 90 in 60 days had gone to customers who already
+// had. Read at delivery, so every accept path counts (public accept,
+// one-tap, Mark accepted): the estimate whose send enrolled this episode
+// (metadata.estimate_id, also when the accept landed mid-send, before the
+// enrollment existed), or any estimate for this customer or address
+// accepted since the episode began (another estimate in the same send, or
+// an enrollment without the stamp: queued before it, or a manual trigger).
+async function estimateAcceptedForFollowUp(enrollment) {
+  const estimateId = enrollment.metadata?.estimate_id || null;
+  const email = String(enrollment.email || '').trim().toLowerCase();
+  // Without a customer or an address the "since" half has no one to match,
+  // and an empty group would match every customer's accepted estimate.
+  const since = enrollment.enrolled_at && (enrollment.customer_id || email) ? enrollment.enrolled_at : null;
+  if (!estimateId && !since) return false;
+  const accepted = await db('estimates')
+    .whereNotNull('accepted_at')
+    .where((q) => {
+      if (estimateId) q.orWhere('id', estimateId);
+      if (since) {
+        q.orWhere((episode) => episode
+          .where('accepted_at', '>=', since)
+          .where((who) => {
+            if (enrollment.customer_id) who.orWhere('customer_id', enrollment.customer_id);
+            if (email) who.orWhereRaw('lower(trim(customer_email)) = ?', [email]);
+          }));
+      }
+    })
+    .first('id');
+  return !!accepted;
+}
+
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
   // A billing send checks suppression for the CURRENT billing recipient,
@@ -148,6 +198,10 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     if (bond?.termite_renewal_date) return null;
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
+  }
+  if (template.key === 'estimate_sent' && await estimateAcceptedForFollowUp(enrollment)) {
+    return blockSendAndCancelEnrollment({ enrollment, sendId,
+      reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
   }
   return null;
 }
@@ -268,7 +322,7 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
-  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
+  const rawHtml = substitute(htmlBody || '', customer, { html: true }).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
   const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
   // Every automation renders the service chrome — "Waves Newsletter"
@@ -333,6 +387,9 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   // role): the step's dispatch-time contact recheck reads it back (codex
   // #6363 r10 P1). Absent for the holder's and third-party addresses.
   const recipientRole = require('./customer-contact').isServiceContactRole(context.recipientRole) ? String(context.recipientRole) : null;
+  // The estimate whose send enrolled this episode (estimate_sent): the
+  // delivery check reads it back (estimateAcceptedForFollowUp).
+  const estimateId = context.estimateId ? String(context.estimateId) : null;
 
   // Customer-linked enrollment mutations serialize with a concurrent
   // merge-undo (r21): the undo's active-enrollment absence probe runs
@@ -406,7 +463,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
         last_name: fresh.last_name || customer.last_name || null,
       };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole, estimateId });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
@@ -467,7 +524,7 @@ async function enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, con
   }
 }
 
-async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null }) {
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null, estimateId = null }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
@@ -516,10 +573,17 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // ambiguous between the target row and EXCLUDED and fails the insert.
   // The recipient_role stamp (whose address this episode mails — codex
   // #6363 r10 P1) is this episode's fact too: set when the enqueue resolved
-  // an on-location contact, dropped otherwise.
-  const stamps = { ...(leadId ? { lead_id: leadId } : {}), ...(recipientRole ? { recipient_role: recipientRole } : {}) };
+  // an on-location contact, dropped otherwise. So is estimate_id: the
+  // estimate whose send started this episode, never a prior episode's. So
+  // is the sequence cursor (passed_step_*): the new episode starts again at
+  // the first step.
+  const stamps = {
+    ...(leadId ? { lead_id: leadId } : {}),
+    ...(recipientRole ? { recipient_role: recipientRole } : {}),
+    ...(estimateId ? { estimate_id: estimateId } : {}),
+  };
   reactivatePayload.metadata = dbh.raw(
-    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role') || ?::jsonb",
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids') || ?::jsonb",
     [JSON.stringify(stamps)],
   );
   if (existing) {
@@ -564,6 +628,59 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   }
 
   return { enrolled: true, enrollmentId: row.id };
+}
+
+// Where an enrollment is in its sequence (owner 2026-10-31, weekly sweep #4616
+// B1, option A). The place is the last step the enrollment PASSED: sent, settled
+// by a manual prep delivery (prep-guide-sender), or an empty step moved past. It
+// is kept in metadata.passed_step_order / passed_step_id, with every passed step
+// id in passed_step_ids. The next step is the first enabled step after it, in
+// (step_order, id) order, that this episode has not passed. Before, the place
+// was a count of enabled steps, so turning a step off, turning an old one back
+// on, deleting one or moving one shifted every customer partway through: they
+// skipped an email or got one twice. current_step stays the index of the next
+// step in the enabled list (prep-guide-sender reads 0 as "awaiting the first
+// step"). An enrollment last advanced before this change has no metadata cursor:
+// its place is the enabled step just before current_step, which is the step it
+// would have sent next anyway.
+function enabledSequenceSteps(templateKey) {
+  return db('automation_steps')
+    .where({ template_key: templateKey, enabled: true })
+    .orderBy('step_order', 'asc')
+    .orderBy('id', 'asc');
+}
+
+const stepKey = (step) => [Number(step.step_order), String(step.id)];
+const keyAfter = ([order, id], [anchorOrder, anchorId]) => order > anchorOrder || (order === anchorOrder && id > anchorId);
+
+function enrollmentMetadata(enrollment) {
+  const raw = enrollment.metadata;
+  if (raw && typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+function sequenceCursor(enrollment, steps) {
+  const meta = enrollmentMetadata(enrollment);
+  const passedIds = Array.isArray(meta.passed_step_ids) ? meta.passed_step_ids.map(String) : [];
+  const order = meta.passed_step_order;
+  if (order !== null && order !== undefined && order !== '' && Number.isFinite(Number(order))) {
+    return { anchor: [Number(order), String(meta.passed_step_id ?? '')], passedIds };
+  }
+  // No cursor yet: every enabled step before current_step counts as passed, the
+  // same reading that makes the last of them the anchor.
+  const before = steps.slice(0, Math.max(0, Math.min(Number(enrollment.current_step) || 0, steps.length)));
+  const legacy = before.length ? before[before.length - 1] : null;
+  return { anchor: legacy ? stepKey(legacy) : null, passedIds: [...new Set([...passedIds, ...before.map((s) => String(s.id))])] };
+}
+
+function firstStepAfter(steps, anchor, passedIds) {
+  const passed = new Set(passedIds);
+  return steps.find((s) => !passed.has(String(s.id)) && (!anchor || keyAfter(stepKey(s), anchor))) || null;
+}
+
+function nextSequenceStep(enrollment, steps) {
+  const { anchor, passedIds } = sequenceCursor(enrollment, steps);
+  return firstStepAfter(steps, anchor, passedIds);
 }
 
 /**
@@ -735,13 +852,11 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
   if (!template) throw new Error('template missing');
 
-  const steps = await db('automation_steps')
-    .where({ template_key: enrollment.template_key, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(enrollment.template_key);
 
-  const step = steps[enrollment.current_step];
+  const step = nextSequenceStep(enrollment, steps);
   if (!step) {
-    // No step at this index — treat as completed.
+    // No step left after the last one passed — treat as completed.
     await db('automation_enrollments').where({ id: enrollmentId }).update({
       status: 'completed', completed_at: new Date(), next_send_at: null, updated_at: new Date(),
     });
@@ -749,7 +864,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   }
   if (!step.html_body && !step.text_body) {
     // Empty step — skip and advance.
-    return advanceEnrollment(enrollment, steps);
+    return advanceEnrollment(enrollment, steps, step);
   }
 
   const personal = {
@@ -833,7 +948,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 
     await stampPrepSentForSequence(enrollment, step, steps);
 
-    return advanceEnrollment(enrollment, steps);
+    return advanceEnrollment(enrollment, steps, step);
   } catch (err) {
     logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
     await db('automation_step_sends').where({ id: sendRow.id }).update({
@@ -852,39 +967,40 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   }
 }
 
-// Moves an enrolment past the step it just delivered: the next enabled step
-// is scheduled from its own delay, or the enrolment completes when none
-// remain. Fenced on the step the caller saw, so two settlers of one step
-// (the tick and a manual / composer prep delivery through
-// prep-guide-sender's settleHeldEnrollment) cannot advance it twice. Steps
-// are loaded when the caller has none.
-async function advanceEnrollment(enrollment, steps = null) {
-  if (!steps) {
-    steps = await db('automation_steps')
-      .where({ template_key: enrollment.template_key, enabled: true })
-      .orderBy('step_order', 'asc');
-  }
-  const fence = { id: enrollment.id, current_step: enrollment.current_step };
-  const nextIdx = enrollment.current_step + 1;
-  if (nextIdx >= steps.length) {
-    await db('automation_enrollments').where(fence).update({
-      status: 'completed',
-      completed_at: new Date(),
+// Moves an enrolment past a step: the one it just delivered or skipped (the
+// runner passes it), or, when the caller names none (prep-guide-sender's
+// settleHeldEnrollment after a manual prep delivery), the step it was due to
+// send next. The next step is scheduled from its own delay, or the enrolment
+// completes when none remain. Fenced on the cursor the caller saw (current_step
+// and the last passed step id), so two settlers of one step (the tick and a
+// manual / composer prep delivery) cannot advance it twice. Steps are loaded
+// when the caller has none.
+async function advanceEnrollment(enrollment, steps = null, passedStep = null) {
+  if (!steps) steps = await enabledSequenceSteps(enrollment.template_key);
+  const { passedIds } = sequenceCursor(enrollment, steps);
+  const passed = passedStep || nextSequenceStep(enrollment, steps);
+  const next = passed ? firstStepAfter(steps, stepKey(passed), [...passedIds, String(passed.id)]) : null;
+  const priorPassedId = String(enrollmentMetadata(enrollment).passed_step_id ?? '');
+  const cursor = passed ? {
+    passed_step_order: Number(passed.step_order),
+    passed_step_id: String(passed.id),
+    passed_step_ids: [...new Set([...passedIds, String(passed.id)])],
+  } : null;
+  const write = (patch) => db('automation_enrollments')
+    .where({ id: enrollment.id, current_step: enrollment.current_step })
+    .whereRaw("COALESCE(metadata->>'passed_step_id', '') = ?", [priorPassedId])
+    .update({
+      ...patch,
+      ...(cursor ? { metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(cursor)]) } : {}),
       last_sent_at: new Date(),
-      next_send_at: null,
-      current_step: nextIdx,
       updated_at: new Date(),
     });
+  if (!next) {
+    await write({ status: 'completed', completed_at: new Date(), next_send_at: null, current_step: steps.length });
     return { sent: true, done: true };
   }
-  const nextStep = steps[nextIdx];
-  const nextSendAt = new Date(Date.now() + (nextStep.delay_hours || 0) * 3600 * 1000);
-  await db('automation_enrollments').where(fence).update({
-    current_step: nextIdx,
-    last_sent_at: new Date(),
-    next_send_at: nextSendAt,
-    updated_at: new Date(),
-  });
+  const nextSendAt = new Date(Date.now() + (next.delay_hours || 0) * 3600 * 1000);
+  await write({ current_step: steps.indexOf(next), next_send_at: nextSendAt });
   return { sent: true, done: false, nextSendAt };
 }
 
@@ -982,6 +1098,7 @@ module.exports = {
   enrollCustomer,
   sendStep,
   advanceEnrollment,
+  nextSequenceStep,
   processDueSteps,
   testSequence,
   substitute,

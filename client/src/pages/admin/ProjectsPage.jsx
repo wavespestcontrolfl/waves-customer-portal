@@ -1352,6 +1352,9 @@ export default function ProjectsPage() {
     loadProjects();
   }, [loadProjects]);
 
+  // A deep link opens its report by id even when the capped directory lists
+  // (500 general + 500 WDO) do not hold it: ProjectDetail loads the report
+  // itself and shows its own error when the id is missing or not reachable.
   useEffect(() => {
     if (!initialProjectId) {
       setSelectedId(null);
@@ -1360,7 +1363,7 @@ export default function ProjectsPage() {
     const match = projects.find(
       (project) => String(project.id) === String(initialProjectId),
     );
-    setSelectedId(match?.id || null);
+    setSelectedId(match?.id ?? initialProjectId);
   }, [initialProjectId, projects]);
 
   const selectProject = useCallback(
@@ -1396,7 +1399,6 @@ export default function ProjectsPage() {
   const wdoProjects = projects.filter((p) => p.project_type === WDO_TYPE);
   const showRegularProjects = filterType !== WDO_TYPE;
   const showWdoProjects = !filterType || filterType === WDO_TYPE;
-  const selected = projects.find((p) => p.id === selectedId);
 
   return (
     <div className="max-w-[1300px] mx-auto text-ink-primary">
@@ -1444,14 +1446,14 @@ export default function ProjectsPage() {
           // column, and when a project is open show only the detail (full width)
           // so its title/photos aren't squished into a sliver. The detail's
           // close (X) returns to the list.
-          gridTemplateColumns: !isMobile && selected ? "1fr 1.4fr" : "1fr",
+          gridTemplateColumns: !isMobile && selectedId ? "1fr 1.4fr" : "1fr",
           gap: 16,
         }}
       >
         {/* List — hidden on mobile while a detail is open */}
         <div
           style={{
-            display: isMobile && selected ? "none" : "flex",
+            display: isMobile && selectedId ? "none" : "flex",
             flexDirection: "column",
             gap: 8,
           }}
@@ -1485,10 +1487,10 @@ export default function ProjectsPage() {
         {/* Detail — keyed by project id so switching projects remounts the
             panel: stale edit state or an in-flight load for project A can
             never render onto (or save over) project B. */}
-        {selected && (
+        {selectedId && (
           <ProjectDetail
-            key={selected.id}
-            projectId={selected.id}
+            key={String(selectedId)}
+            projectId={selectedId}
             typesRegistry={typesRegistry}
             onClose={closeProject}
             onChanged={loadProjects}
@@ -1655,6 +1657,21 @@ function ProjectRow({ project, active, onSelect, compactType }) {
 // in an overlay so project-backed visits (WDO, pre-treat cert) open their
 // report in place from the schedule — the pest-completion interaction
 // (owner ask 2026-07-13). Self-contained: fetches its own project by id.
+const DETAIL_CLOSE_STYLE = {
+  background: "transparent",
+  border: "none",
+  color: "#71717A",
+  fontSize: 22,
+  cursor: "pointer",
+  width: 44,
+  height: 44,
+  padding: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+};
+
 export function ProjectDetail({
   projectId,
   typesRegistry,
@@ -1687,9 +1704,6 @@ export function ProjectDetail({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
   const [productCatalog, setProductCatalog] = useState([]);
-  // "Pay before you get the report" — default ON when the server offers the
-  // option (WDO + gate enabled + not yet delivered).
-  const [holdReportUntilPaid, setHoldReportUntilPaid] = useState(true);
 
   function markDirty() {
     editRevisionRef.current += 1;
@@ -1752,9 +1766,6 @@ export function ProjectDetail({
 
   useEffect(() => {
     load();
-    // The drawer instance survives across projects (dispatch overlay) — an
-    // unchecked hold must not silently carry over to the next WDO.
-    setHoldReportUntilPaid(true);
     setDirtyPhotoIds(new Set());
   }, [projectId]);
 
@@ -1818,12 +1829,6 @@ export function ProjectDetail({
   const wdoSendBlockedTitle = wdoNeedsSignature
     ? "Capture the licensee signature first"
     : "Report changed after signing — the licensee must clear & re-sign first";
-  // Payment hold: server-computed availability (official termite document +
-  // gate on + not sent) and the live state driving the release hint.
-  const reportHoldAvailable = !!project?.report_payment_hold_available;
-  const reportHeld = ["held", "releasing"].includes(
-    String(project?.report_hold_status || ""),
-  );
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -1966,9 +1971,6 @@ export function ProjectDetail({
         routing.report_copies?.length
           ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
           : null,
-        pv.releases_payment_hold
-          ? "This send RELEASES the payment hold — the report goes out now, before payment."
-          : null,
       ]
         .filter(Boolean)
         .join("\n");
@@ -2069,10 +2071,6 @@ export function ProjectDetail({
         )) || "";
       if (!overrideReason) return;
     }
-    // Resolved once per send: the toggle only renders when the server offers
-    // the hold (WDO + gate on + not delivered), so a hidden toggle never
-    // silently holds a non-eligible project.
-    const sendHold = reportHoldAvailable && holdReportUntilPaid && project.status !== "closed";
     setSaving(true);
     setError("");
     setNotice("");
@@ -2083,7 +2081,6 @@ export function ProjectDetail({
         method: "POST",
         body: {
           dry_run: true,
-          ...(sendHold ? { hold_report_until_paid: true } : {}),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -2107,20 +2104,15 @@ export function ProjectDetail({
         routing.recipient ? `Email to: ${routing.recipient}` : null,
         routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
         routing.report_copies?.length
-          ? sendHold
-            ? `Report-only copy after payment, no invoice: ${routing.report_copies.join(", ")}`
-            : `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
+          ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
           : null,
       ]
         .filter(Boolean)
         .join("\n");
-      const confirmMessage = sendHold
-        ? `${verb} invoice${invoiceLabel} for ${amount} and hold the ${reportNoun} until it's paid?\n\n` +
-          `The customer gets the invoice + pay link now — no report. The FDACS-13645 report is emailed automatically the moment the invoice is paid.` +
-          (routingLines ? `\n\n${routingLines}` : "")
-        : `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
-          `The customer gets one email (${emailContents}) and one text (report + pay links).` +
-          (routingLines ? `\n\n${routingLines}` : "");
+      const confirmMessage =
+        `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
+        `The customer gets one email (${emailContents}) and one text (report + pay links).` +
+        (routingLines ? `\n\n${routingLines}` : "");
       if (!(await confirmAsk(confirmMessage, { confirmLabel: verb }))) {
         setSaving(false);
         return;
@@ -2131,7 +2123,6 @@ export function ProjectDetail({
           // Only an existing invoice carries an id from the preview; a new WDO
           // (id null) routes to the server's locked create path on send.
           ...(inv.id ? { invoice_id: inv.id } : {}),
-          ...(sendHold ? { hold_report_until_paid: true } : {}),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -2140,10 +2131,6 @@ export function ProjectDetail({
       setDelivery(d.channels || null);
       if (d.sent === false) {
         setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
-      } else if (d.report_held) {
-        setNotice(
-          `Invoice ${d.invoice?.invoice_number || ""} sent — report held; it delivers automatically once the invoice is paid. ${deliverySummary(d.channels)}`.trim(),
-        );
       } else {
         setNotice(
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
@@ -2508,9 +2495,18 @@ export function ProjectDetail({
           borderRadius: 6,
           padding: 24,
           color: "#71717A",
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 12,
         }}
       >
-        {loading ? "Loading project…" : error || "Project unavailable."}
+        <span>{loading ? "Loading project…" : error || "Project unavailable."}</span>
+        {/* A deep link to a missing report hides the list on a phone, so
+            this state keeps the header's way back to the list. */}
+        <button type="button" onClick={onClose} style={DETAIL_CLOSE_STYLE} aria-label="Close">
+          ×
+        </button>
       </div>
     );
   }
@@ -2607,20 +2603,7 @@ export function ProjectDetail({
         <button
           type="button"
           onClick={onClose}
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#71717A",
-            fontSize: 22,
-            cursor: "pointer",
-            width: 44,
-            height: 44,
-            padding: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
+          style={DETAIL_CLOSE_STYLE}
           aria-label="Close"
         >
           ×
@@ -3173,7 +3156,7 @@ export function ProjectDetail({
             </div>
             {billingBlocksClose && (
               <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
-                Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
+                Use the completion action to charge an authorized card on file, or send the invoice together with the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"}.
               </div>
             )}
             {followupBlocksClose && (
@@ -3205,31 +3188,6 @@ export function ProjectDetail({
           />
         </div>
       )}
-      {reportHeld && (
-        <div style={{ padding: "0 16px 12px" }}>
-          <div
-            style={{
-              padding: "10px 12px",
-              borderRadius: 8,
-              border: "1px solid #FCD34D",
-              background: "#FFFBEB",
-              color: "#92400E",
-              fontSize: 13,
-              fontWeight: 500,
-            }}
-          >
-            Report held — the customer has the invoice and pay link, and the
-            report is emailed automatically the moment the invoice is paid.
-            &ldquo;Send report&rdquo; delivers it now and clears the hold.
-            {project.report_hold_last_error ? (
-              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 700 }}>
-                Last automatic release attempt failed:{" "}
-                {project.report_hold_last_error}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      )}
       {/* Footer actions */}
       <div
         style={{
@@ -3242,31 +3200,6 @@ export function ProjectDetail({
           alignItems: "center",
         }}
       >
-        {canAdminActions && reportHoldAvailable && project.status !== "closed" && (
-          <label
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 7,
-              fontSize: 13,
-              color: "#3F3F46",
-              fontWeight: 500,
-              cursor: "pointer",
-              marginRight: "auto",
-            }}
-            title={project.project_type === WDO_TYPE
-              ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
-              : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
-          >
-            <input
-              type="checkbox"
-              checked={holdReportUntilPaid}
-              onChange={(e) => setHoldReportUntilPaid(e.target.checked)}
-              disabled={actionsBlocked}
-            />
-            Hold report until invoice is paid
-          </label>
-        )}
         {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
@@ -3356,15 +3289,9 @@ export function ProjectDetail({
               onClick={handleSend}
               disabled={actionsBlocked || wdoSendBlocked}
               style={{ ...btnPrimary, opacity: actionsBlocked || wdoSendBlocked ? 0.5 : 1 }}
-              title={
-                wdoSendBlocked
-                  ? wdoSendBlockedTitle
-                  : reportHeld
-                    ? "Deliver the report now — this releases the payment hold"
-                    : undefined
-              }
+              title={wdoSendBlocked ? wdoSendBlockedTitle : undefined}
             >
-              {reportHeld ? "Send report now (release hold)" : "Send report"}
+              Send report
             </button>
           )}
         {canAdminActions &&
@@ -3380,18 +3307,10 @@ export function ProjectDetail({
               title={
                 wdoSendBlocked
                   ? wdoSendBlockedTitle
-                  : reportHoldAvailable
-                    ? holdReportUntilPaid
-                      ? project.project_type === WDO_TYPE
-                        ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
-                        : "Send the invoice and payment link now; release the pre-treatment certificate automatically after payment"
-                      : "Send the report and an invoice together via email + text"
-                    : "Send the report and an invoice together via email + text"
+                  : "Send the report and an invoice together via email + text"
               }
             >
-              {reportHoldAvailable && holdReportUntilPaid
-                ? "Send invoice & hold report"
-                : "Send report + invoice"}
+              Send report + invoice
             </button>
           )}
         <IssueWarrantyAction
@@ -3414,10 +3333,6 @@ const PROJECT_ACTIVITY_LABELS = {
   project_report_resent: "Resent",
   project_report_with_invoice_sent: "Report + invoice sent",
   project_report_with_invoice_failed: "Report + invoice failed",
-  project_invoice_sent_report_held: "Invoice sent — report held",
-  project_invoice_report_hold_failed: "Invoice send failed (hold)",
-  project_report_released_after_payment: "Report released (paid)",
-  project_report_release_blocked: "Report release blocked",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",

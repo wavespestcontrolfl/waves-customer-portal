@@ -13,6 +13,7 @@
 // caught by tests/model-switchboard.test.js.
 
 const MODELS = require('../config/models');
+const { agentName } = require('./voice-agent/relay-protocol');
 
 // The picker's model catalog lives in the registry (every model id in one
 // place — AGENTS.md model-ID rule); this module only resolves against it.
@@ -77,7 +78,7 @@ const SELECTORS = [
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
-  { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the Sandy scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
   // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)
   // the same thinking floor deep.js does and reads past thinking blocks and
@@ -162,6 +163,7 @@ const ROUTE_SELECTOR = {
   smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
   autoDispatchProofreader: 'AUTO_DISPATCH_PROOFREADER',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
+  lawnDiagnosisPerceptionBackup: 'OPENAI_LAWN_ASSESSMENT',
   typedDecision: 'TYPESAFE_JEV',
   typedDecisionClef: 'CLOUDFLARE_CLEF',
 };
@@ -391,7 +393,6 @@ const LANES = [
   L('review_ask_repeat_check', 'Tech-voice review text repeat check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('lawn_draft_timing_check', 'Lawn report draft result-timing check', 'service-report/lawn-draft-timing-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'lawn v6 copy (GATE_LAWN_REPORT_LEAD); kill LAWN_DRAFT_TIMING_CHECK=off' }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
-  L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -484,7 +485,7 @@ const LANES = [
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
-  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
+  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), R('lawnDiagnosisPerceptionBackup'), { note: 'OpenAI reads the photos when Gemini misses (owner 2026-10-29); if both miss, the Claude VISION score composite' }),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
@@ -510,7 +511,7 @@ const LANES = [
   L('sms_canary_save_sale', 'SMS draft canary · save-the-sale route', 'sms-draft-canary.js', 'voice', R('smsDraftSaveSale'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
   L('report_ask', 'Service report Ask Waves answer', 'service-report/report-ask-ai.js', 'voice', P('reportAsk', 'primary'), P('reportAsk', 'fallback'), { inbound: true, note: 'GATE_REPORT_ASK_AI, dark; writes the answer from the report\'s own facts (owner 2026-10-05: Sonnet 5.5), a miss on both legs answers with the fixed-rule text' }),
   L('completion_recap', 'Completion recap (customer-facing)', 'completion-recap.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
-  L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/lawn-report-narrative.js, service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
+  L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('social_copy', 'Social post copy', 'social-media.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('tech_caption_copy', 'Tech social caption · copy', 'tech-social-caption.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('review_ask', 'Review-ask drafting', 'review-ask-drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
@@ -518,8 +519,8 @@ const LANES = [
   L('email_reply', 'Email reply drafting', 'email/email-actions.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('invoice_summary', 'Invoice AI summary', 'invoice-ai-summary.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('websiteContent', 'primary'), P('websiteContent', 'fallback')),
-  L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
-  L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
+  L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max' }),
+  L('content_misc', 'Content ideas, scheduler copy, automation emails', 'content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -535,7 +536,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids, PLUS any voice-eligible OpenAI id while GATE_VOICE_RELAY_OPENAI_INBOUND is exactly "true" (dark by default; owner ruling 2026-09-28, GPT-6 Luna); an OpenAI round that fails for a provider reason falls back to the shared Anthropic chain once, mid-call, and stays there for the rest of that call' }),
+  L('voice_relay', `Inbound voice relay (${agentName()})`, 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids, PLUS any voice-eligible OpenAI id while GATE_VOICE_RELAY_OPENAI_INBOUND is exactly "true" (dark by default; owner ruling 2026-09-28, GPT-6 Luna); an OpenAI round that fails for a provider reason falls back to the shared Anthropic chain once, mid-call, and stays there for the rest of that call' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), null, { note: 'shares VOICE_RELAY_MODEL with inbound and the same allowlist walk (VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default); VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -571,8 +572,6 @@ const LANES = [
   L('ib_tech_backup', 'Intelligence Bar · tech OpenAI backup', 'intelligence-bar/openai-tool-adapter.js', 'reason', E('INTELLIGENCE_BAR_BACKUP_MODEL', P('highStakes', 'fallback')), null, { note: 'tech-context requests only; same gate as ib_admin_backup' }),
   L('ib_tools', 'IB email / SMS / procurement tools', 'intelligence-bar/email-tools.js, intelligence-bar/comms-tools.js, intelligence-bar/procurement-tools.js', 'reason', T('FLAGSHIP')),
   L('commercial_proposal', 'Commercial proposal brief', 'estimator-engine/commercial-proposal.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('signal_detector', 'Customer signal detector', 'customer-intelligence/signal-detector.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
-  L('retention_drafts', 'Retention drafts (owner-approved)', 'customer-intelligence/retention-engine.js', 'reason', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('tax_advisor', 'Tax advisor weekly report', 'tax-advisor.js', 'reason', T('FLAGSHIP')),
   L('csr_coach', 'CSR call coaching', 'csr/csr-coach.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
@@ -692,7 +691,6 @@ const LANE_AREA = {
   transcription: 'calls',
   transcript_label: 'calls',
   contact_pass: 'calls',
-  call_sentiment: 'calls',
   call_self_audit: 'calls',
   call_incidents: 'calls',
   // Shadow typed decisions ride the nightly call self-audit (and inbound texts
@@ -744,8 +742,6 @@ const LANE_AREA = {
   intent_composer: 'estimates',
   commercial_proposal: 'estimates',
   churn_classify: 'estimates',
-  signal_detector: 'estimates',
-  retention_drafts: 'estimates',
   report_copy: 'reports',
   treatment_narrative: 'reports',
   lawn_tech_paragraph: 'reports',
@@ -864,7 +860,6 @@ const LANE_DESCRIBE = {
   transcription: 'Transcribes recordings, with a long-call verifier',
   transcript_label: 'Labels who is speaking',
   contact_pass: 'Second listen for spelled emails and addresses',
-  call_sentiment: 'Reads how the caller sounds',
   call_self_audit: 'Audits the extraction against the transcript',
   call_incidents: 'Second opinion that confirms a self-audit disagreement',
   lead_synopsis: 'Summarises a new lead from the call',
@@ -876,9 +871,9 @@ const LANE_DESCRIBE = {
   tech_dictation: 'Transcribes field notes from the tech',
   voice_fill_transcription: 'Hears what the tech said for Fast Complete voice fill',
   parse_when: 'Reads "next Tuesday morning" into a date',
-  voice_relay: 'Speaks with callers on the phone line (Sandy)',
+  voice_relay: `Speaks with callers on the phone line (${agentName()})`,
   voice_relay_collections: 'Speaks with customers on collections calls',
-  voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
+  voice_relay_judge: `Grades ${agentName()}'s eval calls against each scenario's spec`,
   pest_id: 'Identifies the pest in a customer photo',
   pest_id_app: "Identifies the pest in a photo a customer takes in the app's Photo ID",
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
@@ -914,8 +909,6 @@ const LANE_DESCRIBE = {
   intent_composer: 'Turns a request into an estimator plan',
   commercial_proposal: 'Writes the commercial proposal brief',
   churn_classify: 'Classifies why a customer left',
-  signal_detector: 'Spots customers at risk',
-  retention_drafts: 'Drafts the retention outreach you approve',
   report_copy: 'Writes the completed-service report',
   treatment_narrative: 'Writes the treatment narrative',
   lawn_tech_paragraph: 'Writes the lawn report\'s "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH)',

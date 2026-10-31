@@ -1459,6 +1459,37 @@ const FACTS = [
     verifiedOn: '2026-10-24',
     newsletter: false,
   },
+  {
+    slug: 'fact-tip-fa-flood-rafts',
+    title: 'Service-report tip source: Fire ants float in a flood',
+    tags: ['tech-tips', 'pest'],
+    sourceUrls: ['https://www.cdc.gov/niosh/docs/2025-106/pdfs/2025-106.pdf'],
+    quote: '"Fire ants are often disturbed during hurricanes and floods. They can cling together and float along in floodwaters." "Be careful when lifting items (including animal carcasses) off the ground, as they may be covered in ants"',
+    content: 'What the technician tip "Fire ants float in a flood" on service reports relies on, quoted above from CDC/NIOSH, Hurricane and Flood Key Messages, 3rd ed. (2025-106), page 14. Nothing beyond the quoted words is claimed.',
+    verifiedOn: '2026-10-26',
+    newsletter: false,
+  },
+  {
+    slug: 'fact-tip-lawn-watering-day',
+    title: 'Service-report tip source: Your watering day',
+    tags: ['tech-tips', 'lawn'],
+    sourceUrls: ['https://www.swfwmd.state.fl.us/business/epermitting/district-water-restrictions'],
+    quote: '"The District\'s Modified Phase III one-day-per-week water shortage restrictions were extended through March 31, 2027." "Lawn and landscape watering remains limited to a once-per-week schedule" "Residents should check with their city or county for their allowable day and times as many have different schedules or stricter hours in effect. Below is the standard watering days schedule based on addresses ending in: 0 or 1 shall only water on Monday 2 or 3, on Tuesday 4 or 5, on Wednesday 6 or 7, on Thursday 8 or 9, on Friday along with locations with a mix of addresses or for which an address cannot be determined (such as common areas associated with a subdivision)" "The restrictions apply to residents using potable, well or surface water; however, exclusive use of reclaimed water is only subject to voluntary watering hours, unless restricted by the local government or utility." "New lawns and plants have a 60-day establishment period." "The restrictions apply to all of Citrus, DeSoto, Hardee, Hernando, Hillsborough, Manatee, Pasco, Pinellas, Polk, Sarasota and Sumter counties; portions of Charlotte, Highlands and Lake counties"',
+    content: 'What the technician tip "Your watering day" on service reports relies on, quoted above from SWFWMD: the order\'s end date, the once-a-week limit for an established lawn, the standard day for each last digit, and the reclaimed-water exception. The page says cities and counties may set different days, so the tip shows only where the yard\'s own city or county page was read and follows the standard schedule. Nothing beyond the quoted words is claimed.',
+    expiresOn: '2027-04-01',
+    verifiedOn: '2026-10-26',
+    newsletter: false,
+  },
+  {
+    slug: 'fact-tip-led-warm-white-ifas',
+    title: 'Service-report tip source: Warm white LEDs outdoors (UF/IFAS Extension Sarasota County, 2023)',
+    tags: ['tech-tips', 'lighting', 'pest'],
+    sourceUrls: ['https://blogs.ifas.ufl.edu/sarasotaco/2023/08/17/shining-a-spotlight-on-exterior-lighting/'],
+    quote: '"When purchasing an LED lightbulb, be sure you are choosing the correct bulbs for exterior lighting" "LED Lightbulbs that are most effective at decreasing insects (best to use!)" "The LED lights that are least attractive to insects, so the most effective lightbulb to use, are those labeled warm white or ultra warm white (>550nm)." "LED bulbs below 3600K will emit warm or ultra warm white light that is difficult for insects to see."',
+    content: 'What the technician tip "LED porch bulbs" on service reports relies on, quoted above from UF/IFAS Extension Sarasota County ("Shining a Spotlight on Exterior Lighting", Carol Wyatt-Evens, posted August 17, 2023). Nothing beyond the quoted words is claimed.',
+    verifiedOn: '2026-10-26',
+    newsletter: false,
+  },
 ];
 
 module.exports = { FACTS, SOURCE, VERIFIED_ON };

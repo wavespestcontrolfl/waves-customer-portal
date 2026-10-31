@@ -12,7 +12,12 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutco
 
 jest.mock('../models/db', () => jest.fn());
 const mockGates = { reviewSequences: true, reviewDirectLink: true };
-jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (g) => !!mockGates[g],
+  // GATE_REVIEW_PROBABLE_REVIEWER_GUARD: the send guard's call-time reader (review-click-guard.js).
+  reviewProbableReviewerGuardLive: () => mockGates.reviewProbableReviewerGuard === true,
+  gates: mockGates,
+}));
 jest.mock('../routes/admin-sms-templates', () => ({
   // Canonical 'review_request' sms_template render — carries the
   // {reservice_line} clause #3288 wired into this template's render sites.

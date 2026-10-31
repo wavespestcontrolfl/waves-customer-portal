@@ -473,63 +473,6 @@ describe('slot reservation helpers', () => {
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 
-  describe('commitReservation — lunch block mirror (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23)', () => {
-    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
-    let previous;
-    beforeEach(() => { previous = process.env[ENV_KEY]; });
-    afterEach(() => {
-      if (previous === undefined) delete process.env[ENV_KEY];
-      else process.env[ENV_KEY] = previous;
-    });
-    function wire({ windowStart, windowEnd }) {
-      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
-      const reservationBuilder = {
-        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({
-          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
-          window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
-          reservation_expires_at: '2027-05-20T13:15:00.000Z',
-        }),
-      };
-      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
-      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
-      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
-      const trx = jest.fn((table) => {
-        if (table === 'scheduled_services') return scheduledBuilders.shift();
-        if (table === 'technicians') return techBuilder;
-        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
-        throw new Error(`unexpected table ${table}`);
-      });
-      trx.raw = jest.fn((sql) => ({ raw: sql }));
-      trx.isTransaction = true;
-      return { trx, updateBuilder };
-    }
-    const commit = (trx) => slotReservation.commitReservation({
-      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
-      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
-    });
-
-    test('gate on: a noon hold minted before the flip is refused SLOT_UNAVAILABLE, nothing written', async () => {
-      process.env[ENV_KEY] = 'true';
-      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-      try {
-        const { trx, updateBuilder } = wire({ windowStart: '12:00:00', windowEnd: '13:00:00' });
-        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
-        expect(updateBuilder.update).not.toHaveBeenCalled();
-      } finally { jest.useRealTimers(); }
-    });
-
-    test('gate on: an 11:00 hold whose resolved window runs into lunch (11:00-12:30) is refused too', async () => {
-      process.env[ENV_KEY] = 'true';
-      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-      try {
-        const { trx, updateBuilder } = wire({ windowStart: '11:00:00', windowEnd: '12:30:00' });
-        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
-        expect(updateBuilder.update).not.toHaveBeenCalled();
-      } finally { jest.useRealTimers(); }
-    });
-  });
-
   describe('commitReservation — self-serve notice window (owner ruling 2026-09-23)', () => {
     function wire({ reservationExpiresAt }) {
       const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
@@ -780,6 +723,93 @@ describe('slot reservation helpers', () => {
       notes: 'Gate code in customer profile.\nAccepted service mix: 4x Pest Control + 9x Lawn Care.',
       reservation_expires_at: null,
     }));
+  });
+
+  // GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, Route Check Everywhere
+  // follow-up item 1): a graduating hold nothing numbered (capacity mode off)
+  // gets its stop number in the accept's own transaction.
+  describe('commitReservation — GATE_ROUTE_CHECK_ACCEPT_SAVES stop number', () => {
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    // Relative to today (AGENTS.md: near-today date literals go red): a hold well past the booking notice window.
+    const HOLD_DATE = etDateString(addETDays(new Date(), 30));
+    let placeSpy;
+    function wireCommit() {
+      const chain = (extra) => ({ where: jest.fn().mockReturnThis(), ...extra });
+      const reservationBuilder = chain({
+        select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: HOLD_DATE,
+          window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
+          reservation_expires_at: `${HOLD_DATE}T13:15:00.000Z`,
+        }),
+      });
+      const conflictBuilder = chain({
+        modify: jest.fn(function (callback) { callback(this); return this; }),
+        whereNot: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(), andWhereRaw: jest.fn().mockReturnThis(),
+        andWhere: jest.fn(function (callback) { callback(this); return this; }),
+        whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null),
+      });
+      const updateBuilder = chain({
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1', technician_id: null }]),
+      });
+      const scheduledBuilders = [
+        chain({ first: jest.fn().mockResolvedValue({ scheduled_date: HOLD_DATE }) }),
+        reservationBuilder, conflictBuilder, makeGlobalProbeBuilder([]), updateBuilder,
+      ];
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return makeAssignableTechnicianBuilder();
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return trx;
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, serviceMode: 'recurring',
+      selectedFrequency: 'quarterly', trx,
+    });
+    const gateOn = () => {
+      process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    };
+    beforeEach(() => { placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(['scheduled-123']); });
+    afterEach(() => {
+      placeSpy.mockRestore();
+      delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
+      delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    });
+
+    test('gate off: no placement, and the graduated row is returned as before', async () => {
+      await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
+      expect(placeSpy).not.toHaveBeenCalled();
+    });
+
+    test('gate on: one placement on the accept transaction, source estimate_accept, after the graduation update', async () => {
+      gateOn();
+      const trx = wireCommit();
+      await expect(commit(trx)).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'scheduled-123', staffSave: true, source: 'estimate_accept' });
+      expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
+    });
+
+    test('gate on: a throwing placement never fails the accept', async () => {
+      gateOn();
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123' });
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+    });
+
+    test('capacity mode: its own persisted order stands, so nothing places a second time', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../services/slot-reservation.js'), 'utf8');
+      const fn = src.slice(src.indexOf('async function commitReservation('));
+      expect(fn).toMatch(/if \(capacityFit\) await persistArrivalOrder\(client, capacityFit, scheduledServiceId\);[\s\S]{0,400}?else await require\('\.\/scheduling\/staff-save-route-check'\)\.placeAcceptedVisit\(client/);
+    });
   });
 
   test('canonical service type emits exact catalog names per cadence', () => {
@@ -1231,15 +1261,7 @@ describe('slot reservation helpers', () => {
     });
   });
 
-  describe('lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) — commit-side mirror of the offer filter', () => {
-    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
-    let previous;
-    beforeEach(() => { previous = process.env[ENV_KEY]; });
-    afterEach(() => {
-      if (previous === undefined) delete process.env[ENV_KEY];
-      else process.env[ENV_KEY] = previous;
-    });
-
+  describe('noon is an ordinary hour (owner ruling 2026-09-23)', () => {
     function noonProfile() {
       estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
         serviceMode: 'one_time',
@@ -1249,58 +1271,7 @@ describe('slot reservation helpers', () => {
       });
     }
 
-    test('gate on: a signed 12:00 slot is refused as SLOT_UNAVAILABLE before any hold/conflict/insert query', async () => {
-      process.env[ENV_KEY] = 'true';
-      jest.useFakeTimers();
-      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-      try {
-        noonProfile();
-        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
-        const technicianBuilder = makeTechnicianBuilder();
-        const scheduledBuilders = [];
-        const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
-        db.transaction = jest.fn(async (callback) => callback(trx));
-
-        // Signed over the profile duration so the HMAC passes and the LUNCH
-        // guard is what rejects (a forged/stale noon slot can't be committed).
-        await expect(slotReservation.reserveSlot({
-          estimateId: 'estimate-456',
-          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '12:00', techId: 'tech-1', durationMinutes: 60 }),
-          serviceMode: 'one_time',
-        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
-        expect(scheduledBuilders).toHaveLength(0);
-      } finally {
-        jest.useRealTimers();
-      }
-    });
-
-    test('gate on: a window that merely TOUCHES the block (11:00–12:00, 13:00–14:00) still reserves', async () => {
-      process.env[ENV_KEY] = 'true';
-      jest.useFakeTimers();
-      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-      try {
-        for (const hhmm of ['11:00', '13:00']) {
-          noonProfile();
-          const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
-          const technicianBuilder = makeTechnicianBuilder();
-          const insertBuilder = makeInsertBuilder({ id: `scheduled-${hhmm}`, reservation_expires_at: '2027-05-20T21:15:00.000Z' });
-          const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
-          const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
-          db.transaction = jest.fn(async (callback) => callback(trx));
-          await expect(slotReservation.reserveSlot({
-            estimateId: 'estimate-456',
-            slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm, techId: 'tech-1', durationMinutes: 60 }),
-            serviceMode: 'one_time',
-          })).resolves.toMatchObject({ scheduledServiceId: `scheduled-${hhmm}` });
-          expect(insertBuilder.insert).toHaveBeenCalled();
-        }
-      } finally {
-        jest.useRealTimers();
-      }
-    });
-
-    test('gate unset (default): the same 12:00 slot reserves — noon is an ordinary hour', async () => {
-      delete process.env[ENV_KEY];
+    test('a signed 12:00 slot reserves', async () => {
       jest.useFakeTimers();
       jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
       try {

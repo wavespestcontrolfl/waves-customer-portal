@@ -39,7 +39,7 @@ function currency(n) {
 function dateOnly(d) { return formatDateOnly(d, { fallback: '—' }); }
 function dateTime(d) { return formatDisplayDate(d, { fallback: '—' }); }
 
-const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on receipt' };
+const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', net60: 'Net 60', due_on_receipt: 'Due on receipt' };
 
 // Overdue in ET, not UTC: due_date is an ET-derived DATE (stored as a 'YYYY-MM-DD'
 // calendar day). Compare its calendar date against TODAY in ET as plain strings —

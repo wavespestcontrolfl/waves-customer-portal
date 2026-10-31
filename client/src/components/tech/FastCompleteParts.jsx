@@ -422,12 +422,11 @@ const SPRAY_METHODS = new Set(['broadcast_spray', 'foliar_spray', 'perimeter_spr
 /**
  * The method a lawn row starts on: a granular product never starts on a spray method (the plan's,
  * the last visit's, or the visit's own default), it starts on Granular broadcast. Any other method
- * (spot treatment, soil drench) and every other product keep the method they had, and so does
- * every product while `enabled` is false (the sheets pass the context's methodCorrection). A tech who then
+ * (spot treatment, soil drench) and every other product keep the method they had. A tech who then
  * picks another method is changing it, not taking a default.
  */
-export function startMethodFor(product, method, enabled = true) {
-  return enabled && isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
+export function startMethodFor(product, method) {
+  return isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
 }
 
 /** The context's method list, or the common three when it has none. */
@@ -611,8 +610,8 @@ export function useProductPicker({ products, waiting = null, waitingNote = null,
 // The reason sits above full-width actions, so neither squeezes the other on
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
-// own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
+// own label instead of a line above it. `warnings`: lines that do not hold the button.
+export function CompleteFooter({ submission, missingReason, warn, warnings = [], label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -620,6 +619,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {warnings.map((line) => <p key={line} className="tech-visit-status--warn" role="status">{line}</p>)}
       <div className="tech-visit-actions">
         {children}
         <Button

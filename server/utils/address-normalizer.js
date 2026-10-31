@@ -419,6 +419,19 @@ function unitLineValueKey(normalizedUnitLine) {
   return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
 }
 
+// The full unit identity of a stored address as ONE comparison key: the
+// trailing inline unit peeled off line 1 (splitStreetLineUnit) joined with
+// line 2 BEFORE keying, so "123 Main St Bldg C" + "Apt 2" keys like a typed
+// "Bldg C Apt 2" (keyed apart, the lone "Apt 2" lost its dwelling
+// designator — Codex #7249 r4 P2). The same unit written in both places
+// counts once. '' = no unit. Callers compare keys for equality.
+function premiseUnitKey(line1, line2) {
+  const keyOf = (unitText) => unitLineValueKey(normalizeUnitLine(unitText));
+  const parts = [splitStreetLineUnit(String(line1 || '')).unit, line2].map((s) => String(s || '').trim()).filter(Boolean);
+  const fragments = parts.length === 2 && keyOf(parts[0]) === keyOf(parts[1]) ? [parts[0]] : parts;
+  return fragments.length ? keyOf(fragments.join(' ')) : '';
+}
+
 // Split a street line into its street part and a trailing inline unit —
 // "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }, and
 // multi-part units peel fully: "123 Main St Bldg 2 Apt 4" →
@@ -781,6 +794,72 @@ function normalizeLeadAddress(input = {}) {
   };
 }
 
+// A comma segment that is only a unit: "Apt 4", "#4", "Fl 2". A bare "FL" is the
+// state and "FL 34236" the state + ZIP, never a floor.
+function unitOnlySegment(segment) {
+  const [first, value = ''] = segment.toLowerCase().replace(/\./g, '').split(' ');
+  if (first.startsWith('#')) return first.length > 1 || Boolean(value);
+  return UNIT_DESIGNATORS.has(first) && Boolean(value) && !isStateZipPair(first, value);
+}
+
+// The comma segments after the street and the unit segments right behind it
+// (parseRawAddress keeps those on the street line), with a trailing "USA" dropped.
+function segmentsAfterStreetUnits(raw) {
+  const segments = raw.split(',').map(cleanString).filter(Boolean).slice(1);
+  if (/^(usa|united states)$/i.test(segments[segments.length - 1] || '')) segments.pop();
+  let start = 0;
+  while (start < segments.length && unitOnlySegment(segments[start])) start += 1;
+  return segments.slice(start);
+}
+
+// Whether a one-line address ends in a locality: one or two segments after the
+// street and its units ("City, ST ZIP") and no unit among them. "123 Main St,
+// Apt 12345" has no locality: a five-digit unit is not a ZIP, and no unit is
+// ever dropped.
+function endsInLocality(raw) {
+  const locality = segmentsAfterStreetUnits(raw);
+  return locality.length > 0 && locality.length <= 2 && !locality.some(unitOnlySegment);
+}
+
+// Whether a saved street line also holds its locality. Such a line keys as a
+// different house than the same address saved in parts, so a merge keeps both
+// copies (owner 2026-10-30). After the street and its units: a state, a ZIP or
+// the row's own city ("6618 Sample Ct, Bradenton, FL 34203", "13524 Sample Ct
+// Parrish, 34219", "123 Royal Palm Ct, Venice"). A comma-free line counts when
+// it ends in the state ("17394 Sample Creek Trl Parrish FL 34219"). A unit or a
+// street-name word after a comma ("324 48th Street, Court West") does not.
+function streetLineHoldsLocality({ address_line1, city } = {}) {
+  const line = cleanString(address_line1);
+  if (!line.includes(',')) return /\s(fl|florida)\.?(\s+\d{5}(-\d{4})?)?$/i.test(line);
+  const tail = segmentsAfterStreetUnits(line).join(' ').toLowerCase();
+  const rowCity = cleanString(city).toLowerCase();
+  return /\b(fl|florida)\b|\b\d{5}\b/.test(tail) || Boolean(rowCity && tail.startsWith(rowCity));
+}
+
+// A lead's service address as customer fields. leads.address holds one free-text line, and the
+// website form saves its whole fullAddress there with no ZIP column ("12 Sample Ct East, Parrish,
+// FL 34219"). Copied as-is into a street field, that line keys as a different house than the same
+// address saved in parts, so the customer it creates never matches the form's own customer and a
+// later merge keeps both copies (owner 2026-10-30). A line that starts with a house number and
+// ends in a locality (a state, a ZIP, or the lead's own city) is split the way the form split it.
+// The line's city must agree with the lead's city column when both are set (a segment that
+// disagrees may be a unit word, not a city); the lead's zip column wins over the line's ZIP.
+// Anything else (a bare street, a call's partial "12912", a unit tail) is returned as before.
+function leadAddressFields(lead = {}) {
+  const raw = cleanString(lead.address);
+  const leadCity = cleanString(lead.city);
+  const asIs = { line1: raw, line2: null, city: leadCity || null, state: 'FL', zip: cleanString(lead.zip) || null };
+  if (!endsInLocality(raw)) return asIs;
+  const tail = parseRawAddress(raw);
+  const tailCity = cleanString(tail.city).toLowerCase();
+  const sameCity = Boolean(tailCity) && tailCity === leadCity.toLowerCase();
+  if (/\d/.test(tailCity) || (tailCity && leadCity && !sameCity)) return asIs;
+  if (!(tail.state || tail.zip || sameCity)) return asIs;
+  const split = normalizeLeadAddress({ raw, city: lead.city, zip: lead.zip });
+  if (!/^\d/.test(split.line1) || split.unitConflict) return asIs;
+  return { line1: split.line1, line2: split.line2 || null, city: split.city || null, state: split.state || 'FL', zip: split.zip || null };
+}
+
 // Build a single-line display address from already-parsed parts, dropping any
 // empty piece so a missing zip never renders as "Sarasota, FL null" and a
 // missing city never leaves a dangling comma ("123 Main St, , FL 34231").
@@ -795,10 +874,13 @@ function formatAddress(parts = {}) {
 
 module.exports = {
   normalizeLeadAddress,
+  leadAddressFields,
+  streetLineHoldsLocality,
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,
   unitLineValueKey,
+  premiseUnitKey,
   splitStreetLineUnit,
   splitStreetLineUnitParts,
   splitUnitFirstLine,

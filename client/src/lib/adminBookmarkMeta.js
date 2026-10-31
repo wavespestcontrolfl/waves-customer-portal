@@ -41,7 +41,7 @@ export const FIELD_BOOKMARK_META = {
   appTitle: "Field Tools",
   description: "Waves field technician tools — route, estimates, and protocols.",
   documentTitle: "Waves Tech",
-  themeColor: "#0f1923",
+  themeColor: "#18181B",
 };
 
 const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];

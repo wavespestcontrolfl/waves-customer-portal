@@ -23,9 +23,17 @@ const { AUTO_CLEARABLE_REASON } = require('./billing-pause');
 
 const SERIES_CUSTOMER_COLUMNS = ['id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage'];
 
+// The one definition of a genuine whole-account hold (rule above). Also read
+// by the unstamped-lawn-series watchdog leg
+// (irrigation-weekly-email#findUnstampedRecurringLawnMembers), so the
+// distinction is never copied.
+function isCustomerServiceHeld(c) {
+  return !!c && !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON;
+}
+
 const SERIES_CUSTOMER_INELIGIBILITY_RULES = [
   ['customer_deleted', (c) => !!c.deleted_at],
-  ['customer_service_held', (c) => !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON],
+  ['customer_service_held', isCustomerServiceHeld],
   ['customer_inactive', (c) => c.active === false],
   ['customer_churned', (c) => FORMER_CUSTOMER_STAGES.includes(c.pipeline_stage)],
 ];
@@ -51,6 +59,7 @@ function seriesCustomerSkipReasons(customer) {
 module.exports = {
   SERIES_CUSTOMER_COLUMNS,
   SERIES_CUSTOMER_INELIGIBILITY_RULES,
+  isCustomerServiceHeld,
   seriesCustomerSkipReason,
   seriesCustomerSkipReasons,
 };

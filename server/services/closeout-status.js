@@ -78,6 +78,10 @@ const {
 } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { customerOnAutopay } = require('./autopay-eligibility');
+// pg returns a DATE column as a JS Date: String(date).slice(0, 10) gives
+// "Mon May 31", not "2027-05-31" (the license check compared weekday
+// names). dateOnlyString reads both a Date and an ISO string.
+const { dateOnlyString } = require('../utils/datetime-et');
 const { typedFollowupObligationForCompletedSource, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 
 const FACT_STATES = Object.freeze(['not_required', 'pending', 'done', 'failed', 'unknown']);
@@ -574,7 +578,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.lane = lane;
   let duesCollected = false;
   if (lane?.mode === 'monthly_membership' && inputs.autopayActive === false && customerId) {
-    const visitDay = visit.scheduled_date ? new Date(`${String(visit.scheduled_date).slice(0, 10)}T12:00:00Z`) : now;
+    const visitDay = visit.scheduled_date ? new Date(`${dateOnlyString(visit.scheduled_date)}T12:00:00Z`) : now;
     const duesProbe = await probe('monthly dues collected', unavailable, () => monthlyDuesCollected(knex, customerId, visitDay, { excludeScheduledServiceId: serviceId }));
     duesCollected = duesProbe.error ? false : Boolean(duesProbe.value);
     inputs.duesLookupFailed = Boolean(duesProbe.error);
@@ -621,6 +625,16 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
   } catch { /* gate module unavailable in some test harnesses */ }
   inputs.completionAutopayChargeEnabled = completionAutopayChargeEnabled;
+  // Auto Pay never collects a visit from a won Bill-by-invoice proposal
+  // (owner 2026-10-30, bill-by-invoice.js). Read only when Auto Pay could
+  // charge; a failed read counts as Bill by invoice (the sheet never
+  // promises a charge completion refuses).
+  inputs.billByInvoice = false;
+  if (inputs.autopayActive === true && visit.source_estimate_id) {
+    const billByInvoiceProbe = await probe('estimates (bill by invoice)', unavailable,
+      () => require('./bill-by-invoice').billByInvoiceVisit(knex, visit));
+    inputs.billByInvoice = billByInvoiceProbe.error ? true : billByInvoiceProbe.value === true;
+  }
 
   // Effective bill-to payer — same COALESCE the schedule feed uses
   // (routes/admin-schedule.js effectiveBillToSql): a visit-level payer wins,
@@ -684,7 +698,9 @@ function deriveBillingExpectation(inputs) {
     duesCollectedThisMonth: inputs.duesCollectedThisMonth === true,
     completionAutopayChargeEnabled: inputs.completionAutopayChargeEnabled === true,
   });
-  return { ...prediction, why: prediction.kind, ruleSource: 'lane', laneSource: lane.source };
+  // A Bill-by-invoice visit is billed by invoice, never by Auto Pay (inputs.billByInvoice).
+  const shown = inputs.billByInvoice === true && prediction.kind === 'auto_charge' ? { ...prediction, kind: 'invoice' } : prediction;
+  return { ...shown, why: shown.kind, ruleSource: 'lane', laneSource: lane.source };
 }
 
 // The application fact of a visit with chemical area add-ons (Codex round 8 on #6135): done only when EVERY
@@ -902,7 +918,6 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) reportDelivery = awaiting();
   else if (projectBacked) {
     const ds = project ? String(project.delivery_status || 'not_sent').toLowerCase() : null;
-    const hold = project?.report_hold_status ? String(project.report_hold_status).toLowerCase() : null;
     const channels = parseJsonObjectSafe(project?.delivery_channels);
     const channelOk = Object.fromEntries(Object.entries(channels).map(([k, v]) => [k, v?.ok === true]));
     // Only CUSTOMER report channels count (never a payer/AP leg), and a WDO
@@ -912,12 +927,9 @@ function deriveCloseoutFacts(inputs) {
     const anyChannelOk = isWdo ? channelOk.email === true : (channelOk.email === true || channelOk.sms === true);
     const evidence = {
       projectId: project?.id || null, deliveryStatus: ds, lastDeliveryAt: isoOrNull(project?.last_delivery_at),
-      reportHoldStatus: hold, channelOk, source: 'projects.delivery_status',
+      channelOk, source: 'projects.delivery_status',
     };
     if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', evidence);
-    // Payment hold FIRST: the combined payer-invoice send stamps
-    // delivery_status 'sent' while the report itself is still held.
-    else if (hold === 'held' || hold === 'releasing') reportDelivery = fact('pending', 'project_report_on_hold', evidence);
     else if (ds === 'sent' || ds === 'legacy_sent') reportDelivery = fact('done', `project_delivery_${ds}`, evidence);
     // 'partial' = at least one channel reached the customer (done) OR the
     // required channel failed (WDO email-only) — the channel ledger decides.
@@ -1207,7 +1219,7 @@ function deriveCloseoutFacts(inputs) {
   else if (inputs.followupChild) {
     followUp = fact('done', 'followup_child_scheduled', {
       childServiceId: inputs.followupChild.id, childStatus: inputs.followupChild.status,
-      childScheduledDate: inputs.followupChild.scheduled_date ? String(inputs.followupChild.scheduled_date).slice(0, 10) : null,
+      childScheduledDate: inputs.followupChild.scheduled_date ? dateOnlyString(inputs.followupChild.scheduled_date) : null,
       frozen: obligation.frozen === true,
     });
   } else if (inputs.followupChildLookupFailed) followUp = fact('unknown', 'followup_child_lookup_failed', { required: true });
@@ -1243,9 +1255,9 @@ function deriveCloseoutFacts(inputs) {
     const categoryProblem = licenseCategoryProblem(requiredAll, categories);
     // Judge expiry at the day the work was RECORDED (service_records.service_date);
     // the scheduled day is only a fallback for records without one.
-    const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
-      || (visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null);
-    const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
+    const visitDay = (record?.service_date ? dateOnlyString(record.service_date) : null)
+      || (visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null);
+    const expiry = tech.license_expiry ? dateOnlyString(tech.license_expiry) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
       ...multiCategoryEvidence(requiredAll),
@@ -1345,7 +1357,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     asOf: derived.asOf,
     visit: {
       status: visit.status || null,
-      scheduledDate: visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null,
+      scheduledDate: visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null,
       completedAt: isoOrNull(visit.completed_at),
       customerId: visit.customer_id || null,
       propertyId: visit.property_id || null,

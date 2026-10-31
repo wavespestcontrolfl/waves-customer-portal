@@ -268,9 +268,8 @@ describe('countSegmentRecipients is THE shared 0-recipient preflight', () => {
     expect(senderOutsideHelper).not.toMatch(/buildSubscriberQuery\([^\n]*\)\.count\(/);
     expect(read('services/newsletter-proof.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,80}\.count\(/);
     expect(read('routes/admin-newsletter.js')).not.toMatch(/buildSubscriberQuery\([^\n]*\)[\s\S]{0,120}\.count\(/);
-    // Proof approval and the manual-send route both call the shared helper.
+    // Proof approval calls the shared helper (the manual-send route is gone).
     expect(read('services/newsletter-proof.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
-    expect(read('routes/admin-newsletter.js')).toContain('NewsletterSender.countSegmentRecipients(send.segment_filter)');
     // Scheduler claim-validation counts through it too.
     expect(sender).toContain('const recipientCount = await countSegmentRecipients(row.segment_filter);');
   });

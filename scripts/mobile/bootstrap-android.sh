@@ -99,7 +99,12 @@ fi
 # /api/... links too (direct PDF/report URLs in SMS/email would open a raw API
 # response in the webview instead of the browser download flow — codex P1 on
 # #2496). A path not listed here simply keeps opening in the browser; when a
-# new customer link surface ships, add its prefix here AND rebuild.
+# new customer link surface ships, add its prefix here, in
+# server/services/messaging/email-link-policy.js APP_LINK_PATH_PREFIXES (the
+# same list: emailed links to these paths skip SendGrid's click rewrite so
+# they reach the app), AND rebuild. server/tests/mobile-bootstrap-pinning.test.js
+# fails when the two lists differ or a customer route in client/src/App.jsx is
+# in neither the list nor its documented browser-only set.
 # NOTE: pathPrefix is a plain string prefix — '/l/' and '/r/' need the trailing
 # slash or they'd swallow /login, /report, /reschedule, etc.
 #
@@ -115,13 +120,19 @@ if [ -f "$MANIFEST" ]; then
   # /r/ (referral links) is deliberately ABSENT: referral-links.js 302s those
   # to the marketing site, which would strand the app's webview off-portal —
   # they belong in the browser (iOS AASA excludes them too).
-  APP_LINK_PREFIXES="/l/ /track /pay /billing /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines"
+  APP_LINK_PREFIXES="/l/ /track /pay /billing /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines /appointment /secure /visit /reservice /inspection /price-change"
   IND="            "
   NL=$'\n'
   FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"
   FILTER="${FILTER}${IND}    <action android:name=\"android.intent.action.VIEW\" />${NL}"
   FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.DEFAULT\" />${NL}"
   FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.BROWSABLE\" />${NL}"
+  # http as well as https: texted links carry no scheme (the SMS link policy
+  # strips https://) and the phone opens them as http://, which an https-only
+  # filter never matched, so every texted link opened Chrome. Verification
+  # still runs over https; the web handler upgrades http to https
+  # (client/src/native/nativeLinks.js upgradeOwnHostHttp).
+  FILTER="${FILTER}${IND}    <data android:scheme=\"http\" />${NL}"
   FILTER="${FILTER}${IND}    <data android:scheme=\"https\" android:host=\"portal.wavespestcontrol.com\" />${NL}"
   FILTER="${FILTER}${IND}    <data android:path=\"/\" />${NL}"
   for p in $APP_LINK_PREFIXES; do

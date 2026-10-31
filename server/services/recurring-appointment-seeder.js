@@ -11,6 +11,9 @@ const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
+const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
+const { newSeriesAreaAnchor } = require('./lawn-area-days');
+const { lawn9xRoundsLive } = require('../config/feature-gates');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -133,10 +136,38 @@ function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDat
   return null;
 }
 
+// Weekend shifts and blackout nudges can push a lawn-rounds date across a
+// round edge, which would double up two visits in one round and leave another
+// empty. Walk back INTO the round the cadence intended (the round of
+// `intendedDate`, the date lawnRoundDate returned before any shift) from
+// whichever edge was crossed. A no-op for every other pattern, for a call with
+// no intendedDate, and for dates already inside the intended round. Returns
+// null when no clear date exists inside the round within the bounded search,
+// so callers skip the candidate like every other exhausted nudge.
+function clampDateToRound(pattern, dateStr, { skipWeekends = false, blackoutDates = null, intendedDate = null } = {}) {
+  if (pattern !== LAWN_ROUNDS_9 || !dateStr || !intendedDate) return dateStr;
+  const round = roundOf(intendedDate);
+  if (!round) return dateStr;
+  if (dateStr >= round.start && dateStr <= round.end) return dateStr;
+  // Start AT the edge that was crossed and walk inward, so the result never
+  // depends on how far outside the round the date is (an admin-moved exception
+  // can sit months away). Null only when every day of the round is closed.
+  const step = dateStr > round.end ? -1 : 1;
+  let candidate = step < 0 ? round.end : round.start;
+  for (let i = 0; i < round.length; i++) {
+    const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+    const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+    if (weekendClear && !isBlackedOut(candidate, blackoutDates)) return candidate;
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
+  }
+  return null;
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
   [SEASONAL_FEB_OCT]: 9,
+  [LAWN_ROUNDS_9]: 9,
   bimonthly: 6,
   quarterly: 4,
   triannual: 3,
@@ -151,6 +182,34 @@ function dateOnly(value) {
   if (typeof value === 'string') return value.slice(0, 10);
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+// A series row's cadence position (see seriesExtendAnchor in admin-schedule.js): an exception's
+// recorded cadence date, else a hand-off's due date, else its own date.
+function seriesCadencePosition(row) {
+  const position = (row?.date_exception && row?.date_exception_cadence_date)
+    ? row.date_exception_cadence_date
+    : (row?.recurring_dispatch_due_date || row?.scheduled_date);
+  return dateOnly(position) || '';
+}
+
+// Lawn rounds: the date whose offset in its round and weekday place every
+// visit of the series. A write that re-places the series from a new date
+// (a series move on a later visit, an Edit appointment cadence rewrite, make
+// recurring) stores that date on the parent, recurring_round_anchor_date: the
+// parent's own date is history and usually a completed visit. Unset, it is
+// the parent's cadence position, which a one-off move or a hand-off placement
+// does not change.
+function seriesRoundAnchor(parent) {
+  return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
+}
+
+// The anchor a rounds date walk places from: the caller's roundAnchor (a NEW series on its
+// area's anchor, areaSeedOptions), else the parent's own (seriesRoundAnchor: its stored
+// recurring_round_anchor_date, else its cadence position), so a reseed of a series that
+// already stores an area anchor keeps its area day.
+function walkRoundAnchor(parent, opts) {
+  return opts.roundAnchor ?? seriesRoundAnchor(parent) ?? undefined;
 }
 
 function positiveInt(value) {
@@ -173,6 +232,9 @@ function normalizeRecurringPattern(value) {
   // reason as every_6_weeks above: numeric 9-visit inference must stay
   // 'bimonthly' so legacy 9-visit rows keep their office-scheduled behavior.
   if ([SEASONAL_FEB_OCT.replace(/_/g, ''), 'seasonalfeboctober', 'seasonal9', 'seasonal9x'].includes(compact)) return SEASONAL_FEB_OCT;
+  // Lawn 9x rounds (nine fixed rounds a year). EXPLICIT tokens only: numeric
+  // 9-visit inference and the '9x' token keep resolving as they do today.
+  if ([LAWN_ROUNDS_9.replace(/_/g, ''), 'lawnrounds'].includes(compact)) return LAWN_ROUNDS_9;
   if (['bimonthly', 'bimonth', 'bimonthlypest', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bimonthly';
   if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
   if (['triannual', 'threetimesyearly', '3x', '3xperyear'].includes(compact)) return 'triannual';
@@ -188,7 +250,7 @@ function normalizeRecurringPattern(value) {
   if (compact === 'biweekly') return 'biweekly';
   const visits = Number(raw);
   if (Number.isFinite(visits) && visits > 0) return patternFromVisitsPerYear(visits);
-  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT].includes(raw)) return raw;
+  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT, LAWN_ROUNDS_9].includes(raw)) return raw;
   return null;
 }
 
@@ -243,6 +305,69 @@ function serviceKeyFor(value = {}) {
   if (/termite/.test(raw)) return 'termite_bait';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
+}
+
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS, owner 2026-10-28). The pattern a NEW
+// series is WRITTEN with: lawn_rounds_9 and no interval when the gate is on
+// and the series is a RESIDENTIAL LAWN 9x plan (lawn family; every_6_weeks, or
+// custom with a 42-day interval), else the input unchanged. Quotes and every
+// upstream cadence word stay every_6_weeks / custom-42; only a writer of
+// recurring_pattern / recurring_interval_days calls this, and it writes the
+// result on the parent AND every child of one series.
+//
+// Identity is the converter's own: seedingFamilyKey (the seeder's
+// serviceKeyFor plus the palm correction; catalog keys such as
+// lawn_care_6week and labels such as "Lawn Care" both read lawn_care) and
+// isCommercialRecurringLine (any "commercial" in the line or label), so
+// tree & shrub, mosquito, pest, palm and commercial lawn are never
+// translated. Pass whatever names the service: service / serviceKey /
+// service_key / name / label / service_type (or serviceType) / isCommercial.
+// Lazy converter require (it loads this module at boot); an identity that
+// cannot be read fails closed to the unchanged pattern.
+function lawnRoundsSeriesPattern(input = {}) {
+  const { pattern, intervalDays = null } = input;
+  try {
+    if (lawn9xRoundsLive() && isLawn9xRoundsSeries(input)) return { pattern: LAWN_ROUNDS_9, intervalDays: null };
+  } catch (err) {
+    require('./logger').warn(`[recurring-seeder] lawn rounds identity unreadable (series left unchanged): ${err.message}`);
+  }
+  return { pattern, intervalDays };
+}
+
+// The identity half of lawnRoundsSeriesPattern, without the gate: is this a residential lawn 9x
+// series (lawn family; every_6_weeks, or custom with a 42-day interval)? The one-time re-date of
+// current 9x customers (lawn-rounds-redate.js) asks the same question while the gate is off.
+function isLawn9xRoundsSeries({ pattern, intervalDays = null, ...identity } = {}) {
+  const normalized = normalizeRecurringPattern(pattern);
+  const parsedInterval = Number.parseInt(intervalDays, 10);
+  const interval = Number.isFinite(parsedInterval) ? parsedInterval : null;
+  const sixWeek = (normalized === 'every_6_weeks' && (interval == null || interval === 42))
+    || (normalized === 'custom' && interval === 42);
+  if (!sixWeek) return false;
+  const svc = { ...identity };
+  if (!svc.service_type && svc.serviceType) svc.service_type = svc.serviceType;
+  const { seedingFamilyKey, isCommercialRecurringLine } = require('./estimate-converter');
+  if (svc.isCommercial === true || svc.is_commercial === true || isCommercialRecurringLine(svc, { service_type: svc.service_type })) return false;
+  return seedingFamilyKey(svc, { service_type: svc.service_type }) === 'lawn_care';
+}
+
+// The seeder's own follow-up rows: when it is handed a lawn 9x parent with the
+// every-6-weeks vocabulary, the parent mark and every seeded child carry
+// lawn_rounds_9 and no interval. Returns null when nothing translates.
+function lawnRoundsSeedInput(parent, opts) {
+  const pattern = normalizeRecurringPattern(opts?.pattern || parent?.recurring_pattern);
+  if (!pattern || pattern === LAWN_ROUNDS_9 || !parent) return null;
+  const translated = lawnRoundsSeriesPattern({
+    pattern,
+    intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days ?? null,
+    service_type: parent.service_type || opts.serviceType,
+    service_key: parent.service_key_snapshot || undefined,
+  });
+  if (translated.pattern !== LAWN_ROUNDS_9) return null;
+  return {
+    parent: { ...parent, recurring_interval_days: null },
+    opts: { ...opts, pattern: LAWN_ROUNDS_9, recurringIntervalDays: null },
+  };
 }
 
 function visitsForService(value = {}) {
@@ -328,6 +453,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
+  // opts.roundAnchor: the series anchor, when `safe` is a later visit of it
+  // (extension, top-up, reseed) — keeps the anchor's offset. See lawnRoundDateFrom.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -340,7 +468,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
 // walk, a day gap, the nth-weekday walk, the season, or a custom interval)?
 // Anything else schedules at FALLBACK_RECURRENCE_GAP_DAYS.
 function schedulerPlacesPattern(pattern) {
-  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === 'custom'
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === LAWN_ROUNDS_9 || pattern === 'custom'
     || !!MONTH_RECURRENCE_INTERVALS[pattern] || Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern);
 }
 
@@ -362,7 +490,7 @@ function intervalDaysForPattern(pattern, intervalDays = null) {
   if (pattern === 'monthly_nth_weekday') return MONTH_RECURRENCE_INTERVALS.monthly * 30;
   if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
   if (Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern)) return DAY_RECURRENCE_INTERVALS[pattern];
-  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT) return null;
+  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT || pattern === LAWN_ROUNDS_9) return null;
   return FALLBACK_RECURRENCE_GAP_DAYS;
 }
 
@@ -421,13 +549,18 @@ function* recurringDateCandidates(baseDate, pattern, {
   existingDates = [], blackoutDates = null, maxAttempts,
 } = {}) {
   const rOpts = recurrenceOrdinalOptions(baseDate, recurrenceOptions);
-  const seen = new Set([baseDate, ...existingDates]);
+  // A SeriesDates keeps which existing dates are boosters (they own no round).
+  const seen = new SeriesDates(existingDates);
+  seen.add(baseDate);
   for (let attempt = 1; attempt < maxAttempts; attempt++) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     const shifted = shiftPastWeekend(rawNext, skipWeekends, weekendShift);
     const cleared = nudgeOffBlackoutDates(shifted, blackoutDates, { skipWeekends });
-    const nextDate = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
+    const seasonal = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
+    const nextDate = seasonal && clampDateToRound(pattern, seasonal, { skipWeekends, blackoutDates, intendedDate: rawNext });
     if (!nextDate || recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDate) || seen.has(nextDate)) continue;
+    // One visit a round: a visit already in this round, on another day, owns it.
+    if (pattern === LAWN_ROUNDS_9 && roundTaken(seen, nextDate)) continue;
     seen.add(nextDate);
     yield nextDate;
   }
@@ -451,8 +584,15 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     nth: opts.recurringNth ?? parent.recurring_nth,
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
+    // Lawn rounds, a NEW series on its area's anchor only (resolveNewSeriesAreaAnchor); undefined otherwise.
+    roundAnchor: walkRoundAnchor(parent, opts),
   });
-  const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
+  // existingSeriesDates hands a SeriesDates (boosters own no lawn round); a
+  // caller's plain list is read as cadence dates.
+  const existingDates = opts.existingDates instanceof SeriesDates
+    ? new SeriesDates(opts.existingDates)
+    : new SeriesDates((opts.existingDates || []).map(dateOnly).filter(Boolean));
+  existingDates.add(baseDate);
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -652,6 +792,9 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
     recurring_weekday: rOpts.weekday,
     recurring_interval_days: rOpts.intervalDays,
     updated_at: new Date(),
+    // Lawn rounds: a new series born on its area's anchor stores it on the parent (the seed's area
+    // anchor; a later config edit does not move the series).
+    ...(opts.areaRoundAnchor ? { recurring_round_anchor_date: opts.areaRoundAnchor } : {}),
     // Anchored-split PROVENANCE (owner ruling 2026-08-27): when this seed
     // bills follow-ups at an even per-visit quotient (the parent absorbed
     // the annual's remainder cents), record that quotient on the series
@@ -673,20 +816,22 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
 }
 
 async function existingSeriesDates(conn, parent, columns) {
-  const dates = [dateOnly(parent?.scheduled_date)].filter(Boolean);
+  // Every row blocks its day; a booster (is_recurring = false) owns no lawn
+  // round (SeriesDates).
+  const dates = new SeriesDates([dateOnly(parent?.scheduled_date)].filter(Boolean));
   if (!parent?.id || !columns?.recurring_parent_id) return dates;
   const rows = await conn('scheduled_services')
     .where(function () {
       this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
     })
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    .select('scheduled_date')
+    .select('scheduled_date', 'is_recurring')
     .catch(() => []);
   for (const row of rows || []) {
     const d = dateOnly(row.scheduled_date);
-    if (d) dates.push(d);
+    if (d) (row.is_recurring === false ? dates.addExtra(d) : dates.add(d));
   }
-  return [...new Set(dates)];
+  return dates;
 }
 
 // Find this customer's ACTIVE recurring series parents in the same service
@@ -1186,6 +1331,18 @@ async function seedingBlackoutDates(conn, parent, opts = {}) {
   } catch { return null; /* fail open */ }
 }
 
+// Lawn rounds neighborhood day: the extra options of a NEW lawn_rounds_9 series
+// whose area (lawn-area-days.js) has an anchor: the anchor itself (stamped on
+// the parent, and the roundAnchor of the date walk). {} for every other series,
+// a parent that already stores an anchor (its walk reads that, walkRoundAnchor),
+// and a caller that passed its own roundAnchor. The seed and its planner both
+// call this, so their dates are identical.
+async function areaSeedOptions(conn, parent, opts, pattern) {
+  if (dateOnly(opts.roundAnchor)) return {};
+  const areaRoundAnchor = await newSeriesAreaAnchor(conn, parent, pattern);
+  return areaRoundAnchor ? { areaRoundAnchor, roundAnchor: areaRoundAnchor } : {};
+}
+
 // The dates a seedFollowUpsForParent call with the SAME opts would insert —
 // plain reads + the deterministic builder, no locks taken and nothing
 // written. Lets a caller acquire the per-date occupancy locks (rung 1 of
@@ -1195,7 +1352,10 @@ async function seedingBlackoutDates(conn, parent, opts = {}) {
 // them) and fail closed on drift (codex #3504 r3 hook). Mirrors the seed
 // call's B6 weekday-preference resolution so the planned dates match what
 // the seeder will actually place.
-async function planFollowUpSeedDates(conn, parent, opts = {}) {
+async function planFollowUpSeedDates(conn, inputParent, inputOpts = {}) {
+  const rounds = lawnRoundsSeedInput(inputParent, inputOpts);
+  const parent = rounds ? rounds.parent : inputParent;
+  const opts = rounds ? rounds.opts : inputOpts;
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) return [];
   const columns = opts.columns || await scheduledServiceColumns(conn);
@@ -1204,8 +1364,9 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
     || await customerPrefersNoWeekends(conn, parent.customer_id);
   const existingDates = await existingSeriesDates(conn, parent, columns);
   const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
+  const area = await areaSeedOptions(conn, parent, opts, pattern);
   return [...new Set(
-    buildRecurringFollowUpRows(parent, { ...opts, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
+    buildRecurringFollowUpRows(parent, { ...opts, ...area, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
       .map((row) => dateOnly(row.scheduled_date))
       .filter(Boolean),
   )];
@@ -1312,7 +1473,10 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
   }
 }
 
-async function seedFollowUpsForParent(conn, parent, opts = {}) {
+async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
+  const rounds = lawnRoundsSeedInput(inputParent, inputOpts);
+  const parent = rounds ? rounds.parent : inputParent;
+  const opts = rounds ? rounds.opts : inputOpts;
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
@@ -1326,8 +1490,10 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
   const skipWeekends = stampSkipWeekends
     || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const area = await areaSeedOptions(conn, parent, opts, pattern);
   await markParentRecurring(conn, parent, pattern, {
     ...opts,
+    ...area,
     skipWeekends: stampSkipWeekends,
     columns,
   });
@@ -1353,6 +1519,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
   const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,
+    ...area,
     childIdentity,
     pattern,
     skipWeekends,
@@ -1491,6 +1658,8 @@ function separateProgramMatches(existingSeries, reviewedIds) {
 }
 
 module.exports = {
+  seriesCadencePosition,
+  seriesRoundAnchor,
   separateProgramMatches,
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
@@ -1514,6 +1683,9 @@ module.exports = {
   seasonalFebOctDate,
   nextSeasonalFebOctDue,
   clampDateToSeason,
+  LAWN_ROUNDS_9,
+  lawnRoundDate,
+  clampDateToRound,
   firstInSeasonDate,
   markParentRecurring,
   normalizeRecurringPattern,
@@ -1523,6 +1695,8 @@ module.exports = {
   planFollowUpSeedDates,
   seedFollowUpsForParent,
   serviceKeyFor,
+  lawnRoundsSeriesPattern,
+  isLawn9xRoundsSeries,
   shiftPastWeekend,
   _internals: {
     applySeededPrepayCoverage,

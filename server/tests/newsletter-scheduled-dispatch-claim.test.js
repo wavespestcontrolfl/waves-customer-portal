@@ -36,6 +36,9 @@ const SEND = {
   id: 'send-pi-1', status: 'scheduled', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — October',
   html_body: '<p>Body</p>', text_body: 'Body', event_ids: [], segment_filter: null,
   scheduled_for: new Date('2026-10-06T13:56:00Z'), updated_at: READ_AT, proof_approved_at: APPROVED_AT,
+  // Approved by an APPROVED reply (email-sync always passes the stored email
+  // row); no email id would mean the auto-send switch queued it.
+  proof_approval_email_id: 'email-1',
 };
 
 function chain({ first, rows, returning } = {}) {

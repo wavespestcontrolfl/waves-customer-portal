@@ -57,6 +57,21 @@ export const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this plan.",
     },
   },
+  // The misting SYSTEM plan: owner-approved Waves AI card copy only (2026-10-30, item E); the chips and per-day line reuse
+  // strings that hold for a system. Mirrors the server's SERVICE_COPY.mosquito_misting.
+  mosquito_misting: {
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Priced from your system layout',
+    aiBody: 'Your price is set by your system size and your nozzle and riser count.',
+    askChips: [
+      'How long does each visit last?',
+      'What precautions should I follow for pets and children?',
+      'What about my pool area?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
   termite_bait: {
     headline: "Hey {first}, choose your termite protection option.",
     aiEyebrow: 'Waves AI',

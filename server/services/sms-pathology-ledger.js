@@ -29,6 +29,13 @@
  *   only), and roll it back by itself. It reads this table and never changes a
  *   proposal's status; gate off, the rule above holds for everything.
  *
+ *   READ, never written, by sms-prompt-autopromote.js while
+ *   GATE_SMS_PROMPT_AUTOPROMOTE is 'observe' or 'true' (owner 2026-09-27 "the
+ *   texting AI should improve with NO human approval steps", 2026-10-24 "do
+ *   all"): a pending prompt_discipline proposal can become ONE guarded candidate
+ *   rule that the sealed exam grades, with the decision recorded. Nothing
+ *   activates and a proposal's status never changes.
+ *
  * The taxonomy is fixed and enum-validated — the classifier picks from the
  * list or falls to 'other', so cells stay countable across months instead
  * of drifting with model vocabulary.

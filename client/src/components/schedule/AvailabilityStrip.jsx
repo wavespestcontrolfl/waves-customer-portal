@@ -455,7 +455,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         <div>
           <div style={{ marginBottom: 6, color: '#52525B' }}>
             {viewed.hours.length
-              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}${viewed.last_resort ? ' (last resort)' : ''}`
+              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}${viewed.last_resort ? ' (last resort)' : ''}${viewed.alreadyLate ? ' (already late)' : ''}`
               : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
           </div>
           {viewed.hours.length > 0 && (
@@ -468,8 +468,22 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         </div>
       )}
       {displayedHours({ availability, verdict, viewed, showBest }).some(showsEstimate) ? (
-        <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
+        <EstimateLegend roadLimit={availability.roadLimit} />
       ) : null}
+    </div>
+  );
+}
+
+// The "~" legend. GATE_PICKER_ROAD_LIMIT_NOTICE: when Google road times are
+// stopped by a spending limit the server says so (`roadLimit`), and the one
+// line sits under the legend. No line = the legend alone, as before.
+export function EstimateLegend({ roadLimit }) {
+  const legend = <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>;
+  if (!roadLimit) return legend;
+  return (
+    <div>
+      {legend}
+      <div data-testid="road-limit-note" style={{ color: '#52525B' }}>{roadLimit}</div>
     </div>
   );
 }

@@ -64,7 +64,6 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   enqueueReceiptDelivery: jest.fn(async () => {}),
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
-jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
@@ -220,6 +219,31 @@ describe('payment settlement takes ownership from the LOCKED invoice row', () =>
     const paymentInsert = mockState.inserts.find((i) => i.table === 'payments');
     expect(paymentInsert).toBeTruthy();
     expect(paymentInsert.payload.customer_id).toBe(WINNER);
+  });
+});
+
+// Partial payments (owner 2026-10-29): money received by hand earlier on the same invoice stays in the bill when a card/ACH payment
+// completes it. total = cash + credit + the earlier parts, and the column that holds money received on a still-open invoice resets.
+describe('a part payment already on the invoice survives the settlement rewrite', () => {
+  test('the fallback settlement carries amount_paid into total and resets it', async () => {
+    mockState.lockedInvoice = { ...mockState.lockedInvoice, customer_id: WINNER, total: '130.00', credit_applied: '10.00', amount_paid: '20.00' };
+
+    await handlePaymentIntentSucceeded(succeededPI({ amount: 10000, amount_received: 10000 }));
+
+    const flip = mockState.updates.find((u) => u.table === 'invoices' && u.inTrx && u.payload?.status === 'paid');
+    expect(flip).toBeTruthy();
+    expect(flip.payload.amount_paid).toBe(0);
+    // $100 cash + $10 credit + $20 received earlier.
+    expect(flip.payload.total).toBe(130);
+  });
+
+  test('the in-SQL rewrite after it adds amount_paid back and resets it in the same UPDATE', async () => {
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    const flip = mockState.updates.find((u) => u.table === 'invoices' && !u.inTrx && u.payload?.status === 'paid');
+    expect(flip).toBeTruthy();
+    expect(flip.payload.amount_paid).toBe(0);
+    expect(flip.payload.total.__raw).toMatch(/COALESCE\(credit_applied, 0\) \+ COALESCE\(amount_paid, 0\)/);
   });
 });
 

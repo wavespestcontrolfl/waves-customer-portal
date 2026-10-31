@@ -76,7 +76,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   const correctiveWork = Array.isArray(proposal.correctiveWork) ? proposal.correctiveWork : [];
   const responsibilities = Array.isArray(proposal.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
-  const termRows = commercialTermRows(proposal.commercialTerms);
+  const termRows = commercialTermRows(proposal.commercialTerms, { recurring: Number(totals.annualRecurring) > 0 });
   const sectionTitle = {
     fontSize: 14, fontWeight: 700, color: W.blueDeeper, marginTop: 14, marginBottom: 2,
   };

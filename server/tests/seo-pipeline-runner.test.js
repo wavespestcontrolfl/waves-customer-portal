@@ -152,4 +152,52 @@ describe('SEO pipeline runner', () => {
     );
     expect(result.status).toBe('completed_with_errors');
   });
+
+  test.each([
+    ['sync failure', { synced: false, error: 'quota' }, 'quota'],
+    ['not configured', { synced: false }, 'GSC sync did not run: Search Console is not configured'],
+  ])('marks the gsc_sync step failed when the sync resolves unsynced (%s)', async (_label, syncResult, message) => {
+    SearchConsole.syncDailyData.mockResolvedValue(syncResult);
+
+    const result = await runClaimedSeoPipeline({
+      pipelineRun: { id: 'pipeline-unsynced' },
+      domain: 'wavespestcontrol.com',
+      daysBack: 7,
+      logPrefix: 'test-unsynced',
+    });
+
+    expect(completePipelineRun).toHaveBeenCalledWith(
+      'pipeline-unsynced',
+      expect.objectContaining({
+        failed: 1,
+        steps: expect.arrayContaining([
+          expect.objectContaining({ step: 'gsc_sync', status: 'failed', error: message }),
+          expect.objectContaining({ step: 'site_audit', status: 'ok', pages: 250 }),
+        ]),
+      }),
+      'completed_with_errors',
+    );
+    expect(result.status).toBe('completed_with_errors');
+  });
+
+  test('keeps the gsc_sync step ok when the sync reports synced', async () => {
+    SearchConsole.syncDailyData.mockResolvedValue({ synced: true, rows: 3 });
+
+    await runClaimedSeoPipeline({
+      pipelineRun: { id: 'pipeline-synced' },
+      domain: 'wavespestcontrol.com',
+      daysBack: 7,
+      logPrefix: 'test-synced',
+    });
+
+    expect(completePipelineRun).toHaveBeenCalledWith(
+      'pipeline-synced',
+      expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({ step: 'gsc_sync', status: 'ok', detail: { synced: true, rows: 3 } }),
+        ]),
+      }),
+      'completed',
+    );
+  });
 });

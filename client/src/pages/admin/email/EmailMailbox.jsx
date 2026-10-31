@@ -26,6 +26,8 @@ const CATEGORY_LABELS = {
   lead_inquiry: "Lead", customer_request: "Customer", complaint: "Complaint", vendor_invoice: "Invoice",
   vendor_communication: "Vendor", scheduling: "Scheduling", review_notification: "Review", regulatory: "Regulatory",
   marketing_newsletter: "Newsletter", internal: "Internal", spam: "Spam", other: "Other",
+  // A known vendor domain, stored at sync before (or without) the classifier.
+  vendor: "Vendor",
 };
 
 function timeAgo(dateStr) {

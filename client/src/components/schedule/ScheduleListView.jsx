@@ -313,6 +313,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
           `Moved. ${res.overlapWarnings.length} visit(s) now overlap another appointment on the schedule — all are kept on the calendar.`,
         );
       }
+      // Route-check notes (GATE_ROUTE_CHECK_STAFF_SAVES): the arrival-window
+      // check's own text per visit, apart from the overlap count above. One
+      // line per distinct warning; visits are counted once however many
+      // notes they carry. The moves committed either way.
+      if (Array.isArray(res?.routeWarnings) && res.routeWarnings.length > 0) {
+        const visits = new Set(res.routeWarnings.map((w) => String(w?.id)));
+        const texts = [...new Set(res.routeWarnings.map((w) => w?.warning).filter(Boolean))];
+        window.alert(
+          `Moved. The route check flagged ${visits.size} visit(s) — all are kept on the calendar:\n${texts.slice(0, 8).map((t) => `• ${t}`).join('\n')}`,
+        );
+      }
       setSelected(new Set());
       setBulkAction('');
       // One decision per bulk cancel: never let a checked waive leak into
@@ -550,7 +561,16 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                       className="w-4 h-4" style={{ accentColor: '#18181B' }} />
                   </td>
                   <td className={cn(tdClass, 'font-medium text-zinc-900')}>
-                    {s.customerName || 'Unassigned'}
+                    {/* The row click is mouse-only; this button opens the
+                        appointment from the keyboard too. */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onEdit?.(s); }}
+                      aria-label={`Open appointment: ${s.customerName || 'Unassigned'}, ${fmtDate(s.scheduledDate)}`}
+                      className="text-left font-medium text-zinc-900 hover:underline u-focus-ring rounded-sm"
+                    >
+                      {s.customerName || 'Unassigned'}
+                    </button>
                     {s.tier && <Badge tone="neutral" className="ml-1.5">{s.tier}</Badge>}
                   </td>
                   <td className={tdClass}>{s.serviceType}</td>

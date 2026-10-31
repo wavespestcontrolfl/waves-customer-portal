@@ -1,7 +1,6 @@
 /**
  * Destructive-endpoint guards on /api/admin/content/blog/* (2026-07-15 audit):
- * - POST /blog/:id/generate refuses published / astro-active posts (it
- *   unconditionally overwrites content and forces status back to draft).
+ * - The manual create routes stay unmounted (owner 2026-10-30).
  * - DELETE /blog/:id refuses astro-active posts (orphans an open PR /
  *   strands a live page) and 404s on missing ids.
  * - PUT /blog/:id validates status and blocks the direct →published jump.
@@ -15,19 +14,16 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/content/blog-writer', () => ({
-  generatePost: jest.fn().mockResolvedValue({ success: true, content: 'x' }),
-}));
+jest.mock('../services/content/blog-writer', () => ({}));
 jest.mock('../services/content/blog-auditor', () => ({}));
 jest.mock('../config/models', () => ({}));
 jest.mock('../services/content-astro/spoke-sites', () => ({ invalidSpokeSites: () => [] }));
 jest.mock('../services/content/autonomous-review-queue', () => ({}));
 jest.mock('../services/content/internal-link-review-queue', () => ({}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
-jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn() }));
+jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn(), mergeAstro: jest.fn() }));
 
 const db = require('../models/db');
-const BlogWriter = require('../services/content/blog-writer');
 const router = require('../routes/admin-content-v2');
 
 const POST_ID = '3f2a9c34-1111-2222-3333-444455556666';
@@ -58,6 +54,7 @@ function setupDb() {
       orWhereNull: jest.fn(() => q),
       orWhere: jest.fn(() => q),
       orderBy: jest.fn(() => q),
+      offset: jest.fn((n) => { q._offset = n; return q; }),
       limit: jest.fn(() => Promise.resolve(tableState.rows || [])),
       groupBy: jest.fn(() => Promise.resolve([])),
       select: jest.fn(() => q),
@@ -103,58 +100,20 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('POST /blog/:id/generate guard', () => {
-  test('refuses a published post (content would be irreversibly overwritten)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'published', astro_status: 'live' };
-    const r = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(r.statusCode).toBe(409);
-    expect(BlogWriter.generatePost).not.toHaveBeenCalled();
-  });
-
-  test('refuses an astro-active draft (open PR would be orphaned from its content)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'pr_open' };
-    const r = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(r.statusCode).toBe(409);
-  });
-
-  test('refuses build_failed and marker-bearing publish_failed posts (PR/branch still exists)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'build_failed' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: 88 };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    // branch-only failure marker (branch created, PR creation failed):
-    // astro_branch_name is the row's ONLY reference to the surviving branch
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: 'content/blog-x' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    // publish_failed with NO external markers is a plain retryable row
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: null };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(200);
-
-    // mid-publish scheduler claim: markers don't exist yet but the publisher
-    // already captured the row's content (codex r3)
-    tableState.post = { id: POST_ID, status: 'queued', astro_status: 'draft', publish_status: 'publishing' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-  });
-
-  test('allows a plain draft and 404s junk / missing ids', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'draft' };
-    const ok = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(ok.statusCode).toBe(200);
-    expect(BlogWriter.generatePost).toHaveBeenCalledWith(POST_ID);
-
-    tableState.post = null;
-    const missing = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(missing.statusCode).toBe(404);
-
-    const junk = await invoke('post', '/blog/:id/generate', { params: { id: 'not-a-uuid' } });
-    expect(junk.nextErr?.statusCode).toBe(404);
+describe('manual blog creation is retired (owner 2026-10-30)', () => {
+  test('no create route is mounted: new posts come from Autopilot', () => {
+    const mounted = router.stack
+      .filter((l) => l.route)
+      .flatMap((l) => Object.keys(l.route.methods).map((m) => `${m.toUpperCase()} ${l.route.path}`));
+    for (const gone of [
+      'POST /generate',
+      'POST /blog/ideas',
+      'POST /blog/bulk-generate',
+      'POST /blog/:id/generate',
+      'GET /weather',
+    ]) {
+      expect(mounted).not.toContain(gone);
+    }
   });
 });
 
@@ -248,6 +207,20 @@ describe('GET /blog sort/limit hardening', () => {
     expect(ok.statusCode).toBe(200);
 
     const bad = await invoke('get', '/blog', { query: { limit: 'abc' } });
+    expect(bad.nextErr?.statusCode).toBe(400);
+  });
+
+  test('pages with offset and reports every matching row as total (audit BLOG-12)', async () => {
+    setupDb();
+    tableState.rows = [{ id: 'a' }];
+    tableState.post = { count: '523' };
+    const page = await invoke('get', '/blog', { query: { status: 'published', offset: '200' } });
+    expect(page.statusCode).toBe(200);
+    expect(page.payload).toMatchObject({ posts: [{ id: 'a' }], total: 523, offset: 200 });
+    const listQuery = db.mock.results.find((r) => r.value.offset.mock.calls.length)?.value;
+    expect(listQuery.offset).toHaveBeenCalledWith(200);
+
+    const bad = await invoke('get', '/blog', { query: { offset: '-1' } });
     expect(bad.nextErr?.statusCode).toBe(400);
   });
 });
@@ -397,5 +370,26 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     setupDb();
     tableState.post = { id: POST_ID, status: 'queued', publish_claimed_at: new Date() };
     expect((await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { title: 'T' } })).statusCode).toBe(409);
+  });
+});
+
+describe('merge-astro returns the row after the merge (audit BLOG-07)', () => {
+  const AstroPublisher = require('../services/content-astro/astro-publisher');
+
+  test('the editor gets the merged row', async () => {
+    setupDb();
+    AstroPublisher.mergeAstro.mockResolvedValue({ merged: true, unpublished: true, pr_number: 9, live_url: null });
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'draft', astro_pr_number: null };
+    const r = await invoke('post', '/blog/:id/merge-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    expect(r.payload).toMatchObject({ success: true, unpublished: true, post: { astro_status: 'draft', status: 'draft' } });
+  });
+
+  test('a failed read after a merged PR still reports the merge, with post null', async () => {
+    db.mockImplementation(() => ({ where: () => ({ first: () => Promise.reject(new Error('connection reset')) }) }));
+    AstroPublisher.mergeAstro.mockResolvedValue({ merged: true, unpublished: false, pr_number: 9, live_url: 'https://x.invalid/p/' });
+    const r = await invoke('post', '/blog/:id/merge-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    expect(r.payload).toMatchObject({ success: true, merged: true, post: null });
   });
 });

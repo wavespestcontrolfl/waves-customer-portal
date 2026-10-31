@@ -60,7 +60,6 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
@@ -3304,6 +3303,29 @@ function ToolLabel({ full, short }) {
   );
 }
 
+// Download PDF on the report pages. In the app the file goes to the share
+// sheet: an <a download> dead-ends the webview (F-046). An app built before
+// the Filesystem/Share plugins (2026-07-07) cannot save it, and the bare link
+// would cover the app with the PDF and no way back, so it gets no link.
+function ReportPdfLink({ pdfUrl, fileName, onTap, children, ...anchorProps }) {
+  if (isNativeApp() && !canSaveNative()) return null;
+  return (
+    <a
+      {...anchorProps}
+      href={pdfUrl}
+      download
+      onClick={(e) => {
+        onTap?.();
+        if (canSaveNative()) {
+          e.preventDefault();
+          saveUrlNative(pdfUrl, fileName)
+            .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
+        }
+      }}
+    >{children}</a>
+  );
+}
+
 function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
@@ -3323,24 +3345,13 @@ function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Rep
       <div className="section-eyebrow">Report Tools</div>
       <div className="report-action-buttons">
         {pdfUrl
-          ? <a
+          ? <ReportPdfLink
               data-glass-accent=""
-              href={pdfUrl}
-              download
-              onClick={(e) => {
-                trackReportEvent(token, 'pdf_downloaded');
-                // In the Capacitor shell an <a download> dead-ends the
-                // webview — route through the native share sheet (F-046).
-                // canSaveNative: old installed binaries run this JS without
-                // the plugins — leave their legacy tap behavior alone.
-                if (canSaveNative()) {
-                  e.preventDefault();
-                  saveUrlNative(pdfUrl, fileName)
-                    .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-                }
-              }}
+              pdfUrl={pdfUrl}
+              fileName={fileName}
+              onTap={() => trackReportEvent(token, 'pdf_downloaded')}
               style={actionButtonStyle('primary')}
-            ><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></a>
+            ><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></ReportPdfLink>
           : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></button>}
         <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? <ToolLabel full="Link copied" short="Copied" /> : 'Share'}</button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
@@ -6560,21 +6571,12 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
-          <a
-            href={pdfUrl}
-            download
+          <ReportPdfLink
+            pdfUrl={pdfUrl}
+            fileName={reportPdfDownloadName(data)}
             data-glass-accent={glass ? '' : undefined}
-            onClick={(e) => {
-              // Capacitor webview: <a download> dead-ends — share sheet
-              // instead (old binaries without the plugins keep legacy taps).
-              if (canSaveNative()) {
-                e.preventDefault();
-                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
-                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-              }
-            }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
-          ><Download size={16} /> Download PDF</a>
+          ><Download size={16} /> Download PDF</ReportPdfLink>
           {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
               & Safety link too; they never mount the v1 footer. */}
           <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
@@ -10122,14 +10124,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* GATE_LAWN_REPORT_STORY: the story order prints Ask Waves in the page (its "ask" section) instead. */}
         {!storyLayout && <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />}
 
-        {/* The customer controls above remain portal chrome. From here through
-            the closing record line, the live/static report is the authored
-            document and shares the same Field paper presentation as the PDF
-            renderer. Lawn story layouts intentionally retain their in-flow
-            Ask/engagement slots so their approved ordering does not change. */}
-        <FieldDocumentBody className="service-report-document-body">
-        <FieldMasthead />
-
         {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
             standard one, unless the payload carries the lawn layout key on a live lawn report: then
             LawnLayoutBody prints the same sections in the phone order (LAYOUT_ORDER), built from the
@@ -10786,7 +10780,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        </FieldDocumentBody>
       </CustomerColumn>
     </div>
   );

@@ -14,6 +14,8 @@ const {
   UNPAID_MEAL_MIN_BREAK_MINUTES,
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
+const { lockPayrollMutationsShared } = require('./payroll-lock');
+const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
 
@@ -802,6 +804,14 @@ async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
     throw staffTimeHttpError(409, 'Unlock the approved week before changing its entries.');
   }
 
+  // A pay run finalizes under the exclusive payroll lock. Taking it shared here,
+  // before the daily and weekly row locks, makes an edit and a finalize wait for
+  // each other (edits do not block one another), so hours cannot move into a week
+  // while it is being paid. Lock order: staff-week locks and the entry row (the
+  // callers), then this lock, then the summary rows. Finalize takes this lock and
+  // then weekly rows only.
+  await lockPayrollMutationsShared(trx);
+
   const workDates = [...new Set(
     (affectedWorkDates || [staffWorkDate(entry.clock_in)]).map(validateWorkDate),
   )].sort();
@@ -816,6 +826,21 @@ async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
   }
 
   const weekStarts = [...new Set(workDates.map(staffWeekStartForWorkDate))].sort();
+  // A paid week is closed even when it never had an approved timesheet (a week
+  // paid for time off alone). Not behind GATE_PAYROLL_TIME_OFF: it must keep
+  // protecting such a week if the gate is turned off later.
+  const paid = await trx('payroll_checks')
+    .where({ technician_id: entry.technician_id, status: 'finalized' })
+    .whereIn('week_start', weekStarts)
+    .first('id');
+  if (paid) {
+    throw staffTimeHttpError(409, 'This week is already paid. Void its pay run before changing its entries.');
+  }
+  // A paid pay line took its overtime from these hours (GATE_PAYROLL_PAY_LINES), even
+  // when the week had no check of its own. Not behind the gate, like the check above.
+  if (await paidLineCoveringWeeks(trx, entry.technician_id, weekStarts)) {
+    throw staffTimeHttpError(409, 'A paid pay line took its overtime from this week. Void the pay run that paid it before changing its entries.');
+  }
   for (const weekStart of weekStarts) {
     const weekly = await trx('time_weekly_summary')
       .where({ technician_id: entry.technician_id, week_start: weekStart })

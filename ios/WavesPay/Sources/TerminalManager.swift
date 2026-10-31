@@ -9,11 +9,14 @@ import StripeTerminal
 //      Initializes the Terminal singleton with our token provider and
 //      requests location permission. Must run before any access to
 //      `Terminal.shared`.
-//   2. `collect(clientSecret:)` — discovers the on-device Tap-to-Pay reader,
-//      connects if not already connected, retrieves the PaymentIntent via
-//      the client secret, collects the payment method (NFC sheet), and
-//      confirms. Reused across charges — connecting once per app session
-//      is enough; Stripe's SDK maintains the local reader.
+//   2. `prepare()` — connects the on-device Tap-to-Pay reader ahead of the
+//      tap: when a signed-in staff page loads, when the app comes back to the
+//      front, and when a payment link checks out. Connecting is the slow step
+//      (seconds), so the card screen opens at once when staff tap.
+//   3. `collect(clientSecret:)` — connects if still needed (waiting on a
+//      connect already in flight), retrieves the PaymentIntent via the client
+//      secret, collects the payment method (NFC sheet), and confirms. The
+//      reader stays connected across charges.
 //
 // Thread: public async methods hop to the main actor because the SDK
 // delivers delegate callbacks there. The SDK itself serializes internally.
@@ -22,8 +25,14 @@ import StripeTerminal
 final class TerminalManager: NSObject {
     static let shared = TerminalManager()
 
+    // Fetches Stripe connection tokens through the signed-in staff page
+    // (PortalCoordinator). Nil until a page asks to prepare the reader.
+    var pageConnectionToken: (@MainActor () async throws -> String)?
+
     private var isConfigured = false
-    private var isConnected = false
+    // The connect in flight, so a payment waits on it instead of starting a
+    // second one.
+    private var connecting: Task<Void, Error>?
     private var discoverCancelable: Cancelable?
     // Stripe holds the DiscoveryDelegate weakly (SCPConnectionConfiguration.h:29).
     // Retain it here so it outlives the withCheckedThrowingContinuation closure.
@@ -37,6 +46,25 @@ final class TerminalManager: NSObject {
             locationManager.requestWhenInUseAuthorization()
         }
         isConfigured = true
+    }
+
+    // Connects the reader in the background. A failure here waits for the
+    // tap, which tries again and shows the error.
+    func prepare() {
+        guard isConfigured,
+              Terminal.shared.connectionStatus == .notConnected,
+              pageConnectionToken != nil || Keychain.read(key: "authToken") != nil
+        else { return }
+        Task { try? await ensureConnected() }
+    }
+
+    // A connection token for the SDK: from the signed-in staff page while one
+    // is open, else with the payment's 15-minute token from /validate-handoff.
+    func connectionToken() async throws -> String {
+        if let pageConnectionToken, let secret = try? await pageConnectionToken() {
+            return secret
+        }
+        return try await API.connectionToken()
     }
 
     // Full collect-and-confirm flow. Returns the final PaymentIntent on success.
@@ -60,10 +88,14 @@ final class TerminalManager: NSObject {
     // picks up the server-side amount change here (StripeTerminal 5.x +
     // 2026-03-25.preview surcharge API). If confirm rejects the amount change,
     // re-retrieve the PI after apply-surcharge and confirm the fresh object.
-    func collect(clientSecret: String, jti: String, surchargeEnabled: Bool) async throws -> PaymentIntent {
+    //
+    // `onCardRead` runs once the card is read and Apple's tap screen closes.
+    func collect(clientSecret: String, jti: String, surchargeEnabled: Bool,
+                 onCardRead: () -> Void) async throws -> PaymentIntent {
         try await ensureConnected()
         let pi = try await retrievePI(clientSecret: clientSecret)
         let collected = try await collectMethod(pi: pi, allowAmountUpdate: surchargeEnabled)
+        onCardRead()
         if surchargeEnabled {
             // Throws on network/HTTP error → aborts the charge (no silent base settle).
             let resp = try await API.applyTerminalSurcharge(jti: jti)
@@ -83,11 +115,25 @@ final class TerminalManager: NSObject {
     // MARK: - Private
 
     private func ensureConnected() async throws {
-        if isConnected, Terminal.shared.connectionStatus == .connected { return }
+        // After the app was in the background the SDK reconnects by itself
+        // (auto-reconnect is on by default): give it up to 15 s to finish.
+        var waits = 0
+        while Terminal.shared.connectionStatus == .reconnecting && waits < 60 {
+            try await Task.sleep(nanoseconds: 250_000_000)
+            waits += 1
+        }
+        if Terminal.shared.connectionStatus == .connected { return }
+        if let connecting { return try await connecting.value }
+        let task = Task { try await connect() }
+        connecting = task
+        defer { connecting = nil }
+        try await task.value
+    }
 
+    private func connect() async throws {
         switch locationManager.authorizationStatus {
         case .denied, .restricted:
-            throw NSError(domain: "wavespay", code: -3, userInfo: [NSLocalizedDescriptionKey: "Location is off for WavesPay. Enable it in Settings → Privacy → Location Services, then try again."])
+            throw NSError(domain: "wavespay", code: -3, userInfo: [NSLocalizedDescriptionKey: "Location is off for Waves Admin. Turn it on in Settings → Privacy & Security → Location Services, then try again."])
         default:
             break
         }
@@ -97,37 +143,52 @@ final class TerminalManager: NSObject {
         let config = try TapToPayDiscoveryConfigurationBuilder().build()
         let reader = try await discoverFirstReader(config: config)
         try await connectTapToPay(reader: reader)
-        isConnected = true
     }
+
+    // Discovery that ends with no reader and no error, or never answers, used
+    // to leave this wait open forever: the card screen spun with no way out.
+    // Both now end in this error, which the card screen shows with Try again.
+    private static let discoveryTimeoutNanoseconds: UInt64 = 30_000_000_000
+    private static let noReaderError = NSError(domain: "wavespay", code: -5, userInfo: [
+        NSLocalizedDescriptionKey: "Tap to Pay did not start on this iPhone. Please try again.",
+    ])
 
     private func discoverFirstReader(config: TapToPayDiscoveryConfiguration) async throws -> Reader {
         try await withCheckedThrowingContinuation { cont in
             var resumed = false
-            let delegate = DiscoveryCallback { [weak self] readers in
-                guard !resumed, let reader = readers.first else { return }
+            // The one exit: the first reader, an error, an empty finish, or
+            // the timeout, whichever comes first.
+            let finish: (Result<Reader, Error>) -> Void = { [weak self] result in
+                guard !resumed else { return }
                 resumed = true
                 self?.discoverCancelable?.cancel { _ in }
                 self?.discoverCancelable = nil
                 self?.discoveryDelegate = nil
-                cont.resume(returning: reader)
+                cont.resume(with: result)
+            }
+            let delegate = DiscoveryCallback { readers in
+                if let reader = readers.first { finish(.success(reader)) }
             }
             self.discoveryDelegate = delegate
-            self.discoverCancelable = Terminal.shared.discoverReaders(config, delegate: delegate) { [weak self] error in
-                if let error, !resumed {
-                    resumed = true
-                    self?.discoveryDelegate = nil
-                    cont.resume(throwing: error)
-                }
+            self.discoverCancelable = Terminal.shared.discoverReaders(config, delegate: delegate) { error in
+                finish(.failure(error ?? Self.noReaderError))
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: Self.discoveryTimeoutNanoseconds)
+                finish(.failure(Self.noReaderError))
             }
         }
     }
 
     private func connectTapToPay(reader: Reader) async throws {
         let locId = Bundle.main.object(forInfoDictionaryKey: "STRIPE_TERMINAL_LOCATION_ID") as? String ?? ""
+        // Apple's tap screen shows the merchant name to the customer.
         let connConfig = try TapToPayConnectionConfigurationBuilder(
             delegate: TapToPayDelegate.shared,
             locationId: locId
-        ).build()
+        )
+            .setMerchantDisplayName("Waves Pest Control")
+            .build()
         _ = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Reader, Error>) in
             Terminal.shared.connectReader(reader, connectionConfig: connConfig) { reader, error in
                 if let error { cont.resume(throwing: error) }
@@ -185,14 +246,51 @@ final class TokenProvider: NSObject, ConnectionTokenProvider {
     static let shared = TokenProvider()
 
     func fetchConnectionToken(_ completion: @escaping ConnectionTokenCompletionBlock) {
-        Task {
+        Task { @MainActor in
             do {
-                let secret = try await API.connectionToken()
-                completion(secret, nil)
+                completion(try await TerminalManager.shared.connectionToken(), nil)
             } catch {
                 completion(nil, error)
             }
         }
+    }
+}
+
+// MARK: - Receipt from the confirmed charge
+
+extension Receipt {
+    init(_ pi: PaymentIntent, fallbackId: String, handoff: API.ValidatedHandoff) {
+        self.init(
+            paymentIntentId: pi.stripeId ?? fallbackId,
+            amountCents: Int(pi.amount),
+            currency: pi.currency,
+            customerName: handoff.customer_name,
+            card: pi.charges.first?.paymentMethodDetails?.cardPresent.map(Self.cardLine),
+            invoiceNumber: handoff.invoice_number,
+            items: handoff.items ?? [],
+            adjustments: handoff.adjustments ?? [],
+            amountDueCents: handoff.amount_cents
+        )
+    }
+
+    // "Visa •••• 4242 · Credit"
+    private static func cardLine(_ card: CardPresentDetails) -> String {
+        let brand: String
+        switch card.brand {
+        case .visa: brand = "Visa"
+        case .masterCard: brand = "Mastercard"
+        case .amex: brand = "Amex"
+        case .discover: brand = "Discover"
+        default: brand = "Card"
+        }
+        var line = "\(brand) •••• \(card.last4)"
+        switch card.funding {
+        case .credit: line += " · Credit"
+        case .debit: line += " · Debit"
+        case .prepaid: line += " · Prepaid"
+        default: break
+        }
+        return line
     }
 }
 

@@ -188,6 +188,34 @@ describe('renderWeekPlanEmail', () => {
     expect(renderWeekPlanEmail(twoNoForecast, CTX).plan_note).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
   });
 
+  test('minutes withheld for heads already entered → the note says why, never re-asks for a head type on file (owner 2026-10-26)', () => {
+    const base = { targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, runMinutes: 20, wateringDays: ['Mon'] };
+    const mixed = buildWeekPlan({ ...base, systemType: ['rotor', 'spray'] });
+    expect(mixed.action).toBe('run');
+    expect(mixed.minutesPerEvent).toBe(null);
+    const mixedNote = renderWeekPlanEmail(mixed, { ...CTX, headTypes: ['rotor', 'spray'] }).plan_note;
+    expect(mixedNote).toContain('Your system is on file with rotor heads and spray heads, which put down water at very different rates, so this plan gives a time for each kind of zone.');
+    expect(mixedNote).not.toContain('Add your sprinkler head type');
+    // Drip beside one turf type is that one type for the engine: minutes exist, so no minutes note at all.
+    expect(buildWeekPlan({ ...base, systemType: ['spray', 'drip'] }).minutesPerEvent).not.toBe(null);
+    // Drip beside two turf types is still mixed, and drip is not named as a turf head.
+    const three = buildWeekPlan({ ...base, systemType: ['spray', 'drip', 'rotor'] });
+    expect(renderWeekPlanEmail(three, { ...CTX, headTypes: ['spray', 'drip', 'rotor'] }).plan_note).toContain('on file with spray heads and rotor heads, which');
+    const drip = buildWeekPlan({ ...base, systemType: ['drip'] });
+    expect(drip.minutesPerEvent).toBe(null);
+    expect(renderWeekPlanEmail(drip, { ...CTX, headTypes: ['drip'] }).plan_note).toContain('Your system is on file as drip, which waters beds rather than turf.');
+    const legacy = buildWeekPlan({ ...base, systemType: ['impact'] });
+    expect(legacy.minutesPerEvent).toBe(null);
+    expect(renderWeekPlanEmail(legacy, { ...CTX, headTypes: ['impact'] }).plan_note).toContain('Pick In-ground Spray or Rotor under Irrigation in your portal');
+    // No head type on file (or a caller that passes none) keeps the head-type ask.
+    expect(renderWeekPlanEmail(buildWeekPlan({ ...base, systemType: [] }), { ...CTX, headTypes: [] }).plan_note).toContain('Add your sprinkler head type');
+    expect(renderWeekPlanEmail(mixed, CTX).plan_note).toContain('Add your sprinkler head type');
+    // A hold carries no minutes note either way.
+    const hold = buildWeekPlan({ ...base, targetInchesPerWeek: 0.5, lastWeekAppliedInches: 2, lastWeekRainInches: 2, systemType: ['rotor', 'spray'] });
+    expect(hold.action).toBe('hold');
+    expect(renderWeekPlanEmail(hold, { ...CTX, headTypes: ['rotor', 'spray'] }).plan_note).not.toContain('kind of zone');
+  });
+
   test('watering prohibited (0-day policy) → skip, no override cycle, no "permitted day"', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: { maxDaysPerWeek: 0 }, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 0 } });

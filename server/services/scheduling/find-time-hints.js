@@ -18,6 +18,7 @@ const { checkArrivalPlacement } = require('./arrival-route');
 const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
 const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
 const { etParts } = require('../../utils/datetime-et');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 function toMin(hhmm) {
   const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
@@ -82,7 +83,8 @@ function markUnknownDetours(slots) {
  * recommends can sit on an unassigned visit the commit will still reject.
  * Mirror the dispatch slot-check occupancy guard (tech-blind BY DESIGN —
  * one active field technician, so every overlap is a real clash and every
- * commit gate is tech-blind too; see scheduling/occupancy.js — same overlap
+ * commit gate is tech-blind too; with GATE_MULTI_TECH_CONFIRM on each slot's
+ * check is scoped to its own technician, as the save is; see scheduling/occupancy.js — same overlap
  * predicate, excludeServiceIds honored) and veto those hours. The engine
  * emits only the EARLIEST start per route gap, so a vetoed candidate must
  * not discard its whole gap — walk the gap through latest_start_min at the
@@ -129,8 +131,12 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
     await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
+    // The slot's own technician scopes the check when GATE_MULTI_TECH_CONFIRM is on (the
+    // option is ignored with the gate off): another technician's visit does not veto this
+    // technician's hour, an unassigned one still does.
     const clearAt = (s, m) => s.route_mode === 'arrival_windows' || conflictsForTarget(
-      occupancyByDate.get(s.date), null, s.date, { start: toHHMM(m), end: toHHMM(m + spanMin) }, { excludeServiceIds: excluded },
+      occupancyByDate.get(s.date), null, s.date, { start: toHHMM(m), end: toHHMM(m + spanMin) },
+      { excludeServiceIds: excluded, technicianId: s.technician?.id ?? null },
     ).length === 0;
     keptPerGap = slots.map((s) => {
       const kept = [];
@@ -211,7 +217,10 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone }) {
+async function pickedByArrivalChecker({
+  pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone,
+  paidRoads = true, roadSpender = null, pickerBudget = null,
+}) {
   // Summary mode names WHY there is no verdict, so the strip can say
   // "can't check this day" instead of going silent; the three-line hint
   // keeps its no-verdict contract (undefined).
@@ -226,6 +235,11 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
+      // Staff only: a technician's own picker spends no Google (Codex #6881),
+      // counted against the staff user who asked (picker-road-spend.js).
+      roads: paidRoads === true, roadSpender, pickerBudget,
+      // GATE_ROUTE_CHECK_LATE_DAYS: the list offers hours on an already-late day, so the pick is judged the same way.
+      ...(gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}),
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at
@@ -239,6 +253,7 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       return {
         start: pickedWindow.start, fits: true, detour_minutes: fit.detourMinutes ?? null,
         drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
+        ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
       };
     }
     if (fit.reason === 'route_unverified') return noVerdict('route_unverified');
@@ -301,7 +316,8 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false,
+  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false, paidRoads = true,
+  roadSpender = null, pickerBudget = null,
 }) {
   const pickedMin = toMin(pickedStart);
   // `withReason` (summary mode): an hour no verdict can cover still gets a
@@ -312,7 +328,9 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone })
+    ? pickedByArrivalChecker({
+      pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads, roadSpender, pickerBudget,
+    })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
 }
 
@@ -321,9 +339,9 @@ async function scorePickedHour({
  * New appointment "who adds the least drive at this hour" list): the
  * gap-mode verdict once per technician with a gap on `from`, each against
  * that tech's own slots. The occupancy check passes the technician, so it
- * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM); with
- * that gate off an hour any visit holds fits nobody, as the save refuses
- * it. Returns the fits only, least added drive first; unknown detours last.
+ * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM, hour or
+ * capacity mode); with that gate off an hour any visit holds fits nobody, as
+ * the save refuses it. Returns the fits only, least added drive first; unknown detours last.
  */
 async function scorePickedHourByTech({
   rawSlots, from, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
@@ -461,6 +479,11 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
+      // 'google' when the route check itself drove this hour on Google
+      // (GATE_PICKER_ROAD_CHECK); otherwise set by the road re-pricing.
+      ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
+      // GATE_ROUTE_CHECK_LATE_DAYS: the day's existing stops already arrive late; this hour adds no new late stop.
+      ...(slot.day_already_late === true ? { day_already_late: true } : {}),
       [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
@@ -475,6 +498,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     // GATE_AUTO_DISPATCH_DAY_RULES on) is a working day the strip offers
     // only when no other day has room.
     ...(closedDates?.has(date) ? { closed: true } : (lastResortDates?.has(date) ? { last_resort: true } : {})),
+    // The day's existing stops already break an arrival promise (GATE_ROUTE_CHECK_LATE_DAYS): a small tag, never a verdict.
+    ...(hours.some((hour) => hour.day_already_late) ? { already_late: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
 }
@@ -542,6 +567,7 @@ function publicChip(chip) {
     rain_chance: chip.rain_chance ?? null,
     stops_that_day: chip.stops_that_day ?? null,
     technician: chip.technician || null,
+    ...(chip.day_already_late === true ? { day_already_late: true } : {}),
   };
 }
 
@@ -552,7 +578,8 @@ function publicChip(chip) {
  * the model's numbers, or shows no rain.
  */
 async function buildBestRows(days, {
-  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null, deps = {},
+  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null,
+  paidRoads, roadSpender, deps = {},
 }) {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
   // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
@@ -581,7 +608,8 @@ async function buildBestRows(days, {
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
-  const [priced, hourly] = await Promise.all([priceChips(chips), forecast]);
+  // Staff only, counted against the staff user who asked (Codex #6881 security).
+  const [priced, hourly] = await Promise.all([priceChips(chips, { paid: paidRoads, spender: roadSpender }), forecast]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
@@ -693,7 +721,7 @@ const OPEN_TIMES_SLOW_MS = 3000;
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
-  serviceTypes = [], rainSpan = null,
+  serviceTypes = [], rainSpan = null, paidRoads = false, roadSpender = null,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
@@ -707,6 +735,7 @@ async function buildHintSummary(plan, everyStart, {
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes, rainSpan,
+    paidRoads, roadSpender,
   }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {

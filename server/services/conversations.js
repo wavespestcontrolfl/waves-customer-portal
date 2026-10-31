@@ -124,7 +124,7 @@ async function findOrCreateThreadWith(conn, {
   contactEmail,
   contactExternalId,
   contactLabel,
-  // GATE_SMS_SHARED_PHONE_LINK (codex #6268 r14): a text linked through the
+  // Shared-phone link (codex #6268 r14): a text linked through the
   // shared-phone primary mark must NOT pull the number's earlier unknown
   // conversation (and every message in it, some of which may belong to the
   // other account on that phone) into this customer. Only the current

@@ -90,6 +90,12 @@ surface for at-a-glance triage. Specifically allowed:
 - **Stage badge** (Customer 360): green `#10B981` for
   `active_customer`/`won`; red `#C8312F` for everything else.
 
+**Exception — Autopilot (`AutonomousContentReviewPage.jsx` +
+`pages/admin/autonomous-content/*`):** the forest-green hero, kelly-green
+tabs and buttons, green positive tags and cream page background are
+owner-directed brand theming (#2021, 2026-06-22). Keep them. The 14px
+floor still applies there.
+
 Other admin surfaces follow strict zinc + alert-fg-for-alerts-only rules.
 
 ## Feature flags

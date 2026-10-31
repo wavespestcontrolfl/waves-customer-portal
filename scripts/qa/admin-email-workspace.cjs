@@ -52,7 +52,7 @@ async function main() {
       let body, status = 200;
       if (api === '/admin/auth/me') body = { id: 'fixture-owner', name: 'Fixture operator', email: 'operator@example.invalid', role: state.role };
       else if (api === '/health') body = { status: 'ok', gates: {} };
-      else if (api === '/admin/feature-flags') body = { flags: { 'admin-navigation': true } };
+      else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
       else if (api === '/admin/communications/unread-count') body = { conversations: 0 };
       else if (api === '/admin/usage/track') body = {};
@@ -92,6 +92,10 @@ async function main() {
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/blocked-numbers') body = { blocked: [] };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
+      // The Communications page asks whether the Portal tab is on (GATE_PORTAL_INBOX, off here).
+      else if (api === '/admin/portal-inbox/summary') body = { enabled: false };
+      // The Communications page asks whether the Messenger tab is on (GATE_MESSENGER_INBOX, off here).
+      else if (api === '/admin/messenger/summary') body = { enabled: false };
       // The SMS composer's mic asks whether server dictation is on (GATE_SERVER_DICTATION, off here).
       else if (api === '/tech/dictation/availability') body = { available: false };
       else { report.unmatched.push(record); body = { error: 'Unmatched synthetic request' }; status = 500; }
@@ -245,7 +249,7 @@ async function main() {
           assert.equal(await send.isDisabled(), true);
           await send.evaluate((button) => button.click());
           assert.equal(state.sends.length, 2, 'A repeated pending click must not submit again');
-          assert.deepEqual(state.sends[1], { to: a.from_address, subject: `Re: ${a.subject}`, body: 'Fixture reply with a clear recipient', threadId: a.gmail_thread_id });
+          assert.deepEqual(state.sends[1], { to: a.from_address, subject: `Re: ${a.subject}`, body: 'Fixture reply with a clear recipient', threadId: a.gmail_thread_id, replyEmailId: a.id });
           state.releaseSend();
           await page.getByText('Reply sent.', { exact: true }).waitFor();
           assert.equal(await reply.inputValue(), '');

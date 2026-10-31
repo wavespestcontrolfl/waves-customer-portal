@@ -2188,7 +2188,8 @@ export function calculateEstimate(inputs) {
   // mirror: the lawn line's low_confidence_turf manualReviewReason).
   const lowConfidenceTurf = String(turfArea.turfConfidence || '').toUpperCase() === 'LOW'
     || (turfArea.turfFlags || []).includes('FIELD_VERIFY_TURF_SQFT');
-  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
+  // Plugging is not here: it prices only from its own entered area (server mirror: turfPricedServicesSelected).
+  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch;
   if (hasTurfPricedService) {
     turfArea.turfFlags.forEach(flag => {
       if (!fieldVerify.includes(flag)) fieldVerify.push(flag);
@@ -3046,17 +3047,31 @@ export function calculateEstimate(inputs) {
     // 35% of price, a 65% target gross margin.
     const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
     const e4 = otP(Math.max(450, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.35)));
-    R.td = e8;
+    // Quote-only (owner 2026-10-29): the formula is a floor that loses money
+    // on larger lawns, so the office prices every top dressing job by hand.
+    // Mirrors the server line (estimate-engine.js): no sendable price, the
+    // existing custom-quote markers, and the formula kept only as
+    // baseEstimatePrice (the dethatching convention) for the parity tests.
+    // A low-confidence turf basis (a blank area derived from a guessed turf
+    // estimate; an explicit topDressArea is exact) keeps its own reason first.
+    const topDressTurfReview = lowConfidenceTurf && !(topDressArea > 0);
+    const topDressReasons = [
+      ...(topDressTurfReview ? ['low_confidence_turf_requires_field_verification'] : []),
+      'top_dressing_quote_only',
+    ];
+    topDressReasons.forEach(addManualReviewReason);
     otItems.push({
-      name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"',
-      // An explicit topDressArea is exact and needs no turf verification; a
-      // blank area derives from the (possibly guessed) turf estimate, so a
-      // low-confidence basis carries the send-gate marker here too (codex P1).
-      ...(lowConfidenceTurf && !(topDressArea > 0) ? { requiresCustomQuote: true } : {}),
+      name: 'Lawn Top Dressing Service', price: null, detail: 'St. Augustine standard', depth: '1/8"',
+      baseEstimatePrice: e8,
+      quoteRequired: true,
+      requiresManualReview: true,
+      requiresCustomQuote: true,
+      customQuoteReason: topDressReasons[0],
+      manualReviewReasons: topDressReasons,
     });
     R.tdTiers = [
-      { name: '1/8" Depth', price: e8, detail: 'St. Augustine standard' },
-      { name: '1/4" Depth', price: e4, detail: 'Bermuda / leveling — 2x material' },
+      { name: '1/8" Depth', price: null, baseEstimatePrice: e8, quoteRequired: true, detail: 'St. Augustine standard' },
+      { name: '1/4" Depth', price: null, baseEstimatePrice: e4, quoteRequired: true, detail: 'Bermuda / leveling — 2x material' },
     ];
   }
 

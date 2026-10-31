@@ -83,8 +83,10 @@ describe('finding 3: an uncleared street-level hold is not a missed visit, a no-
 
 describe('finding 5 (scheduled path): the linked visits survive the queue so the hold is re-checked at delivery', () => {
   test('/schedule-sms persists them on the queued row and the cron replay forwards them into the send metadata', () => {
-    const route = read('../routes/admin-communications.js');
-    expect(route).toContain('if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;');
+    // The queue writer moved out of the route into the shared service the route (and the bar's schedule_sms card) call.
+    const queue = read('../services/scheduled-sms-queue.js');
+    expect(queue).toContain('if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;');
+    expect(read('../routes/admin-communications.js')).toContain('scheduleCustomerSms(req.body');
     const cron = read('../services/scheduler.js');
     expect(cron).toContain('{ linked_scheduled_service_ids: claimMeta.linked_scheduled_service_ids }');
     // ...which the shared send step reads (every linked visit is checked).

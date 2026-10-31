@@ -87,15 +87,36 @@ describe('weather-forecast (NWS)', () => {
     expect(hours).toHaveLength(2);
     // temperatureF / windMph ride along for the job-card spray check; the
     // wind upper bound is the conservative number for a max-wind label limit.
-    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms', temperatureF: 88, windMph: 10 });
+    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms', temperatureF: 88, windMph: 10, windDirection: null, relativeHumidity: null });
     expect(hours[1].rainChance).toBeNull();
-    expect(hours[1]).toMatchObject({ temperatureF: null, windMph: null });
+    expect(hours[1]).toMatchObject({ temperatureF: null, windMph: null, windDirection: null, relativeHumidity: null });
 
     // Cached on the second call; null coords rejected without fetching.
     await getHourlyRainOutlook(27.1, -82.45);
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect(await getHourlyRainOutlook(null, -82.45)).toBeNull();
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('hourly outlook carries the wind direction and the relative humidity when NWS gives them', async () => {
+    global.fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/gridpoints/TBW/3,4/forecast/hourly' } }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          properties: {
+            periods: [
+              { startTime: '2026-06-11T13:00:00-04:00', temperature: 91, windSpeed: '10 mph', windDirection: 'ENE', relativeHumidity: { unitCode: 'wmoUnit:percent', value: 68 } },
+              { startTime: '2026-06-11T14:00:00-04:00', temperature: 92, windSpeed: '12 mph', windDirection: '', relativeHumidity: { value: null } },
+              { startTime: '2026-06-11T15:00:00-04:00', temperature: 92, windSpeed: '12 mph', windDirection: 7 },
+            ],
+          },
+        }),
+      });
+    const hours = await getHourlyRainOutlook(27.2, -82.5);
+    expect(hours[0]).toMatchObject({ windMph: 10, windDirection: 'ENE', relativeHumidity: 68 });
+    expect(hours[1]).toMatchObject({ windMph: 12, windDirection: null, relativeHumidity: null });
+    expect(hours[2]).toMatchObject({ windDirection: null, relativeHumidity: null });
   });
 
   test('non-finite coordinates are rejected without fetching', async () => {

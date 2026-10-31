@@ -89,8 +89,7 @@ const EXCLUDED_DIR_HINTS = [
 //
 // These are NOT exemptions. They are R3 and R4 work in the Liquid Glass audit:
 // - estimate/* is the ~35-item legacy cluster the old SCAN_DIRS comment
-//   described (13px labels, ★ glyphs, the local W palette in tokens.js);
-//   ReportShowcaseCard's 8.5–13px is a scaled-down phone mockup.
+//   described (13px labels, ★ glyphs, the local W palette in tokens.js).
 // - NotificationBell / NewsletterSignup are the 09-07 audit's own findings,
 //   invisible to CI until now. Their weights are cleared; the undersized
 //   labels are what is left. InstallPrompt and VanScene were weight-only and
@@ -103,7 +102,6 @@ const EXCLUDED_DIR_HINTS = [
 const LEGACY_BASELINE = {
   'client/src/App.jsx': { 'banned-font-size': 2 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
-  'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
   'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9 },
   'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
@@ -115,7 +113,6 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/InlineAutoPayCapture.jsx': { 'emoji': 1, 'font-family-literal': 1 },
   'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
-  'client/src/components/estimate/ReportShowcaseCard.jsx': { 'banned-font-size': 14 },
   'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 3 },
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
   'client/src/index.css': { 'banned-font-size': 2 },

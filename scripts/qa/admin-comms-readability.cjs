@@ -28,7 +28,7 @@ function fixture(url) {
   const p = url.pathname;
   if (p === "/api/admin/auth/me") return { id: "fixture-owner", name: "Fixture operator", role: "admin" };
   if (p === "/api/health") return { status: "ok", gates: {} };
-  if (p === "/api/admin/feature-flags") return { flags: { "admin-navigation": true } };
+  if (p === "/api/admin/feature-flags") return { flags: {} };
   if (p === "/api/admin/notifications/unread-count") return { count: 0 };
   if (p === "/api/admin/usage/track") return {};
   if (p === "/api/admin/communications/unread-count") return { conversations: 0, messages: 0 };
@@ -37,6 +37,8 @@ function fixture(url) {
   if (p === "/api/admin/communications/blocked-numbers") return { blocked: [], numbers: [] };
   if (p === "/api/admin/communications/ai-auto-reply-status") return { enabled: false };
   if (p === "/api/admin/communications/agent-draft") return { draft: null };
+  if (p === "/api/admin/portal-inbox/summary") return { enabled: false };
+  if (p === "/api/admin/messenger/summary") return { enabled: false };
   if (p === "/api/admin/communications/link-library") return { links: [] };
   if (p === "/api/admin/communications/sender") return { fromNumber: null };
   if (p === "/api/tech/dictation/availability") return { available: false };

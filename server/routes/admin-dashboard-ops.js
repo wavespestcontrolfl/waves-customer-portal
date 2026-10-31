@@ -4,16 +4,9 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
-const { etDateString } = require('../utils/datetime-et');
-const { fetchPropertyForecast, etDayWindow } = require('../services/service-report/application-conditions');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-
-// The dashboard weather tile is company-wide, not a property: the place it
-// reports on is named here and handed to the forecast module explicitly
-// (SW Florida, Fort Myers area).
-const DASHBOARD_WEATHER_LOCATION = Object.freeze({ latitude: 26.64, longitude: -81.87 });
 
 /* ── 1. GET /inbox — last 20 inbound SMS with customer context ──
  * Reads unified `messages` since PR 2. Channel filter keeps the dashboard
@@ -230,102 +223,6 @@ router.get('/field-leads', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/* ── 8. GET /weather — weather for a date ── */
-router.get('/weather', async (req, res, next) => {
-  try {
-    const date = req.query.date || etDateString();
-    const alerts = [];
-
-    // Strategy 1: Try weather_data table (FAWN)
-    try {
-      const hasTable = await db.schema.hasTable('weather_data');
-      if (hasTable) {
-        const row = await db('weather_data').where({ date }).first();
-        if (row) {
-          if (row.rainfall > 0.5) alerts.push({ level: 'red', text: `Rain: ${row.rainfall}"` });
-          if (row.wind_speed > 15) alerts.push({ level: 'amber', text: `Wind: ${row.wind_speed} mph` });
-          if (row.temp_high > 95) alerts.push({ level: 'amber', text: `Heat: ${row.temp_high}°F` });
-          return res.json({
-            source: 'fawn',
-            date,
-            temp: row.temp_high,
-            humidity: row.humidity,
-            windSpeed: row.wind_speed,
-            rainfall: row.rainfall,
-            alerts,
-          });
-        }
-      }
-    } catch {}
-
-    // Strategy 2: Open-Meteo via the shared property-forecast module. The
-    // dashboard tile is company-wide, so it names its place explicitly (SW
-    // Florida / Fort Myers area) rather than reading a property.
-    try {
-      const dayWindow = etDayWindow(date);
-      const forecast = dayWindow
-        ? await fetchPropertyForecast({ ...DASHBOARD_WEATHER_LOCATION, ...dayWindow, timeoutMs: 5000 })
-        : null;
-      if (forecast && forecast.status === 'ok' && forecast.hourly.length > 0) {
-        // A day's figure is reported only when EVERY hour stamp of that ET day
-        // (00:00-23:00; 23 on the spring-forward day, 25 on the fall-back day) has a
-        // reading for it, derived from the ET day window rather than assuming 24.
-        // Otherwise that figure is null, which is what the daily API answered for a
-        // day it could not aggregate: the tile shows "no data" rather than a max or a
-        // sum over a handful of hours.
-        const slotCount = Math.round((dayWindow.to - dayWindow.from) / 3600000);
-        const byAt = new Map(forecast.hourly.map((h) => [h.at, h]));
-        const dayValues = (key) => {
-          const values = [];
-          for (let i = 0; i < slotCount; i += 1) {
-            const v = byAt.get(new Date(dayWindow.from.getTime() + i * 3600000).toISOString())?.[key];
-            if (v == null) return null;
-            values.push(v);
-          }
-          return values;
-        };
-        const maxOf = (key) => {
-          const values = dayValues(key);
-          return values ? Math.max(...values) : null;
-        };
-        const temp = maxOf('temperature_f');
-        const humidity = maxOf('humidity_pct');
-        const wind = maxOf('wind_mph');
-        // Day rain = the sum of the day's hour stamps 00:00-23:00, which is exactly how
-        // Open-Meteo's own daily precipitation_sum (the value this tile showed before)
-        // is built ("simple 24 hour aggregation from hourly values"). It is NOT the
-        // module's interval total (stamps 01:00-24:00), which would differ by the
-        // one hour of rain that straddles midnight.
-        const rainValues = dayValues('precipitation_in');
-        const rain = rainValues ? Math.round(rainValues.reduce((sum, v) => sum + v, 0) * 1000) / 1000 : null;
-        if (rain > 0.5) alerts.push({ level: 'red', text: `Rain: ${rain}"` });
-        if (wind > 15) alerts.push({ level: 'amber', text: `Wind: ${wind} mph` });
-        if (temp > 95) alerts.push({ level: 'amber', text: `Heat: ${temp}°F` });
-        return res.json({ source: 'open-meteo', date, temp, humidity, windSpeed: wind, rainfall: rain, alerts });
-      }
-    } catch {}
-
-    // Strategy 3: SWFL seasonal averages by month
-    const month = new Date(date + 'T12:00:00').getMonth(); // 0-indexed
-    const SWFL_AVERAGES = [
-      { temp: 75, humidity: 65, windSpeed: 8, rainfall: 0.1 },  // Jan
-      { temp: 77, humidity: 63, windSpeed: 9, rainfall: 0.1 },  // Feb
-      { temp: 80, humidity: 60, windSpeed: 10, rainfall: 0.1 }, // Mar
-      { temp: 84, humidity: 58, windSpeed: 10, rainfall: 0.1 }, // Apr
-      { temp: 89, humidity: 62, windSpeed: 8, rainfall: 0.3 },  // May
-      { temp: 91, humidity: 72, windSpeed: 7, rainfall: 0.6 },  // Jun
-      { temp: 92, humidity: 74, windSpeed: 6, rainfall: 0.7 },  // Jul
-      { temp: 92, humidity: 75, windSpeed: 6, rainfall: 0.7 },  // Aug
-      { temp: 91, humidity: 73, windSpeed: 7, rainfall: 0.5 },  // Sep
-      { temp: 86, humidity: 68, windSpeed: 8, rainfall: 0.2 },  // Oct
-      { temp: 81, humidity: 65, windSpeed: 8, rainfall: 0.1 },  // Nov
-      { temp: 76, humidity: 66, windSpeed: 8, rainfall: 0.1 },  // Dec
-    ];
-    const avg = SWFL_AVERAGES[month];
-    res.json({ source: 'seasonal-average', date, ...avg, alerts: [] });
-  } catch (err) { next(err); }
-});
-
 // =========================================================================
 // WEEKLY BI BRIEFING AGENT
 // =========================================================================
@@ -333,7 +230,7 @@ router.get('/weather', async (req, res, next) => {
 // Admin-only (ADMIN-BUG-R42): company-wide revenue/MRR briefings and the
 // paid BI-agent trigger are owner-only everywhere else (admin-kpi-targets,
 // admin-dashboard), and the router-level requireTechOrAdmin above stays for
-// the genuinely technician-facing routes in this file (/inbox, /weather,
+// the genuinely technician-facing routes in this file (/inbox,
 // /recent-photos, /field-leads) — so these two are gated per-route rather
 // than at the router.
 // POST /api/admin/dashboard-ops/bi/run — trigger the Monday briefing manually

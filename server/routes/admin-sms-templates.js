@@ -147,6 +147,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // autopay-setup-link.js passes this same list to getTemplate at send time
   // and checks every active body in its read-only delivery preflight.
   autopay_setup_link: Object.freeze(['secure_link']),
+  // Cancellation confirmations with an open balance: the amount and the pay
+  // link ARE the reason this twin exists. cancellation-confirmations.js
+  // passes this same list at render time and falls back to the base copy.
+  service_cancellation_confirmation_balance: Object.freeze(['balance', 'pay_url']),
+  service_cancellation_end_of_term_confirmation_balance: Object.freeze(['balance', 'pay_url']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
@@ -216,50 +221,11 @@ function auditSmsTemplateIssue(templateKey, eventType, reason, details = {}) {
   }).catch(() => {});
 }
 
-// Auto-create table if missing + seed any new default templates that don't exist yet
-let _seededThisProcess = false;
-async function ensureTable() {
-  if (!(await db.schema.hasTable('sms_templates'))) {
-    await db.schema.createTable('sms_templates', t => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.string('template_key', 80).unique().notNullable();
-      t.string('name', 200).notNullable();
-      t.string('category', 30).notNullable();
-      t.text('body').notNullable();
-      t.text('description');
-      t.jsonb('variables');
-      t.string('trigger_event_key', 120).nullable();
-      t.boolean('is_active').defaultTo(true);
-      t.boolean('is_internal').defaultTo(false);
-      t.integer('sort_order').defaultTo(100);
-      t.timestamps(true, true);
-      t.index(['trigger_event_key']);
-    });
-  }
-  if (!(await db.schema.hasColumn('sms_templates', 'trigger_event_key'))) {
-    await db.schema.alterTable('sms_templates', t => {
-      t.string('trigger_event_key', 120).nullable();
-      t.index(['trigger_event_key']);
-    });
-  }
-  if (_seededThisProcess) return;
-  _seededThisProcess = true;
-  // Upsert default templates — onConflict.ignore means existing rows are untouched,
-  // new template_keys (like newly-added seeds) get inserted on deploy.
-  const templates = CLEAN_DEFAULT_SMS_TEMPLATES.map(template => ({
-    ...template,
-    variables: JSON.stringify(template.variables),
-  }));
-  for (const t of templates) {
-    try { await db('sms_templates').insert(t).onConflict('template_key').ignore(); }
-    catch (_) { /* best-effort */ }
-  }
-}
-
-// GET / — list all templates
+// GET / — list all templates. A read only: the table, its columns and every default template come from the
+// migrations (20260514000002 inserts each default; the default keys are protected from delete), so the list
+// never creates a table, adds a column or inserts a row.
 router.get('/', async (req, res, next) => {
   try {
-    await ensureTable();
     const { category } = req.query;
     let query = db('sms_templates').orderBy('category').orderBy('sort_order');
     if (category) query = query.where({ category });

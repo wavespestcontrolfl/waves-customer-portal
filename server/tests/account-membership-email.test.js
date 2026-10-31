@@ -427,6 +427,42 @@ describe('app intro tracker destination', () => {
   });
 });
 
+describe('sendMembershipRenewalReminder (annual prepay year-end notice)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a prepay term notice says "12 months prepaid" and drops the monthly rate even when the customer row has one', async () => {
+    setDbQueues({ customers: [chain({ first: customer({ monthly_rate: '159.00' }) }), chain({ first: customer({ monthly_rate: '159.00' }) })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 30,
+      termId: 'term-1',
+    });
+
+    const sent = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(sent.templateKey).toBe('membership.renewal_reminder');
+    expect(sent.payload.billing_cadence).toBe('12 months prepaid');
+    expect(sent.payload.monthly_rate).toBe('');
+  });
+
+  test('a termite plan 15/7-day notice keeps the existing cadence and rate payload', async () => {
+    setDbQueues({ customers: [chain({ first: customer({ monthly_rate: '159.00' }) }), chain({ first: customer({ monthly_rate: '159.00' }) })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 15,
+      termId: 'term-1',
+      termitePlan: true,
+    });
+
+    const sent = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(sent.payload.billing_cadence).toBe('monthly');
+    expect(sent.payload.monthly_rate).toBe('$159.00');
+  });
+});
+
 describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, slice 5)', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -607,5 +643,95 @@ describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, s
     expect(result).toEqual(expect.objectContaining({
       ok: true, deduped: true, messageId: 'sg-orig', sentAt: '2026-09-26T14:05:00.000Z',
     }));
+  });
+});
+
+describe('customer-facing request subject strips the staff actor label', () => {
+  const { customerRequestSubject } = AccountMembershipEmail._private;
+  const uuid = '36ec9727-d81c-4649-8dde-8b9583258191';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test.each([
+    [`Cancel Mosquito (Intelligence Bar (user ${uuid}))`, 'Cancel Mosquito'],
+    ['Cancel Mosquito (Intelligence Bar)', 'Cancel Mosquito'],
+    [`Cancel plan (Admin (user ${uuid}))`, 'Cancel plan'],
+    ['Cancel plan (Admin)', 'Cancel plan'],
+    ['Cancel lawn and pest (Admin (user 12))  ', 'Cancel lawn and pest'],
+  ])('strips the trailing label from %p', (input, expected) => {
+    expect(customerRequestSubject(input, 'fallback')).toBe(expected);
+  });
+
+  test('leaves ordinary customer subjects alone', () => {
+    expect(customerRequestSubject('Move my visit', 'fallback')).toBe('Move my visit');
+    expect(customerRequestSubject('Question (Admin) about my bill', 'fallback')).toBe('Question (Admin) about my bill');
+    expect(customerRequestSubject('Cancel plan (spring)', 'fallback')).toBe('Cancel plan (spring)');
+  });
+
+  test('falls back when nothing is left or the subject is empty', () => {
+    expect(customerRequestSubject('(Admin)', 'Your request')).toBe('Your request');
+    expect(customerRequestSubject(` (Intelligence Bar (user ${uuid}))`, 'Your request')).toBe('Your request');
+    expect(customerRequestSubject(null, 'Your request')).toBe('Your request');
+  });
+
+  test('sendCancellationReceived sends the subject without the Intelligence Bar label', async () => {
+    setDbQueues({
+      email_messages: [chain({ first: undefined })],
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: {
+        id: 'req-ib-1',
+        category: 'cancellation',
+        subject: `Cancel Mosquito (Intelligence Bar (user ${uuid}))`,
+        created_at: '2026-10-30',
+      },
+      processed: true,
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ request_subject: 'Cancel Mosquito' }),
+    }));
+  });
+
+  test('sendRequestReceived and sendRequestUpdated also strip the label', async () => {
+    for (const send of ['sendRequestReceived', 'sendRequestUpdated']) {
+      jest.clearAllMocks();
+      setDbQueues({
+        customers: [chain({ first: customer() })],
+        customer_interactions: [chain()],
+        email_messages: [chain({ first: undefined })],
+      });
+      await AccountMembershipEmail[send]({
+        customerId: 'cust-1',
+        request: {
+          id: 'req-admin-1',
+          category: 'cancellation',
+          status: 'in_progress',
+          subject: `Cancel plan (Admin (user ${uuid}))`,
+          created_at: '2026-10-30',
+        },
+      });
+      const calls = EmailTemplates.sendTemplate.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls[0][0].payload.request_subject).toBe('Cancel plan');
+    }
+  });
+
+  test('admin-cancellation.js still builds the actor label this helper strips', () => {
+    // If this label format changes, customerRequestSubject must change with
+    // it or the staff text leaks into customer email again.
+    const source = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/admin-cancellation.js'),
+      'utf8',
+    );
+    expect(source).toContain(
+      "const actorLabel = `${actorType === 'ib' ? 'Intelligence Bar' : 'Admin'}${actorUserId ? ` (user ${actorUserId})` : ''}`;",
+    );
+    expect(source).toContain('`Cancel plan (${actorLabel})`');
+    expect(source).toContain('`Cancel ${scope.map(familyLabelOf).join(\', \')} (${actorLabel})`');
   });
 });

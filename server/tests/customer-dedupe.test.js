@@ -2709,6 +2709,47 @@ describe('mergeConversationRows', () => {
 });
 
 describe('runAutoMergeSweep', () => {
+  it('says why it left a pair for review: ids, tier, reasons and both intake sources, never names', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000101',
+      first_name: 'Sweepfixture', last_name: 'Review', phone: '+19415550101',
+      address_line1: '100 Alpha St', city: 'Bradenton', zip: '34211',
+      pipeline_stage: 'new_lead', lead_source: 'lead_pipeline', created_at: '2026-10-27',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000102',
+      first_name: 'Sweepfixture', last_name: 'Review', phone: '9415550101',
+      address_line1: '200 Beta Ave', city: 'Bradenton', zip: '34211',
+      pipeline_stage: 'new_lead', lead_source: 'website_quote', created_at: '2026-10-28',
+    };
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+
+    expect(results.merged).toEqual([]);
+    expect(results.skipped).toEqual([{ loserId: loserRow.id, winnerId: winnerRow.id, tier: 'yellow', reasons: ['address_conflict'] }]);
+    const logger = require('../services/logger');
+    const line = logger.info.mock.calls.map((c) => c[0]).find((m) => m.includes('for review'));
+    expect(line).toBe(`[customer-dedupe] auto-merge left ${loserRow.id} -> ${winnerRow.id} for review: tier=yellow reasons=address_conflict sources=lead_pipeline/website_quote`);
+    expect(line).not.toMatch(/Sweepfixture|Review /);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('summarizeSweepSkips counts the first token of every skip reason', () => {
+    expect(dedupe.summarizeSweepSkips([])).toBe('');
+    expect(dedupe.summarizeSweepSkips(undefined)).toBe('');
+    expect(dedupe.summarizeSweepSkips([
+      { reasons: ['address_conflict'] },
+      { reasons: ['name_conflict', 'address_conflict'] },
+      { reasons: ['merge_failed: executeMerge: rows no longer share a phone'] },
+      { reasons: [] },
+    ])).toBe('address_conflict:2,name_conflict:1,merge_failed:1');
+  });
+
   it('aborts (merges nothing) when the dismissals table is unreadable — fail closed for the writer', async () => {
     installDb((table) => {
       if (table === 'customers') {

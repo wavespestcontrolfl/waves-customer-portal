@@ -17,6 +17,17 @@ describe('estimate-proposal', () => {
   });
 
   describe('normalizeProposal', () => {
+    // Owner 2026-10-28: the building use is kept only when picked, so a proposal saved before the pick keeps its shape.
+    it('keeps a picked building use and leaves the key off when unset or unknown', () => {
+      const withUse = (buildingUse) => normalizeProposal({ estimate_data: { proposal: {
+        enabled: true, buildingUse, buildings: [{ name: 'A', lineItems: [{ description: 'Pest', unitPrice: 100, frequency: 'monthly' }] }],
+      } } });
+      expect(withUse('residential').buildingUse).toBe('residential');
+      expect(withUse(' NonResidential ').buildingUse).toBe('nonresidential');
+      expect(withUse(undefined)).not.toHaveProperty('buildingUse');
+      expect(withUse('warehouse')).not.toHaveProperty('buildingUse');
+    });
+
     it('reads an authored multi-building proposal from estimate_data', () => {
       const estimate = {
         customer_name: 'Siesta Sands HOA',
@@ -304,6 +315,18 @@ describe('structured proposal sections (slice 1A-i)', () => {
     // through to the synthesized fallback.
     expect(p.synthesized).toBe(false);
     expect(p.enabled).toBe(true);
+  });
+
+  it('keeps a builder visit length in whole minutes 5-480 and leaves the key off otherwise', () => {
+    const programFor = (visitMinutes) => normalizeProposal(authored({
+      buildings: [],
+      programs: [{ service: 'pest', label: 'Pest', frequencyPerYear: 12, pricePerApplication: 81.67, visitMinutes }],
+    })).programs[0];
+    expect(programFor(30).visitMinutes).toBe(30);
+    expect(programFor('45').visitMinutes).toBe(45);
+    // Unset, blank or out of range: no key at all, so a proposal saved before the field normalizes (and fingerprints)
+    // exactly as before.
+    for (const value of [undefined, null, '', 2, 481, 'abc']) expect(programFor(value)).not.toHaveProperty('visitMinutes');
   });
 
   it('folds program annuals into recurring totals with per-program tax', () => {
@@ -851,5 +874,17 @@ describe('one-time itemization reads the frozen send-snapshot bundle first (code
       ['One-Time Pest Control', 'one_time', 'One-time'],
       ['Fire Ant Yard Treatment', 'one_time', 'Per application'],
     ]);
+  });
+});
+
+describe('normalizePaymentTerms: Net-60 (owner 2026-10-29)', () => {
+  const { normalizePaymentTerms } = require('../services/estimate-proposal');
+  test('every common spelling canonicalizes to the payer token, like Net-30', () => {
+    for (const raw of ['net60', 'Net-60', 'NET 60', 'net_60']) expect(normalizePaymentTerms(raw)).toBe('net60');
+    expect(normalizePaymentTerms('Net-30')).toBe('net30');
+  });
+  test('a term outside the payer vocabulary stays null', () => {
+    expect(normalizePaymentTerms('Net-90')).toBeNull();
+    expect(normalizePaymentTerms('60 days')).toBeNull();
   });
 });

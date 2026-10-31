@@ -3893,10 +3893,11 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   // Exempt only when EVERY selected turf service is such a bounded add-on, so a
   // Top Dressing + Plugging combo (each with its own area) clears together,
   // while any whole-lawn service (LAWN/OT_LAWN/DETHATCH) still requires it.
-  const plugArea = firstNonNegativeNumber(options.plugArea);
+  // Plugging is always exempt: it never prices from turf (no plug area = no
+  // price, owner 2026-10-31).
   const topDressArea = firstNonNegativeNumber(options.topDressArea);
   const areaBoundedExempt = {
-    PLUGGING: plugArea > 0,
+    PLUGGING: true,
     TOPDRESS: topDressArea > 0,
   };
   // (An empty turf list here means the unobservable mosquito case — never
@@ -6058,6 +6059,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       accessType: o.sanitationAccess || 'normal',
     };
   }
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, new quotes
+  // only: the engine refuses the input with a 400 when the gate is off). The
+  // access tier comes from the required Access select; no default, so an unchosen
+  // tier reaches the engine as a custom-quote line. Only the tier is sent: the
+  // price is one per tier, and staff discount on the estimate itself.
+  if (sel.has('RODENT_DEAD_ANIMAL')) {
+    services.deadAnimalRemoval = { tier: o.deadAnimalAccess || undefined };
+  }
 
   // Features — normalize v2's UPPERCASE enum shape to v1's lowercase boolean/string shape
   const features = {
@@ -6293,6 +6302,10 @@ async function resolveCalculateQualifyingEvidence(options = {}, resolver = null)
   return {
     priorQualifyingServices: clean(evidence?.tierKeys),
     setupWaiverPriorQualifyingServices: clean(evidence?.setupWaiverKeys),
+    // The property scope the save's membership snapshot uses — the tick
+    // list below must list exactly the rows a save would freeze.
+    groupedEstimate: evidence?.groupedEstimate === true,
+    perPropertyStreetScope: evidence?.perPropertyStreetScope || null,
   };
 }
 
@@ -6323,8 +6336,9 @@ router.post('/calculate-estimate', async (req, res) => {
     // (codex #3591 r34 P1) — so the preview prices exactly as the save-time
     // recompute will. A lookup failure refuses (retryable) rather than
     // previewing a different result than the save persists.
+    let evidence;
     try {
-      const evidence = await resolveCalculateQualifyingEvidence(options || {});
+      evidence = await resolveCalculateQualifyingEvidence(options || {});
       v1Input.priorQualifyingServices = evidence.priorQualifyingServices;
       v1Input.setupWaiverPriorQualifyingServices = evidence.setupWaiverPriorQualifyingServices;
     } catch (lookupErr) {
@@ -6359,6 +6373,23 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // The linked member's current services at the tier this quote moves
+    // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
+    // failure only leaves the list off.
+    // ADMIN ONLY, like /api/admin/estimates/customer-spend: the list carries
+    // contracted prices and margins, and this router also admits technicians.
+    if (options?.existingCustomerId && req.techRole === 'admin') {
+      try {
+        const { currentServiceTierOffer } = require('../services/estimate-membership-context');
+        const offer = await currentServiceTierOffer(require('../models/db'), {
+          customerId: String(options.existingCustomerId),
+          estData: { result: mapped },
+          groupedEstimate: evidence.groupedEstimate,
+          perPropertyStreetScope: evidence.perPropertyStreetScope,
+        });
+        if (offer) mapped.currentServiceTierOffer = offer;
+      } catch (_) { /* the list is a convenience; the quote stands */ }
+    }
     res.json(mapped);
   } catch (err) {
     console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);

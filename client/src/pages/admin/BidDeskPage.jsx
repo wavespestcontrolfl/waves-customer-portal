@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Gavel } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TableColumnPicker, TablePagination, TableToolbar, TBody, TD, TH, THead, Textarea, TR, UiSurface,
+  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TableColumnPicker, TablePagination, TableSavedViews, TableToolbar, TBody, TD, TH, THead, Textarea, TR, UiSurface,
 } from "../../components/ui";
+import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
+import { useAdminTableViews } from "../../hooks/useAdminTableViews";
+import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
-import BidChecklistPanel from "./BidChecklistPanel";
+import BidChecklistPanel, { UNCONFIRMED_MESSAGE } from "./BidChecklistPanel";
 
 // Bid Desk (GATE_BID_DESK, dark). Bid invites the email sync stored, filed by a job. The page only reads them and
 // records the operator's decisions; nothing here sends a message to a buyer or a contractor.
@@ -63,6 +66,33 @@ const SORTS = [
   { value: "buyer", label: "Buyer A–Z" },
 ];
 const DEFAULT_PAGE_SIZE = 100;
+const PAGE_SIZES = [25, 50, 100, 500];
+const BID_TABLE_VIEW_DEFAULTS = {
+  filter: "open",
+  showEarlier: true,
+  search: "",
+  sort: "workflow",
+  visibleColumns: ALL_BID_COLUMNS,
+  page: 1,
+  pageSize: DEFAULT_PAGE_SIZE,
+  scrollTop: 0,
+};
+
+// Saved records are browser-owned input. Keep only this table's settings and
+// restore columns in their canonical order, including the required project action.
+function normalizeBidTableState(value) {
+  const state = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    filter: FILTERS.some(({ key }) => key === state.filter) ? state.filter : BID_TABLE_VIEW_DEFAULTS.filter,
+    showEarlier: typeof state.showEarlier === "boolean" ? state.showEarlier : BID_TABLE_VIEW_DEFAULTS.showEarlier,
+    search: typeof state.search === "string" ? state.search.slice(0, 160) : BID_TABLE_VIEW_DEFAULTS.search,
+    sort: SORTS.some(({ value: option }) => option === state.sort) ? state.sort : BID_TABLE_VIEW_DEFAULTS.sort,
+    visibleColumns: normalizeTableColumns(state.visibleColumns, BID_COLUMNS),
+    page: Number.isInteger(state.page) && state.page > 0 ? state.page : BID_TABLE_VIEW_DEFAULTS.page,
+    pageSize: PAGE_SIZES.includes(state.pageSize) ? state.pageSize : BID_TABLE_VIEW_DEFAULTS.pageSize,
+    scrollTop: Number.isFinite(state.scrollTop) && state.scrollTop >= 0 ? state.scrollTop : BID_TABLE_VIEW_DEFAULTS.scrollTop,
+  };
+}
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -176,6 +206,7 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
                   variant="secondary"
                   className="bid-desk-open-record h-auto min-h-11 max-w-full justify-start whitespace-normal px-3 py-2 text-left"
                   onClick={() => onSelect(bid.id)}
+                  data-bid-open={bid.id}
                   aria-label={`Open ${titleOf(bid)}`}
                 >
                   <span className="min-w-0 break-words">{titleOf(bid)}</span>
@@ -204,6 +235,10 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
   );
 }
 
+// A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
+const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
+const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
+
 function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
@@ -214,8 +249,17 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const headingRef = useRef(null);
+  const arrived = useRef(false);
 
-  const load = useCallback(async () => {
+  // The due date typed but not saved yet, as of the last render (load() reads it without re-creating itself).
+  const dueEditedAtNow = useRef(null);
+  dueEditedAtNow.current = dueEditedAt;
+
+  // keepDrafts: the reload after a lost reply refreshes the bid as the server has it and leaves every unsaved field
+  // alone (Decision, Note, and a due date typed but not saved, still tied to the version it was typed on), as a
+  // successful save does. Only the save's own date (resetDueDraft) is re-read.
+  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false } = {}) => {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
@@ -224,15 +268,38 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
         : null;
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
-      setDueInput(etDatetimeLocalValue(data.bid.due_at));
-      setDueEditedAt(null);
-      setStatus(data.bid.status);
-      setNote(data.bid.decision_note || "");
+      if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
+        setDueInput(etDatetimeLocalValue(data.bid.due_at));
+        setDueEditedAt(null);
+      }
+      if (!keepDrafts) {
+        setStatus(data.bid.status);
+        setNote(data.bid.decision_note || "");
+      }
     } catch (err) {
+      // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
+      // instead of replacing the detail with an error (whose Retry would reload without the drafts).
+      if (keepDrafts) {
+        setState((s) => (s.bid ? { ...s, loading: false } : { loading: false, error: err.message, bid: null, emails: [], extras: null }));
+        setMessage(RELOAD_FAILED_MESSAGE);
+        return;
+      }
       setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
     }
   }, [bidId]);
   useEffect(() => { setMessage(""); load(); }, [load]);
+
+  // The detail renders below the whole list, so when it first loads (after an Open, or from a ?bid= link) it is
+  // scrolled to and its heading takes focus. A reload of the same bid does not move the page again.
+  useEffect(() => {
+    if (!state.bid || arrived.current) return;
+    arrived.current = true;
+    const heading = headingRef.current;
+    if (!heading) return;
+    const card = heading.closest("[data-bid-detail]");
+    if (card && card.scrollIntoView) card.scrollIntoView({ block: "start", behavior: "instant" });
+    heading.focus({ preventScroll: true });
+  }, [state.bid]);
 
   const save = async (body, done) => {
     setBusy(true);
@@ -252,7 +319,15 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       onChanged();
       return true;
     } catch (err) {
-      setMessage(`Not saved: ${err.message}`);
+      if (err instanceof ApiError) {
+        setMessage(`Not saved: ${err.message}`);
+      } else {
+        // No answer arrived (the network dropped): the server may have written the change, so show what it has.
+        // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
+        setMessage(UNCONFIRMED_MESSAGE);
+        onChanged();
+        await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+      }
       return false;
     } finally {
       setBusy(false);
@@ -265,11 +340,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   if (!bid) return null;
 
   return (
-    <Card>
+    <Card data-bid-detail>
       <CardBody>
         <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <h2 className="break-words text-ui-body font-medium text-zinc-900">{titleOf(bid)}</h2>
+            <h2 ref={headingRef} tabIndex={-1} className="break-words text-ui-body font-medium text-zinc-900 outline-none">{titleOf(bid)}</h2>
             <div className="text-ui-body text-ink-secondary">
               {[buyerOf(bid), SOURCE_LABEL[bid.source], bid.location].filter(Boolean).join(" · ")}
             </div>
@@ -318,7 +393,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
           <Button disabled={busy} onClick={() => save({ status, decision_note: note }, "Decision saved")}>Save decision</Button>
         </div>
 
-        {message && <ActionFeedback error={message.startsWith("Not saved")} className="mb-3">{message}</ActionFeedback>}
+        {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
           <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
@@ -354,7 +429,10 @@ function MarkEmail({ onMarked }) {
       setEmailId("");
       onMarked(data.bid_id);
     } catch (err) {
-      setMessage({ text: err.status === 404 ? "No email has that id" : "Enter the id from the email's address bar link (the id= part)", error: true });
+      const text = err.status === 404 ? "No email has that id"
+        : err.status === 400 ? "Enter the id from the email's address bar link (the id= part)"
+          : `Could not mark it: ${err.message}. Try again.`;
+      setMessage({ text, error: true });
     } finally {
       setBusy(false);
     }
@@ -374,7 +452,7 @@ function MarkEmail({ onMarked }) {
 
 function BidDeskControls({
   enhanced, search, onSearchChange, filter, onFilterChange, showEarlier, onEarlierChange,
-  sort, onSortChange, visibleColumns, onColumnsChange, onReset, canReset, loadedCount,
+  sort, onSortChange, visibleColumns, onColumnsChange, onReset, canReset, loadedCount, savedViewsControl,
 }) {
   if (!enhanced) {
     return (
@@ -417,6 +495,7 @@ function BidDeskControls({
           </Select>
         </Field>
         <TableColumnPicker label="Bid Desk" columns={BID_COLUMNS} visibleColumns={visibleColumns} onChange={onColumnsChange} />
+        {savedViewsControl}
       </TableToolbar>
       <p className="text-ui-caption text-ink-secondary">Search, filters, sorting, and page counts apply to the loaded bids.</p>
       {loadedCount >= 500 && (
@@ -457,7 +536,7 @@ function BidDeskResults({
           onPageChange={onPageChange}
           onPageSizeChange={onPageSizeChange}
           itemLabel="loaded bids"
-          pageSizeOptions={[25, 50, 100, 500]}
+          pageSizeOptions={PAGE_SIZES}
         />
       )}
     </>
@@ -470,15 +549,17 @@ export default function BidDeskPage({ embedded = false }) {
   const [checklistLive, setChecklistLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState({ text: "", off: false });
-  const [filter, setFilter] = useState("open");
-  const [showEarlier, setShowEarlier] = useState(true);
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState("workflow");
-  const [visibleColumns, setVisibleColumns] = useState(ALL_BID_COLUMNS);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const enhancedControls = params.get("tableControls") !== "0";
+  const savedViewsEnabled = enhancedControls && params.get("savedViews") === "1";
   const selectedId = params.get("bid") || "";
+  const tableViews = useAdminTableViews({
+    tableId: "bids",
+    enabled: savedViewsEnabled,
+    defaults: BID_TABLE_VIEW_DEFAULTS,
+    normalize: normalizeBidTableState,
+  });
+  const { state: tableState, setState: setTableState } = tableViews;
+  const { filter, showEarlier, search, sort, visibleColumns, page, pageSize, scrollTop } = tableState;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -501,6 +582,16 @@ export default function BidDeskPage({ embedded = false }) {
     setBids((rows) => rows.map((row) => (row.id === id ? { ...row, checklist_progress: { checked: progress.checked, required: progress.required } } : row)));
   }, []);
 
+  // Closing a bid puts focus back on its Open button, so the operator keeps their place in the list.
+  const returnFocusTo = useRef("");
+  useEffect(() => {
+    if (selectedId || !returnFocusTo.current) return;
+    const id = returnFocusTo.current;
+    returnFocusTo.current = "";
+    const button = Array.from(document.querySelectorAll("[data-bid-open]")).find((node) => node.dataset.bidOpen === id);
+    if (button) button.focus({ preventScroll: true });
+  }, [selectedId]);
+
   const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
 
   const shown = useMemo(() => {
@@ -515,17 +606,40 @@ export default function BidDeskPage({ embedded = false }) {
   }, [bids, enhancedControls, filter, search, showEarlier, sort]);
   const totalPages = Math.max(1, Math.ceil(shown.length / pageSize));
   useEffect(() => {
-    if (!enhancedControls) return;
-    setPage((current) => Math.min(Math.max(1, current), totalPages));
-  }, [enhancedControls, totalPages]);
+    if (!enhancedControls || loading || error.text) return;
+    const nextPage = Math.min(Math.max(1, page), totalPages);
+    if (nextPage !== page) {
+      setTableState((current) => ({ ...current, page: nextPage, scrollTop: 0 }));
+    }
+  }, [enhancedControls, error.text, loading, page, setTableState, totalPages]);
   const displayed = enhancedControls
     ? shown.slice((page - 1) * pageSize, page * pageSize)
     : shown;
+  const scrollResetKey = useMemo(
+    () => JSON.stringify([filter, showEarlier, search, sort, page, pageSize]),
+    [filter, page, pageSize, search, showEarlier, sort],
+  );
+  const rememberScroll = useCallback((value) => {
+    setTableState((current) => ({ ...current, scrollTop: value }));
+  }, [setTableState]);
+  useAdminTableScroll({
+    enabled: savedViewsEnabled && tableViews.available,
+    active: !selectedId,
+    ready: !loading && !error.text,
+    scope: tableViews.storageKey,
+    scrollTop,
+    onScroll: rememberScroll,
+    resetKey: scrollResetKey,
+  });
   const resetEnhancedControls = () => {
-    setSearch("");
-    setFilter("open");
-    setShowEarlier(true);
-    setPage(1);
+    setTableState((current) => ({
+      ...current,
+      search: BID_TABLE_VIEW_DEFAULTS.search,
+      filter: BID_TABLE_VIEW_DEFAULTS.filter,
+      showEarlier: BID_TABLE_VIEW_DEFAULTS.showEarlier,
+      page: 1,
+      scrollTop: 0,
+    }));
   };
   const enhancedControlsChanged = Boolean(search) || filter !== "open" || !showEarlier;
 
@@ -550,18 +664,19 @@ export default function BidDeskPage({ embedded = false }) {
           <BidDeskControls
             enhanced={enhancedControls}
             search={search}
-            onSearchChange={(value) => { setSearch(value); setPage(1); }}
+            onSearchChange={(value) => setTableState((current) => ({ ...current, search: value, page: 1, scrollTop: 0 }))}
             filter={filter}
-            onFilterChange={(value) => { setFilter(value); setPage(1); }}
+            onFilterChange={(value) => setTableState((current) => ({ ...current, filter: value, page: 1, scrollTop: 0 }))}
             showEarlier={showEarlier}
-            onEarlierChange={(value) => { setShowEarlier(value); setPage(1); }}
+            onEarlierChange={(value) => setTableState((current) => ({ ...current, showEarlier: value, page: 1, scrollTop: 0 }))}
             sort={sort}
-            onSortChange={(value) => { setSort(value); setPage(1); }}
+            onSortChange={(value) => setTableState((current) => ({ ...current, sort: value, page: 1, scrollTop: 0 }))}
             visibleColumns={visibleColumns}
-            onColumnsChange={setVisibleColumns}
+            onColumnsChange={(value) => setTableState((current) => ({ ...current, visibleColumns: value }))}
             onReset={resetEnhancedControls}
             canReset={enhancedControlsChanged}
             loadedCount={bids.length}
+            savedViewsControl={savedViewsEnabled ? <TableSavedViews label="Bid Desk" controller={tableViews} /> : null}
           />
 
           <BidDeskResults
@@ -578,13 +693,13 @@ export default function BidDeskPage({ embedded = false }) {
             page={page}
             totalPages={totalPages}
             pageSize={pageSize}
-            onPageChange={setPage}
-            onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+            onPageChange={(value) => setTableState((current) => ({ ...current, page: value, scrollTop: 0 }))}
+            onPageSizeChange={(size) => setTableState((current) => ({ ...current, pageSize: size, page: 1, scrollTop: 0 }))}
           />
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} onProgress={setProgress} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => { returnFocusTo.current = selectedId; select(""); }} onProgress={setProgress} />
             </div>
           )}
         </>

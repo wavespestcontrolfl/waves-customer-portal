@@ -11,6 +11,10 @@
 //     a visit; the third goes to the office ("text us").
 //  3. No rule may empty the picker: the late-move limit is not applied when
 //     fewer than MIN_CHOICES times remain inside it.
+//  4. A lawn_rounds_9 visit (owner 2026-10-28) has no allowance: its last date
+//     is the last day of its round. Dates before the round are not offered
+//     either; the picker (reschedule-public) and the rebooker hold that line
+//     whether or not this limit applies.
 //
 // The due date and the move count come from reschedule_log. The series mover
 // logs only the visit the customer moved, so the visit's rows are its own
@@ -33,6 +37,7 @@
 const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { intervalDaysForPattern, normalizeRecurringPattern } = require('../recurring-appointment-seeder');
+const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
 const { visitTimeElapsed } = require('../reschedule-eligibility');
 const { isPlanSeriesRow } = require('../recurring-series-cancel-reseed');
 
@@ -82,7 +87,7 @@ function slotChanged(row) {
 // Legacy plan rows store 'custom' or no pattern, with no interval; their
 // cadence is the catalog's (services.frequency, read as `catalog_frequency`).
 // The same reading as rate-review's CADENCE_SQL, for the four ruled plans.
-const CATALOG_CADENCES = new Set(['monthly', 'every_6_weeks', 'bimonthly', 'quarterly']);
+const CATALOG_CADENCES = new Set(['monthly', 'every_6_weeks', 'bimonthly', 'quarterly', LAWN_ROUNDS_9]);
 
 // True for a legacy plan row: 'custom' or no pattern, and no interval. Its
 // cadence is not on the row.
@@ -110,14 +115,28 @@ function isPlanVisit(svc) {
   return isPlanSeriesRow(svc);
 }
 
-function allowanceDays(svc) {
-  if (!isPlanVisit(svc)) return null;
-  // Legacy rows store aliases ('bi-monthly'); the shared normalizer reads
-  // them. A value it does not place (monthly_nth_weekday) is passed as stored.
+// The plan's cadence for the allowance: a legacy row's from the catalog, any
+// other row's from its stored pattern (aliases read by the shared normalizer;
+// a value it does not place, monthly_nth_weekday, passed as stored).
+function planPattern(svc) {
   const stored = svc.recurring_pattern || null;
-  const pattern = isLegacyCadenceRow(svc)
+  return isLegacyCadenceRow(svc)
     ? catalogCadence(svc)
     : (normalizeRecurringPattern(stored) || stored);
+}
+
+// A lawn_rounds_9 visit moves only inside its round: the last date is the
+// round's last day, whatever the visit's due date inside it. Null for every
+// other plan. The late-move allowance (days after the due date) does not
+// apply to it: a round is fixed, not a gap from the last visit.
+function roundEnd(svc, dueDate) {
+  if (!isPlanVisit(svc) || planPattern(svc) !== LAWN_ROUNDS_9) return null;
+  return roundOf(dueDate)?.end || null;
+}
+
+function allowanceDays(svc) {
+  if (!isPlanVisit(svc)) return null;
+  const pattern = planPattern(svc);
   if (!pattern) return null;
   const gap = intervalDaysForPattern(pattern, svc.recurring_interval_days);
   if (!gap) return null;
@@ -216,7 +235,7 @@ async function loadMoveLimit(svc, { database, missed = false, now = new Date() }
     if (!dueDate) return null;
 
     const allowance = allowanceDays(svc);
-    const lastDate = allowance ? addDays(dueDate, allowance) : null;
+    const lastDate = roundEnd(svc, dueDate) || (allowance ? addDays(dueDate, allowance) : null);
 
     let firstVisitBlocked = false;
     const starts = moveStarts(moves);
@@ -308,6 +327,7 @@ function applyLimit(limit, full, shown, { rangeTo, now = new Date() } = {}) {
 module.exports = {
   ALLOWANCE_BY_GAP_DAYS,
   allowanceDays,
+  roundEnd,
   FIRST_VISIT_ONLINE_MOVES,
   CORRECTION_MINUTES,
   MIN_CHOICES,

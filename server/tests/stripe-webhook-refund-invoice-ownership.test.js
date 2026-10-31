@@ -55,6 +55,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn(() => Promise.resolve({ ok: true })) }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
+jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 1 })) }));
 jest.mock('../services/customer-credit', () => ({
   ...jest.requireActual('../services/customer-credit'),
   returnAppliedCreditOnRefund: jest.fn(),
@@ -71,6 +72,7 @@ jest.mock('../services/stripe', () => ({
 }));
 
 const db = require('../models/db');
+const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const CustomerCredit = require('../services/customer-credit');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { triggerNotification } = require('../services/notification-triggers');
@@ -255,6 +257,33 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
     expect(payments[0]).toEqual(expect.objectContaining({ status: 'refunded', refund_status: 'full' }));
     expect(termsTouched()).toBe(true);
     expect(PaymentLifecycleEmail.sendRefundIssued).toHaveBeenCalledTimes(1);
+  });
+
+  test('(b2) a full card refund on an invoice paid partly by hand: refunded as before, and the office gets one Billing alert', async () => {
+    payments.push(paymentRow());
+    invoices.push(invoiceRow({ stripe_payment_intent_id: 'pi_1', stripe_charge_id: 'ch_1', invoice_number: 'WPC-2026-0500' }));
+    // $40 recorded by hand earlier (a part payment still standing in the ledger).
+    db.raw.mockImplementation(async (sql) => (/partial_payment/.test(String(sql)) ? { rows: [{ cents: 4000 }] } : {}));
+
+    await handleChargeRefunded(fullRefundOf('ch_1', 'pi_1'));
+
+    expect(invoices[0]).toEqual(expect.objectContaining({ status: 'refunded' }));
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(spec).toMatchObject({ area: 'Billing', severity: 'needs-you', who: 'person', subject: { type: 'invoice', id: 'inv-1' } });
+    expect(spec.why).toBe('Invoice WPC-2026-0500 was refunded by card in Stripe, but $40.00 paid by hand is still on record.');
+    expect(opts).toMatchObject({ bell: true });
+    // The copy passes the house rules (docs/admin-notifications.md).
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('(b3) a full card refund with no hand part raises no alert', async () => {
+    payments.push(paymentRow());
+    invoices.push(invoiceRow({ stripe_payment_intent_id: 'pi_1', stripe_charge_id: 'ch_1' }));
+    await handleChargeRefunded(fullRefundOf('ch_1', 'pi_1'));
+    expect(invoices[0]).toEqual(expect.objectContaining({ status: 'refunded' }));
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('(c) charge-only reconciled payment (no PI; invoice linked by stripe_charge_id, stale PI ignored): unchanged', async () => {

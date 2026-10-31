@@ -1,7 +1,7 @@
 // Bid kit Product List sync (GATE_BID_KIT_PRODUCT_LIST_SYNC): the snapshot and fingerprint, the diff, the auto sign-off decision
 // table, the PDF, and the run itself. The database, the store, the file storage and the bell service are stand-ins here (the SQL
 // runs in bid-kit-product-list.db.test.js); every bell spec goes through the real notification rules. Synthetic products only.
-const mockTables = { 'service_products as sp': [], service_products: [], products_catalog: [], purchase_receipt_lines: [] };
+const mockTables = { 'service_products as sp': [], service_products: [], products_catalog: [], bid_products: [], purchase_receipt_lines: [] };
 // Every query the job builds, with the builder calls it made, so a test can check what each one joined and filtered on.
 const mockQueries = [];
 jest.mock('../models/db', () => {
@@ -14,7 +14,9 @@ jest.mock('../models/db', () => {
             mockQueries.push({ table, calls });
             // The same table serves two queries: the one that joins the catalog is the linked one; the other is the unlinked lines.
             const linked = calls.some((c) => c.method === 'join' && String(c.args[0]).startsWith('products_catalog'));
-            const key = table === 'service_products as sp' && !linked ? 'service_products' : table;
+            // The bid products query (ticked catalog rows) has its own rows, apart from the catalog read for unlinked lines.
+            const bidQuery = table === 'products_catalog' && calls.some((c) => c.method === 'where' && c.args[0] && c.args[0].bid_list === true);
+            const key = table === 'service_products as sp' && !linked ? 'service_products' : bidQuery ? 'bid_products' : table;
             return Promise.resolve(mockTables[key]).then(resolve, reject);
           };
         }
@@ -354,6 +356,7 @@ describe('runBidKitProductListSync', () => {
     mockTables.purchase_receipt_lines = [];
     mockTables.service_products = [];
     mockTables.products_catalog = [];
+    mockTables.bid_products = [];
     store.listItems.mockResolvedValue([itemRow()]);
     store.fileInfo.mockResolvedValue({ key: KEY });
     store.replaceFile.mockResolvedValue({ item: itemRow(), oldKey: KEY });
@@ -394,10 +397,40 @@ describe('runBidKitProductListSync', () => {
     expect(store.replaceFile).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
-  test('an empty list leaves the file alone', async () => {
+  test('an empty read with no stored list leaves the file alone', async () => {
+    store.listItems.mockResolvedValue([itemRow({ details: null })]);
     setList([]);
     expect(await run()).toEqual({ skipped: 'no_products' });
     expect(files.putFile).not.toHaveBeenCalled();
+  });
+  test('an empty read after a stored list rebuilds it, unsigned, and asks once (every product reads as removed)', async () => {
+    setList([]);
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('removed');
+    expect(store.replaceFile.mock.calls[0][3].attestBySystem).toBe(false);
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.rows).toEqual([]);
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+  });
+  test('unticking the last product of a bid-only list rebuilds it and asks', async () => {
+    const bidOnly = [lib.snapshotOf(product(7, { name: 'Termidor SC', uses: 0 }), { bid: true })];
+    store.listItems.mockResolvedValue([itemRow({ details: { product_list_sync: { fingerprint: lib.fingerprintOf(bidOnly), file_ref: refOf(KEY), rows: bidOnly } } })]);
+    setList([]);
+    mockTables.bid_products = [];
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('bid_products');
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.rows).toEqual([]);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toContain('Removed from bid work: Termidor SC');
+  });
+  test('a list with only bid products (no applied products) still rebuilds', async () => {
+    setList([]);
+    mockTables.bid_products = [product(7, { name: 'Termidor SC', uses: 0 })];
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false });
+    expect(result.reasons).toContain('bid_products');
+    const rows = store.replaceFile.mock.calls[0][3].details.product_list_sync.rows;
+    expect(rows).toEqual([expect.objectContaining({ id: ID(7), bid: 1, name: 'Termidor SC' })]);
   });
   test('first run: replaces the file, does not sign it off, one bell', async () => {
     store.listItems.mockResolvedValue([itemRow({ details: null })]);
@@ -438,6 +471,26 @@ describe('runBidKitProductListSync', () => {
     expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
     expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('Added Gentrol Complete EC3 (not a SiteOne purchase); check and sign off.');
     expect(store.logActivity.mock.calls.some((c) => c[1] === 'bid_kit_attested')).toBe(false);
+  });
+  test('ticking a bid product rebuilds the list with a bid table, leaves it unsigned, and the one bell names it (even when it has a SiteOne purchase)', async () => {
+    mockTables.bid_products = [product(7, { name: 'Termidor SC', uses: 0 })];
+    mockTables.purchase_receipt_lines = [{ product_id: ID(7) }];
+    const result = await run();
+    expect(result).toMatchObject({ changed: true, signedOff: false, reasons: ['bid_products'] });
+    expect(store.replaceFile.mock.calls[0][3].attestBySystem).toBe(false);
+    const rows = store.replaceFile.mock.calls[0][3].details.product_list_sync.rows;
+    expect(rows).toHaveLength(3);
+    expect(rows.find((r) => r.id === ID(7))).toMatchObject({ bid: 1, name: 'Termidor SC' });
+    expect(files.putFile.mock.calls[0][1].size).toBeGreaterThan(0);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('Added for bid work: Termidor SC; check and sign off.');
+  });
+  test('the same ticked product on the next day is an unchanged list: nothing is written', async () => {
+    const withBid = [...rowsBefore];
+    const snaps = [...snap(withBid), lib.snapshotOf(product(7, { uses: 0 }), { bid: true })];
+    store.listItems.mockResolvedValue([itemRow({ details: { product_list_sync: { fingerprint: lib.fingerprintOf(snaps), file_ref: refOf(KEY), rows: snaps } } })]);
+    mockTables.bid_products = [product(7, { uses: 0 })];
+    expect(await run()).toEqual({ changed: false });
+    expect(store.replaceFile).not.toHaveBeenCalled();
   });
   test('an incomplete list asks even when the new product is a SiteOne purchase', async () => {
     setList([...rowsBefore, product(3, { sds_url: null })], [3]);
@@ -671,6 +724,22 @@ describe('runBidKitProductListSync', () => {
       expect(filter).not.toMatch(/created_at|applied_at/);
     }
   });
+  test('both product queries leave out the internal test accounts (owner 2026-10-26: "adam m is a dummy account")', async () => {
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    expect(INTERNAL_TEST_CUSTOMERS.length).toBeGreaterThan(0);
+    mockQueries.length = 0;
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: 1 }];
+    await run();
+    const lines = mockQueries.filter((q) => q.table === 'service_products as sp');
+    expect(lines).toHaveLength(2);
+    for (const query of lines) {
+      // A left join: a visit whose customer row is gone still counts.
+      expect(query.calls.some((c) => c.method === 'leftJoin' && c.args[0] === 'customers as c' && c.args[1] === 'c.id' && c.args[2] === 'sr.customer_id')).toBe(true);
+      const exclusion = query.calls.find((c) => c.method === 'whereRaw' && /NOT IN/.test(c.args[0]));
+      expect(exclusion.args[0]).toMatch(/LOWER\(COALESCE\(c\.first_name, ''\) \|\| ' ' \|\| COALESCE\(c\.last_name, ''\)\) NOT IN \(\?(, \?)*\)/);
+      expect(exclusion.args[1]).toEqual(INTERNAL_TEST_CUSTOMERS);
+    }
+  });
   test('a sign-off by the owner closes the open bell on the next run', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ITEM}`]);
     expect(await run()).toEqual({ changed: false });
@@ -693,5 +762,149 @@ describe('runBidKitProductListSync', () => {
   test('a failed stale-bell read never blocks the run', async () => {
     episodes.openAdminAlertKeys.mockRejectedValueOnce(new Error('read failed'));
     expect(await run()).toEqual({ changed: false });
+  });
+});
+
+// ---- bid products (owner 2026-10-28: "fill gaps from all missing products") ----
+
+describe('bid products: the list, the snapshot, the fingerprint', () => {
+  const applied = [product(1), product(2)];
+  const bid = (n, over = {}) => product(n, { uses: 0, ...over });
+  const snapBid = (appliedRows, bidRows) => [...appliedRows.map((r) => lib.snapshotOf(r)), ...bidRows.map((r) => lib.snapshotOf(r, { bid: true }))];
+
+  test('readProductList returns the ticked rows beside the applied rows, asks the catalog for active ticked rows only, and drops one that is already applied', async () => {
+    mockQueries.length = 0;
+    mockTables['service_products as sp'] = applied;
+    mockTables.service_products = [];
+    mockTables.bid_products = [bid(2), bid(7), bid(5, { category: null })];
+    const result = await lib.readProductList(require('../models/db'));
+    expect(result.rows.map((r) => r.product_id)).toEqual([ID(1), ID(2)]);
+    expect(result.bidRows.map((r) => r.product_id)).toEqual([ID(7), ID(5)]);
+    expect(result.bidRows[0]).toMatchObject({ uses: 0, name: 'Synthetic Product 7' });
+    const query = mockQueries.find((q) => q.table === 'products_catalog' && q.calls.some((c) => c.method === 'where'));
+    expect(query.calls.find((c) => c.method === 'where').args[0]).toEqual({ bid_list: true, active: true });
+  });
+  test('a bid row already applied on a visit by a free-text line (folded into the catalog) is not listed twice', async () => {
+    mockTables['service_products as sp'] = [product(1)];
+    mockTables.service_products = [{ product_name: 'Synthetic Product 8', uses: 2 }];
+    mockTables.products_catalog = [{ id: ID(8), name: 'Synthetic Product 8', category: 'Insecticide', active_ingredient: 'x', epa_reg_number: '100-8', label_url: 'l', sds_url: 's', active: true }];
+    mockTables.bid_products = [bid(8)];
+    const result = await lib.readProductList(require('../models/db'));
+    expect(result.rows.map((r) => r.product_id)).toEqual([ID(1), ID(8)]);
+    expect(result.bidRows).toEqual([]);
+  });
+  test('ticking a product changes the snapshot and the fingerprint; unticking changes it back; a list with no bid rows keeps its old fingerprint', () => {
+    const plain = snapBid(applied, []);
+    const ticked = snapBid(applied, [bid(7)]);
+    expect(ticked.find((s) => s.id === ID(7))).toMatchObject({ bid: 1 });
+    expect(plain.some((s) => 'bid' in s)).toBe(false);
+    expect(lib.fingerprintOf(ticked)).not.toBe(lib.fingerprintOf(plain));
+    expect(lib.fingerprintOf(snapBid(applied, []))).toBe(lib.fingerprintOf(snap(applied)));
+    // The marker alone matters: the same product applied (no marker) is not the same list as ticked.
+    expect(lib.fingerprintOf([lib.snapshotOf(bid(7))])).not.toBe(lib.fingerprintOf([lib.snapshotOf(bid(7), { bid: true })]));
+  });
+  test('the diff names bid products added, removed or changed in diff.bid, and leaves the key out when none are involved', () => {
+    const before = snapBid(applied, [bid(7), bid(8)]);
+    const after = snapBid(applied, [bid(7, { sds_url: 'https://sds.example.test/new.pdf' }), bid(9)]);
+    const diff = lib.diffSnapshots(before, after);
+    expect(diff.added.map((p) => p.id)).toEqual([ID(9)]);
+    expect(diff.removed.map((p) => p.id)).toEqual([ID(8)]);
+    expect(diff.changed.map((p) => p.id)).toEqual([ID(7)]);
+    expect([...diff.bid].sort()).toEqual([ID(7), ID(8), ID(9)].sort());
+    expect(lib.diffSnapshots(snap(applied), snap([...applied, product(3)]))).not.toHaveProperty('bid');
+    // An applied product that merely changed is not a bid change.
+    expect(lib.diffSnapshots(snapBid(applied, [bid(7)]), snapBid([applied[0], product(2, { sds_url: null })], [bid(7)])).bid).toBeUndefined();
+  });
+});
+
+describe('bid products: sign-off and completeness', () => {
+  const applied = [product(1), product(2)];
+  const snapBid = (appliedRows, bidRows) => [...appliedRows.map((r) => lib.snapshotOf(r)), ...bidRows.map((r) => lib.snapshotOf(r, { bid: true }))];
+  const decide = (before, after, bought) => lib.decideSignOff({
+    previous: 'ok', wasSignedOff: true, complete: true, diff: lib.diffSnapshots(before, after), bought: new Set(bought),
+  });
+  test('a bid product added never signs off, even when it has a SiteOne purchase and nothing else changed', () => {
+    const d = decide(snapBid(applied, []), snapBid(applied, [product(7)]), [ID(7)]);
+    expect(d).toMatchObject({ auto: false, reasons: ['bid_products'], outside: [] });
+  });
+  test('a bid product removed or changed never signs off', () => {
+    expect(decide(snapBid(applied, [product(7)]), snapBid(applied, []), []).reasons).toEqual(expect.arrayContaining(['bid_products', 'removed']));
+    const d = decide(snapBid(applied, [product(7)]), snapBid(applied, [product(7, { name: 'Renamed' })]), [ID(7)]);
+    expect(d).toMatchObject({ auto: false, reasons: ['bid_products'] });
+  });
+  test('every other change bought from SiteOne would sign off alone, but a bid change in the same run still asks', () => {
+    const before = snapBid(applied, []);
+    const withApplied = snapBid([...applied, product(3)], []);
+    expect(decide(before, withApplied, [ID(3)]).auto).toBe(true);
+    expect(decide(before, snapBid([...applied, product(3)], [product(7)]), [ID(3), ID(7)])).toMatchObject({ auto: false, reasons: ['bid_products'] });
+  });
+  test('an unchanged bid list (same rows both times) still signs off a SiteOne-only change', () => {
+    expect(decide(snapBid(applied, [product(7)]), snapBid([...applied, product(3)], [product(7)]), [ID(3)]).auto).toBe(true);
+  });
+  test('listIsComplete covers bid rows: a bid pesticide missing its SDS, or with a note for an EPA number, is incomplete', () => {
+    expect(lib.listIsComplete([...applied, product(7)])).toBe(true);
+    expect(lib.listIsComplete([...applied, product(7, { sds_url: null })])).toBe(false);
+    expect(lib.listIsComplete([...applied, product(7, { epa_reg_number: 'TBD' })])).toBe(false);
+  });
+  test('the bell and its full text name bid products as "Added for bid work", inside the notification rules', () => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const diff = lib.diffSnapshots(snapBid(applied, []), snapBid(applied, [product(7, { name: 'Termidor SC' })]));
+    const decision = lib.decideSignOff({ previous: 'ok', wasSignedOff: true, complete: true, diff, bought: new Set() });
+    const { spec, detail } = lib.alertFor(ID(1), { diff, decision, previous: 'ok' });
+    expect(composeAdminAlert(spec).why).toBe('Added for bid work: Termidor SC; check and sign off.');
+    expect(detail).toContain('Added for bid work: Termidor SC.');
+    expect(detail).not.toContain('not a SiteOne purchase');
+    const removed = lib.diffSnapshots(snapBid(applied, [product(7, { name: 'Termidor SC' })]), snapBid(applied, []));
+    const d2 = lib.decideSignOff({ previous: 'ok', wasSignedOff: true, complete: true, diff: removed, bought: new Set() });
+    expect(lib.alertFor(ID(1), { diff: removed, decision: d2, previous: 'ok' }).detail).toContain('Removed from bid work: Termidor SC.');
+  });
+});
+
+describe('bid products: the PDF', () => {
+  const rowsA = [product(1, { name: 'Synthetic Insecticide One' })];
+  const bidRows = [product(7, { name: 'Termidor SC', category: 'Termiticide', epa_reg_number: '7969-210', uses: 0 }), product(8, { name: 'Synthetic Bid Fertilizer', category: 'Fertilizer', epa_reg_number: 'N/A', sds_url: null, uses: 0 })];
+  const build = (extra = {}) => pdf.buildProductListPdf({ rows: rowsA, asOf: '2026-10-25', businessName: 'Waves Pest Control, LLC', licenseNumber: 'JB351547', ...extra });
+  const textOf = (doc) => {
+    let out = '';
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFRawStream)) continue;
+      const data = Buffer.from(decodePDFRawStream(obj).decode()).toString('latin1');
+      for (const [, array] of data.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+        out += [...array.matchAll(/<([0-9a-f]+)>/gi)].map((m) => Buffer.from(m[1], 'hex').toString('latin1')).join('');
+        out += '\n';
+      }
+    }
+    return out;
+  };
+
+  test('the intro says "then products proposed for bid work" and a second table follows with its own title', async () => {
+    expect(pdf.introLine({ businessName: 'B', licenseNumber: 'L', asOf: '2026-10-25', hasBidRows: true }))
+      .toContain('Products applied in the 12 months to October 25, 2026 (ET), then products proposed for bid work. Every pesticide');
+    const text = textOf(await PDFDocument.load(await build({ bidRows })));
+    expect(text).toContain('then products proposed for bid work.');
+    expect(text).toContain('Products proposed for bid work (not applied in the 12 months to October 25, 2026)');
+    expect(text).toContain('Termidor SC');
+    expect(text).toContain('Synthetic Bid Fertilizer');
+  });
+  test('with no bid rows the intro, tables and layout are exactly what they were', async () => {
+    const intro = pdf.introLine({ businessName: 'B', licenseNumber: 'L', asOf: '2026-10-25' });
+    expect(intro).toBe(pdf.introLine({ businessName: 'B', licenseNumber: 'L', asOf: '2026-10-25', hasBidRows: false }));
+    expect(intro).toContain('(ET). Every pesticide');
+    expect(intro).not.toContain('bid work');
+    const [a, b] = await Promise.all([build(), build({ bidRows: [] })]);
+    // PDFKit writes the creation date as an indirect string object, so the inline /CreationDate pattern alone misses it:
+    // blank every PDF date string too, or two builds that straddle a second differ.
+    const strip = (buf) => buf.toString('latin1').replace(/\/(CreationDate|ModDate)\s*\([^)]*\)/g, '').replace(/\(D:\d{14}[^)]*\)/g, '(D:)').replace(/\/ID\s*\[[^\]]*\]/g, '');
+    expect(strip(b)).toBe(strip(a));
+    const text = textOf(await PDFDocument.load(a));
+    expect(text).not.toContain('bid work');
+    expect(text).toContain('Fertilizers, adjuvants and other products (0)');
+  });
+  test('the bid table title fits the page width', () => {
+    const PDFKit = require('pdfkit');
+    const doc = new PDFKit({ size: 'LETTER', margin: 40 });
+    doc.font('Helvetica-Bold').fontSize(11);
+    const width = doc.widthOfString('Products proposed for bid work (not applied in the 12 months to September 30, 2026)');
+    expect(width).toBeLessThan(612 - 80);
   });
 });

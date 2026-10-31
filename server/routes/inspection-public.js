@@ -169,6 +169,17 @@
  *   and never sees another customer's visit data, reschedule URL, or
  *   booking (Codex pre-push P1, 2026-09-24).
  *
+ *   Exception, behind GATE_INSPECTION_REUSE_LEAD_SHELL (strict 'true', dark):
+ *   the web form mints a customer for the lead seconds before the lead row,
+ *   so an unverified lead whose linked customer is provably its OWN
+ *   untouched intake shell (leadOwnIntakeShell: new_lead, active, created at
+ *   most 10 minutes before the lead, this lead first on it, no billing/
+ *   visit/login/merge history, same phone identity and email, no other
+ *   lead's provenance, the primary and only live profile of its account,
+ *   a complete stored street/city/ZIP, the same unit as the booking) books onto that customer instead of a second row,
+ *   with outright (not requires_verification) provenance. Gate off = the
+ *   paragraph above holds without exception.
+ *
  * POST /:token/waitlist — the out-of-area stop's one-field ask: inserts (or
  *   no-ops on) a newsletter_subscribers row tagged `expansion_waitlist:<county>`
  *   at status `waitlist` — deliberately NOT `active` (buildSubscriberQuery in
@@ -190,7 +201,7 @@ const logger = require('../services/logger');
 const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { leadInspectionLinkLive } = require('../config/feature-gates');
+const { leadInspectionLinkLive, inspectionReuseLeadShellLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
@@ -204,7 +215,7 @@ const { isOpenLeadRow } = require('../services/lead-statuses');
 // the offer (buildAvailabilityForLead) and the commit (callbackVisit).
 const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
-const { parseRawAddress } = require('../utils/address-normalizer');
+const { parseRawAddress, leadAddressFields, premiseUnitKey } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
 
 // Per-lead advisory-lock namespace for the commit's provisioning/booking
@@ -275,7 +286,7 @@ function buildLeadPayload(lead, custRow) {
   const hasAddress = !!(custRow?.address_line1 || lead.address);
   const addressDisp = custRow?.address_line1
     ? addressDisplay({ line1: custRow.address_line1, city: custRow.city, zip: custRow.zip })
-    : (lead.address ? addressDisplay({ line1: lead.address, city: lead.city, zip: lead.zip }) : null);
+    : (lead.address ? addressDisplay(leadAddressFields(lead)) : null);
   return {
     first_name: lead.first_name || null,
     phone_masked: maskPhone(lead.phone),
@@ -299,6 +310,8 @@ function buildLeadPayload(lead, custRow) {
 const LEAD_ROW_FIELDS = [
   'id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
   'status', 'customer_id', 'converted_at', 'first_contact_channel', 'twilio_call_sid',
+  // leadOwnIntakeShell (GATE_INSPECTION_REUSE_LEAD_SHELL) compares it with the linked customer's created_at.
+  'created_at',
 ];
 
 async function loadLead(dbConn, leadId, { forUpdate = false } = {}) {
@@ -602,10 +615,9 @@ function storedAddressCandidates(lead, custRow) {
     });
   }
   if (lead?.address) {
-    candidates.push({
-      source: 'lead',
-      address: { line1: lead.address, line2: null, city: lead.city || null, state: 'FL', zip: lead.zip || null },
-    });
+    // The form's one-line address split into its parts, so the customer this
+    // creates keys as the same house the form's own customer does.
+    candidates.push({ source: 'lead', address: leadAddressFields(lead) });
   }
   return candidates;
 }
@@ -767,7 +779,7 @@ async function serviceAreaFailure(location, address = null) {
   return null;
 }
 
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   return buildBookingAvailability({
@@ -785,6 +797,8 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     rangeTo,
     config,
     today: new Date(),
+    // Offer lists only (GATE_CUSTOMER_ROUTE_CHECK); every confirmation rebuild omits `offer`.
+    ...(offer ? { surface: 'inspection' } : {}),
     selfServeNotice: true,
     // This route's commit (phase 2, createSelfBooking below) re-verifies
     // with traffic and persists the certified route order while
@@ -1359,6 +1373,13 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   // under an arbitrarily chosen household. The shared-phone match runs
   // BEFORE any account is created (local audit P1), so a reuse or an
   // already_booked answer never leaves an orphan customer_accounts row.
+  // GATE_INSPECTION_REUSE_LEAD_SHELL: an UNVERIFIED (web-form) lead whose own
+  // untouched intake profile the form just minted books onto THAT profile
+  // instead of a second customer row. Gate off = this block never runs.
+  if (!verifiedContact && inspectionReuseLeadShellLive()) {
+    const reusedShell = await tryReuseOwnIntakeShell(trx, freshLead, resolved);
+    if (reusedShell) return reusedShell;
+  }
   const sharedPhoneHouseholds = verifiedContact ? await phoneMatchedHouseholds(trx, freshLead.phone) : [];
   const multiAccount = sharedPhoneHouseholds.length > 1;
   if (multiAccount) {
@@ -1520,6 +1541,136 @@ async function reuseWithProvenance(trx, freshLead, matched, resolved) {
   return reused;
 }
 
+// GATE_INSPECTION_REUSE_LEAD_SHELL — the lead's OWN intake profile.
+//
+// lead-webhook.js creates a customer (pipeline_stage 'new_lead') and then the
+// lead (customer_id = that customer) seconds later. The page distrusts
+// leads.customer_id for an unverified contact (Codex #4737 P0: for a phone
+// that already exists the webhook links the lead to the EXISTING row, which
+// may be someone else's real account), so it used to mint a second prospect
+// for every web-form lead. This returns the linked customer ONLY when every
+// sign says the form minted it for this very lead and nothing has touched it
+// since; anything else returns null and the caller creates the prospect as
+// before. Reads only (callers hold the comms fence and the lead row lock).
+const OWN_SHELL_MAX_AGE_MS = 10 * 60 * 1000;
+const OWN_SHELL_COLUMNS = [
+  'id', 'first_name', 'last_name', 'phone', 'email', 'account_id', 'is_primary_profile', 'active', 'pipeline_stage', 'created_at',
+  'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude',
+  // The columns customer-dedupe's loserAutoBlockers reads off the row.
+  'stripe_customer_id', 'password_hash', 'payer_id', 'billing_mode', 'monthly_rate',
+];
+
+// The shell was created no later than the lead and at most 10 minutes before it.
+function shellMintedForLead(shell, lead) {
+  const shellAt = new Date(shell.created_at).getTime();
+  const leadAt = new Date(lead.created_at).getTime();
+  if (!Number.isFinite(shellAt) || !Number.isFinite(leadAt)) return false;
+  return shellAt <= leadAt && leadAt - shellAt <= OWN_SHELL_MAX_AGE_MS;
+}
+
+// Full phone identity (never a last-10 suffix) and trimmed lowercased email.
+function shellIdentityMatches(shell, lead) {
+  const { phoneIdentityKey } = require('../utils/phone');
+  const leadKey = phoneIdentityKey(lead.phone);
+  if (!leadKey || phoneIdentityKey(shell.phone) !== leadKey) return false;
+  const email = (value) => String(value || '').trim().toLowerCase();
+  return email(shell.email) === email(lead.email);
+}
+
+// No billing/visit/login history (customer-dedupe's shell test) and no merge
+// in either direction.
+async function shellUntouched(dbConn, shell) {
+  const { loserAutoBlockers } = require('../services/customer-dedupe');
+  if ((await loserAutoBlockers(dbConn, shell)).length) return false;
+  if (await mergedWinnerId(dbConn, shell.id)) return false;
+  return !(await wonAMerge(dbConn, shell.id));
+}
+
+// This lead is the FIRST live lead on the shell, and no OTHER lead's
+// consultation provenance names it.
+async function shellOwnedOnlyByLead(dbConn, shell, lead) {
+  const earlierLead = await dbConn('leads')
+    .where({ customer_id: shell.id })
+    .whereNull('deleted_at')
+    .whereNot('id', lead.id)
+    .where('created_at', '<', lead.created_at)
+    .first('id');
+  if (earlierLead) return false;
+  const otherProvenance = await dbConn('lead_activities')
+    .where({ activity_type: CONSULTATION_PROSPECT_ACTIVITY })
+    .whereNot('lead_id', lead.id)
+    .whereRaw("metadata->>'customer_id' = ?", [String(shell.id)])
+    .first('lead_id');
+  return !otherProvenance;
+}
+
+// The shell must be the primary AND only live profile of its own account
+// (Codex #7250 security P2): an existing account whose full phone differs but
+// shares the last ten digits is missed by the webhook's exact match, and
+// ensureCustomerAccount's suffix match then files the shell as that unrelated
+// household's "Additional property". Outright trust there would book a real
+// assessment under another account.
+async function shellAloneInAccount(dbConn, shell) {
+  if (shell.is_primary_profile !== true || !shell.account_id) return false;
+  const sibling = await dbConn('customers')
+    .where({ account_id: shell.account_id, active: true })
+    .whereNull('deleted_at')
+    .whereNot('id', shell.id)
+    .first('id');
+  return !sibling;
+}
+
+// A complete stored address (street, city and ZIP). A partial one is never
+// reused (Codex #7250 r1 P2): the booking would keep the incomplete dispatch
+// address, and writing the fill would also have to update the profile's
+// property rows; a new prospect gets the validated address instead.
+function shellAddressComplete(shell) {
+  return ['address_line1', 'city', 'zip'].every((column) => String(shell[column] || '').trim());
+}
+
+async function leadOwnIntakeShell(dbConn, lead) {
+  if (!lead?.customer_id || !lead.created_at) return null;
+  const shell = await dbConn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first(...OWN_SHELL_COLUMNS);
+  if (!shell || shell.active !== true || shell.pipeline_stage !== 'new_lead') return null;
+  if (!shellMintedForLead(shell, lead) || !shellIdentityMatches(shell, lead) || !shellAddressComplete(shell)) return null;
+  if (!(await shellAloneInAccount(dbConn, shell))) return null;
+  if (!(await shellOwnedOnlyByLead(dbConn, shell, lead))) return null;
+  return (await shellUntouched(dbConn, shell)) ? shell : null;
+}
+
+// Books an unverified lead onto its own intake shell. Returns the same shape
+// as resolveOrLinkCustomerForLead ({ customer, location } or { eligibility }),
+// or null to fall through to the new-prospect path (not a shell, a stored
+// address that clearly differs, the comms fence busy, or a location the
+// reuse could not settle). The provenance row carries NO requires_verification:
+// like a flow-created prospect, the shell is outright trusted for this lead.
+async function tryReuseOwnIntakeShell(trx, freshLead, resolved) {
+  if (!freshLead.customer_id) return null;
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+  // Non-blocking (the lead row is locked): busy = not reused this time.
+  if (!(await tryLockCustomerComms(trx, freshLead.customer_id))) return null;
+  const shell = await leadOwnIntakeShell(trx, freshLead);
+  if (!shell) return null;
+  if (profileAffirmativelyDiffers(shell, resolved.address)) return null;
+  // The full unit must be EQUAL (Codex #7250 r2 P2): a stored shell with no
+  // unit would otherwise absorb a booking for "Apt 4" and dispatch to the
+  // building without the apartment. premiseUnitKey = the shared normalizer's
+  // key ("Bldg 2" never equals "Apt 2"; no unit on both sides is equal).
+  if (premiseUnitKey(shell.address_line1, shell.address_line2) !== premiseUnitKey(resolved.address?.line1, resolved.address?.line2)) return null;
+  const reused = await reuseMatchedProfile(trx, freshLead, shell, resolved);
+  if (reused.eligibility) return reused;
+  if (!reused.customer) return null;
+  const { customer } = reused;
+  await trx('lead_activities').insert({
+    lead_id: freshLead.id,
+    activity_type: CONSULTATION_PROSPECT_ACTIVITY,
+    description: "Consultation page reused the lead's own intake profile",
+    performed_by: 'consultation_page',
+    metadata: JSON.stringify({ customer_id: customer.id }),
+  });
+  return { ...reused, customer };
+}
+
 async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   // includeRescheduleUrl:false — this runs under the caller's advisory
   // lock (round 13, Codex pre-push P1, 2026-09-24); see
@@ -1661,7 +1812,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -1718,7 +1869,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -1789,7 +1940,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2126,7 +2277,12 @@ function parseCommitBody(body) {
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
 // (see the handler's phase-2 note for the lane-dedupe contract).
-async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe }) {
+// `source` and `alertLabel` default to this page's; the estimate-token page (estimate-assessment-public.js) passes its
+// own and no leadDedupe (its dedupe is the per-customer assessment lane below).
+async function bookAssessmentVisit({
+  booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
+  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null,
+}) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
     slot_date: date,
@@ -2136,7 +2292,7 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
     // The customer-VISIBLE `notes` column stays generic — the free-text
     // note rides internal_notes below (never customer/tech visible notes).
     customer_notes: null,
-    source: 'inspection_link',
+    source,
     // Server-resolved trust context — the token proved the lead's identity.
     authedCustomer: custRow,
     payAtVisit: false,
@@ -2157,8 +2313,10 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
       // refuses (409) under its customer fence if the customer's stored pin
       // has moved since (Codex #4737 r5 P1).
       expectedLocation: bookingLocation,
-      alertLabel: '🔁 Free consultation self-booked:',
+      alertLabel,
       leadDedupe,
+      // The estimate-token page's in-transaction re-check (estimate-assessment-public.js); absent for a lead link.
+      ...(estimateGuard ? { estimateGuard } : {}),
     },
   });
 }
@@ -2651,6 +2809,25 @@ router._internals = {
   computeConsultationSlotsForLead,
   currentBookingState,
   bookingAddressInputs,
+  // The estimate-token booking page (estimate-assessment-public.js) books the same Waves Assessment with this page's
+  // own catalog, window, availability, slot match, commit and success shape.
+  ASSESSMENT_EXPECTED_IDENTITY,
+  addressDisplay,
+  maskPhone,
+  serviceAreaFailure,
+  bookingRange,
+  searchParseOpts,
+  loadAssessmentCatalog,
+  buildAvailabilityForLead,
+  shapeAvailability,
+  findSlotIn,
+  commitWindowFailure,
+  parseCommitBody,
+  findOpenVisit,
+  visitShape,
+  rescheduleUrlFor,
+  bookAssessmentVisit,
+  finishCommittedBooking,
 };
 
 router._test = {
@@ -2681,6 +2858,7 @@ router._test = {
   // Test hooks (geocode review fence P1/P2, PR #5064).
   profileAffirmativelyDiffers,
   reuseMatchedProfile,
+  leadOwnIntakeShell,
   provisionLinkedCustomer,
   // Test hooks (geocode review quarantine round 3 P0 fixes, PR #5064).
   profileMatchesOrQuarantined,

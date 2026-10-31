@@ -545,6 +545,8 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryPreview', firstValue: entry },
       { table: 'time_entries', label: 'entryLock', firstValue: entry },
       { table: 'time_entry_daily_summary', label: 'dayState', firstValue: undefined },
+      { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'weekState', firstValue: undefined },
     ], events);
 
@@ -603,6 +605,8 @@ describe('Staff active timer serialization', () => {
       'week',
       [
         { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
+        { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+        { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
         {
           table: 'time_weekly_summary',
           label: 'approvedWeek',
@@ -633,6 +637,42 @@ describe('Staff active timer serialization', () => {
     expect(events).not.toContain('entryUpdate.update');
   });
 
+  test.each([
+    ['edit', () => timeTracking.adminEditEntry('entry-1', { edited_by: 'admin-1' })],
+    ['void', () => timeTracking.voidEntry('entry-1', { voided_by: 'admin-1' })],
+  ])('refuses to %s an entry in a week with a finalized paycheck, after taking the payroll lock shared', async (_action, invoke) => {
+    const events = [];
+    const entry = {
+      id: 'entry-1',
+      technician_id: 'tech-1',
+      status: 'completed',
+      approval_status: 'pending',
+      clock_in: new Date('2026-07-07T14:00:00.000Z'),
+      clock_out: new Date('2026-07-07T15:00:00.000Z'),
+    };
+    const specs = [
+      { table: 'time_entries', label: 'entryPreview', firstValue: entry },
+      { table: 'time_entries', label: 'entryLock', firstValue: entry },
+      { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
+      { table: 'payroll_checks', label: 'paidWeek', firstValue: { id: 'check-1' } },
+    ];
+    const { trx } = installTransaction(specs, events);
+
+    await expect(invoke()).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'This week is already paid. Void its pay run before changing its entries.',
+    });
+    // The shared payroll lock is taken after the entry row lock and before any summary row lock.
+    const shared = trx.raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock_shared/.test(sql));
+    expect(shared).toEqual([['SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))', ['payroll.mutation', 'pay-runs']]]);
+    const rawIndex = events.lastIndexOf('transaction.raw');
+    expect(events.indexOf('entryLock.forUpdate')).toBeLessThan(rawIndex);
+    expect(rawIndex).toBeLessThan(events.indexOf('approvedDay.forUpdate'));
+    expect(specs[3].whereArgs).toEqual([{ technician_id: 'tech-1', status: 'finalized' }]);
+    expect(specs[3].whereInArgs).toEqual(['week_start', ['2026-07-06']]);
+    expect(events).not.toContain('entryUpdate.update');
+  });
+
   test('serializes an admin edit with approval and recomputes its summaries before commit', async () => {
     const events = [];
     const entry = {
@@ -657,6 +697,8 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryPreview', firstValue: entry },
       { table: 'time_entries', label: 'entryLock', firstValue: entry },
       { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
+      { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: undefined },
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
@@ -683,6 +725,7 @@ describe('Staff active timer serialization', () => {
       'transaction.raw',
       'entryLock.forUpdate',
       'approvedDay.first',
+      'paidWeek.first',
       'approvedWeek.first',
       'entryUpdate.update',
       'dailyEntries.table',
@@ -724,6 +767,8 @@ describe('Staff active timer serialization', () => {
         label: 'dayState',
         firstValue: { id: 'daily-1', status: 'disputed' },
       },
+      { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       {
         table: 'time_weekly_summary',
         label: 'weekState',
@@ -751,13 +796,13 @@ describe('Staff active timer serialization', () => {
       edited_by: 'admin-1',
     });
 
-    expect(specs[4].updatePayload).toMatchObject({
+    expect(specs[6].updatePayload).toMatchObject({
       approval_status: 'pending',
       approved_by: null,
       approved_at: null,
       approval_notes: null,
     });
-    expect(specs[6].updatePayload.status).toBe('pending');
+    expect(specs[8].updatePayload.status).toBe('pending');
     expectOrdered(events, [
       'entryUpdate.update',
       'remainingDispute.first',

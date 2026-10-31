@@ -1,20 +1,16 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { CITIES } = require('./scoring-config');
-const { _internals: uniq } = require('./uniqueness-gate');
 const topicGate = require('./topic-targeting-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 const { dispatchWithFallback } = require('../llm/call');
 
-// ── idea-generation taxonomy & weighting ──────────────────────────────
+// ── blog tag taxonomy ─────────────────────────────────────────────────
 //
-// The model MUST pick a tag from this closed set. Before this constraint
-// existed the generator invented its own labels run-to-run ("Fleas &
-// Ticks" vs "Fleas", "Stinging Insects" vs "Flying Insects"), which
-// fragments tag pages and the admin filter. normalizeTag() collapses the
-// known variants back into the canonical label; anything unrecognized
-// falls back to 'Pest Control'.
+// The closed tag set. Free-form labels ("Fleas & Ticks" vs "Fleas",
+// "Stinging Insects" vs "Flying Insects") fragment tag pages and the admin
+// filter. normalizeTag() collapses the known variants back into the
+// canonical label; anything unrecognized falls back to 'Pest Control'.
 const BLOG_TAGS = [
   'Roaches', 'Ants', 'Rodents', 'Termites', 'Mosquitoes',
   'Fleas & Ticks', 'Stinging Insects', 'Spiders', 'Bed Bugs',
@@ -70,80 +66,6 @@ function normalizeTag(raw) {
     if (pattern.test(key)) return canon;
   }
   return 'Pest Control';
-}
-
-// Real Waves offices vs service-area-only markets. Idea volume should lean
-// toward the staffed-office cities (they have spoke domains / GBP and
-// convert), while still covering demand-driven service-area cities.
-const STAFFED_CITIES = ['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'Parrish'];
-const SERVICE_AREA_CITIES = (CITIES || []).filter((c) => !STAFFED_CITIES.includes(c));
-
-// SWFL seasonal pest emphasis by month (0 = Jan). Keeps idea generation
-// timely instead of pushing wasp content in December. Caller passes the
-// current month so the engine biases toward what's actually active.
-const SEASONAL_PESTS = {
-  0: ['Rodents', 'Roaches', 'Termites (drywood)'],            // Jan
-  1: ['Rodents', 'Ants', 'Termites (drywood)'],               // Feb
-  2: ['Stinging Insects', 'Ants', 'Termites (subterranean swarms)'], // Mar
-  3: ['Stinging Insects', 'Fleas & Ticks', 'Ants'],           // Apr
-  4: ['Stinging Insects', 'Fleas & Ticks', 'Mosquitoes'],     // May
-  5: ['Mosquitoes', 'Fleas & Ticks', 'Lawn Disease'],         // Jun
-  6: ['Mosquitoes', 'Lawn Disease', 'Roaches'],               // Jul
-  7: ['Mosquitoes', 'Lawn Disease', 'Roaches'],               // Aug
-  8: ['Lawn Disease', 'Rodents', 'Stinging Insects'],         // Sep
-  9: ['Rodents', 'Lawn Disease', 'Roaches'],                  // Oct
-  10: ['Rodents', 'Roaches', 'Ants'],                         // Nov
-  11: ['Rodents', 'Roaches', 'Termites (drywood)'],           // Dec
-};
-
-// Novelty gate — reject a candidate idea whose title+keyword 3-gram
-// shingles overlap an existing post/idea (or an already-accepted sibling
-// in the same batch) above this Jaccard threshold. Reuses the same
-// shingle/jaccard primitives the autonomous publisher's uniqueness gate
-// uses, so "German roaches Palmetto" and "German roach infestation
-// Palmetto" collapse instead of both landing in the queue.
-const IDEA_NOVELTY_JACCARD_MAX = 0.5;
-
-function ideaCorpusText(row) {
-  return `${row.title || ''} ${row.keyword || ''}`.trim();
-}
-
-function slugify(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-// City-stripped "concept key" — the dominant sprawl in the backlog is the
-// SAME idea swapped across all 8 cities ("indoor cat fleas Port Charlotte"
-// / "...North Port" / ...). Those read as near-zero shingle overlap because
-// the city tokens differ, so the jaccard gate can't see them. Stripping the
-// city + state tokens and keying on tag+concept lets us cap how many cities
-// a single concept may fan across per batch.
-const CITY_STRIP_RE = new RegExp(
-  `\\b(${(CITIES || []).map((c) => c.toLowerCase()).join('|')}|fl|florida)\\b`,
-  'g'
-);
-
-function conceptKey(idea) {
-  const base = String(idea.keyword || idea.title || '').toLowerCase();
-  const stripped = base.replace(CITY_STRIP_RE, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
-  return `${normalizeTag(idea.tag)}::${stripped}`;
-}
-
-// Max cities a single concept may fan across (counting what's already in the
-// library). Tiered so a strong concept CAN cover the priority/staffed-office
-// markets, while service-area cities don't get the same idea spun into them
-// unless a demand signal points there — that's what kills the "wall of
-// identical roach posts" without starving legitimate local coverage.
-const PRIORITY_CONCEPT_CITY_CAP = 3;
-const SERVICE_AREA_CONCEPT_CITY_CAP = 1;
-
-function conceptCapForCity(city) {
-  return STAFFED_CITIES.includes(city)
-    ? PRIORITY_CONCEPT_CITY_CAP
-    : SERVICE_AREA_CONCEPT_CITY_CAP;
 }
 
 // ── FAQ-section policy (must mirror content-guardrails) ───────────────
@@ -460,240 +382,11 @@ Return JSON: {
 
     return optimization;
   }
-
-  /**
-   * Pull real demand signals from the autonomous content engine's scored
-   * opportunity queue (GSC-mined queries + AEO gaps). This is what makes
-   * idea generation demand-aware instead of "fill the coverage grid":
-   * we ground new ideas in queries people actually search where Waves is
-   * weak, rather than spinning the same pest concept across all 8 cities.
-   * Degrades to [] if the table is absent (older deploys) or empty.
-   */
-  async getDemandSignals(limit = 25) {
-    try {
-      const hasTable = await db.schema.hasTable('opportunity_queue');
-      if (!hasTable) return [];
-      // ONLY truly un-actioned opportunities — status='pending'. The queue's
-      // lifecycle is pending → claimed → done \→ pending_review
-      // (opportunity-queue.js). A 'pending_review' row has already been
-      // claimed and DRAFTED by the autonomous runner (pendingReview() sets
-      // completed_at and only transitions from 'claimed'); it's parked for a
-      // human approve/dismiss/requeue decision, not waiting to be written.
-      // Seeding a blog idea from one would duplicate a draft already in
-      // review — the novelty gate compares blog_posts only, not
-      // autonomous_runs/briefs, so it wouldn't catch the dup. 'claimed' is
-      // in-flight; 'done'/'skipped' are finished. So 'pending' is the only
-      // demand pool that's safe to seed from.
-      //
-      // Filter on action_type — the queue's AUTHORITATIVE routing decision
-      // (actionForOpportunity in gsc-opportunity-miner). That router
-      // DELIBERATELY sends a city+service gap to a SERVICE page
-      // (create_or_refresh_city_service_page / refresh_existing_page) and only
-      // emits new_supporting_blog / create_customer_question_page when the
-      // demand is a non-geo supporting topic or a customer-question cluster.
-      // So consuming exactly those two actions is intentional: pulling the
-      // city+service gap rows in here would spawn blogs that compete with the
-      // service pages the queue wants (doorway / cannibalization).
-      // query is usually present but not required (a customer-question cluster
-      // can be query-less), so it is rendered with a city+service fallback.
-      return await db('opportunity_queue')
-        .where('status', 'pending')
-        .whereIn('action_type', ['new_supporting_blog', 'create_customer_question_page'])
-        .orderBy('score', 'desc')
-        .limit(limit)
-        .select('query', 'city', 'service', 'score', 'action_type', 'bucket');
-    } catch (err) {
-      logger.warn(`Blog idea demand-signal lookup failed: ${err.message}`);
-      return [];
-    }
-  }
-
-  async generateNewIdeas(count = 20) {
-    count = Math.min(Math.max(Number.parseInt(count, 10) || 20, 1), 50);
-
-    const existing = await db('blog_posts').select('title', 'keyword', 'tag', 'slug', 'city');
-
-    // Owner rulings 2026-08-27: every idea is judged by the same
-    // topic-targeting gate as the runner (geo on title/keyword/slug, entity
-    // ownership against the LIVE post corpus). Loaded before any LLM spend
-    // and fail-closed — no verifiable corpus, no ideas this run.
-    let topicIndex;
-    try {
-      topicIndex = await topicGate.loadLiveIndex();
-    } catch (err) {
-      logger.warn(`Blog idea generation held: live blog corpus unavailable for the topic-targeting gate (${err.message})`);
-      return [];
-    }
-
-    const voice = await this.getVoiceConfig().catch(() => null);
-    const demand = await this.getDemandSignals(25);
-
-    // Coverage gaps (volume heuristic — kept as a SECONDARY priority,
-    // below real demand).
-    const tagCounts = {};
-    const cityCounts = {};
-    for (const p of existing) {
-      if (p.tag) tagCounts[p.tag] = (tagCounts[p.tag] || 0) + 1;
-      if (p.city) cityCounts[p.city] = (cityCounts[p.city] || 0) + 1;
-    }
-    const underrepTags = BLOG_TAGS.filter((t) => (tagCounts[t] || 0) < 8);
-    const underrepCities = (CITIES || []).filter((c) => (cityCounts[c] || 0) < 19);
-
-    const month = new Date().getMonth();
-    const seasonal = SEASONAL_PESTS[month] || [];
-
-    // Pre-build the existing-corpus shingle sets ONCE for the novelty gate.
-    const existingShingles = existing.map((p) => uniq.shingles(ideaCorpusText(p)));
-    const existingKeywords = new Set(
-      existing.map((p) => String(p.keyword || '').toLowerCase().trim()).filter(Boolean)
-    );
-    const existingSlugs = new Set(
-      existing.map((p) => String(p.slug || '').toLowerCase().trim()).filter(Boolean)
-    );
-
-    // Voice reference: a SMALL curated sample from voice config — NOT the
-    // last 20 generated titles. Feeding generated titles back as the style
-    // target is what amplified the one clickbait formula run-over-run.
-    const voiceSamples = Array.isArray(voice?.sample_titles) ? voice.sample_titles.slice(0, 4) : [];
-    const voiceBlock = voiceSamples.length
-      ? `VOICE REFERENCE (for tone only — do NOT reuse their structure or topics):\n${voiceSamples.map((t) => `• "${t}"`).join('\n')}`
-      : '';
-
-    const demandBlock = demand.length
-      ? `PRIORITY — REAL SEARCH DEMAND (ground ideas in these where they fit an educational blog; these are scored GSC/answer-engine gaps where Waves is weak):\n${demand
-          .slice(0, 18)
-          .map((d) => {
-            const core = d.query ? `"${d.query}"` : `${d.service || 'pest'} content gap (${d.bucket})`;
-            const loc = d.city ? ` — ${d.city}` : '';
-            return `• ${core}${loc} (score ${d.score})`;
-          })
-          .join('\n')}`
-      : 'No live demand signals available this run — lead with seasonality and coverage gaps below.';
-
-    // Over-request so the novelty gate can reject near-dupes and still hit
-    // the target count.
-    const requestCount = Math.min(Math.ceil(count * 1.4), 60);
-
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.websiteContent, {
-      laneId: 'blog_draft',
-      maxTokens: 6000,
-      jsonMode: true,
-      system: `You are the editorial planner for Waves Pest Control's local blog in Southwest Florida. Generate ${requestCount} genuinely distinct blog post ideas.
-
-${voiceBlock}
-
-${demandBlock}
-
-EDITORIAL BRIEF — every idea must be a real, specific local problem, structured as: a concrete homeowner symptom → why it happens in THIS SWFL city/conditions → what actually fixes it. Not generic SEO filler.
-
-ANTI-SAMENESS RULES (critical — the current backlog is a wall of near-identical titles):
-- Do NOT open every title with "Your [City]…". No more than ${Math.max(2, Math.round(requestCount * 0.25))} titles may share the same opening structure. Vary it: questions, surprising claims, a number, a myth-bust, a "here's what's actually happening".
-- A strong concept may cover up to 3 of the priority cities (${STAFFED_CITIES.join(', ')}) — but do NOT spin the same concept into a service-area city (${SERVICE_AREA_CITIES.join(', ')}) unless a demand signal above points there.
-- Most ideas should still be a distinct angle, not just the same idea re-aimed at another city.
-
-TARGETING:
-- City must be one of: ${(CITIES || []).join(', ')}.
-- Lean toward staffed-office cities (${STAFFED_CITIES.join(', ')}) unless a demand signal points at a service-area city (${SERVICE_AREA_CITIES.join(', ')}).
-- Seasonal emphasis for this month: ${seasonal.length ? seasonal.join(', ') : 'no strong seasonal bias'}. Bias topic mix toward these unless a demand signal overrides.
-- tag MUST be exactly one of this closed set (no new labels): ${BLOG_TAGS.join(', ')}.
-- Secondary coverage gaps to help fill if nothing better: tags [${underrepTags.join(', ') || 'none'}], cities [${underrepCities.join(', ') || 'none'}].
-- keyword = a specific local-intent search phrase. Avoid any of these existing keywords: ${[...existingKeywords].slice(0, 40).join('; ') || '(none yet)'}.
-
-META DESCRIPTION CONTRACT (owner rule 2026-07-29 — hard publish blocks):
-- meta_description: 115-160 characters, informational summary of the post.
-- NO phone number of any kind and nothing salesy (no "free estimate",
-  "call now", "book today", "request a quote", "contact us").
-- It must END with a soft CTA as its last sentence — e.g. "Learn more on
-  the Waves blog." or "Learn more."
-
-Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "slug": "", "meta_description": "", "city": "" }]`,
-      text: `Generate ${requestCount} distinct, demand-aware, seasonally-relevant blog ideas. Reject your own duplicates before returning.`,
-    });
-    if (!response.ok) return [];
-
-    const candidates = response.json;
-    if (!Array.isArray(candidates)) return [];
-
-    // Concept saturation — count how many cities each concept already
-    // covers in the library, so we can cap cross-city fan-out per batch.
-    const conceptCount = new Map();
-    for (const p of existing) {
-      const k = conceptKey(p);
-      conceptCount.set(k, (conceptCount.get(k) || 0) + 1);
-    }
-
-    // ── novelty gate + normalization + insert ───────────────────────────
-    const acceptedShingles = [];
-    const accepted = [];
-    let rejected = 0;
-
-    for (const raw of candidates) {
-      if (accepted.length >= count) break;
-      if (!raw || !raw.title) { rejected++; continue; }
-
-      const city = (CITIES || []).includes(raw.city) ? raw.city : null;
-      const tag = normalizeTag(raw.tag);
-      const keyword = String(raw.keyword || '').trim();
-      const slug = slugify(raw.slug || raw.title);
-
-      // Owner rulings 2026-08-27: an idea built around an out-of-footprint
-      // geo, statewide-only framing (an idea IS a title — judged strictly),
-      // or an entity a live post already owns is rejected outright.
-      // Every persisted targeting field is judged here — the meta description
-      // is ownership evidence too (generation would block it later anyway).
-      const topic = topicGate.evaluate(
-        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, city: city || '', category: categoryForRow({ tag }), targeting: raw.meta_description ? String(raw.meta_description).trim() : '' },
-        { index: topicIndex }
-      );
-      if (!topic.ok) { rejected++; continue; }
-
-      // Exact-dupe guards (covers short titles the shingle test can't).
-      if (keyword && existingKeywords.has(keyword.toLowerCase())) { rejected++; continue; }
-      if (slug && (existingSlugs.has(slug) || accepted.some((a) => a.slug === slug))) { rejected++; continue; }
-
-      // Near-dupe guard via shared shingle/jaccard primitives.
-      const sh = uniq.shingles(`${raw.title} ${keyword}`);
-      const tooSimilar = [...existingShingles, ...acceptedShingles].some(
-        (other) => uniq.jaccard(sh, other) > IDEA_NOVELTY_JACCARD_MAX
-      );
-      if (tooSimilar) { rejected++; continue; }
-
-      // Concept-fan-out cap — a concept may cover up to 3 priority cities
-      // but only 1 service-area city (existing library + this batch).
-      const ckey = conceptKey({ tag, keyword, title: raw.title });
-      if ((conceptCount.get(ckey) || 0) >= conceptCapForCity(city)) { rejected++; continue; }
-
-      const row = {
-        title: String(raw.title).trim(),
-        keyword: keyword || null,
-        tag,
-        slug: slug || null,
-        meta_description: raw.meta_description ? String(raw.meta_description).trim() : null,
-        city,
-        status: 'idea',
-        source: demand.length ? 'demand_mined' : 'ai_generated',
-      };
-
-      await db('blog_posts').insert(row);
-      accepted.push(row);
-      acceptedShingles.push(sh);
-      conceptCount.set(ckey, (conceptCount.get(ckey) || 0) + 1);
-      if (keyword) existingKeywords.add(keyword.toLowerCase());
-      if (slug) existingSlugs.add(slug);
-    }
-
-    logger.info(
-      `Blog idea generation: ${accepted.length} inserted, ${rejected} rejected as near-duplicate/invalid ` +
-      `(${candidates.length} candidates, ${demand.length} demand signals, season=[${seasonal.join(',')}])`
-    );
-
-    return accepted;
-  }
 }
 
 const blogWriter = new BlogWriter();
 
-// Pure helpers exposed for unit testing the idea-generation gate.
+// Pure helpers exposed for unit testing.
 blogWriter._internals = {
   BLOG_TAGS,
   faqFormatInstruction,
@@ -701,14 +394,6 @@ blogWriter._internals = {
   NO_FAQ_SECTION_INSTRUCTION,
   normalizeTag,
   categoryForRow,
-  conceptKey,
-  slugify,
-  SEASONAL_PESTS,
-  STAFFED_CITIES,
-  IDEA_NOVELTY_JACCARD_MAX,
-  conceptCapForCity,
-  PRIORITY_CONCEPT_CITY_CAP,
-  SERVICE_AREA_CONCEPT_CITY_CAP,
 };
 
 module.exports = blogWriter;

@@ -2,6 +2,8 @@
 require('./config/load-env')();
 // Sentry must be initialized before all other imports
 require("./instrument.js");
+// AI credit key pool (GATE_AI_CREDIT_KEYS, dark): wraps globalThis.fetch once, before any module builds an Anthropic client.
+require('./services/llm/credit-key-pool').installCreditKeyPool();
 const Sentry = require("@sentry/node");
 
 // Prevent unhandled promise rejections from crashing the process
@@ -76,6 +78,7 @@ const bouncieRoutes = require('./routes/bouncie');
 const lawnHealthRoutes = require('./routes/lawn-health');
 const feedRoutes = require('./routes/feed');
 const satisfactionRoutes = require('./routes/satisfaction');
+const mistingSystemRoutes = require('./routes/misting-system');
 const propertyRoutes = require('./routes/property');
 const customerPricingAiRoutes = require('./routes/customer-pricing-ai');
 const referralRoutes = require('./routes/referrals-v2');
@@ -469,6 +472,18 @@ app.use('/api/public/inspection', (req, res, next) => {
   }
   next();
 });
+// "Book a free Waves Assessment first" from an estimate (routes/estimate-assessment-public.js,
+// GATE_ESTIMATE_ASSESSMENT_FIRST): the inspection guard's contract above. Privacy headers first, then while the gate
+// is off, or the path's token is not an estimate token, every request is a uniform 404 before the global limiter and
+// the body parsers. Call-time gate read.
+app.use('/api/public/estimate-assessment', require('./middleware/no-store').noStore);
+app.use('/api/public/estimate-assessment', (req, res, next) => {
+  if (!require('./config/feature-gates').estimateAssessmentFirstLive()) return res.status(404).json({ error: 'not_found' });
+  let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
+  try { token = decodeURIComponent(token); } catch { token = ''; }
+  if (!require('./routes/estimate-public').ESTIMATE_TOKEN_RE.test(token)) return res.status(404).json({ error: 'not_found' });
+  next();
+});
 // Appointment and re-service links: dark application requests must reach
 // their 404 before the shared API limiter or body parsers can answer. Keep
 // CORS and the Staff maintenance interlock above these guards; the routers
@@ -508,6 +523,8 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.serviceAgreementPreGuard);
+// Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
 
 app.use('/api/', limiter);
 
@@ -615,6 +632,9 @@ app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPrePar
 // body parsing, then parse with its own 256kb cap — same reason as staff
 // auth above; unauthenticated callers must not force big JSON parse work.
 app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+// Owner MCP admin reads (routes/mcp-admin.js): gate + key check + per-login
+// rate limit BEFORE any body parsing, then a 64kb capped parse.
+app.use('/api/mcp-admin', ...require('./routes/mcp-admin').mcpAdminPreParsers);
 
 // Public MCP endpoint (anonymous agents): gate + rate limit BEFORE any body
 // parsing, then a 64kb capped parse — dark (404) until GATE_MCP_PUBLIC flips.
@@ -713,6 +733,8 @@ app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/satisfaction', satisfactionRoutes);
+// Misting system card on Home — dark behind GATE_MOSQUITO_MISTING (request-time read).
+app.use('/api/misting-system', mistingSystemRoutes);
 app.use('/api/property', propertyRoutes);
 // Unified Property Score — dark behind GATE_PROPERTY_SCORE (request-time read).
 app.use('/api/property-score', require('./routes/property-score'));
@@ -773,6 +795,8 @@ app.use('/api/admin/turf-height', require('./routes/admin-turf-height'));
 app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/service-outlines', adminServiceOutlineRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
+app.use('/api/admin/estimates', require('./routes/admin-estimate-misting-layout'));
+app.use('/api/admin/misting-records', require('./routes/admin-misting-records'));
 app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
@@ -841,6 +865,9 @@ app.use('/api/public/reservice', require('./routes/reservice-public'));
 // Assessment). Token-gated on the signed lead-consultation token; every
 // route 404s until GATE_LEAD_INSPECTION_LINK is on.
 app.use('/api/public/inspection', require('./routes/inspection-public'));
+// "Book a free Waves Assessment first" from an estimate: the estimate's own token, the same page contract as
+// /inspection. Every route 404s until GATE_ESTIMATE_ASSESSMENT_FIRST is on.
+app.use('/api/public/estimate-assessment', require('./routes/estimate-assessment-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.
@@ -901,15 +928,13 @@ app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, 
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoutes);
-// Facebook Messenger / Instagram channel-sender inbound (POST /messenger) —
-// same mount + signature validation as the SMS/voice webhooks; no path conflict.
-app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twilio-messenger-webhook'));
 // Collections outbound-voice vestibule + relay action (PR B) — same mount +
 // signature validation; every route fails closed (bare hangup) unless
 // GATE_VOICE_LATE_PAYMENT is exactly 'true'.
 app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/collections-voice-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
+app.use('/api/admin/cost-cards', require('./routes/admin-cost-cards'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
 app.use('/api/admin/schedule/new-caller', require('./routes/admin-schedule-new-caller'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
@@ -977,6 +1002,8 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// Owner MCP admin reads — Intelligence Bar read tools under an mcp_read key, gated.
+app.use('/api/mcp-admin', require('./routes/mcp-admin'));
 // External ops-cron findings → ops_digest bell rows — machine auth
 // (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
 app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
@@ -991,12 +1018,15 @@ app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/requests', require('./routes/admin-requests'));
+app.use('/api/admin/portal-inbox', require('./routes/admin-portal-inbox'));
+app.use('/api/admin/messenger', require('./routes/admin-messenger'));
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
+app.use('/api/tech/payroll', require('./routes/tech-payroll'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
@@ -1013,6 +1043,8 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (GATE_BID_KIT, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
+// Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
+app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
@@ -1084,7 +1116,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
       htmlClass: 'admin-app',
     },
     {
@@ -1105,7 +1137,7 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#111111',
+      themeColor: '#18181B',
     },
   ];
   function pickSection(reqPath) {
@@ -1447,24 +1479,6 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
       void runContactCorrectionQueue();
       scheduledCron.scheduleTimeout(runContactCorrectionQueue, 30 * 1000).unref();
       scheduledCron.scheduleInterval(runContactCorrectionQueue, 60 * 1000).unref();
-    }
-
-    // WDO report payment-hold release sweep — delivers held reports once
-    // their invoice settles. The interval is the guarantee (every settlement
-    // path converges on invoices.status); payment paths also nudge it via
-    // scheduleHoldReleaseSweep for near-instant release. No-op until the
-    // hold columns migrate and a held row exists.
-    {
-      const runReportHoldSweep = async () => {
-        try {
-          const { sweepHeldReportReleases } = require('./services/project-report-hold');
-          await sweepHeldReportReleases({ limit: 5 });
-        } catch (err) {
-          logger.error(`[report-hold] sweep failed: ${err.message}`);
-        }
-      };
-      scheduledCron.scheduleTimeout(runReportHoldSweep, 45 * 1000).unref();
-      scheduledCron.scheduleInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
     // First-touch hold ledger sweep — retries abandoned release claims on

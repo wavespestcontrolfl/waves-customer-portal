@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
 const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
@@ -126,6 +127,15 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
+// customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
+const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
+// Reasons the office prices by hand: a keyed quote-on-request product and top
+// dressing (quote-only since 2026-10-29, owner). Both reuse the existing
+// quote_on_request customer message and office notice; no new copy.
+function isPricedByTeamReason(reason) {
+  return reason === 'quote_on_request' || reason === TOP_DRESSING_QUOTE_ONLY_REASON;
+}
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -244,7 +254,23 @@ function numberOrNull(...values) {
 // probe applies: an ambiguous phone declines outright (falling through to
 // email would resolve the same shared household by another key); only a
 // no-match phone probe falls through.
-async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
+//
+// GATE_QUOTE_SAME_PERSON_MATCH (dark): an ambiguous phone whose 2..10 rows are
+// ALL one person at the typed address (names + street/unit/ZIP match, pairwise
+// and against the typed contact) resolves to the nightly sweep's winner row,
+// so a rerun does not add a customers row each time. `typed` is optional; the
+// pre-pricing rodent lookup omits it and keeps the old null.
+async function resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed) {
+  if (!typed || !require('../config/feature-gates').quoteSamePersonMatchLive()) return null;
+  const rows = await database('customers')
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+    .whereNull('deleted_at')
+    .limit(11)
+    .select('*');
+  return require('../services/customer-dedupe').resolveSamePersonCluster(database, rows, typed);
+}
+
+async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}, typed = null) {
   const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
   const emailLc = String(contactEmail || '').trim().toLowerCase();
   if (phoneDigits.length === 10) {
@@ -254,7 +280,7 @@ async function findExistingCustomerByContact(database, { contactPhone, contactEm
       .limit(2)
       .select('*');
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) return null;
+    if (matches.length > 1) return resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed);
   }
   if (emailLc) {
     const matches = await database('customers')
@@ -1172,6 +1198,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // Optional self-reported "How did you hear about us?" (+ the AI follow-up
+    // prompt): fixed allowlist, unknown values silently dropped, never required.
+    const wizardHeardAbout = heardAboutFromBody(req.body);
     // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
     // exact engine request for that product (plus the few site-collected
     // options the engine needs, e.g. lawn grass type), so the site never
@@ -1903,8 +1932,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.plugging) {
       // Forward a positive patch area so the engine prices the patch; when
-      // absent the engine falls back to the whole lawn (the /estimate page's
-      // default behavior).
+      // absent the engine prices nothing and the quote goes to the office
+      // (owner 2026-10-31: never the whole lawn).
       const pluggingArea = Number(services.plugging.area);
       engineInput.services.plugging = {
         spacing: services.plugging.spacing || 12,
@@ -2114,6 +2143,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
       || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
+    const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     // `let`: a ZERO rodent-setup decision (decided under the draft row lock
@@ -2145,7 +2175,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
-    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    // leads.gclid is varchar(200) (migration 20260401000110), unlike the other click ids.
+    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 200) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
@@ -2284,6 +2315,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
       if (anonId) updateFields.anon_id = anonId;
+      // Self-reported "How did you hear about us?" — fills an EMPTY answer
+      // only, never replaces one already recorded (the property-lookup stage
+      // may have stored it; staff may have corrected it). One statement, so
+      // the answer and its prompt are judged on the same pre-write row.
+      Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
       const ownRow = () => db('leads')
         .where({ id: leadId })
@@ -2441,6 +2477,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
+        heard_about: wizardHeardAbout.heardAbout,
+        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
         extracted_data: duplicateOfLeadId
           ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
           : extractedData,
@@ -2683,7 +2721,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail }, {
+        first_name: contactFirstName,
+        last_name: contactLastName,
+        address_line1: quoteAddress,
+        address_line2: normalizedAddress.line2 || null,
+        city: quoteCity || '',
+        zip: quoteZip || '',
+      });
       // Normalized email for the new-customer insert below (the shared
       // lookup normalizes its own copy — codex #3591 r15 P1 TDZ fix).
       const emailLc = String(contactEmail || '').trim().toLowerCase();
@@ -3557,11 +3602,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       await NotificationService.notifyAdmin(
         'new_lead',
         quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
+          ? (quoteIsPricedByTeam ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
           : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         `${quoteRequired
-          ? (quoteRequiredReason === 'quote_on_request'
+          ? (quoteIsPricedByTeam
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
+            : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+              ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
@@ -4169,7 +4216,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: quoteRequiredReason === 'quote_on_request'
+        message: quoteIsPricedByTeam
           ? (keyedService?.service_key === 'mosquito_misting_system'
             ? 'Mosquito misting systems are designed and priced on site — we\'ll call to schedule your free design visit.'
             : `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`)
@@ -4177,6 +4224,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
+          : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
+          ? 'Lawn plugging is priced by the square feet that need plugs — the Waves team will confirm that area with you and send your exact price shortly.'
           : (quoteRequiredReason === 'unknown_grass_type_priced_st_augustine' || quoteRequiredReason === 'lawn_v13_bahia_no_program')
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
@@ -4439,6 +4488,7 @@ module.exports._internals = {
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
+  isPricedByTeamReason,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,

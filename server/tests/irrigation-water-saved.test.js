@@ -125,6 +125,10 @@ describe('phase 2 — the dollar range for county water (GATE_IRRIGATION_WATER_D
     expect(waterSavedSentence(block, { action: 'run', reasons: [] })).toMatch(/gallons on your lawn\. On Manatee County water that is roughly \$5 to \$17 a run\. That assumes/);
     expect(waterSavedSentence(block, { action: 'hold', reasons: ['cool_season_cadence'] })).toMatch(/\$5 to \$17 a run\./);
     expect(waterSavedSetupSentence(block)).toMatch(/real water saved\. On Manatee County water that is roughly \$5 to \$17 a run\. Once your schedule/);
+    expect(waterSavedSetupSentence(block, { scheduleDetailsOnFile: true })).toMatch(/a run\. Once that's in your portal, we'll use your own schedule for that figure\.$/);
+    // The closer option never touches a schedule-basis sentence.
+    const sched = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Thu'], systemType: ['spray'], rates });
+    expect(waterSavedSetupSentence(sched, { scheduleDetailsOnFile: true })).toBe(waterSavedSetupSentence(sched));
     const schedule = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Thu'], systemType: ['spray'], rates, waterSource: 'county', county: 'Sarasota' });
     expect(waterSavedSentence(schedule, hold)).toMatch(/saves about 3,100 gallons\. On Sarasota County water that is roughly \$12 to \$40 for the week\.$/);
     const phase1 = waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'well', county: 'Manatee' });
@@ -311,6 +315,15 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     expect(rotorDrip.payload.schedule_ask).toMatch(/very different rates/);
     expect(rotorDrip.payload.schedule_ask).toContain('a typical 20-minute run is about 1,550 gallons');
     expect(rotorDrip.payload.schedule_ask).not.toMatch(/From the sprinkler schedule in your portal/);
+    // Its minutes and days ARE on file, so the closer points at the ask instead of "once your schedule is on file"
+    // (owner 2026-10-26); nothing on file keeps the original closer (asserted above).
+    expect(rotorDrip.payload.schedule_ask.endsWith("Once that's in your portal, we'll use your own schedule for that figure.")).toBe(true);
+    expect(rotorDrip.payload.schedule_ask).not.toContain('Once your schedule is on file');
+    // A system marked off routes the customer to reply to us, never to the portal: the original closer stays.
+    const markedOff = decideFor({ ...noSchedule, irrigation_system: false, turf_irrigation_type: 'in_ground', irrigation_run_minutes: 40, watering_days: ['Mon', 'Thu'], irrigation_system_type: ['rotor'] });
+    expect(markedOff.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(markedOff.payload.schedule_ask).toContain('reply to this email');
+    expect(markedOff.payload.schedule_ask).not.toContain("Once that's in your portal");
     // No sprinkler system known: nothing to skip, no sentence (setup_system carries no ask at all).
     const noSystem = decideFor({ ...noSchedule, irrigation_system: false, turf_irrigation_type: 'none' });
     expect(noSystem.templateKey).toBe(TEMPLATE_SETUP_SYSTEM);

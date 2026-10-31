@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>WavesPay</string>
+	<string>Waves Admin</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.6</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,13 +30,19 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>7</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Bluetooth is not used by WavesPay, but the Stripe Terminal SDK requires this key.</string>
+	<string>Bluetooth is not used by Waves Admin, but the Stripe Terminal SDK requires this key.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Take photos and videos for service reports.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Tap to Pay on iPhone requires location access to authenticate card-present transactions.</string>
+	<string>Waves Admin uses your location for Tap to Pay on iPhone, which needs it to approve card payments, and for field tools.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record sound with service report videos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach photos and videos to service reports.</string>
 	<key>STRIPE_TERMINAL_LOCATION_ID</key>
 	<string>tml_GdySzQ3nA6YhEC</string>
 	<key>UIApplicationSceneManifest</key>

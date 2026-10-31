@@ -156,4 +156,28 @@ describe('native customer-app bootstrap reproducibility', () => {
       fs.rmSync(fixture, { recursive: true, force: true });
     }
   });
+
+  // Regression: the allowlist stayed frozen at its 2026-07-08 list while
+  // /appointment, /secure, /visit, /reservice, /inspection and /price-change
+  // shipped, so those links opened Chrome instead of the Android app.
+  test('Android App Links claim every customer page, from the same list emailed links use', () => {
+    const { APP_LINK_PATH_PREFIXES, BROWSER_ONLY_PATH_ROOTS } = require('../services/messaging/email-link-policy');
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-android.sh'), 'utf8');
+    const android = source.match(/APP_LINK_PREFIXES="([^"]+)"/)[1].split(/\s+/);
+    expect([...android].sort()).toEqual([...APP_LINK_PATH_PREFIXES].sort());
+    // Texted links have no scheme and open as http://; an https-only filter sent them all to Chrome.
+    expect(source).toContain('<data android:scheme=\\"http\\" />');
+    expect(source).toContain('<data android:scheme=\\"https\\" android:host=\\"portal.wavespestcontrol.com\\" />');
+
+    // Customer-reachable pages that open in the browser on purpose (the iOS
+    // association file excludes the same roots).
+    const app = fs.readFileSync(path.join(root, 'client/src/App.jsx'), 'utf8');
+    const routeRoots = new Set([...app.matchAll(/<Route path="(\/[a-z-]+)[^"]*"/g)].map((m) => m[1]));
+    routeRoots.delete('/admin');
+    routeRoots.delete('/tech');
+    expect(routeRoots.size).toBeGreaterThan(20);
+    const unclaimed = [...routeRoots].filter((route) => !BROWSER_ONLY_PATH_ROOTS.includes(route)
+      && !APP_LINK_PATH_PREFIXES.some((prefix) => `${route}/`.startsWith(prefix)));
+    expect(unclaimed).toEqual([]);
+  });
 });

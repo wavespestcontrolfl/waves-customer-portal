@@ -95,6 +95,10 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // The Dispatch board has no Reopen for a resolved Action Queue card.
+  'resolve_dispatch_alert',
+  // An email cannot be unsent.
+  'compose_email',
   // An invoice sent to the customer cannot be unsent.
   'send_invoice',
   // A recorded payment closes the invoice and stops its reminders; only a refund or void (closed to the bar) undoes it.
@@ -104,6 +108,10 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'create_payment_plan',
   // A stopped reminder sequence has no undo in the portal (the panel offers Resume only for paused or Auto Pay-held ones).
   'stop_invoice_reminders',
+  // A text cannot be unsent, and no page restores an ignored Agent Review draft.
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
+  'ignore_agent_review_draft',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -123,17 +131,23 @@ const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_pay
 // attribution (preview.pinned_recipient.linked_customer) instead.
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
+  // The queued text goes to the customer at the scheduled minute.
+  'schedule_sms',
   'reply_via_sms',
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
   // The confirmed run texts or emails the customer their Auto Pay setup link.
   'send_autopay_setup_link',
-  // The invoice text (one text with the pay link; the bar sends no email).
+  // The invoice text (one text with the pay link), or under GATE_IB_INVOICE_EMAIL the invoice email (PDF + pay link) with at most
+  // one CC, which the card names.
   'send_invoice',
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',
   'create_payment_plan',
+  // The confirmed run texts the customer the Agent Review draft (as written, or edited).
+  'approve_agent_review_draft',
+  'revise_agent_review_draft',
 ]);
 
 // send_invoice: its card lines come from its own preview
@@ -148,6 +162,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// schedule_sms: its card lines come from its own preview (schedule-sms-tools.js cardLines): the exact text, who and when.
+CURATED_PREVIEW_TOOL_NAMES.add('schedule_sms');
 // The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
 for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
@@ -155,8 +171,16 @@ for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unv
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
+// compose_email: its card lines (To, From, subject, the exact body, every effect) come from its own preview (compose-email-tools.js cardLines).
+CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// The Agent Review draft cards: their card lines come from their own preview (agent-review-tools.js cardLines).
+for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
+// unblock-sender-tools.js cardLines). Neither sends anything.
+CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
+CURATED_PREVIEW_TOOL_NAMES.add('unblock_sender');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -228,6 +252,7 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  schedule_sms: 'Schedule a text to a customer',
   edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
   archive_invoice: 'Archive a voided invoice (sends nothing)',
   unarchive_invoice: 'Unarchive an invoice (sends nothing)',
@@ -240,7 +265,13 @@ const ACTION_LABELS = {
   create_payment_plan: 'Create a payment plan (no card charged; emails the customer)',
   cancel_payment_plan: 'Cancel a payment plan',
   create_invoice: 'Create a draft invoice (sends nothing)',
+  compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  approve_agent_review_draft: 'Send an Agent Review draft as written',
+  revise_agent_review_draft: 'Send an edited Agent Review draft',
+  ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
+  resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
+  unblock_sender: 'Unblock an email sender (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -900,6 +931,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'convert_lead' && preview?.preview === true) {
     for (const line of require('./lead-convert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
+  // schedule_sms: the exact text, the customer and number, the From number and the send time in words.
+  if (toolName === 'schedule_sms' && preview?.preview === true) {
+    for (const line of require('./schedule-sms-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -922,6 +957,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       else push(line.kind, line.text);
     }
   }
+  // compose_email: To, From, subject, the exact body (the whole text under "Show more" when long) and every effect of the send.
+  if (toolName === 'compose_email' && preview?.preview === true) {
+    for (const line of require('./compose-email-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
   // create_invoice: the customer, every line, the totals, and that the draft is not sent.
   if (toolName === 'create_invoice' && preview?.preview === true) {
     for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -929,6 +971,18 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The Agent Review draft cards: the exact text, the recipient (name and masked number) and the message it answers.
+  if (['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./agent-review-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // resolve_dispatch_alert: the alert, when it was raised, the visit, customer and technician, and every effect of the Resolve.
+  if (toolName === 'resolve_dispatch_alert' && preview?.preview === true) {
+    for (const line of require('./dispatch-alert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
+  if (toolName === 'unblock_sender' && preview?.preview === true) {
+    for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {
@@ -1143,6 +1197,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // attributed to one (GH r17 P2) — vendor/partner replies are outbound
   // mail, not customer contact.
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
+  // compose_email contacts a CUSTOMER only when the address belongs to one on file; to anyone else it is outbound mail.
+  const composeToCustomer = toolName === 'compose_email' && preview?.pinned_recipient?.linked_customer === true;
   // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
   const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   // cancel_appointment's own SHARED status-writer hook (GATE_CANCEL_NOTICE_HOOK,
@@ -1163,7 +1219,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   const cancelTextGoesOut = cancelEffects !== null && cancelEffects.notify_customer === true && cancelEffects.customer_text?.would_send === true;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || composeToCustomer || emailChangeMayContact || bookingConfirmationText
       // A repair plan that queues a report email or receipt contacts the
       // customer through the delivery workers.
       || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
@@ -1294,7 +1350,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // irreversible whatever the database undo can do — the canceled
     // PaymentIntent cannot be restored, and the customer's payment link is
     // dead (codex #4348 r7 P2).
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+    // schedule_sms contacts the customer but is not "cannot be undone": the queued text is cancelable until it sends.
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || (notifiesCustomer && toolName !== 'schedule_sms') || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
       // The Bill action writes a 'billed' visit disposition no portal path
       // removes (voiding the draft leaves the visit "already handled").
       || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))

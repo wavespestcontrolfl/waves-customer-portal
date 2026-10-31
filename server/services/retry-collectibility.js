@@ -149,7 +149,12 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
     .whereRaw("(metadata IS NULL OR metadata->>'idempotency_key' IS NULL)")
     .first('id');
   if (keylessConsumedToday) attemptNumber += 1;
-  const base = `autopay_monthly_${customerId}_${todayEt}`;
+  // An EARLIER month collected today (Charge now with a month picked) carries that month in its
+  // key: the bare key is today's, so a never-attempted earlier month would otherwise hand out the
+  // same key as today's own dues charge (or another earlier month's), and Stripe would replay one
+  // PaymentIntent for both. The current month's key is unchanged (chargeMonthly's own default).
+  const monthPart = monthKey === todayEt.slice(0, 7) ? '' : `_${monthKey}`;
+  const base = `autopay_monthly_${customerId}_${todayEt}${monthPart}`;
   return attemptNumber > 0 ? `${base}_r${attemptNumber}` : base;
 }
 
@@ -159,11 +164,15 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
 // (billed_month stamp), payment_date window + description marker as the legacy
 // fallback; exactly the dedupe charge-now and the retry classifier apply.
 // `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
-// the completion-minted dues invoice fallback (it names no payment row).
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true } = {}) {
-  const payment = await conn('payments')
+// the completion-minted dues invoice fallback (it names no payment row);
+// `excludePaymentId` leaves out one row (a caller asking whether ANOTHER row
+// collected the month).
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null } = {}) {
+  let query = conn('payments')
     .where({ customer_id: customerId })
-    .whereIn('status', statuses)
+    .whereIn('status', statuses);
+  if (excludePaymentId) query = query.whereNot({ id: excludePaymentId });
+  const payment = await query
     .where(function () {
       this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
         .orWhere(function () {
@@ -545,5 +554,6 @@ module.exports = {
   hasUnresolvedSiblingStripeOutcome,
   findCollectedMonthlyPayment,
   deriveMonthlyChargeIdempotencyKey,
+  monthKeyOf,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },
 };

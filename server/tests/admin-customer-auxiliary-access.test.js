@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/customer-intelligence/signal-detector', () => ({ detectAllSignals: jest.fn() }));
 jest.mock('../services/customer-intelligence/health-scorer', () => ({ enrichAllCustomers: jest.fn() }));
 jest.mock('../services/customer-intelligence/retention-engine', () => ({
-  getMetrics: jest.fn().mockResolvedValue({ retained: 0 }), generateRetentionOutreach: jest.fn(),
+  getMetrics: jest.fn().mockResolvedValue({ retained: 0 }),
 }));
 jest.mock('../services/customer-health', () => ({ scoreAllCustomers: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -61,7 +61,6 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { withTurfProfileFence } = require('../services/customer-pricing-ai');
 const { confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { generateRetentionOutreach } = require('../services/customer-intelligence/retention-engine');
 const { detectAllSignals } = require('../services/customer-intelligence/signal-detector');
 const { scoreAllCustomers } = require('../services/customer-health');
 const { enrichAllCustomers } = require('../services/customer-intelligence/health-scorer');
@@ -148,8 +147,28 @@ describe.each(['GET', 'PUT'])('%s turf profile', method => {
   });
 });
 
+describe('PUT turf profile on an archived customer', () => {
+  const save = () => request('PUT', '/customer/turf-profile', 'admin', { grass_type: 'bermuda', county: 'Manatee', county_confirmed: true });
+  test('is not found, and nothing is written', async () => {
+    db.rows.customers[0].deleted_at = '2026-10-01T12:00:00.000Z';
+    expect(await save()).toEqual({ status: 404, body: { error: 'Customer not found' } });
+    expect(withTurfProfileFence).not.toHaveBeenCalled();
+    expect(db.rows.customer_turf_profiles[0].grass_type).toBe('bahia');
+  });
+  test('an archive that commits before the fence wins: nothing is written or confirmed', async () => {
+    withTurfProfileFence.mockImplementationOnce(async (handle, _id, callback) => {
+      db.rows.customers[0].deleted_at = '2026-10-01T12:00:00.000Z';
+      return callback(handle);
+    });
+    expect(await save()).toEqual({ status: 404, body: { error: 'Customer not found' } });
+    expect(withTurfProfileFence).toHaveBeenCalledTimes(1);
+    expect(db.rows.customer_turf_profiles[0].grass_type).toBe('bahia');
+    expect(confirmIrrigationFields).not.toHaveBeenCalled();
+  });
+});
+
 const intelligenceRoutes = [
-  ['GET', '/'], ['GET', '/customer/health'], ['POST', '/customer/retention-outreach'],
+  ['GET', '/'], ['GET', '/customer/health'],
   ['PUT', '/retention/outreach/approve'], ['PUT', '/retention/outreach/skip'],
   ['PUT', '/retention/outreach/outcome'], ['PUT', '/upsells/upsell'],
   ['GET', '/metrics/summary'], ['POST', '/scan'],
@@ -158,7 +177,7 @@ test.each(intelligenceRoutes)('intelligence %s %s rejects even an assigned techn
   assign();
   expect((await request(method, '/intelligence' + path, 'technician', method === 'GET' ? undefined : { outcome: 'retained', status: 'accepted' })).status).toBe(403);
   expect(db.mock.calls.map(([table]) => table)).toEqual(['technicians']);
-  for (const service of [sendCustomerMessage, generateRetentionOutreach, detectAllSignals, scoreAllCustomers, enrichAllCustomers]) {
+  for (const service of [sendCustomerMessage, detectAllSignals, scoreAllCustomers, enrichAllCustomers]) {
     expect(service).not.toHaveBeenCalled();
   }
 });

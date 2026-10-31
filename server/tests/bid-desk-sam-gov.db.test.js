@@ -121,6 +121,31 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
+  test('GATE_BID_DESK_NOT_OUR_WORK: a grounds-upkeep notice is filed as no bid with no bell; off, it files and rings as before', async () => {
+    const upkeep = (id) => notice(id, { title: 'Grounds Maintenance Services' });
+    process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
+    try {
+      const mixed = notice('n-fert', { title: 'Mowing and Fertilization' });
+      const run = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-1'), mixed]), apiKey: 'test-key' });
+      expect(run).toMatchObject({ filed: 2, rung: 1 });
+      const declined = await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first();
+      expect(declined).toMatchObject({
+        status: 'no_bid', decision_note: 'Not our work: mowing, edging or trimming (owner 2026-10-29).', owed_alert_kind: null, owed_alert_key: null, notified_at: null,
+      });
+      expect(await mockPg('bid_opportunities').where({ external_id: 'n-fert' }).first()).toMatchObject({ status: 'new', decision_note: null });
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).not.toContain(declined.id);
+      // A republished notice (new deadline) refreshes the declined bid but rings nothing.
+      raiseAdminAlert.mockClear();
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([{ ...upkeep('n-1'), responseDeadLine: '2026-11-12T14:00:00-05:00' }]), apiKey: 'test-key' });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect((await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first()).status).toBe('no_bid');
+    } finally { delete process.env.GATE_BID_DESK_NOT_OUR_WORK; }
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-2')]), apiKey: 'test-key' });
+    expect(await mockPg('bid_opportunities').where({ external_id: 'n-2' }).first()).toMatchObject({ status: 'new', decision_note: null });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('a failed bell stays owed and the 15-minute sweep rings it; a decided bid never rings', async () => {
     raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
     const first = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-3'), notice('n-4')]), apiKey: 'test-key' });
@@ -453,5 +478,31 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     } finally {
       delete process.env.SAM_GOV_DAILY_CALLS;
     }
+  });
+
+  describe('GATE_BID_DESK_AUTO_DATES', () => {
+    beforeEach(() => { process.env.GATE_BID_DESK_AUTO_DATES = 'true'; });
+    afterEach(() => { delete process.env.GATE_BID_DESK_AUTO_DATES; });
+
+    test('gate on: a new notice with a response deadline is filed with the date confirmed; a notice with none is not', async () => {
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-60'), notice('n-61', { responseDeadLine: null })]), apiKey: 'test-key' });
+      const bids = await samBids();
+      expect(bids.find((b) => b.external_id === 'n-60')).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
+      expect(bids.find((b) => b.external_id === 'n-61')).toMatchObject({ due_at: null, due_confirmed: false });
+    });
+
+    test('gate off: the same notice is filed with the date unconfirmed', async () => {
+      delete process.env.GATE_BID_DESK_AUTO_DATES;
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-62')]), apiKey: 'test-key' });
+      expect((await samBids())[0]).toMatchObject({ due_confirmed: false });
+    });
+
+    test('a deadline SAM.gov moves later still flags the confirmed date and never overwrites it', async () => {
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-63')]), apiKey: 'test-key' });
+      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-63', { responseDeadLine: '2026-11-20T14:00:00-05:00' })]), apiKey: 'test-key' });
+      const [bid] = await samBids();
+      expect(new Date(bid.due_at).toISOString()).toBe('2026-11-05T19:00:00.000Z');
+      expect(bid).toMatchObject({ due_confirmed: true, needs_date_confirmation: true });
+    });
   });
 });

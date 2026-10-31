@@ -290,6 +290,14 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
       .toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
   });
 
+  // Owner 2026-10-27: a late close hands the drafter the visit's scheduled day (YYYY-MM-DD) when it
+  // had no arrival stamp (review-visit-day.js); a day string reads as that ET day.
+  test('a visit worked on an earlier day, given as its scheduled day string, drops "today"', async () => {
+    const { etCalendarDayOf } = require('../utils/datetime-et');
+    expect(await Drafter.draftTechVoice({ ...INPUT, serviceDate: etCalendarDayOf(new Date(Date.now() - 3 * 86400000)) }))
+      .toBe("Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}");
+  });
+
   test('follow-up texts keep the writer', async () => {
     mockDispatch.mockResolvedValue(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);

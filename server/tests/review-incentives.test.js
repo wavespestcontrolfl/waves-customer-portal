@@ -27,7 +27,10 @@ jest.mock('../services/email-template-automation-emitters', () => ({
   recordAutomationIntent: jest.fn(async () => ({ id: 'intent-mock' })),
 }));
 
+// The match queue's evidence reader runs raw SQL the query-builder mock below does not model.
+jest.mock('../services/review-link-candidates', () => ({ loadEvidenceCandidates: jest.fn(async () => []) }));
 const ReviewIncentives = require('../services/review-incentives');
+const { loadEvidenceCandidates } = require('../services/review-link-candidates');
 const { emitReviewLinked5Star, recordAutomationIntent } = require('../services/email-template-automation-emitters');
 
 function createDbMock(initialRows = {}) {
@@ -441,6 +444,105 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('lists the review matcher\'s open decisions with the customer they name, outside the period and the program window (owner 2026-10-31)', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true },
+        { id: 'customer-gwen', first_name: 'Gwen', last_name: 'Harlowe', active: true },
+      ],
+      google_reviews: [
+        {
+          // A year-old unlinked review the matcher pauses: listed though it predates the program.
+          id: 'review-pause', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+          review_created_at: '2025-12-13T16:00:00.000Z', location_id: 'bradenton',
+          name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+        },
+        {
+          // A disputed link stays visible even after its bonus was paid.
+          id: 'review-disputed', customer_id: 'customer-gwen', reviewer_name: 'Gwen Harlowe', star_rating: 5,
+          review_created_at: '2025-01-01T16:00:00.000Z', location_id: 'parrish',
+          name_match_result: 'disputed', name_match_customer_id: 'customer-gwen', name_match_reason: 'clash_early',
+        },
+        {
+          // Matched by a person since the pass ran: the suggestion is closed.
+          id: 'review-closed', customer_id: 'customer-gwen', reviewer_name: 'Gwen Harlowe', star_rating: 5,
+          review_created_at: '2025-02-01T16:00:00.000Z', location_id: 'sarasota',
+          name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+        },
+      ],
+      review_incentive_payouts: [{ id: 'payout-1', google_review_id: 'review-disputed' }],
+    });
+
+    const queue = await ReviewIncentives.getAttributionQueue({
+      conn,
+      policy: { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' },
+      days: 30,
+    });
+
+    expect(queue.items.map((item) => [item.id, item.reason, item.nameMatchResult, item.suggestedCustomerId, item.suggestedCustomerName, item.customerName])).toEqual([
+      ['review-pause', 'name_match_pause', 'pause', 'customer-dana', 'Dana Fenwick', null],
+      ['review-disputed', 'name_match_disputed', 'disputed', 'customer-gwen', 'Gwen Harlowe', 'Gwen Harlowe'],
+    ]);
+  });
+
+  test('Match confirms a queued matcher suggestion on an old review without a payout; a plain old review is still refused', async () => {
+    const oldReview = {
+      id: 'review-old', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+      review_created_at: '2025-12-13T16:00:00.000Z', location_id: 'bradenton', google_review_id: 'accounts/1/locations/2/reviews/old',
+    };
+    const make = (extra) => createDbMock({
+      customers: [{ id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true }],
+      technicians: [],
+      service_records: [],
+      google_reviews: [{ ...oldReview, ...extra }],
+    });
+    const attrs = { reviewId: 'review-old', customerId: 'customer-dana', technicianId: null, serviceRecordId: null, noVisit: true, adminId: 'admin-1' };
+    const programPolicy = { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' };
+
+    const queued = make({ name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near' });
+    await ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: queued, policy: programPolicy });
+    expect(queued.__state.rows.google_reviews[0]).toMatchObject({ customer_id: 'customer-dana', link_source: 'manual_no_visit' });
+    expect(queued.__state.rows.review_incentive_payouts).toHaveLength(0);
+
+    const plain = make({});
+    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: plain, policy: programPolicy }))
+      .rejects.toMatchObject({ code: 'review_before_program_start' });
+    expect(plain.__state.rows.google_reviews[0].customer_id).toBeNull();
+
+    // A disputed link never moves to another customer here, whatever the payout rules say: the first
+    // customer's review flag would stay set with no review behind it.
+    const disputed = make({ customer_id: 'customer-first', name_match_result: 'disputed', name_match_customer_id: 'customer-first', name_match_reason: 'clash_early' });
+    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: disputed, policy }))
+      .rejects.toMatchObject({ code: 'disputed_link_move', statusCode: 409 });
+    expect(disputed.__state.rows.google_reviews[0].customer_id).toBe('customer-first');
+
+    // A disputed click auto-link keeps its own correction path (its reversal owns the flag).
+    const clickAuto = make({
+      customer_id: 'customer-first', link_source: 'click_auto', auto_linked_at: '2025-12-13T16:05:00.000Z',
+      name_match_result: 'disputed', name_match_customer_id: 'customer-first', name_match_reason: 'clash_early',
+    });
+    await ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: clickAuto, policy });
+    expect(clickAuto.__state.rows.google_reviews[0]).toMatchObject({ customer_id: 'customer-dana', link_source: 'manual_no_visit' });
+  });
+
+  test('candidate search puts the matcher\'s suggestion first even when the name search misses it', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true },
+        // Sorts first by surname, so only the pin can put the suggestion ahead of it.
+        { id: 'customer-other', first_name: 'Dana', last_name: 'Aaronson', active: true },
+      ],
+      google_reviews: [{
+        id: 'review-pause', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+        review_created_at: '2026-09-01T16:00:00.000Z', location_id: 'bradenton',
+        google_review_id: 'accounts/1/locations/2/reviews/pause',
+        name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near',
+      }],
+    });
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'review-pause', conn });
+    expect(result.candidates[0].id).toBe('customer-dana');
+  });
+
   test('excludes historical reviews from the attribution queue after program start', async () => {
     const conn = createDbMock({
       google_reviews: [
@@ -661,6 +763,57 @@ describe('review incentives', () => {
     // And the customer is marked so future review asks stop.
     expect(conn.__state.rows.customers.find((c) => c.id === 'customer-1')).toMatchObject({
       has_left_google_review: true,
+    });
+  });
+
+  describe('the "already reviewed" mark commits with the relink (RR-07)', () => {
+    const rows = () => ({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true, has_left_google_review: false }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-1', customer_id: null, reviewer_name: 'Customer One', star_rating: 4,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+    // The relink transaction gets its own handle, so a write made through it
+    // is told apart from one made on the bare connection after commit.
+    function withTrxLog(conn, { failCustomerMark = false } = {}) {
+      const viaTrx = [];
+      conn.transaction = async (fn) => {
+        const trx = jest.fn((table) => {
+          const q = conn(table);
+          const update = q.update.bind(q);
+          q.update = async (patch) => {
+            if (failCustomerMark && q.table === 'customers' && patch.has_left_google_review === true) throw new Error('db hiccup');
+            viaTrx.push([q.table, patch]);
+            return update(patch);
+          };
+          return q;
+        });
+        trx.fn = conn.fn;
+        return fn(trx);
+      };
+      return viaTrx;
+    }
+    const attribute = (conn) => ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1', customerId: 'customer-1', serviceRecordId: 'service-1', adminId: 'admin-1',
+    }, { conn, policy });
+
+    test('the mark is written inside the relink transaction', async () => {
+      const conn = createDbMock(rows());
+      const viaTrx = withTrxLog(conn);
+      await attribute(conn);
+      expect(viaTrx).toContainEqual(['customers', expect.objectContaining({ has_left_google_review: true })]);
+      expect(conn.__state.rows.activity_log.map((r) => r.action)).toContain('review_manual_marked');
+    });
+
+    test('a failed mark fails the attribution instead of reporting success', async () => {
+      const conn = createDbMock(rows());
+      withTrxLog(conn, { failCustomerMark: true });
+      await expect(attribute(conn)).rejects.toThrow('db hiccup');
+      expect(conn.__state.rows.activity_log.map((r) => r.action)).not.toContain('review_manual_marked');
     });
   });
 
@@ -935,6 +1088,75 @@ describe('review incentives', () => {
     conn.__state.rows.google_reviews[0].link_source = null;
     const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
     expect(paged.candidates.map((c) => c.id)).toEqual(['customer-sam']);
+  });
+
+  test('candidate search shows each candidate\'s evidence: name, first contact against the review, activity (owner 2026-10-31)', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-late', first_name: 'Gwen', last_name: 'Northgate', active: true },
+        { id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true },
+      ],
+      google_reviews: [
+        {
+          id: 'google-1',
+          customer_id: null,
+          reviewer_name: 'Sam Northgate',
+          star_rating: 5,
+          review_created_at: '2026-09-01T15:00:00.000Z',
+          location_id: 'bradenton',
+          google_review_id: 'accounts/1/locations/2/reviews/northgate',
+        },
+        // Sam already has a live linked review on this profile.
+        { id: 'google-2', customer_id: 'customer-sam', reviewer_name: 'Sam N', review_created_at: '2026-06-01T15:00:00.000Z', location_id: 'bradenton' },
+      ],
+    });
+    loadEvidenceCandidates.mockResolvedValueOnce([
+      {
+        customerId: 'customer-sam',
+        holder: { first: 'Sam', last: 'Northgate' },
+        contacts: [],
+        timeline: { memberSince: '2025-02-01' },
+        activity: { visitsOn: ['2026-08-25'] },
+        linkedProfiles: [],
+      },
+      {
+        customerId: 'customer-late',
+        holder: { first: 'Gwen', last: 'Northgate' },
+        contacts: [],
+        timeline: { createdAt: '2026-10-05T14:00:00.000Z', leadSource: 'website' },
+        activity: {},
+        linkedProfiles: [],
+      },
+    ]);
+
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(loadEvidenceCandidates).toHaveBeenLastCalledWith(conn, { customerIds: expect.arrayContaining(['customer-sam', 'customer-late']) });
+    const byId = Object.fromEntries(result.candidates.map((c) => [c.id, c.evidence]));
+    expect(byId['customer-sam']).toEqual({
+      nameKind: 'exact',
+      role: 'holder',
+      dates: 'fits',
+      firstContactAt: '2025-02-01T05:00:00.000Z',
+      contactAfterReview: false,
+      tap: false,
+      recent: true,
+      saidReviewed: false,
+      alreadyLinkedHere: true,
+    });
+    expect(byId['customer-late']).toMatchObject({ nameKind: 'household', dates: 'clash', firstContactAt: '2026-10-05T14:00:00.000Z', contactAfterReview: true });
+  });
+
+  test('candidate search still answers when the evidence read fails', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true }],
+      google_reviews: [{
+        id: 'google-1', customer_id: null, reviewer_name: 'Sam Northgate', star_rating: 5,
+        review_created_at: '2026-09-01T15:00:00.000Z', location_id: 'bradenton', google_review_id: 'accounts/1/locations/2/reviews/x',
+      }],
+    });
+    loadEvidenceCandidates.mockRejectedValueOnce(new Error('synthetic read failure'));
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(result.candidates.map((c) => [c.id, c.evidence])).toEqual([['customer-sam', undefined]]);
   });
 
   // The surname clause: the folded column (lowercase, apostrophe-free,

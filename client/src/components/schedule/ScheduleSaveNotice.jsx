@@ -22,6 +22,15 @@ export function showScheduleSaveNotice(message) {
   listeners.forEach((listener) => listener());
 }
 
+// A 'following' price/service scope rewrites visits the editor never showed,
+// so Edit appointment and the service-line sheet both report the server's own
+// count of what moved. null when the save rewrote nothing past this visit.
+export function seriesScopeSaveNotice(result) {
+  if (result?.priceServiceScope?.scope !== 'following') return null;
+  const n = Number(result.priceServiceScope.updatedVisits) || 0;
+  return `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? '' : 's'} in the series. Visits the plan schedules later will use the new values too.`;
+}
+
 // Session boundary: logout is an SPA navigation, so this module (and its
 // undismissed notices) outlives the account that produced them. The next
 // operator signing in on the same tab must not inherit warnings about

@@ -82,8 +82,9 @@ import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
+import MistingRecordsPanel from "./MistingRecordsPanel";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
-import { formatETDateOnly } from "../../lib/timezone";
+import { etParts, formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
@@ -358,12 +359,49 @@ const ANNUAL_PREPAY_CADENCE_OPTIONS = [
   { value: "annual", label: "Annual", visits: 1 },
 ];
 
+// Lawn 9x rounds (lawn_rounds_9): the staff-only cadence of a lawn series booked
+// on the nine fixed rounds a year. It is offered in the select only to a
+// customer whose plan or term already runs on it, never as a choice for others.
+const LAWN_ROUNDS_PREPAY_CADENCE = "lawn_rounds_9";
+const ANNUAL_PREPAY_LAWN_ROUNDS_OPTION = { value: LAWN_ROUNDS_PREPAY_CADENCE, label: "Lawn rounds (9 a year)", visits: 9 };
+
+function annualPrepayCadenceOptionsFor(...cadences) {
+  if (!cadences.includes(LAWN_ROUNDS_PREPAY_CADENCE)) return ANNUAL_PREPAY_CADENCE_OPTIONS;
+  const at = ANNUAL_PREPAY_CADENCE_OPTIONS.findIndex((option) => option.value === "every_6_weeks") + 1;
+  return [
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(0, at),
+    ANNUAL_PREPAY_LAWN_ROUNDS_OPTION,
+    ...ANNUAL_PREPAY_CADENCE_OPTIONS.slice(at),
+  ];
+}
+
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
-  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
+  [...ANNUAL_PREPAY_CADENCE_OPTIONS, ANNUAL_PREPAY_LAWN_ROUNDS_OPTION].map((option) => [option.value, String(option.visits)]),
 );
+
+// Lawn rounds is the lawn plan's own calendar: the server refuses it for any
+// other covered service (annual-prepay-renewals lawnRoundsCoverageError, the
+// seeder's serviceKeyFor 'lawn_care' test, mirrored here).
+function labelIsLawnPlan(label) {
+  const raw = String(label || "").toLowerCase();
+  if (/\+/.test(raw) && /pest|roach|ant|spider|perimeter|general/.test(raw)) return false;
+  return /lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw);
+}
+
+// The cadence a new "Service covered" label infers. A lawn label that says
+// "every 6 weeks" keeps a lawn rounds cadence; any other service leaves it for
+// its own label cadence, or the 9-visit every-6-weeks schedule when the label
+// names none (Codex #7008 r6).
+function annualPrepayLabelCadence(label, currentCadence) {
+  const labelCadence = inferAnnualPrepayCadenceFromLabel(label);
+  if (currentCadence !== LAWN_ROUNDS_PREPAY_CADENCE) return labelCadence;
+  if (!labelIsLawnPlan(label)) return labelCadence || "every_6_weeks";
+  return labelCadence === "every_6_weeks" ? null : labelCadence;
+}
 
 function inferAnnualPrepayCadenceFromLabel(value) {
   const text = String(value || "").toLowerCase();
+  if (text.trim() === LAWN_ROUNDS_PREPAY_CADENCE) return LAWN_ROUNDS_PREPAY_CADENCE;
   if (/\bevery\s*6\s*weeks?\b|\b6\s*weeks\b|\b42\s*days\b/.test(text)) return "every_6_weeks";
   if (/\bbi[-\s]?monthly\b|\bevery\s*2\s*months?\b/.test(text)) return "bimonthly";
   if (/\bquarterly\b|\bevery\s*3\s*months?\b/.test(text)) return "quarterly";
@@ -402,6 +440,26 @@ function annualPrepayLabelsMatch(left, right) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// The cadence a label names, read WITHOUT the billing suffix: a legacy term's
+// planLabel "Pest Control Annual Prepay" names no cadence (the "Annual" is the
+// product), but the raw text would infer annual. Every cadence comparison for
+// dropdown dedupe and amount lookup reads labels through here.
+function annualPrepayLabelServiceCadence(label) {
+  return inferAnnualPrepayCadenceFromLabel(String(label || "").replace(/\s+Annual Prepay$/i, ""));
+}
+
+// Amount lookup match: the same service label match, plus cadence. When the
+// selected label names a cadence, a candidate whose own label names a different
+// one must not supply the amount (two plans of one service, different cadences,
+// different totals). A candidate or selection that names no cadence still
+// matches, so the single-plan case is unchanged (sweep #3960 A3, codex P1).
+function annualPrepayAmountLabelsMatch(candidateLabel, serviceType) {
+  if (!annualPrepayLabelsMatch(candidateLabel, serviceType)) return false;
+  const wanted = annualPrepayLabelServiceCadence(serviceType);
+  const candidate = annualPrepayLabelServiceCadence(candidateLabel);
+  return !wanted || !candidate || wanted === candidate;
+}
+
 function formatAnnualPrepayServiceLabel(baseLabel, cadence) {
   const base = String(baseLabel || "").trim();
   if (!base) return "";
@@ -438,15 +496,27 @@ function inferAnnualPrepayServiceBase(customer, activeTerm = null, prepaidPlans 
   return "Pest Control";
 }
 
-function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
-  const seen = new Set();
+// Dropdown dedupe: the label key ignores cadence words, so the inferred cadence
+// joins it. "Lawn Care - Every 2 Months" and "Lawn Care - Every 3 Months" are
+// two plans; true duplicates (same service, same cadence) still merge, and a
+// label that names no cadence merges into any same-service option (sweep #3960 A3).
+function annualPrepayOptionIsDuplicate(seen, key, cadence) {
+  const sameService = seen.filter((entry) => entry.key === key);
+  if (!sameService.length) return false;
+  if (!cadence) return true;
+  return sameService.some((entry) => entry.cadence === cadence);
+}
+
+export function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
+  const seen = [];
   const options = [];
   const push = (label, source = "saved") => {
     const text = String(label || "").trim();
     if (!text) return;
     const key = normalizeAnnualPrepayLabelKey(text);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+    const cadence = annualPrepayLabelServiceCadence(text);
+    if (!key || annualPrepayOptionIsDuplicate(seen, key, cadence)) return;
+    seen.push({ key, cadence });
     options.push({ value: text, label: text, source });
   };
 
@@ -516,8 +586,8 @@ function annualPrepayRenewalDefault(term) {
   return noticed > 0 && untaxed ? noticed : base;
 }
 
-function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
-  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
+export function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
+  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayAmountLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
     serviceType,
   )
@@ -529,16 +599,16 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
     ? customer.annualPrepayTerms.find((term) => {
       const termLabel = term?.coverageServiceType || term?.planLabel || "";
-      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
+      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayAmountLabelsMatch(termLabel, serviceType);
     })
     : null;
   const activeTermMatchBase = annualPrepayRenewalDefault(activeTermMatch);
   if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
-    ? prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+    ? prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
     : Array.isArray(customer?.prepaidPlans)
-      ? customer.prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+      ? customer.prepaidPlans.find((plan) => annualPrepayAmountLabelsMatch(plan?.serviceType, serviceType))
       : null;
   if (matchingPlan?.seriesTotal > 0) return Number(matchingPlan.seriesTotal);
 
@@ -559,6 +629,7 @@ function inferAnnualPrepayInitialCadence(activeTerm = null, prepaidPlans = []) {
   if (activeCadence) return activeCadence;
 
   const planPattern = String(prepaidPlans[0]?.recurringPattern || "").trim();
+  if (planPattern === LAWN_ROUNDS_PREPAY_CADENCE) return LAWN_ROUNDS_PREPAY_CADENCE;
   if (planPattern && planPattern !== "custom") {
     return inferAnnualPrepayCadenceFromLabel(planPattern) || planPattern;
   }
@@ -3196,12 +3267,14 @@ const BILLING_LANE_OPTIONS = [
   { value: "one_time", label: "One-time" },
 ];
 
+const SAVED_REFRESH_FAILED_MESSAGE = "The change was saved. Refresh this record to see it.";
+
 // The ONE place the billing lane is set (customers.billing_mode). Every
 // billing flow — the monthly cron, completion invoicing, booking price
 // stamps, the schedule sheet's prediction — reads this instead of inferring
 // from tier/rate field combinations, so a customer can never sit in two
 // lanes at once. Named export for component tests/harnesses.
-export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate, canEdit }) {
+export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate, canEdit, onSaved }) {
   const [mode, setMode] = useState(billingMode || "");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -3232,6 +3305,15 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       setMsg("Saved");
     } catch (e) {
       setErr(e.message || "Save failed");
+      setSaving(false);
+      return;
+    }
+    // The write is done. Refresh the parent record in its own step: a failed
+    // refresh must never read as a failed save.
+    try {
+      await onSaved?.();
+    } catch {
+      setMsg(SAVED_REFRESH_FAILED_MESSAGE);
     }
     setSaving(false);
   };
@@ -3296,26 +3378,59 @@ function AdminAutopayPanelV2({
   collectionHold = null,
 }) {
   const [state, setState] = useState(null);
+  const [loadError, setLoadError] = useState(false);
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  // The dues month Charge now collects: this ET month (the default) or one of
+  // the 2 before it, e.g. a month whose bank payment was canceled (owner
+  // 2026-10-30). Keep the window in step with PAST_DUES_MONTHS in
+  // server/routes/admin-billing-health.js, which refuses any other month. The
+  // month posted, and named in the confirm, is the one shown, so a click just
+  // after midnight on the 1st still charges it.
+  const monthLabel = (value) => formatETDateOnly(`${value}-15`, { month: "long", year: "numeric" });
+  const { year: etYear, month: etMonth } = etParts();
+  const duesMonths = [0, 1, 2].map((back) => {
+    const value = new Date(Date.UTC(etYear, etMonth - 1 - back, 1)).toISOString().slice(0, 7);
+    return { value, label: monthLabel(value) };
+  });
+  const [duesMonth, setDuesMonth] = useState(duesMonths[0].value);
   const outcomeRef = useRef(null);
   useEffect(() => {
     if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
   }, [msg, err]);
 
+  // Tracks the customer this panel is bound to so a slow read for a customer
+  // the admin already left cannot write into the new customer's panel.
+  const currentCustomerRef = useRef(customerId);
   const load = () => {
+    const reqId = customerId;
+    setLoadError(false);
     fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
       headers: {
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       },
     })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setState(d))
-      .catch(() => {});
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => {
+        if (currentCustomerRef.current !== reqId) return;
+        setState(d);
+        setLoadError(false);
+      })
+      .catch(() => {
+        if (currentCustomerRef.current !== reqId) return;
+        setLoadError(true);
+      });
   };
 
   useEffect(() => {
+    currentCustomerRef.current = customerId;
+    setState(null);
+    setLoadError(false);
+    setDuesMonth(duesMonths[0].value);
     load();
   }, [customerId]);
 
@@ -3329,21 +3444,22 @@ function AdminAutopayPanelV2({
     // the confirm says so, and an unknown hold state needs its own explicit
     // yes rather than reading as "no hold".
     const holdStatus = collectionHold?.status;
+    const forMonth = ` for ${monthLabel(duesMonth)} dues`;
     if (collectionHold && holdStatus !== "ready" && holdStatus !== "idle") {
       if (
         !window.confirm(
-          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)} anyway?`,
+          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)}${forMonth} anyway?`,
         )
       )
         return;
     } else if (collectionHold?.dispute) {
       if (
         !window.confirm(
-          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)} anyway?`,
+          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)}${forMonth} anyway?`,
         )
       )
         return;
-    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
+    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)}${forMonth} now?`))
       return;
     setCharging(true);
     setErr("");
@@ -3351,7 +3467,7 @@ function AdminAutopayPanelV2({
     try {
       const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ billedMonth: duesMonth }),
       });
       const payment = result?.payment;
       const collected = Number.parseFloat(payment?.amount);
@@ -3370,7 +3486,15 @@ function AdminAutopayPanelV2({
     setCharging(false);
   };
 
-  const stateLabel = state?.state || "unknown";
+  // Three distinct states: still reading, could not read (retry offered), and
+  // the status the server returned. "unknown" is only for a 200 with no state.
+  // A failed re-read (e.g. after Charge now) keeps the last status, flagged.
+  const readFailed = loadError && !state;
+  const stateLabel = readFailed
+    ? "Could not read"
+    : state
+      ? state.state || "unknown"
+      : "Loading…";
   const isAlertState = stateLabel === "paused" || stateLabel === "failed";
 
   return (
@@ -3399,6 +3523,22 @@ function AdminAutopayPanelV2({
                 {stateLabel}
               </span>{" "}
             </div>
+            {loadError && (
+              <div role="alert" className="text-ui-label text-alert-fg mt-1.5 flex items-center gap-2 flex-wrap">
+                <span>
+                  {state
+                    ? "Couldn't refresh the auto-pay status. It may be out of date."
+                    : "Couldn't read the auto-pay status."}
+                </span>
+                <button data-ui-text-action
+                  type="button"
+                  className="underline"
+                  onClick={load}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {state && (
               <div className="text-ui-label text-ink-secondary mt-1.5 leading-relaxed">
                 Next charge:{" "}
@@ -3418,11 +3558,27 @@ function AdminAutopayPanelV2({
             )}
           </div>
           {canCharge && (
-            <Button onClick={chargeNow} disabled={charging} size="md">
-              {charging
-                ? "Charging…"
-                : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ""}`}
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="w-40">
+                <Select
+                  aria-label="Dues month"
+                  value={duesMonth}
+                  disabled={charging}
+                  onChange={(e) => setDuesMonth(e.target.value)}
+                >
+                  {duesMonths.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <Button onClick={chargeNow} disabled={charging} size="md">
+                {charging
+                  ? "Charging…"
+                  : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ""}`}
+              </Button>
+            </div>
           )}
         </div>
         {canCharge && (
@@ -3985,9 +4141,10 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType, nextCoverageCadence, nextVisitCount)) {
       amountFromEstimateRef.current = true;
       setAmount(Number(estimateSuggestion.amount).toFixed(2));
-    } else if (amountFromEstimateRef.current) {
-      // The standing amount was the estimate's quoted year for a DIFFERENT
-      // service or schedule — clear rather than silently record it here.
+    } else {
+      // An untouched amount is always one this form suggested (the previous
+      // plan's total, or the estimate's quoted year) for a DIFFERENT service
+      // or schedule — clear rather than silently record it here.
       amountFromEstimateRef.current = false;
       setAmount("");
     }
@@ -3995,7 +4152,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
-    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    const inferredCadence = annualPrepayLabelCadence(value, coverageCadence);
     // A label-inferred cadence only takes effect when the operator hasn't
     // chosen one manually — and the prefill must evaluate against the cadence
     // that will actually be SUBMITTED, never the ignored inference (a
@@ -4184,7 +4341,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               onChange={(e) => handleCadenceChange(e.target.value)}
               className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
-              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+              {annualPrepayCadenceOptionsFor(coverageCadence, labelIsLawnPlan(serviceType) ? defaultCoverageCadence : null).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -4417,12 +4574,15 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       activeTerm,
       prepaidPlans,
     );
-    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+    // Untouched means the amount is this form's own suggestion for the previous
+    // plan, so a plan with no suggestion clears it rather than keeping that total.
+    setAmount(nextSuggested > 0 ? nextSuggested.toFixed(2) : "");
   };
 
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
-    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    // A lawn label keeps a rounds cadence; another service leaves it (annualPrepayLabelCadence).
+    const inferredCadence = annualPrepayLabelCadence(value, coverageCadence);
     if (inferredCadence && !cadenceTouchedRef.current) {
       setCoverageCadence(inferredCadence);
       const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
@@ -4651,7 +4811,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               onChange={(e) => handleCadenceChange(e.target.value)}
               className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
-              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+              {annualPrepayCadenceOptionsFor(coverageCadence, labelIsLawnPlan(serviceType) ? defaultCoverageCadence : null).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -5355,6 +5515,7 @@ function CustomerWorkspaceHeader({
         <div
           className="c360-more-action"
           ref={menuRef}
+          data-modal-escape-owned={menuOpen ? "true" : undefined}
           onKeyDown={(event) => {
             if (event.key === "Escape" && menuOpen) {
               event.stopPropagation();
@@ -5635,6 +5796,9 @@ function CustomerCallMessage({ message: m }) {
   );
 }
 
+// Names the overlay dialog. Only one customer overlay is open at a time.
+const CUSTOMER_OVERLAY_TITLE_ID = "customer-overlay-title";
+
 function CustomerOverlayHeader({
   c,
   isAdmin,
@@ -5661,7 +5825,7 @@ function CustomerOverlayHeader({
             {" "}
             <div className="flex items-center gap-3 flex-wrap">
               {" "}
-              <div className="text-22 font-medium tracking-tight text-zinc-900">
+              <div id={CUSTOMER_OVERLAY_TITLE_ID} className="text-22 font-medium tracking-tight text-zinc-900">
                 {c.firstName} {c.lastName}
               </div>
               {c.profileLabel && (
@@ -6011,6 +6175,7 @@ function CustomerProfileOverview({
                   technician session would only 403 on expand */}
       {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
       {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
+      {!embedded && isAdmin && <MistingRecordsPanel customerId={customerId} />}
       {accountProperties.length > 0 && (
         <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
           {" "}
@@ -6130,10 +6295,10 @@ function CustomerProfileOverview({
         {" "}
         <div>
           {" "}
-          <div className="text-ui-body font-medium text-zinc-900">
+          <div id="has-left-review-v2-label" className="text-ui-body font-medium text-zinc-900">
             Already left a Google review
           </div>{" "}
-          <div className="text-ui-caption text-ink-secondary">
+          <div id="has-left-review-v2-desc" className="text-ui-caption text-ink-secondary">
             When on, this customer is excluded from review-request and 48h
             followup SMS.
           </div>
@@ -6145,6 +6310,8 @@ function CustomerProfileOverview({
         </div>{" "}
         <Switch
           id="has-left-review-v2"
+          aria-labelledby="has-left-review-v2-label"
+          aria-describedby="has-left-review-v2-desc"
           checked={!!c.hasLeftGoogleReview}
           disabled={!isAdmin}
           onChange={async (val) => {
@@ -6312,6 +6479,8 @@ function CustomerProfileBilling({
   setRemovePaymentMethod,
   setCancelSignupOpen,
   setCancelPlanOpen,
+  onRefresh,
+  onRefreshFailed,
 }) {
   return (
     <div className="c360-billing-content">
@@ -6375,6 +6544,7 @@ function CustomerProfileBilling({
         tier={c.tier}
         monthlyRate={c.monthlyRate}
         canEdit={isAdmin}
+        onSaved={onRefresh}
       />{" "}
       <AdminAutopayPanelV2
         customerId={c.id}
@@ -6387,6 +6557,11 @@ function CustomerProfileBilling({
         customerId={c.id}
         customerName={`${c.firstName} ${c.lastName}`}
         canEdit={isAdmin}
+        onChanged={() => {
+          // The credit is already saved; a failed refresh only means the
+          // surrounding record is stale, never that the credit failed.
+          Promise.resolve(onRefresh?.()).catch(() => onRefreshFailed?.());
+        }}
       />{" "}
       {isAdmin && (
         <AnnualPrepayPanelV2
@@ -7623,25 +7798,44 @@ function PropertyNeighborhood({ property, showAddress, onUpdated }) {
 export function CustomerNeighborhoodBlock({ customerId }) {
   const [properties, setProperties] = useState(null);
   const [loadError, setLoadError] = useState("");
+  const seq = useRef(0);
+
+  // Try again reruns this read in place, as on the access codes block below:
+  // no need to leave the customer and come back.
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    try {
+      const data = await adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`);
+      if (mine !== seq.current) return;
+      setLoadError("");
+      setProperties(Array.isArray(data?.properties) ? data.properties : null);
+    } catch (err) {
+      if (mine !== seq.current) return;
+      // Off (404) or not a full admin (403): the block is not shown at all.
+      if (err?.status === 404 || err?.status === 403) {
+        setLoadError("");
+        setProperties(null);
+        return;
+      }
+      setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
+    }
+  }, [customerId]);
 
   useEffect(() => {
-    let cancelled = false;
     setProperties(null);
     setLoadError("");
-    adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`)
-      .then((data) => { if (!cancelled) setProperties(Array.isArray(data?.properties) ? data.properties : null); })
-      .catch((err) => {
-        if (cancelled || err?.status === 404 || err?.status === 403) return;
-        setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
-      });
-    return () => { cancelled = true; };
-  }, [customerId]);
+    load();
+    return () => { seq.current += 1; };
+  }, [load]);
 
   if (loadError) {
     return (
       <div className="mt-3">
         <AccessPrefsSubheading>Neighborhood</AccessPrefsSubheading>
-        <div className="text-ui-label text-ink-secondary">{loadError}</div>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
       </div>
     );
   }
@@ -7953,6 +8147,7 @@ function CustomerProfileProperty({
           <summary>Property service tools & historical maps</summary>
           <PropertyZonesPanel customerId={customerId} />
           <TermiteStationsGate customerId={customerId} />
+          <MistingRecordsPanel customerId={customerId} />
         </details>
       )}
       {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
@@ -8554,6 +8749,7 @@ function CustomerProfileEditor({
   setSavingEdit,
   initialEditForm,
   reloadCustomer,
+  setProfileActionErr,
 }) {
   const density = useUiDensity();
   if (!editOpen) return null;
@@ -8821,10 +9017,19 @@ function CustomerProfileEditor({
                       body: JSON.stringify(payload),
                     });
                     onCustomerMutation?.({ customerId, action: "update" });
-                    await reloadCustomer();
-                    setEditOpen(false);
                   } catch (e) {
                     setEditErr(apiErrorMessage(e, "Save failed"));
+                    setSavingEdit(false);
+                    return;
+                  }
+                  // The write succeeded: close the form first so it can never
+                  // be submitted twice, then refresh. A failed refresh says
+                  // the change was saved; it is never shown as a failed save.
+                  setEditOpen(false);
+                  try {
+                    await reloadCustomer();
+                  } catch {
+                    setProfileActionErr?.(SAVED_REFRESH_FAILED_MESSAGE);
                   }
                   setSavingEdit(false);
                 }}
@@ -9060,7 +9265,9 @@ function CustomerBillingSummary({
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-ui-label font-medium text-zinc-900 truncate">
                     {plan.serviceType}
-                    {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                    {plan.recurringPattern
+                      ? ` · ${plan.recurringPattern === "lawn_rounds_9" ? "Lawn rounds (9 a year)" : plan.recurringPattern}`
+                      : ""}
                   </div>
                   <Badge tone={active ? "strong" : "neutral"}>
                     {active ? "Active" : "Used"}
@@ -9620,10 +9827,23 @@ function CustomerRecipientDetails({
   );
 }
 
+function CustomerConversationLoadError({ error, feedbackEnabled, embedded, commsComposerReady, loading, onRetry }) {
+  // Once the gated embedded composer is mounted, its ActionFeedback owns
+  // history recovery. Initial-load and legacy/overlay paths keep this block.
+  if (!error || (feedbackEnabled && embedded && commsComposerReady)) return null;
+  return (
+    <div className="flex flex-col items-center gap-3 py-5">
+      <p role="alert" className="text-alert-fg text-14">{error}</p>
+      <Button variant="secondary" onClick={onRetry} disabled={loading}>Retry messages</Button>
+    </div>
+  );
+}
+
 function CustomerConversation({
   customerId,
   composerComms,
   composerReadScope,
+  feedbackEnabled,
   commsChannel,
   setCommsChannel,
   commsHasMore,
@@ -9674,12 +9894,14 @@ function CustomerConversation({
             Loading messages…
           </div>
         )}
-        {commsErr && (
-          <div className="flex flex-col items-center gap-3 py-5">
-            <p role="alert" className="text-alert-fg text-14">{commsErr}</p>
-            <Button variant="secondary" onClick={retryComms} disabled={commsLoading}>Retry messages</Button>
-          </div>
-        )}
+        <CustomerConversationLoadError
+          error={commsErr}
+          feedbackEnabled={feedbackEnabled}
+          embedded={embedded}
+          commsComposerReady={commsComposerReady}
+          loading={commsLoading}
+          onRetry={retryComms}
+        />
         {[...comms].reverse().map((message, i) => {
           const Message =
             message.channel === "sms"
@@ -9714,6 +9936,9 @@ function CustomerConversation({
             customer={c}
             customerMessages={composerComms}
             customerReadScope={composerReadScope}
+            customerHistoryError={commsErr}
+            feedbackEnabled={feedbackEnabled}
+            onRetryCustomerHistory={retryComms}
             onSent={async () => {
               setCommsLoaded(false);
               // reloadCustomer refreshes the timeline with the record; a failed
@@ -9951,6 +10176,7 @@ function CustomerWorkspacePresentation({
 
 function CustomerOverlayPresentation({
   panelRef,
+  dialogRef,
   headerProps,
   activeTab,
   profileContentId,
@@ -9960,16 +10186,29 @@ function CustomerOverlayPresentation({
   actions,
   dialogs,
 }) {
-  const density = useUiDensity();
   const { onClose, setActiveTab } = headerProps;
+  // The overlay opts into the documented comfortable density (14px text) once;
+  // UiSurface also provides it to every control rendered inside the panel.
   return createPortal(
-    <div data-ui-density={density}
+    <UiSurface
+      density="comfortable"
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
+      {/* The dialog (focus boundary) holds the scrolling panel AND the
+          mobile action bars, which must stay siblings of the overflow-scroll
+          .c360-panel for iOS position:fixed (see CustomerProfileMobileActions).
+          It neither scrolls nor transforms, so the fixed bars are unaffected. */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={CUSTOMER_OVERLAY_TITLE_ID}
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full max-w-[900px] h-full outline-none"
+      >
       <div
         ref={panelRef}
-        onClick={(e) => e.stopPropagation()}
         className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
       >
         <CustomerProfileStyles />
@@ -10011,8 +10250,9 @@ function CustomerOverlayPresentation({
         />
       </div>
       {actions}
+      </div>
       {dialogs}
-    </div>,
+    </UiSurface>,
     document.body,
   );
 }
@@ -10068,7 +10308,7 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
   useEffect(() => {
     if (lastMutation?.customer_id !== customerId) return;
     void reloadCustomer().catch(() => {
-      if (customerIdRef.current === customerId) setProfileActionErr("The change was saved. Refresh this record to see it.");
+      if (customerIdRef.current === customerId) setProfileActionErr(SAVED_REFRESH_FAILED_MESSAGE);
     });
   }, [lastMutation, customerId, customerIdRef, reloadCustomer]);
 
@@ -10202,10 +10442,12 @@ function useCustomerPayer({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   useEffect(() => {
+    // /admin/payers is requireAdmin: a non-admin's request is always refused.
+    if (!isAdmin) return;
     adminFetch("/admin/payers")
       .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
       .catch(() => setPayers([]));
-  }, []);
+  }, [isAdmin]);
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");
@@ -10701,7 +10943,6 @@ function useCustomerProfileNavigation({
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const [removePaymentMethod, setRemovePaymentMethod] = useState(null);
-  const panelRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
   const tabsAnchorRef = useRef(null);
   const profileContentId = useId();
@@ -10756,16 +10997,22 @@ function useCustomerProfileNavigation({
     cancelPlanOpen ||
     !!refundPayment ||
     !!removePaymentMethod;
-  useEffect(() => {
-    if (embedded) return undefined;
-    const handler = (e) => {
-      if (e.key !== "Escape" || subModalOpen) return;
+  // The shared overlay is a modal dialog: useModalFocus traps Tab inside the
+  // dialog (the scrolling panel plus the mobile action bars), owns Escape, and
+  // returns focus to the opener. Nested dialogs
+  // register after it, so the topmost one always receives Escape first; the
+  // callback below only runs when the overlay itself is on top. The full-page
+  // (embedded) workspace is not a dialog and never traps focus. The hook binds
+  // once its panel exists, so it stays off while the loading screen shows.
+  const panelRef = useRef(null);
+  const dialogRef = useModalFocus(
+    !embedded && !loading && !!data?.customer,
+    () => {
+      if (subModalOpen) return;
       if (!guardNavigateAway()) return;
       onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen, guardNavigateAway]);
+    },
+  );
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e) => {
@@ -10842,6 +11089,7 @@ function useCustomerProfileNavigation({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11049,6 +11297,17 @@ function CustomerProfilePending({
   profileLoadError,
   onRetry,
 }) {
+  // Escape still closes the overlay while it loads or shows its load error.
+  // Focus management starts once the loaded dialog mounts (see
+  // useCustomerProfileNavigation), so the opener is captured only once.
+  useEffect(() => {
+    if (embedded) return undefined;
+    const handler = (e) => {
+      if (e.key === "Escape") onClose?.();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [embedded, onClose]);
   const content = (
     <div
       className={
@@ -11096,6 +11355,7 @@ export default function Customer360ProfileV2({
   onClose,
   onCustomerMutation,
   onSelectCustomer,
+  feedbackEnabled = false,
   initialTab = "overview",
   initialScheduledServiceId = null,
   embedded = false,
@@ -11192,6 +11452,7 @@ export default function Customer360ProfileV2({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    dialogRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11390,6 +11651,7 @@ export default function Customer360ProfileV2({
       customerId={customerId}
       composerComms={composerComms}
       composerReadScope={composerReadScope}
+      feedbackEnabled={feedbackEnabled}
       commsChannel={commsChannel}
       setCommsChannel={setCommsChannel}
       commsHasMore={commsHasMore}
@@ -11477,6 +11739,8 @@ export default function Customer360ProfileV2({
         setRemovePaymentMethod={setRemovePaymentMethod}
         setCancelSignupOpen={setCancelSignupOpen}
         setCancelPlanOpen={setCancelPlanOpen}
+        onRefresh={reloadCustomer}
+        onRefreshFailed={() => setProfileActionErr(SAVED_REFRESH_FAILED_MESSAGE)}
       />
     ),
     services: (
@@ -11559,6 +11823,7 @@ export default function Customer360ProfileV2({
   return (
     <Presentation
       panelRef={panelRef}
+      dialogRef={dialogRef}
       headerPast={headerPast}
       headerProps={{
         c,
@@ -11684,6 +11949,7 @@ export default function Customer360ProfileV2({
             setSavingEdit={setSavingEdit}
             initialEditForm={initialEditForm}
             reloadCustomer={reloadCustomer}
+            setProfileActionErr={setProfileActionErr}
           />
         </>
       }

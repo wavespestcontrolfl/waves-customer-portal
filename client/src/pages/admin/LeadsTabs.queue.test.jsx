@@ -12,7 +12,11 @@ vi.mock('../../components/admin/customer360/CustomerSmsPanel', () => ({
   CustomerSmsProvider: ({ children }) => children,
   openEstimateMessages: vi.fn(),
 }));
-const lead = { id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed', service_interest: 'Mosquito', first_contact_at: new Date().toISOString() };
+const lead = {
+  id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed',
+  service_interest: 'Mosquito', source_name: 'Synthetic source', urgency: 'high',
+  response_time_minutes: 12, first_contact_at: new Date().toISOString(),
+};
 let calls;
 function Location() {
   const navigate = useNavigate();
@@ -153,6 +157,19 @@ describe('Pipeline queue navigation', () => {
     await act(async () => openMessages.mock.calls[0][1].onSent());
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  });
+  it('Create Estimate hands the builder the whole address when the city and ZIP sit in their own columns', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (!String(url).includes('/admin/leads?')) return base(url, opts);
+      await base(url, opts);
+      return { ok: true, json: async () => ({ leads: [{ ...lead, address: '100 Test Palm Way', city: 'Parrish', zip: '34219' }], total: 1 }) };
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Estimate' }));
+    await waitFor(() => expect(new URLSearchParams(screen.getByLabelText('Current route').textContent).get('address'))
+      .toBe('100 Test Palm Way, Parrish, FL 34219'));
   });
   it('keeps status reconciliation off by default', async () => {
     mount();
@@ -330,6 +347,129 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
   });
 
+});
+
+describe('Pipeline shared table controls preview', () => {
+  function pagedLeadResponse(total = 240) {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (!String(url).includes('/admin/leads?')) return base(url, opts);
+      calls.push({ path: String(url), options: opts });
+      return { ok: true, json: async () => ({ leads: [lead], total, consultationLinksEnabled: false }) };
+    });
+  }
+
+  it('keeps the normal route and explicit rollback on the legacy 50-row controls', async () => {
+    const normal = mount('/admin/pipeline');
+    await screen.findByRole('searchbox', { name: 'Search leads' });
+    expect(screen.queryByRole('region', { name: 'Leads controls' })).not.toBeInTheDocument();
+    expect(new URL(queueCalls()[0].path, 'http://localhost').searchParams.get('limit')).toBe('50');
+    normal.unmount();
+    calls = [];
+
+    mount('/admin/pipeline?tableControls=0&leadPageSize=200');
+    await screen.findByRole('searchbox', { name: 'Search leads' });
+    expect(screen.queryByRole('region', { name: 'Leads controls' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Leads pagination' })).not.toBeInTheDocument();
+    expect(new URL(queueCalls()[0].path, 'http://localhost').searchParams.get('limit')).toBe('50');
+    fireEvent.click(screen.getByRole('button', { name: 'QA Prospect' }));
+    expect(document.querySelector('td[colspan="2"]')).toBeTruthy();
+    expect(document.querySelectorAll('td[data-label="Source"]')).toHaveLength(0);
+  });
+
+  it('round-trips the existing filters and resets page 1 for shared search, sort, and page size', async () => {
+    pagedLeadResponse();
+    mount('/admin/pipeline?tableControls=1&leadStatus=estimate_viewed&leadSort=status&leadPage=2&leadPageSize=100&source_name=Synthetic&start_date=2020-01-01&end_date=2020-02-01&builder_warranty=expiring');
+    const search = await screen.findByRole('searchbox', { name: 'Leads search' });
+    let request = new URL(queueCalls()[0].path, 'http://localhost').searchParams;
+    expect(Object.fromEntries(request)).toMatchObject({
+      status: 'estimate_viewed', sort: 'status', order: 'desc', page: '2', limit: '100',
+      source_name: 'Synthetic', start_date: '2020-01-01', end_date: '2020-02-01', builder_warranty: 'expiring',
+    });
+
+    fireEvent.change(search, { target: { value: 'QA mosquito' } });
+    await waitFor(() => expect(queueCalls().at(-1).path).toContain('search=QA+mosquito'));
+    request = new URL(queueCalls().at(-1).path, 'http://localhost').searchParams;
+    expect(request.get('page')).toBe('1');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadPage=');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('leadPage=2'));
+    fireEvent.change(screen.getByLabelText('Sort', { exact: true }), { target: { value: 'name' } });
+    await waitFor(() => expect(queueCalls().at(-1).path).toContain('sort=name'));
+    expect(new URL(queueCalls().at(-1).path, 'http://localhost').searchParams.get('page')).toBe('1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('leadPage=2'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Leads rows per page' }), { target: { value: '25' } });
+    await waitFor(() => expect(queueCalls().at(-1).path).toContain('limit=25'));
+    request = new URL(queueCalls().at(-1).path, 'http://localhost').searchParams;
+    expect(request.get('page')).toBe('1');
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadPageSize=25');
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('source_name=Synthetic');
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('builder_warranty=expiring');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('leadPage=2'));
+    fireEvent.change(screen.getByLabelText('Stage', { exact: true }), { target: { value: 'new' } });
+    await waitFor(() => expect(queueCalls().at(-1).path).toContain('status=new'));
+    expect(new URL(queueCalls().at(-1).path, 'http://localhost').searchParams.get('page')).toBe('1');
+  });
+
+  it('clamps oversized page sizes and corrects an empty out-of-range page', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (!String(url).includes('/admin/leads?')) return base(url, opts);
+      calls.push({ path: String(url), options: opts });
+      const params = new URL(String(url), 'http://localhost').searchParams;
+      return {
+        ok: true,
+        json: async () => ({ leads: params.get('page') === '1' ? [lead] : [], total: 63 }),
+      };
+    });
+    mount('/admin/pipeline?tableControls=1&leadPage=99&leadPageSize=999');
+    await waitFor(() => expect(queueCalls().some(({ path }) => {
+      const params = new URL(path, 'http://localhost').searchParams;
+      return params.get('page') === '1' && params.get('limit') === '200';
+    })).toBe(true));
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadPage=');
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadPageSize=200');
+    expect(await screen.findByRole('button', { name: 'QA Prospect' })).toBeInTheDocument();
+  });
+
+  it('keeps required columns and aligns optional cells with expanded-row spans', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (!String(url).includes('/admin/leads?')) return base(url, opts);
+      await base(url, opts);
+      return {
+        ok: true,
+        json: async () => ({
+          leads: [{ ...lead, builder_warranty_expires_on: '2099-01-01' }],
+          total: 1,
+          consultationLinksEnabled: false,
+        }),
+      };
+    });
+    mount('/admin/pipeline?tableControls=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(document.querySelector('td[colspan="7"]')).toBeTruthy();
+    expect(document.querySelectorAll('td[data-label="Source"]')).toHaveLength(1);
+    expect(document.querySelector('.lead-queue-record td:first-child')).not.toHaveAttribute('data-label');
+    const serviceCell = document.querySelector('td[data-label="Service"]');
+    expect(serviceCell.children).toHaveLength(1);
+    expect(serviceCell).toHaveTextContent('warranty exp 2099-01-01');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Columns' }));
+    expect(screen.getByRole('dialog', { name: 'Leads columns' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Name / Phone' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Status' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Actions' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Source' }));
+    expect(document.querySelectorAll('td[data-label="Source"]')).toHaveLength(0);
+    expect(document.querySelector('td[colspan="6"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  });
 });
 
 describe('Linked lead history preview', () => {

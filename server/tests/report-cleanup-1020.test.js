@@ -1,7 +1,5 @@
-// GATE_REPORT_CLEANUP_1020 (owner 2026-10-20): the service report cleanup that every future report gets.
-// Synthetic data only. Gate off = today's payload, stored method and PDF key part, byte for byte.
+// Service report cleanup (owner 2026-10-20): the fixes every report gets. Synthetic data only.
 
-const featureGates = require('../config/feature-gates');
 const cleanup = require('../services/service-report/report-cleanup-1020');
 const { buildLawnReportV2, buildAftercare } = require('../services/service-report/lawn-report-v2');
 const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
@@ -10,34 +8,14 @@ const { buildWateringInstruction } = require('../services/service-report/lawn-wa
 const { inferServiceReportApplicationMethod } = require('../services/complete-scheduled-service');
 const { completionMethod } = require('../services/lawn-completion-defaults');
 
-const GATE = 'GATE_REPORT_CLEANUP_1020';
-const saved = process.env[GATE];
-const gateOn = () => { process.env[GATE] = 'true'; };
-const gateOff = () => { delete process.env[GATE]; };
-afterEach(() => { if (saved === undefined) gateOff(); else process.env[GATE] = saved; });
-
 const WATER_IN_ROW = { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'owner' };
 const DERIVED_ROW = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
 const product = (name, wateringRule, extra = {}) => ({ product_name: name, approved_report_product_facts: { wateringRule, ...extra } });
 // Synthetic visit: a pre-emergent fertilizer, a granular insecticide and a fungicide spray with no stored rule.
 const VISIT_PRODUCTS = [product('Granular Fertilizer', WATER_IN_ROW), product('Test Granular Insecticide', DERIVED_ROW), product('Test Fungicide', null)];
 
-describe('the gate reader', () => {
-  test('strict opt-in: only the exact string true', () => {
-    gateOff();
-    expect(featureGates.reportCleanup1020Live()).toBe(false);
-    for (const v of ['1', 'on', 'TRUE', 'yes', '']) {
-      process.env[GATE] = v;
-      expect(featureGates.reportCleanup1020Live()).toBe(false);
-    }
-    gateOn();
-    expect(featureGates.reportCleanup1020Live()).toBe(true);
-  });
-
-  test('the PDF cache key part exists only while live', () => {
-    gateOff();
-    expect(cleanup.reportCleanup1020PdfSignature()).toBe('');
-    gateOn();
+describe('the PDF cache key', () => {
+  test('the key part is the constant PDFs were cached under while the cleanup was live', () => {
     expect(cleanup.reportCleanup1020PdfSignature()).toBe(':cleanup1020=1');
   });
 
@@ -53,17 +31,13 @@ describe('the gate reader', () => {
 
 describe('item 1: a visit with a water-in product never says "No special watering"', () => {
   test('the rule is the deepest amount and the shortest window across the products', () => {
-    gateOn();
     expect(cleanup.waterInRuleOf(VISIT_PRODUCTS)).toEqual({ inches: 0.5, hours: 24, sameDay: false });
     expect(cleanup.waterInRuleOf([product('Test Spray', null)])).toBeNull();
     expect(cleanup.waterInRuleOf([product('A', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 48 }), product('B', { mode: 'water_in', water_in_inches: 0.75, water_in_by_hours: 24 })]))
       .toEqual({ inches: 0.75, hours: 24, sameDay: false });
-    gateOff();
-    expect(cleanup.waterInRuleOf(VISIT_PRODUCTS)).toBeNull();
   });
 
   test('a hold on any product keeps hold semantics: no water-in fallback, and no watering line at all', () => {
-    gateOn();
     const HOLD = { mode: 'hold', hold_hours: 24, source: 'label' };
     for (const mix of [
       [product('Test Herbicide', HOLD), product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)],
@@ -83,12 +57,9 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       waterInRule: { hold: true },
     });
     expect(v2.aftercare.watering).toBe('');
-    gateOff();
-    expect(cleanup.waterInRuleOf([product('Test Herbicide', HOLD)])).toBeNull();
   });
 
   test('a recorded "Do not irrigate" note keeps its note, its review verdict and its plan warning beside a hold', () => {
-    gateOn();
     const apps = [{ product: { name: 'Test Herbicide', irrigation_notes: 'Do not irrigate for 24 hours' } }];
     const plan = { title: 'Weekly plan', visitInPlanWeek: true };
     const withHold = buildAftercare(apps, { instruction: null, weekPlan: plan, waterInRule: { hold: true } });
@@ -104,7 +75,6 @@ describe('item 1: a visit with a water-in product never says "No special waterin
   });
 
   test('one eligibility rule: water-in beside a product with a recorded note or flag and no structured rule keeps the normal aftercare', () => {
-    gateOn();
     const NOTE = 'Do not irrigate for 24 hours';
     const mixes = [
       [product('Granular Fertilizer', WATER_IN_ROW), product('Test Herbicide', null, { irrigationNotes: NOTE })],
@@ -112,7 +82,7 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       [product('Granular Fertilizer', WATER_IN_ROW), product('Test Herbicide', null, { irrigationRequired: true })],
     ];
     for (const mix of mixes) expect(cleanup.waterInRuleOf(mix)).toBeNull();
-    // The normal path then keeps the recorded note and the review verdict, exactly as with the gate off.
+    // The normal path then keeps the recorded note and the review verdict.
     const apps = [{ product: { name: 'Test Herbicide', irrigation_notes: NOTE } }];
     const plan = { title: 'Weekly plan', visitInPlanWeek: true };
     const kept = buildAftercare(apps, { instruction: null, weekPlan: plan, waterInRule: cleanup.waterInRuleOf(mixes[0]) });
@@ -133,7 +103,6 @@ describe('item 1: a visit with a water-in product never says "No special waterin
   });
 
   test('GATE_LAWN_WATERING_EVERY_VISIT: logged targets pick a target rule; a target the label gives no line for gives no advice', () => {
-    gateOn();
     const prior = { every: process.env.GATE_LAWN_WATERING_EVERY_VISIT, sms: process.env.GATE_LAWN_WATERING_SMS, rule: process.env.GATE_LAWN_WATERING_RULE };
     const restore = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
     process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
@@ -168,7 +137,6 @@ describe('item 1: a visit with a water-in product never says "No special waterin
   });
 
   test('water-in beside a product with no rule (no hold) gives the water-in line', () => {
-    gateOn();
     const rule = cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)]);
     expect(rule).toEqual({ inches: 0.5, hours: 24, sameDay: false });
     expect(buildAftercare([], { instruction: null, waterInRule: rule }).watering).toBe('Water in about ½ inch within 24 hours.');
@@ -215,10 +183,9 @@ describe('item 1: a visit with a water-in product never says "No special waterin
     expect(neutral.watering).toMatch(/^No special watering is needed/);
   });
 
-  test('through buildLawnReportV2: the report aftercare carries the line only when the rule is passed (gate off passes none)', () => {
+  test('through buildLawnReportV2: the report aftercare carries the line only when the rule is passed', () => {
     const args = { lawnAssessment: { scores: { turfDensity: 88, weedSuppression: 92, colorHealth: 86, stressDamage: 90, fungusControl: 95, overallScore: 89 }, turfProfile: { grassType: 'st_augustine' }, waterContext: {}, photos: [] }, applications: [{ product: { name: 'Test Granular Insecticide' } }] };
     expect(buildLawnReportV2(args).aftercare.watering).toMatch(/^No special watering/);
-    gateOn();
     const v2 = buildLawnReportV2({ ...args, waterInRule: cleanup.waterInRuleOf(VISIT_PRODUCTS) });
     expect(v2.aftercare.watering).toBe('Water in about ½ inch within 24 hours.');
     expect(v2.aftercare.watering).not.toMatch(/No special watering/);
@@ -243,8 +210,7 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
     expect(cleanup.isGranularProduct(null)).toBe(false);
   });
 
-  test('only a broadcast spray is corrected, and only while live', () => {
-    gateOn();
+  test('only a broadcast spray is corrected', () => {
     expect(cleanup.correctedMethod('broadcast_spray', ARENA)).toBe('granular_broadcast');
     expect(cleanup.correctedMethod('broadcast_spray', { name: 'Test Fungicide' })).toBe('broadcast_spray');
     // A granular catalog formulation counts when the name carries no mark (a report row passes catalog_formulation).
@@ -252,15 +218,10 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
     expect(cleanup.correctedMethod('bait_placement', ARENA)).toBe('bait_placement');
     expect(cleanup.correctedMethod('spot_treatment', ARENA)).toBe('spot_treatment');
     expect(cleanup.correctedMethod('perimeter_spray', ARENA)).toBe('perimeter_spray');
-    gateOff();
-    expect(cleanup.correctedMethod('broadcast_spray', ARENA)).toBe('broadcast_spray');
   });
 
   test('the completion stores the corrected method whatever the sheet sent (root cause: the sheet default is a spray for a non-fertilizer lawn product)', () => {
     const catalog = { name: ARENA.name, category: 'insecticide', formulation: 'Granular', application_method: null };
-    gateOff();
-    expect(inferServiceReportApplicationMethod(catalog, { applicationMethod: 'broadcast_spray' }, 'lawn')).toBe('broadcast_spray');
-    gateOn();
     expect(inferServiceReportApplicationMethod(catalog, { applicationMethod: 'broadcast_spray' }, 'lawn')).toBe('granular_broadcast');
     // A catalog row stored with the wrong method is corrected the same way.
     expect(inferServiceReportApplicationMethod({ ...catalog, application_method: 'broadcast_spray' }, {}, 'lawn')).toBe('granular_broadcast');
@@ -269,15 +230,10 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
     // No method on the row or the catalog: the lawn fallback is corrected too.
     expect(inferServiceReportApplicationMethod(catalog, {}, 'lawn')).toBe('granular_broadcast');
     expect(inferServiceReportApplicationMethod({ name: 'Test Fungicide', category: 'fungicide', formulation: 'SC' }, {}, 'lawn')).toBe('broadcast_spray');
-    gateOff();
-    expect(inferServiceReportApplicationMethod(catalog, {}, 'lawn')).toBe('broadcast_spray');
   });
 
   test('the plan default (lawn completion defaults) uses the same correction', () => {
     const item = (applicationMethod, name = ARENA.name) => ({ product: { name, formulation: 'Granular', applicationMethod }, scope: '' });
-    gateOff();
-    expect(completionMethod(item('broadcast_spray'), null)).toBe('broadcast_spray');
-    gateOn();
     expect(completionMethod(item('broadcast_spray'), null)).toBe('granular_broadcast');
     expect(completionMethod({ product: { name: 'Test Fungicide', formulation: 'SC', applicationMethod: 'broadcast_spray' }, scope: '' }, null)).toBe('broadcast_spray');
     // A spot row stays a spot row.
@@ -290,14 +246,10 @@ describe('item 3: the follow-up reason is a whole customer sentence', () => {
 
   test('the cut-off, percent-of-area technician note becomes the fixed sentence (root cause: the free-text next-visit focus, cut at 170 characters)', () => {
     const note = 'Recheck the 75% stress/damage area, confirm continued response to today’s fungicide and insecticide application, and inspect for any localized drought, mechanical, or…';
-    gateOn();
     expect(cleanup.cleanFollowUp(withReason(note)).reportV2.followUp.reason).toBe(cleanup.FOLLOW_UP_FALLBACK);
-    gateOff();
-    expect(cleanup.cleanFollowUp(withReason(note)).reportV2.followUp.reason).toBe(note);
   });
 
   test('a score as a percent, a fraction of 100, a bare bracketed score, no full stop, or an empty reason are replaced; a clean sentence stays', () => {
-    gateOn();
     for (const bad of ['Recheck the stress (75) next visit.', 'Stress reads 75/100 so we will recheck it.', 'Recheck the area covering 20% of the lawn.', 'Recheck the thin area', 'We will look at it...', '']) {
       expect(cleanup.cleanFollowUp(withReason(bad)).reportV2.followUp.reason).toBe(cleanup.FOLLOW_UP_FALLBACK);
     }
@@ -306,7 +258,6 @@ describe('item 3: the follow-up reason is a whole customer sentence', () => {
   });
 
   test('no follow-up card, no change', () => {
-    gateOn();
     const data = { reportV2: { followUp: null } };
     expect(cleanup.cleanFollowUp(data)).toBe(data);
     expect(cleanup.cleanFollowUp({ reportV2: null }).reportV2).toBeNull();
@@ -321,24 +272,16 @@ describe('items 7, 8, 9: the repeated stock lines', () => {
   });
 
   test('lawn: the all-clear card and the "No corrective findings" finding are left out; other cards and findings stay', () => {
-    gateOn();
     const data = cleanup.dropStockLines(lawnData());
     expect(data.reportV2.insights.map((c) => c.category)).toEqual(['weeds']);
     expect(data.findings.map((f) => f.title)).toEqual(['No lawn issues observed']);
   });
 
   test('tree & shrub: the card stays, the "keep monitoring" plan line goes', () => {
-    gateOn();
     const data = cleanup.dropStockLines({ serviceLine: 'tree_shrub', reportV2: { insights: [{ category: 'overall', status: 'good', headline: 'Your landscape plants are in good shape', nextVisitPlan: 'Keep the program steady and keep monitoring each visit.' }] }, findings: [] });
     expect(data.reportV2.insights).toHaveLength(1);
     expect(data.reportV2.insights[0].nextVisitPlan).toBeNull();
     expect(data.reportV2.insights[0].headline).toBe('Your landscape plants are in good shape');
-  });
-
-  test('gate off: nothing changes', () => {
-    gateOff();
-    const before = JSON.stringify(lawnData());
-    expect(JSON.stringify(cleanup.dropStockLines(lawnData()))).toBe(before);
   });
 
   test('the report-data softened-finding strings are the ones this module drops', () => {
@@ -356,17 +299,9 @@ describe('item 4: the trouble-spot note', () => {
     findings: [],
   });
 
-  test('gate off: no flag and no note on the payload', () => {
-    gateOff();
-    const data = cleanup.attachCleanupFields(troubleVisit());
-    expect(data).not.toHaveProperty('reportCleanup');
-    expect(data).not.toHaveProperty('troubleSpotNote');
-  });
-
-  test('gate on: the flag, and one fixed sentence naming a next step', () => {
-    gateOn();
+  test('the payload carries one fixed sentence naming a next step, and no reportCleanup flag', () => {
+    expect(cleanup.attachCleanupFields(troubleVisit())).not.toHaveProperty('reportCleanup');
     expect(cleanup.attachCleanupFields(troubleVisit())).toMatchObject({
-      reportCleanup: true,
       troubleSpotNote: 'The trouble spot photo shows an area your technician flagged. We will check it again at your next visit.',
     });
     expect(cleanup.attachCleanupFields(troubleVisit({ followUp: { scheduled: true } })).troubleSpotNote)
@@ -374,7 +309,6 @@ describe('item 4: the trouble-spot note', () => {
   });
 
   test('the note never names the spot from a visit-wide finding (nothing ties it to the photo)', () => {
-    gateOn();
     const note = (category) => cleanup.attachCleanupFields(troubleVisit({ insights: [{ category, status: 'watch' }] })).troubleSpotNote;
     for (const category of ['weeds', 'damage', 'coverage', 'mowing']) {
       expect(note(category)).toBe('The trouble spot photo shows an area your technician flagged. We will check it again at your next visit.');
@@ -382,7 +316,6 @@ describe('item 4: the trouble-spot note', () => {
   });
 
   test('a failed watering-rule or catalog read gives no water-in fallback', () => {
-    gateOn();
     const waterIn = { approved_report_product_facts: { wateringRule: { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24 } } };
     const unknown = { approved_report_product_facts: {} };
     expect(cleanup.waterInRuleOf([waterIn, unknown])).toMatchObject({ inches: 0.5, hours: 24 });
@@ -393,13 +326,11 @@ describe('item 4: the trouble-spot note', () => {
     }
   });
 
-  test('catalogFormulations reads only rows without a formulation, only while live, and fails soft', async () => {
+  test('catalogFormulations reads only rows without a formulation, and fails soft', async () => {
     const select = jest.fn().mockResolvedValue([{ id: 'p1', formulation: 'granular' }]);
     const whereIn = jest.fn(() => ({ select }));
     const knex = jest.fn(() => ({ whereIn }));
     const rows = [{ product_id: 'p1' }, { product_id: 'p2', catalog_formulation: 'liquid' }];
-    expect((await cleanup.catalogFormulations(knex, rows)).size).toBe(0);
-    gateOn();
     const map = await cleanup.catalogFormulations(knex, rows);
     expect(whereIn).toHaveBeenCalledWith('id', ['p1']);
     expect(map.get('p1')).toBe('granular');
@@ -408,15 +339,12 @@ describe('item 4: the trouble-spot note', () => {
   });
 
   test('the photo strip (no shot list) is read for a Trouble spot label too', () => {
-    gateOn();
     const data = cleanup.attachCleanupFields({ serviceLine: 'lawn', reportV2: { photos: [{ url: 'https://example/a.jpg', label: 'Front yard' }, { url: 'https://example/b.jpg', label: 'Trouble spot' }], followUp: null }, findings: [] });
     expect(data.troubleSpotNote).toBe('The trouble spot photo shows an area your technician flagged. We will check it again at your next visit.');
   });
 
-  test('no trouble-spot photo: the flag is set and the note is null', () => {
-    gateOn();
+  test('no trouble-spot photo: the note is null', () => {
     const data = cleanup.attachCleanupFields({ serviceLine: 'lawn', reportV2: { photoSet: [{ url: 'https://example/a.jpg', shot: 'front' }] }, findings: [] });
-    expect(data.reportCleanup).toBe(true);
     expect(data.troubleSpotNote).toBeNull();
     expect(cleanup.attachCleanupFields({ serviceLine: 'pest' }).troubleSpotNote).toBeNull();
   });
@@ -435,24 +363,13 @@ describe('the reconciliation entry point (route and PDF queue) runs the cleanup'
     findings: [{ category: 'no_activity', title: cleanup.NO_CORRECTIVE_TITLE, detail: cleanup.NO_CORRECTIVE_DETAIL }],
   });
 
-  test('gate on: a clean follow-up, no stock lines, the flag and the note', () => {
-    gateOn();
+  test('a clean follow-up, no stock lines, and the note', () => {
     const data = applyLawnReportReconciliation(payload(), { reentry: null });
-    expect(data.reportCleanup).toBe(true);
+    expect(data).not.toHaveProperty('reportCleanup');
     expect(data.reportV2.followUp.reason).toBe(cleanup.FOLLOW_UP_FALLBACK);
     expect(data.reportV2.insights).toEqual([]);
     expect(data.findings).toEqual([]);
     expect(data.troubleSpotNote).toBe('The trouble spot photo shows an area your technician flagged. We will check it again at the follow-up we already planned.');
     expect(JSON.stringify(data.reportV2.lead || {})).not.toMatch(/…|75%/);
-  });
-
-  test('gate off: the payload is the one it was', () => {
-    gateOff();
-    const data = applyLawnReportReconciliation(payload(), { reentry: null });
-    expect(data).not.toHaveProperty('reportCleanup');
-    expect(data).not.toHaveProperty('troubleSpotNote');
-    expect(data.reportV2.followUp.reason).toMatch(/75%/);
-    expect(data.reportV2.insights).toHaveLength(1);
-    expect(data.findings).toHaveLength(1);
   });
 });

@@ -27,16 +27,14 @@ const { loadPendingSmsConversations, NEEDS_REPLY_SINCE } = require('../services/
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
-const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
-const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
 const { isEnabled, homeLineLive } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
-  markSuggestionScheduled,
   parkThreadSuggestions,
   createReplyHoldingReservation,
   settleReplyHoldingReservation,
@@ -51,6 +49,7 @@ const autoSendExecutor = require('../services/sms-auto-send');
 const { gratitudeClaimsPossible } = require('../services/sms-gratitude-context');
 const { unansweredClaimsPossible } = require('../services/sms-unanswered-reply');
 const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
+const { scheduleCustomerSms } = require('../services/scheduled-sms-queue');
 const {
   excludeUnresolvedSendReservations,
   releaseById: releaseReservationById,
@@ -131,7 +130,9 @@ function normalizeReplyForComparison(value) {
 // draft may only resolve a decision the sender actually owns — pending,
 // phone-matched through its inbound sms_log or customer record, and (when a
 // customer is selected) belonging to that customer.
-async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
+// expectedSuggestedMessage is set only by the Intelligence Bar's card (sendSmsFromBar): the card showed that exact draft, so a
+// card whose stored draft is anything else reads as handled elsewhere.
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody, expectedSuggestedMessage }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
     // A scheduling card whose gate was rolled back is not sendable either
@@ -172,6 +173,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
     if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
+    if (typeof expectedSuggestedMessage === 'string' && decision.suggested_message !== expectedSuggestedMessage) return null;
 
     // House rule at the send boundary: check the OUTGOING body — the text
     // that will actually reach the customer — not the stored suggestion.
@@ -367,7 +369,9 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
 // POST /api/admin/communications/sms — send an SMS from admin
 const { linkedVisitIdsFrom } = require('../services/street-level-hold');
 
-router.post('/sms', async (req, res, next) => {
+async function sendSmsHandler(req, res, next) {
+  // req.ibAgentPins is set only by sendSmsFromBar (never an HTTP field); see the adapter below.
+  const barPins = req.ibAgentPins || null;
   let claimedDecisionId = null;
   let manualReservationId = null;
   let parkedThreadIds = [];
@@ -579,6 +583,11 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // Bar only: this branch SENDS (RecruitingComms.sendOwnerReply) before any draft verification, claim or pin, and it settles
+      // no Agent Review decision. An Agent Review draft never goes out on an applicant thread: refused before any send or write.
+      if (barPins) {
+        return res.status(409).json({ error: 'This number belongs to an active job applicant. Handle it from the Communications page.', code: 'needs_communications_page' });
+      }
       // A translation card's reply is a customer-service reply: the applicant rail sends without its
       // freshness, fact and claim checks, so it never goes out there.
       if (translationTrialId) {
@@ -608,6 +617,18 @@ router.post('/sms', async (req, res, next) => {
     }
 
     const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);
+    // Bar only: a review-ask-looking body takes the review-ask path (spacing history, its reservation, a customer found by phone), which
+    // is not the plain Use Draft send. Refused before any claim or write.
+    if (barPins && reviewLooking) {
+      return res.status(409).json({ error: 'This draft reads as a review request. Send it from the Communications page.', code: 'needs_communications_page' });
+    }
+    // Bar only: the composer-only link kinds (card request, contract signing, prep guide, statement, project report, consultation,
+    // Auto Pay) have claims and delivery bookkeeping that only the composer's seams carry. Read-only check, before any claim.
+    if (barPins) {
+      const linkBlock = await require('../services/intelligence-bar/comms-tools')
+        .customerLinkSendRefusal(cleanBody, to, trustedCustomerId || null, { phase: 'proposal', recipientSelected: Boolean(trustedCustomerId) });
+      if (linkBlock) return res.status(409).json({ error: linkBlock.error, code: 'needs_communications_page' });
+    }
     if (reviewLooking && !reviewRequestId && !trustedCustomerId) {
       const customer = await findSingleCustomerForPhone(to);
       if (!customer || normalizePhone(customer.phone) !== normalizePhone(to)) {
@@ -690,7 +711,7 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body, expectedSuggestedMessage: barPins?.suggestedMessage });
       // A supplied draft id that fails verification means the card the
       // operator is acting on is stale — most often another operator just
       // handled the same suggestion. Sending anyway risks a duplicate reply.
@@ -710,8 +731,10 @@ router.post('/sms', async (req, res, next) => {
       // exception and resolved accepted/corrected on success. The linked
       // reservation below tells recovery whether a crashed attempt is stale
       // or carries explicit provider uncertainty.
-      const claimed = await db('agent_decisions')
-        .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+      let claimQuery = db('agent_decisions').where({ id: verifiedAgentDecision.id, status: 'pending_review' });
+      // Bar only: the same atomic UPDATE also holds the card's exact draft.
+      if (barPins) claimQuery = claimQuery.where('suggested_message', barPins.suggestedMessage);
+      const claimed = await claimQuery
         .update({
           status: 'scheduled',
           correction_note: 'Claimed for an immediate send from the SMS inbox.',
@@ -1206,6 +1229,11 @@ router.post('/sms', async (req, res, next) => {
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
+            // Bar only (undefined, and filtered out, for the composer): the customer has not texted again since the card.
+            barPins ? async ({ dbi } = {}) => (await require('../services/sms-suggest-mode')
+              .newestInboundIdForThread(normalizePhoneLast10(to), dbi || db)) === barPins.latestInboundId
+              ? { ok: true }
+              : { ok: false, code: 'preview_changed', reason: 'The customer sent a new message after the card was shown; nothing was sent.' } : undefined,
           );
         })(),
       // a translation card's reply: the same boundary checks, from the trial's stored snapshot
@@ -1614,7 +1642,7 @@ router.post('/sms', async (req, res, next) => {
             await recordLeadSmsOutreach({
               leadId: outreachLeadId,
               message: cleanBody,
-              performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
+              performedBy: req.technician?.name || 'Admin',
             });
           } else {
             logger.debug(`[admin-communications] lead outreach skipped — leadId ${outreachLeadId} does not bind to this destination`);
@@ -1775,7 +1803,8 @@ router.post('/sms', async (req, res, next) => {
     });
     next(err);
   }
-});
+}
+router.post('/sms', sendSmsHandler);
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
 // customer picked by name ("Send prep guide" button). Smart channel: emails
@@ -3753,14 +3782,6 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
   }
 });
 
-// Marketing/retention purposes require a real stored consent record per
-// server/services/messaging/policy.js. This conversational-compose endpoint
-// is not a marketing send path — reject any messageType whose scheduler
-// mapping resolves to marketing or retention. Reusing the scheduler's
-// mapper here (instead of a local regex) guarantees the route can't drift
-// from the cron's classification.
-const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'marketing_seasonal', 'retention']);
-
 function csvEscape(value) {
   if (value == null) return '';
   const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -3948,268 +3969,17 @@ router.post('/rewrite-sms', async (req, res) => {
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
 // through sendCustomerMessage (same path as the immediate /sms route).
-// A tokenized review page link (/rate/:token or its /api/rate/:token/go
-// short form), scheme-less or not — what buildReviewRequestLink inserts.
-const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
-// Branded /l/:code short links — what buildReviewUrl normally hands out
-// (shortenOrPassthrough); resolved through short_codes.kind below.
-// {5,}: legacy five-character codes still resolve (short-url.js).
-// Case-insensitive like REVIEW_LINK_RE: Express routing is case-insensitive
-// and the public resolver lowercases the code, so /L/AbCdE resolves too
-// (GH Codex #3856 r15 P1).
-const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/gi;
-const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
-
-// Links a scheduled text may NOT carry — every one is an immediate-send-only
-// bearer or ask, re-checked only on the /sms path (the scheduler dispatches
-// straight into sendCustomerMessage). The composer refuses client-side;
-// this is the authoritative fence. Returns { status, error } or null.
-async function scheduledSmsLinkRefusal(cleanBody, to) {
-  // An Auto Pay setup link is a 30-day bearer credential with no
-  // schedule-time re-check.
-  const { autopayLinkSendCheck, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
-  const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
-  if (autopayCheck.present) {
-    return { status: 400, error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' };
-  }
-  // Same fence for the other per-row bearers the composer inserts
-  // (contract signing, card request, statement pay, expiring prep pages)
-  // (GH Codex #3844 r1 P1).
-  const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
-  if (immediateOnly.present) {
-    return { status: 400, error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` };
-  }
-  // A review ask rides the immediate /sms send only — that path claims and
-  // marks the inline row and emails the Both copy; a scheduled row would
-  // deliver it untracked (invisible to the cap and cooldown) and never
-  // email (GH Codex #3856 r4 P1).
-  if (REVIEW_LINK_RE.test(cleanBody)) return { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR };
-  // A pasted branded short link hides the /rate/ path — ask short_codes
-  // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
-  // Lowercased like the public resolver (public-shortlinks.js): short_codes.code
-  // is case-sensitive, and a pasted /l/AbCdE still resolves for the customer
-  // (GH Codex #3856 r12 P1).
-  const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1].toLowerCase());
-  if (!shortCodes.length) return null;
-  let reviewCodes;
-  try {
-    reviewCodes = await db('short_codes').whereIn('code', shortCodes).where({ kind: 'review' }).select('code');
-  } catch (lookupErr) {
-    logger.warn(`[communications] short-link kind lookup failed — refusing to schedule: ${lookupErr.message}`);
-    return { status: 503, error: 'Could not verify the links in this message — try again in a moment.' };
-  }
-  return reviewCodes.length ? { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR } : null;
-}
-
-// The customer a scheduled text is linked to: the selected one, whose phone
-// must match `to`; else a digit-normalized, deleted-filtered, ambiguity-aware
-// lookup (a raw exact-string phone match misses formatting variants and can
-// link the scheduled SMS to a soft-deleted or arbitrary duplicate customer).
-// Returns { customerId } or { status, error }.
-async function trustedCustomerForScheduledSms(customerId, to) {
-  if (!customerId) {
-    const fallback = await findSingleCustomerForPhone(to).catch(() => null);
-    return { customerId: fallback ? fallback.id : null };
-  }
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
-  if (!customer) return { status: 404, error: 'customerId not found' };
-  const normalizedTo = normalizePhone(to);
-  const normalizedCustomerPhone = normalizePhone(customer.phone);
-  if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
-    return { status: 400, error: 'to must match the selected customer phone' };
-  }
-  return { customerId: customer.id };
-}
-
+// The queue itself (every guard, the transaction and the row) lives in services/scheduled-sms-queue.js: this
+// route and the Intelligence Bar's schedule_sms card both call it. The route-local helpers it needs for the
+// Agent Review draft claim, the applicant reply context and the single-customer phone fallback are handed in.
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    // Deferred sends are office-only. The scheduler replays a queued row later
-    // from the stored admin_user_id with no re-check of the sender's route, so a
-    // technician's route-scoped authorization at enqueue time would outlive the
-    // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
-    // lookup or insert, with the staff default-deny gate on or off.
+    // Office only, refused before anything is read (the shared writer refuses a non-admin first as well).
     if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId, translationTrialId } = req.body || {};
-    // A reply taken from the translation card answers the customer's latest text as of now; nothing re-checks
-    // it when a queued send fires, so it is sent now or not at all.
-    if (translationTrialId) return res.status(409).json({ error: 'A suggested reply in the customer\'s language can only be sent now, not scheduled.' });
-    const cleanBody = typeof body === 'string' ? body.trim() : '';
-    if (!to || !cleanBody || !scheduledFor) {
-      return res.status(400).json({ error: 'to, body, scheduledFor required' });
-    }
-    // A retained "Text back" context on a recruiting row makes this an
-    // applicant reply whatever customer is selected (Codex r30 P1, same
-    // rule as the immediate /sms path): applicant texts are never
-    // scheduled here, so refuse before the customer bypass below.
-    const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
-    if (recruitingContext) {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
-    }
-    // Explicit customer context is validated FIRST (Codex r28 P2): a
-    // customerId the operator selected, whose phone matches `to`, is a
-    // customer text even when an open application shares the phone — the
-    // same rule the immediate /sms path applies (Codex r16 P1). The
-    // no-customerId fallback (single customer on the phone) is NOT explicit
-    // context and does not bypass the applicant guard.
-    const trusted = await trustedCustomerForScheduledSms(customerId, to);
-    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
-    const trustedCustomerId = trusted.customerId;
-    if (!(await technicianCustomerGuard(req, res, customerId ? trustedCustomerId : null))) return undefined;
-    // A draft whose reschedule / appointment link points at a street-level address hold is not queued:
-    // nothing about a held visit reaches the customer before the office confirms the address.
-    const scheduledLinkedVisitIds = linkedVisitIdsFrom(req.body?.linkedVisitIds);
-    if (scheduledLinkedVisitIds.length) {
-      const { isStreetLevelHoldVisit, HOLD_REFUSAL } = require('../services/street-level-hold');
-      for (const visitId of scheduledLinkedVisitIds) {
-        if (await isStreetLevelHoldVisit(visitId)) {
-          return res.status(409).json({ error: HOLD_REFUSAL, code: 'street_level_hold' });
-        }
-      }
-    }
-    const explicitCustomerContext = Boolean(customerId && trustedCustomerId);
-    // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
-    // applicant would later hand their reply to the customer pipeline —
-    // applicant texts are not scheduled from here at all (owner sends now
-    // from the recruiting queue / reply box; the send window queues them
-    // itself), and a non-admin is refused outright.
-    if (!explicitCustomerContext && await isRecruitingPhone(to, undefined, { activeOnly: true })) {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
-    }
-    if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
-      return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
-    }
-    const linkRefusal = await scheduledSmsLinkRefusal(cleanBody, to);
-    if (linkRefusal) return res.status(linkRefusal.status).json({ error: linkRefusal.error });
-
-    // ET wall-clock parse — datetime-local strings without offset are
-    // interpreted in ET, ISO strings pass through unchanged.
-    const sendAt = parseETDateTime(scheduledFor);
-    if (Number.isNaN(sendAt.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
-    if (sendAt <= new Date()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
-
-    const chosenFrom = fromNumber || from || TWILIO_NUMBERS.getOutboundNumber();
-    if (!TWILIO_NUMBERS.findByNumber(chosenFrom)) {
-      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
-    }
-
-    // An Agent Review draft can be scheduled instead of sent now. Carry the
-    // verified decision id on the scheduled row so the 5-min dispatch cron
-    // resolves it (accepted/corrected) when the send actually fires —
-    // otherwise the suggestion stays pending and gets miscounted as
-    // ignored/expired despite a human-approved send.
-    let scheduledAgentDecision = null;
-    if (agentDecisionId && agentDraft) {
-      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
-      // Stale card — most often another operator just handled the same
-      // suggestion. Queueing anyway would schedule a duplicate reply with
-      // no decision linkage to resolve or cancel.
-      if (!scheduledAgentDecision) {
-        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before scheduling.' });
-      }
-    }
-
-    // Operator hand-composed this scheduled SMS unless an unchanged AI draft
-    // is being queued through. Persisted as provenance so the dispatch cron
-    // can exempt the deferred send from the stale-month guard, same as the
-    // immediate manual send. An unchanged agent draft stays month-checked.
-    const scheduledBodyIsUnchangedAgentDraft =
-      !!scheduledAgentDecision?.suggested_message &&
-      normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(scheduledAgentDecision.suggested_message);
-    const scheduledHumanAuthored = !scheduledBodyIsUnchangedAgentDraft;
-
-    // Queue + park in ONE transaction: the used decision AND every other
-    // pending house-voice suggestion on this thread move to 'scheduled', so
-    // nothing stays actionable in the composer while the queued reply
-    // waits. Fire resolves the used one and ignores the parked ones;
-    // cancel/failure reopens them all. A park failure rolls the queue
-    // insert back — never a queued send with a still-actionable card.
-    let row;
-    try {
-      row = await db.transaction(async (trx) => {
-        // Same thread lock as the drafter's publish and the post-send
-        // sweep — park + queue commit atomically with respect to both.
-        await lockSuggestThread(trx, normalizePhoneLast10(to) || to);
-
-        // Don't queue a reply while an autonomous house-voice reply (Phase E)
-        // is mid-send to this thread — it could land as a duplicate when this
-        // one dispatches. The 'scheduled' sms_log row inserted below is itself
-        // the marker the auto-send's guard sees, so this check only needs to
-        // cover the reverse race (auto claimed first). No-op while both
-        // autonomous lanes are dormant and gratitude was never activated.
-        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible() || unansweredClaimsPossible())
-          && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
-          const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
-          conflict.statusCode = 409;
-          throw conflict;
-        }
-
-        let usedDecisionId = null;
-        if (scheduledAgentDecision) {
-          const parkedUsed = await markSuggestionScheduled(
-            { decisionId: scheduledAgentDecision.id, scheduledFor: sendAt }, trx
-          );
-          // 0 rows = a concurrent request claimed/resolved this decision
-          // between verification and the guarded park. Queueing anyway
-          // would double-send the same reply — abort and roll back.
-          if (parkedUsed === 0) {
-            const conflict = new Error('This Agent Review draft was just handled elsewhere — refresh the thread before sending.');
-            conflict.statusCode = 409;
-            throw conflict;
-          }
-          usedDecisionId = scheduledAgentDecision.id;
-        }
-        const parkedIds = await parkThreadSuggestions(
-          { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
-        );
-
-        const metaObj = {};
-        if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
-        if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
-        if (scheduledHumanAuthored) metaObj.human_authored = true;
-        // The visits the draft's links point at: the cron replay forwards them so the shared send step
-        // re-checks for a street-level hold at DELIVERY (a visit can become one after this enqueue).
-        if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;
-        const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;
-
-        const [inserted] = await trx('sms_log')
-          .insert({
-            customer_id: trustedCustomerId,
-            direction: 'outbound',
-            from_phone: chosenFrom,
-            to_phone: to,
-            message_body: cleanBody,
-            status: 'scheduled',
-            message_type: messageType || 'manual',
-            admin_user_id: req.technicianId || null,
-            scheduled_for: sendAt,
-            metadata,
-          })
-          .returning(['id', 'scheduled_for']);
-        return inserted;
-      });
-    } catch (scheduleErr) {
-      if (scheduleErr.statusCode === 409) return res.status(409).json({ error: scheduleErr.message });
-      throw scheduleErr;
-    }
-
-    // Scheduling a reply is the operator's response act — stamp the
-    // Speed-to-Lead clock NOW (the scheduled-SMS cron replays human and
-    // automation rows under one entry point, so fire time can't tell them
-    // apart; the decision to respond already happened here). If the queued
-    // send later fails, the failure alert lane surfaces it.
-    try {
-      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-      await stampFirstResponseByContact({
-        phone: to,
-        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
-      });
-    } catch (stampErr) {
-      logger.warn(`[admin-communications] scheduled-reply first-response stamp failed: ${stampErr.message}`);
-    }
-
-    res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
+    const { status, body } = await scheduleCustomerSms(req.body || {}, { techRole: req.techRole, technicianId: req.technicianId }, {
+      verifyAgentDecisionForSend, recruitingReplyContext, findSingleCustomerForPhone,
+    });
+    res.status(status).json(body);
   } catch (err) { next(err); }
 });
 
@@ -4775,5 +4545,28 @@ async function runLinkHandler(handler, body) {
 module.exports.customerLinkInsert = (body) => runLinkHandler(customerLinkHandler, body);
 module.exports.rescheduleLinkInsert = (body) => runLinkHandler(rescheduleLinkHandler, body);
 module.exports.reserviceLinkInsert = (body) => runLinkHandler(reserviceLinkHandler, body);
+// The Intelligence Bar's approve / revise cards for an Agent Review draft run the SAME handler as POST /sms with the body the
+// composer's Use Draft posts ({ to, body, customerId, fromNumber, agentDecisionId, agentDraft }), without an HTTP request: the
+// handler's own verification, claim, thread parking, provider-boundary checks, send and accepted / corrected settlement
+// are the composer's. Resolves { status, json }; an error passed to next() rejects. `pins` is bar-only: suggestedMessage
+// (the draft the card showed, held by the verification and the claim) and latestInboundId (re-read at the provider boundary).
+function sendSmsFromBar({ body, actor, pins }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      body: body || {},
+      technicianId: actor?.technicianId || null,
+      technician: actor?.technician || null,
+      techRole: 'admin',
+      ibAgentPins: pins,
+    };
+    Promise.resolve(sendSmsHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.sendSmsFromBar = sendSmsFromBar;
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;

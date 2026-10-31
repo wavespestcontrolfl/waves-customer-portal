@@ -619,8 +619,9 @@ class ContentBriefBuilder {
     // the opportunity's query / service / city. Skipped for citability
     // backfills: their query is NULL, so the matcher would fall back to the
     // service's top cluster and hand an unrelated customer question to a
-    // targeted edit.
-    if (opportunity.bucket !== CITABILITY_BACKFILL_BUCKET) {
+    // targeted edit. Same for same_question_refresh (2026-10-30): a null-query
+    // owner-page rewrite whose only question rides unanswered_queries.
+    if (opportunity.bucket !== CITABILITY_BACKFILL_BUCKET && opportunity.bucket !== 'same_question_refresh') {
       out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
         logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
         return null;
@@ -1030,6 +1031,13 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // same_question_refresh rows: the topic-targeting match that queued the
+        // rewrite (owner page, the question words, the blocked brief's keyword).
+        // The quality gate's evidence exemption reads it after the
+        // content_briefs round-trip (isSameQuestionRefreshBrief).
+        same_question: opportunity.bucket === 'same_question_refresh' && opportunity.signal_metadata?.same_question
+          ? opportunity.signal_metadata.same_question
+          : null,
         // citability_backfill rows: the (live re-scanned) gap list rides the
         // brief so the refresh agent's CITABILITY MODE addresses exactly the
         // measured gaps, and the quality gate's evidence exemption and

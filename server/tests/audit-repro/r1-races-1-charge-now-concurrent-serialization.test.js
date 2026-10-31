@@ -61,6 +61,8 @@ function makeQB({ first = null } = {}) {
       });
     });
   qb.first = jest.fn(() => Promise.resolve(typeof first === 'function' ? first() : first));
+  // list reads (charge-now's parked-attempt check) find no rows
+  qb.pluck = jest.fn(() => Promise.resolve([]));
   return qb;
 }
 

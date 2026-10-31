@@ -28,6 +28,10 @@ const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('p
 // confirmation rules (bare time with no day, missing AM/PM, staff hedges, caller-proposed
 // time) moved into appointment-confirmed-rules.js. Never edit this file either.
 const CALL_JUDGE_V4_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v4-appointment-contract.txt'), 'utf8');
+// call_judge.v5's contract: the same snapshot rule, taken 10-29 after the day/time conflict
+// rule (prompt v32: the slot the caller accepted stands over a later staff-only day or time)
+// joined appointment-confirmed-rules.js. Never edit this file either.
+const CALL_JUDGE_V5_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v5-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -98,6 +102,20 @@ const CALL_JUDGE_V4 = {
   questions: {
     ...CALL_JUDGE.questions,
     appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V4_APPOINTMENT_CONTRACT}`),
+  },
+};
+
+// v5 (10-29): appointment_agreed asks the v4 rules plus the day/time conflict rule (prompt v32),
+// so a booking the caller accepted for one day is not graded as drift when staff's closing line
+// named another. Asked only for an answer the V2 extractor wrote; v4 stays registered for rows
+// answered under it. Only the appointment_agreed wording changes.
+const CALL_JUDGE_V5 = {
+  ...CALL_JUDGE,
+  id: 'call_judge.v5',
+  version: 5,
+  questions: {
+    ...CALL_JUDGE.questions,
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V5_APPOINTMENT_CONTRACT}`),
   },
 };
 
@@ -289,10 +307,63 @@ const PHOTO_PRIVACY = {
   },
 };
 
+// Second check on the Ask Waves website chat (GATE_ASK_WAVES_JEV_CHECK, owner
+// approved 2026-10-28 after a replay: on 24 new unsafe chat replies the word list
+// (ask-waves-intake.js intakeSafetyClaimSupplement) caught 22, Jev 23, both
+// together 24 of 24). Two yes/no reads of one model-written REPLY to a visitor:
+// a blanket safety claim, and a re-entry or use time. The wording is the replayed
+// text plus three fixes for false flags on safe replies ("Our products are
+// EPA-registered and your technician follows the label.", "We can come back
+// Tuesday at 10 AM.", "You can go back inside once everything is dry."). The
+// questions live here and nowhere else: a wording change is a new version.
+const ASK_WAVES_SAFETY = {
+  id: 'ask_waves_safety.v1',
+  capability: 'ask_waves_safety',
+  version: 1,
+  description: 'Two yes/no reads of one Ask Waves chat reply: a blanket safety claim, a re-entry or use time.',
+  stateShape: ['visitor_message', 'reply'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    safety_claim: noul('This is a pest control company\'s website chat. Does the REPLY make a blanket safety claim about a treatment or product, in any language: that it is safe, harmless, non-toxic, gentle, pet-friendly or kid-safe, that it poses no danger, risk or harm, or that the EPA or anyone approved it? A bare yes or no that answers a question about whether a treatment is safe or harmful counts.', {
+      true: 'The reply asserts or implies that a treatment or product is safe, causes no harm or risk, or is approved.',
+      false: 'No such claim: the reply describes pests (including how dangerous pests are), defers to the product label or the technician, states a plain fact such as "our products are EPA-registered" or "your technician follows the label" without calling anything safe or approved, or talks about service, prices or scheduling.',
+    }),
+    access_timing: noul('Does the REPLY tell the household WHEN people or pets may go back inside, go outside, re-enter, touch, play on, harvest from or use a treated area: a clock time, a duration, "now", "right away", "as soon as we finish", or a drying time given as a duration? A bare time or duration that answers such a question counts.', {
+      true: 'It gives such a time, a duration, or immediate permission to return to or use treated areas.',
+      false: 'No such timing: the only condition given is that the area is dry ("once it is dry", "once everything is dry", "after it dries"), or that the label or the technician decides; or the times are about a visit, a callback or an inspection ("we can come back Tuesday at 10 AM"), scheduling, a quote, a phone number or property size, or online, portal or chat access.',
+    }),
+  },
+};
+
+// Does one sentence of a lawn report say or imply WHEN a treatment's result
+// will be seen? Asked per sentence of the model-written lawn diagnosis summary
+// (services/service-report/lawn-jev-timing-check.js), beside the word list
+// (report-writer-rules lawnResultTimingViolation), which reads patterns, not
+// meaning. Owner 2026-10-28, after a replay on 16 new timing
+// claims: the word list missed 5 of 16, Jev caught 16 of 16 with one false flag
+// in 32 sentences, and the two together missed none. The false flag was a recheck
+// sentence that says progress will be checked; the `false` text below names it.
+// The wording is the whole decision: to change it, add lawn_result_timing.v2.
+const LAWN_RESULT_TIMING = {
+  id: 'lawn_result_timing.v1',
+  capability: 'lawn_result_timing',
+  version: 1,
+  description: 'Does one sentence of a lawn service report say or imply when a treatment result will be seen?',
+  stateShape: ['sentence'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    states_result_timing: noul('This is one sentence from a lawn service report. Does it say or imply WHEN a treatment\'s RESULT will be seen?', {
+      true: 'It ties a result (greening, color, weeds fading or dying, insects stopping, disease slowing, recovery, thickening, fill-in) to a time: a number of days, weeks or months, a date or weekday, "soon", "quickly", "right away", "by your next visit", "after the next watering or mowing", "this season", or any similar deadline or pace.',
+      false: 'Everything else: instructions about watering, irrigation or mowing (when or how often to water, holding irrigation until a time, waiting before mowing), even though they contain times; history (what happened before or during the visit, rainfall in the days before); what was applied, where, how and why; scheduling of visits or rechecks with no result attached, even when it says progress will be checked ("we\'ll check the progress at your next visit in six weeks"); a result with no time attached.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
   [CALL_JUDGE_V4.id]: CALL_JUDGE_V4,
+  [CALL_JUDGE_V5.id]: CALL_JUDGE_V5,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
@@ -300,6 +371,8 @@ const PACKAGES = deepFreeze({
   [VOICEMAIL.id]: VOICEMAIL,
   [PHOTO_PRIVACY.id]: PHOTO_PRIVACY,
   [VISIT_ACCESS.id]: VISIT_ACCESS,
+  [ASK_WAVES_SAFETY.id]: ASK_WAVES_SAFETY,
+  [LAWN_RESULT_TIMING.id]: LAWN_RESULT_TIMING,
 });
 
 // Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a

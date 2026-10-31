@@ -17,7 +17,7 @@
  *     A payer-billed row is the third party's debt, never the homeowner's
  *     balance; a failed resolve DROPS the row (fail closed, same direction
  *     as previsit-balance-reminder).
- *   - positive remainder (total − credit_applied), computed in SQL with the
+ *   - positive remainder (total − credit_applied − amount_paid), computed in SQL with the
  *     same GREATEST expression as the balance sum, oldest first.
  *
  * Invoices are NEVER merged, voided, or re-totalled here — each row keeps
@@ -70,7 +70,7 @@ function applyOpenSelfPayPredicates(query) {
     // another billed member of the same packet. Left in, the row rides a
     // sibling's combined payment and the homeowner pays payer-owned debt.
     .whereRaw("COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
-    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0');
+    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) > 0');
 }
 
 function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db } = {}) {
@@ -80,7 +80,7 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
     .select(
       'id', 'invoice_number', 'status', 'service_type', 'service_date',
       'due_date', 'created_at', 'subtotal', 'discount_amount', 'total',
-      'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
+      'credit_applied', 'amount_paid', 'scheduled_service_id', 'stripe_payment_intent_id',
       database.raw("? AS is_overdue", [invoiceOverdueSql(database)]),
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
@@ -101,13 +101,16 @@ async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0,
   const hi = cents + Math.max(0, Math.round(Number(toleranceCents) || 0));
   return applyOpenSelfPayPredicates(database('invoices'))
     .join('customers', 'customers.id', 'invoices.customer_id')
-    .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
+    .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
+    // Whole-balance match only (partial payments, owner 2026-10-29): a notice never matches an invoice that already holds a part payment.
+    // The office records what is left from the invoice itself.
+    .whereRaw('COALESCE(invoices.amount_paid, 0) = 0')
     .orderBy('invoices.created_at', 'asc')
     .limit(Math.min(Math.max(1, Number(limit) || MAX_AMOUNT_CANDIDATES), MAX_AMOUNT_CANDIDATES))
     .select(
       'invoices.id', 'invoices.invoice_number', 'invoices.status', 'invoices.customer_id',
       'invoices.service_type', 'invoices.service_date', 'invoices.due_date', 'invoices.created_at',
-      'invoices.total', 'invoices.credit_applied', 'invoices.scheduled_service_id',
+      'invoices.total', 'invoices.credit_applied', 'invoices.amount_paid', 'invoices.scheduled_service_id',
       'customers.first_name as customer_first_name', 'customers.last_name as customer_last_name',
     );
 }
@@ -172,11 +175,11 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
 async function openBalanceExists(customerId, { excludeInvoiceId = null, database = db } = {}) {
   if (!customerId) return false;
   // ⭐ NO AMOUNTS LEAVE THE DATABASE. The full read's projection carries
-  // subtotal/total/credit_applied because its callers render them; an
+  // subtotal/total/credit_applied/amount_paid because its callers render them; an
   // existence probe has no business materializing 200 invoices' figures to
   // reduce them to a boolean. The cents-positive test runs IN SQL — the exact
   // integer arithmetic invoiceAmountDue performs
-  // (ROUND(total·100) − ROUND(credit·100) > 0), not the float GREATEST the
+  // (ROUND(total·100) − ROUND(credit·100) − ROUND(amount_paid·100) > 0), not the float GREATEST the
   // broad-phase WHERE uses — and the projection is only what the live payer
   // re-resolution needs. Same eligibility rules, no figures in the process.
   const query = database('invoices')
@@ -187,7 +190,7 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
     // Same withdrawal exclusion as the full read (pre-push P0) — this boolean
     // is SPOKEN to the customer, and payer-owned debt is not their balance.
     .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
-    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100)) > 0')
+    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100) - ROUND(COALESCE(amount_paid, 0) * 100)) > 0')
     .orderBy('created_at', 'asc')
     .limit(MAX_OPEN_INVOICES)
     .select('id', 'invoice_number', 'scheduled_service_id');
@@ -259,81 +262,4 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-/**
- * The {past_due_line} value for the with-invoice completion texts
- * (service_complete_with_invoice / service_report_v1_with_invoice) — the
- * SMS-rail counterpart of the balanceVisibility email note (customers on the
- * completion-SMS delivery rail get no invoice email, so the email-only note
- * never reaches them — owner directive 2026-08-15).
- *
- * Same shape contract as reservice-link.reserviceLineForCustomer: a
- * self-contained clause ending in '\n\n' so an inserted bare token renders
- * clean copy, and '' whenever there is nothing to say — gate off, no open
- * balance, or any lookup failure. Best-effort: NEVER throws (a balance-line
- * failure must not cost the customer their completion text), and an
- * unsupplied-key suppression can't occur because every render site of the
- * completion family supplies this key (expand half; the token lands in the
- * two with-invoice bodies via a separate data-only migration once this is
- * deployed — same rollout discipline as {reservice_line}).
- *
- * `excludeInvoiceId` is the visit's OWN invoice — it is today's bill, not a
- * previous balance. Selection (self-pay only, live payer re-resolution,
- * remainders not face values) is openBalanceSummary's — payer-billed debt is
- * never presented to the homeowner.
- *
- * The clause says "previous balance", NEVER "past due" (codex P1): the
- * shared selection is delivered-and-unpaid (sent/viewed/overdue), which
- * includes invoices still inside their payment terms — the email note uses
- * the same words for the same reason. And a total any survivor-dropping
- * resolve failure made INCOMPLETE is suppressed outright (codex P2): a
- * too-small figure asserted over SMS reads as the whole balance, so saying
- * nothing beats saying something wrong.
- */
-async function pastDueSmsLineForCustomer(customerId, { excludeInvoiceId = null } = {}) {
-  try {
-    const { isEnabled } = require('../config/feature-gates');
-    if (!customerId || !isEnabled('completionSmsBalance')) return '';
-    let incomplete = null;
-    const prev = await openBalanceSummary(customerId, {
-      excludeInvoiceId,
-      onResolveFailure: () => { incomplete = 'a payer resolve failed'; },
-      // A capped candidate page can hide further self-pay rows (codex r3
-      // P2) — same suppression as a resolve failure: never assert an
-      // amount the read cannot prove complete.
-      onTruncation: () => { incomplete = `the ${MAX_OPEN_INVOICES}-invoice candidate bound was hit`; },
-    });
-    if (incomplete) {
-      logger.warn(`[open-balance] SMS balance line suppressed for ${customerId} — ${incomplete}, so the total may understate`);
-      return '';
-    }
-    if (!(prev.total > 0)) return '';
-    const amount = `$${prev.total.toFixed(2)}`;
-    const source = prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`;
-    return `Reminder: your account also has a previous balance of ${amount} from ${source}, separate from today's invoice.\n\n`;
-  } catch (err) {
-    logger.warn(`[open-balance] SMS balance line failed for ${customerId}: ${err.message}`);
-    return '';
-  }
-}
-
-/**
- * Remove a rendered balance clause from an already-rendered SMS body — the
- * quiet-hours seam of the {past_due_line} rollout (codex P2, round 2): the
- * completion route's send-window PREcheck can pass at 19:5x ET while the
- * authoritative validator at the provider handoff still defers the send, so
- * the frozen replay body queued for the 8 AM window open could carry a
- * figure an overnight payment has invalidated. Callers strip the clause at
- * the moment the deferral is KNOWN (QUIET_HOURS_HOLD), which makes the
- * replay body identical to what the precheck-suppressed path would have
- * rendered. Mirrors the renderer's own post-processing (collapse \n{3,},
- * trim) so removing the sentence leaves no blank paragraph behind. A falsy
- * or absent clause returns the body unchanged.
- */
-function stripBalanceLineFromBody(body, line) {
-  if (typeof body !== 'string' || !line || typeof line !== 'string') return body;
-  const clause = line.trim();
-  if (!clause || !body.includes(clause)) return body;
-  return body.split(clause).join('').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, pastDueSmsLineForCustomer, stripBalanceLineFromBody, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

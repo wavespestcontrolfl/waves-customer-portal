@@ -304,6 +304,93 @@ function isBrowserUnavailable(err) {
   return /playwright|chromium|browser|executable|launch|ENOENT/i.test((err && err.message) || '');
 }
 
+// Skip reasons scanProduct (scanner.js) writes when the FETCH itself failed: the
+// adapter threw (a closed page, a dead browser, a timeout, an HTTP error, a login
+// failure). The other reasons are real vendor answers and are NOT fetch failures:
+//   no_candidate  the adapter ran and found nothing (not found / no price)
+//   unverified    a price came back but failed the name / EPA / size gate
+//   non_usd       a price came back in another currency
+//   no_proof_url  a price came back without a product URL
+const FETCH_CLASS_SKIP_REASONS = Object.freeze(['fetch_error']);
+
+// A run is degraded when at least this share of the evaluated products got no
+// usable vendor answer because of fetch / browser failures.
+const DEGRADED_FAILURE_SHARE = 0.5;
+
+// Why one product ended with no usable vendor result, or null when it did get one.
+//   - the whole product threw (r.error), or
+//   - no vendor gave a verified entry AND every skipped reason is fetch-class
+//     (a product with zero vendors, or any real "not found" answer, is not a failure).
+// PURE.
+function fetchFailureOf(r) {
+  if (!r) return null;
+  if (r.error) return { reason: 'error', detail: String((r.error && r.error.message) || r.error).slice(0, 160) };
+  const scan = r.scan || {};
+  const verified = scan.verified || [];
+  const skipped = scan.skipped || [];
+  if (verified.length || !skipped.length) return null;
+  if (!skipped.every((s) => FETCH_CLASS_SKIP_REASONS.includes(s.reason))) return null;
+  return { reason: 'fetch_failed', detail: String(skipped[0].detail || skipped[0].reason).slice(0, 160) };
+}
+
+// PURE: the products that ended with no usable vendor result, and whether that is
+// enough of the run to call it degraded.
+function classifyFetchFailures(results, evaluated) {
+  const failedProducts = [];
+  for (const r of results || []) {
+    const f = fetchFailureOf(r);
+    if (f) failedProducts.push({ product: (r.product && (r.product.name || r.product.productName)) || null, ...f });
+  }
+  const total = Number.isFinite(evaluated) && evaluated > 0 ? evaluated : (results || []).length;
+  const degraded = total > 0 && failedProducts.length / total >= DEGRADED_FAILURE_SHARE;
+  return { failedProducts, degraded };
+}
+
+// Watch for SIGTERM / SIGINT while a scan runs. A deploy sends SIGTERM and the
+// server's own shutdown() exits the process soon after, killing Chromium under the
+// scan; every remaining fetch then fails. This only OBSERVES the signal (process.once;
+// it never replaces the server's shutdown handler). If nothing else listens for the
+// signal, the default behavior (exit) is restored by re-raising it, so adding this
+// listener can never make a script ignore Ctrl-C. dispose() removes the listeners.
+function watchInterrupt(proc = process) {
+  const state = { signal: null };
+  const handlers = ['SIGTERM', 'SIGINT'].map((sig) => {
+    const fn = () => {
+      state.signal = state.signal || sig;
+      if (proc.listenerCount(sig) === 0) proc.kill(proc.pid, sig);
+    };
+    proc.once(sig, fn);
+    return [sig, fn];
+  });
+  return {
+    get signal() { return state.signal; },
+    dispose() { for (const [sig, fn] of handlers) proc.removeListener(sig, fn); },
+  };
+}
+
+// The reasons runWeeklyScan returns with ok:false that mean the scan did NOT do its
+// job and the cron must record a failure. browser_unavailable / vendors_missing /
+// no_scrapable_vendors are environment or config states and stay clean skips.
+const FAILED_SCAN_REASONS = Object.freeze(['interrupted', 'degraded', 'scan_error']);
+
+// Shared by the weekly cron, the catch-up cron and the admin manual run: call it
+// inside runExclusive with the runWeeklyScan result. A failed scan throws, so
+// job_health records 'failed' with a clear last_error (reason + counts) instead of
+// 'success'. Returns the result when it is fine.
+function throwIfScanFailed(result) {
+  if (!result || result.ok !== false || !FAILED_SCAN_REASONS.includes(result.reason)) return result;
+  const parts = [];
+  if (Number.isFinite(result.evaluated)) parts.push(`${result.evaluated} products evaluated`);
+  if (Number.isFinite(result.fetchFailed)) parts.push(`${result.fetchFailed} with fetch failures`);
+  if (Number.isFinite(result.scanned)) parts.push(`${result.scanned} scanned`);
+  if (result.signal) parts.push(`got ${result.signal}`);
+  if (result.draftId) parts.push(`draft ${result.draftId} staged`);
+  const first = result.error
+    || (Array.isArray(result.failedProducts) && result.failedProducts[0] && result.failedProducts[0].detail);
+  if (first) parts.push(`first error: ${String(first).slice(0, 120)}`);
+  throw new Error(`price scan ${result.reason}: ${parts.join(', ')}`);
+}
+
 // Run one weekly scan. Returns a summary; never throws. deps are injectable for tests:
 //   { db, scanMany, createDraft, selectSpecs, scrapableVendors, vendorByName, specs,
 //     vendors, activeMatchKeys, limit, selectOnly }
@@ -337,6 +424,17 @@ async function runWeeklyScan(opts = {}) {
     return { ok: true, evaluated: 0, scanned: 0, opportunities: 0, draftId: null, vendors: vendors.map((v) => v.name) };
   }
 
+  // From here the browser runs. Observe SIGTERM / SIGINT for the whole scan so a deploy
+  // that kills Chromium mid-run is recorded as interrupted, not as an empty success.
+  const interrupt = watchInterrupt();
+  try {
+    return await scanAndStage({ db, scanMany, create, specs, vendors, opts, interrupt });
+  } finally {
+    interrupt.dispose();
+  }
+}
+
+async function scanAndStage({ db, scanMany, create, specs, vendors, opts, interrupt }) {
   // Decrypt + attach login credentials for any login-adapter vendors (Veseris account pricing).
   await (opts.attachLoginCredentials || attachLoginCredentials)(db, specs, opts);
 
@@ -344,9 +442,15 @@ async function runWeeklyScan(opts = {}) {
   try {
     results = await scanMany(specs, { headless: true });
   } catch (err) {
+    if (interrupt.signal) {
+      logger.error(`[price-scan] weekly scan interrupted by ${interrupt.signal}: ${err.message}`);
+      return { ok: false, reason: 'interrupted', signal: interrupt.signal, evaluated: specs.length, error: err.message };
+    }
     const reason = isBrowserUnavailable(err) ? 'browser_unavailable' : 'scan_error';
     logger[reason === 'browser_unavailable' ? 'warn' : 'error'](`[price-scan] weekly scan aborted (${reason}): ${err.message}`);
-    return { ok: false, reason, evaluated: specs.length };
+    return reason === 'scan_error'
+      ? { ok: false, reason, evaluated: specs.length, error: String(err.message).slice(0, 200) }
+      : { ok: false, reason, evaluated: specs.length };
   }
 
   const summary = { evaluated: specs.length, scanned: 0, opportunities: 0, errors: 0, duplicates: 0 };
@@ -368,6 +472,13 @@ async function runWeeklyScan(opts = {}) {
   summary.verifiedTotal = breakdown.verifiedTotal;
   summary.vendorBreakdown = breakdown.vendors;
 
+  // Was this a real scan? A run the process signal cut short, or one where half the
+  // products got no usable vendor answer because the fetches failed, is a failed run
+  // even though scanMany returned. Fresh matches are still staged below.
+  const { failedProducts, degraded } = classifyFetchFailures(results, specs.length);
+  summary.fetchFailed = failedProducts.length;
+  const failure = interrupt.signal ? 'interrupted' : (degraded ? 'degraded' : null);
+
   let draftId = null;
   let includedCount = 0;
   if (matches.length) {
@@ -385,7 +496,10 @@ async function runWeeklyScan(opts = {}) {
       includedCount = row ? row.included_count : 0;
     }
   }
-  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.productsMatched} matched, ${summary.opportunities} opps, ${summary.duplicates} dup, ${summary.errors} err -> draft ${draftId || 'none'} (${includedCount} items); per-vendor=${JSON.stringify(summary.vendorBreakdown)}`);
+  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.productsMatched} matched, ${summary.opportunities} opps, ${summary.duplicates} dup, ${summary.errors} err, ${summary.fetchFailed} fetch-failed -> draft ${draftId || 'none'} (${includedCount} items)${failure ? ` [${failure}${interrupt.signal ? ` by ${interrupt.signal}` : ''}]` : ''}; per-vendor=${JSON.stringify(summary.vendorBreakdown)}`);
+  if (failure) {
+    return { ok: false, reason: failure, ...(interrupt.signal ? { signal: interrupt.signal } : {}), ...summary, draftId, includedCount, failedProducts };
+  }
   return { ok: true, ...summary, draftId, includedCount };
 }
 
@@ -397,6 +511,13 @@ module.exports = {
   opportunityToMatch,
   tallyBreakdown,
   isBrowserUnavailable,
+  fetchFailureOf,
+  classifyFetchFailures,
+  watchInterrupt,
+  throwIfScanFailed,
+  FETCH_CLASS_SKIP_REASONS,
+  FAILED_SCAN_REASONS,
+  DEGRADED_FAILURE_SHARE,
   isOnHost,
   attachLoginCredentials,
   LOGIN_ADAPTER_KEYS,

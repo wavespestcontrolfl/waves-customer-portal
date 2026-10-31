@@ -1,6 +1,6 @@
 const {
-  normalizeLeadAddress, parseRawAddress, formatAddress,
-  normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
+  normalizeLeadAddress, leadAddressFields, streetLineHoldsLocality, parseRawAddress, formatAddress,
+  normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, premiseUnitKey,
   dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine, structuralUnitPart,
 } = require('../utils/address-normalizer');
 
@@ -518,6 +518,29 @@ describe('unitLineValueKey', () => {
   });
 });
 
+// Shared by the quote wizard's same-person link (customer-dedupe) and the
+// consultation page's shell reuse (inspection-public): one key per premise.
+describe('premiseUnitKey', () => {
+  test('an inline building plus a line-2 apartment keys like the compound unit typed on line 2 (Codex #7249 r4)', () => {
+    expect(premiseUnitKey('123 Sample St Bldg C', 'Apt 2')).toBe(premiseUnitKey('123 Sample St', 'Bldg C Apt 2'));
+    expect(premiseUnitKey('123 Sample St Bldg C', 'Apt 2')).not.toBe(premiseUnitKey('123 Sample St', 'Bldg C Apt 3'));
+  });
+
+  test('the same unit inline and on line 2 counts once', () => {
+    expect(premiseUnitKey('123 Sample St Apt 2', 'Unit 2')).toBe(premiseUnitKey('123 Sample St', '#2'));
+  });
+
+  test('no unit is empty, and a unit never equals no unit', () => {
+    expect(premiseUnitKey('123 Sample St', '')).toBe('');
+    expect(premiseUnitKey('123 Sample St', null)).toBe('');
+    expect(premiseUnitKey('123 Sample St', 'Apt 4')).not.toBe(premiseUnitKey('123 Sample St', ''));
+  });
+
+  test('a building is not an apartment, inline or on line 2', () => {
+    expect(premiseUnitKey('123 Sample St Bldg 2', '')).not.toBe(premiseUnitKey('123 Sample St', 'Apt 2'));
+  });
+});
+
 describe('splitStreetLineUnit', () => {
   test('splits a trailing designator + value pair', () => {
     expect(splitStreetLineUnit('123 Main St Apt A')).toEqual({ street: '123 Main St', unit: 'Apt A' });
@@ -733,5 +756,77 @@ describe('parseRawAddress — conversational words that are also state codes', (
   test('a full state name anywhere in the tail is still a state', () => {
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
     expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });
+  });
+});
+
+describe('leadAddressFields', () => {
+  const { addressKey } = require('../services/customer-property-address-keys');
+  const keyOf = (f) => addressKey({ address_line1: f.line1, address_line2: f.line2, city: f.city, zip: f.zip });
+  const unchanged = (lead) => ({ line1: lead.address, line2: null, city: lead.city || null, state: 'FL', zip: lead.zip || null });
+
+  test("splits the form's one-line address so it keys as the same house as the form's own customer", () => {
+    const fields = leadAddressFields({ address: '12 Sample Ct East, Parrish, FL 34219', city: 'Parrish', zip: null });
+    expect(fields).toEqual({ line1: '12 Sample Ct East', line2: null, city: 'Parrish', state: 'FL', zip: '34219' });
+    // The customer the website form itself saved for the same submission.
+    expect(keyOf(fields)).toBe(addressKey({ address_line1: '12 Sample Ct East', city: 'Parrish', zip: '34219' }));
+    // No ZIP: a bare "FL" is the state, not a floor.
+    expect(leadAddressFields({ address: '12 Sample Ct East, Parrish, FL', city: 'Parrish' })).toMatchObject({ line1: '12 Sample Ct East', zip: null });
+    expect(leadAddressFields({ address: '800 N Tamiami Trl, Sarasota, FL 34236, USA', city: 'Sarasota' })).toMatchObject({ line1: '800 N Tamiami Trl', zip: '34236' });
+    expect(leadAddressFields({ address: '123 Royal Palm Ct, Venice', city: 'Venice' })).toMatchObject({ line1: '123 Royal Palm Ct', city: 'Venice' });
+  });
+
+  test('a unit right after the street stays on the street line; the lead zip column wins', () => {
+    expect(leadAddressFields({ address: '123 Main St, Apt 4, Sarasota, FL 34236', city: 'Sarasota' })).toMatchObject({ line1: '123 Main St Apt 4', zip: '34236' });
+    expect(leadAddressFields({ address: '123 Main St, #4, Sarasota, FL 34236', city: 'Sarasota' })).toMatchObject({ line1: '123 Main St #4', zip: '34236' });
+    expect(leadAddressFields({ address: '9 Lead Rd, Bradenton, FL 34211', city: 'Bradenton', zip: '34212' })).toMatchObject({ line1: '9 Lead Rd', zip: '34212' });
+  });
+
+  test('leaves anything that is not a street plus a locality as it was', () => {
+    for (const lead of [
+      // A unit tail is not a locality: a five-digit unit is not a ZIP, and no unit is dropped.
+      { address: '123 Main St, Apt 12345', city: 'Sarasota' },
+      { address: '123 Main St, Apt 4', city: 'Sarasota' },
+      { address: '123 Main St, Sarasota, FL 34236, Apt 4', city: 'Sarasota' },
+      // A segment that is not the lead's city may be a unit word.
+      { address: '100 Ocean Blvd, Penthouse, FL 34236', city: 'Sarasota' },
+      { address: '100 Ocean Blvd, Penthouse 2, Sarasota, FL 34236', city: 'Sarasota' },
+      { address: '9 Lead Rd, Lakewood Ranch, FL 34211', city: 'Bradenton' },
+      // A call's partial house number is not read as a ZIP; no house number, no split.
+      { address: '12912' },
+      { address: 'Parrish, FL', city: 'Parrish' },
+      { address: '123 Royal Palm Ct, Venice' },
+      { address: '123 Main St', city: 'Bradenton', zip: '34205' },
+    ]) expect(leadAddressFields(lead)).toEqual(unchanged(lead));
+  });
+});
+
+describe('streetLineHoldsLocality', () => {
+  test('a street line that also holds its city, state or ZIP', () => {
+    for (const [address_line1, city] of [
+      ['12 Sample Ct East, Parrish, FL 34219', 'Parrish'],
+      ['10451 Sample Cove, Parrish Fl', 'Parrish'],
+      ['13524 Sample Ct Parrish, 34219', 'Parrish'],
+      ['6428 Sample Lane, Lakewood Ranch, Fl., 34202', 'Lakewood Ranch'],
+      // The line's city may differ from the city column; the state and ZIP still give it away.
+      ['5523 Sample Pine Ct,bradenton Fl 34211', 'Lakewood Ranch'],
+      ['15715 8th Pl E, Bradenton, Fl 34212, Usa', 'Bradenton'],
+      ['123 Royal Palm Ct, Venice', 'Venice'],
+      ['123 Main St, Apt 4, Sarasota, FL 34236', 'Sarasota'],
+      ['17394 Sample Creek Trl Parrish FL 34219', 'Parrish'],
+    ]) expect([address_line1, streetLineHoldsLocality({ address_line1, city })]).toEqual([address_line1, true]);
+  });
+
+  test('units, street-name words and plain streets are not a locality', () => {
+    for (const [address_line1, city] of [
+      ['4907 18th Street West, Unit A And B', 'Bradenton'],
+      ['324 48th Street, Court West', 'Palmetto'],
+      ['6050 State Road 70 E, Unit A', 'Bradenton'],
+      ['123 Main St, Apt 12345', 'Sarasota'],
+      ['123 Main St, Fl 2', 'Sarasota'],
+      ['123 Royal Palm Ct, Venice', null],
+      ['123 Main St Apt 4', 'Sarasota'],
+      ['123 Main St', 'Sarasota'],
+      ['', ''],
+    ]) expect([address_line1, streetLineHoldsLocality({ address_line1, city })]).toEqual([address_line1, false]);
   });
 });

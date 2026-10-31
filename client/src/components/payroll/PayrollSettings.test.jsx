@@ -167,3 +167,131 @@ describe('Pay method control', () => {
     expect(writes[0].body).toEqual({ payMethod: 'check', consentOn: null });
   });
 });
+
+describe('Family employee setting (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
+  const FAMILY = { relationship: 'parent', entity: 'single_member_llc', exemptFrom: '2027-01-04' };
+  function serve(withFamily) {
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/technicians' && !options.method) {
+        return reply({ technicians: TECHS.map((tech, i) => (withFamily ? { ...tech, familyEmployment: i === 0 ? FAMILY : null } : tech)) });
+      }
+      return base(path, options);
+    });
+  }
+
+  it('shows nothing with the gate off', async () => {
+    serve(false);
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.queryByText('Family employee')).toBeNull();
+    expect(screen.queryByText(/unemployment tax/)).toBeNull();
+  });
+
+  it('shows the setting, or "Not set", for each employee', async () => {
+    serve(true);
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.getByText('Family employee')).toBeInTheDocument();
+    expect(within(rowFor('Sample Alpha')).getByText('Parent, single-member LLC, from Jan 4, 2027')).toBeInTheDocument();
+    expect(within(rowFor('Sample Beta')).getByText('Not set')).toBeInTheDocument();
+  });
+
+  it('saves a setting with the relationship, entity and start date', async () => {
+    serve(true);
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Beta');
+    fireEvent.click(within(rowFor('Sample Beta')).getByRole('button', { name: 'Edit' }));
+    const row = within(rowFor('Sample Beta'));
+    expect(row.getByText(/Waves pays no federal or Florida unemployment tax on this person's pay; income tax, Social Security and Medicare stay\./)).toBeInTheDocument();
+    expect(row.getByText(/Clear it if Waves elects S corporation status or takes a partner\./)).toBeInTheDocument();
+    const save = row.getByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    expect(row.getByRole('button', { name: 'Clear' })).toBeDisabled();
+    fireEvent.change(row.getByLabelText('Relationship to the owner for Sample Beta'), { target: { value: 'spouse' } });
+    fireEvent.change(row.getByLabelText('Employer entity for Sample Beta'), { target: { value: 'sole_proprietorship' } });
+    fireEvent.change(row.getByLabelText('Family employee start date for Sample Beta'), { target: { value: '2027-01-04' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({
+      path: '/admin/payroll/technicians/tech-b/family-employment',
+      method: 'PUT',
+      body: { relationship: 'spouse', entity: 'sole_proprietorship', exemptFrom: '2027-01-04' },
+    });
+    await screen.findByText('Family employee setting saved for Sample Beta.');
+  });
+
+  it('clears a setting', async () => {
+    serve(true);
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    fireEvent.click(within(rowFor('Sample Alpha')).getByRole('button', { name: 'Edit' }));
+    const row = within(rowFor('Sample Alpha'));
+    expect(row.getByLabelText('Family employee start date for Sample Alpha')).toHaveValue('2027-01-04');
+    fireEvent.click(row.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({ path: '/admin/payroll/technicians/tech-a/family-employment', method: 'PUT', body: { relationship: null } });
+    await screen.findByText('Family employee setting cleared for Sample Alpha.');
+  });
+
+  it('shows the server answer when a save is refused', async () => {
+    serve(true);
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => (options.method === 'PUT'
+      ? reply({ error: 'The family employee setting is for W-2 employees.' }, false, 409)
+      : base(path, options)));
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Beta');
+    fireEvent.click(within(rowFor('Sample Beta')).getByRole('button', { name: 'Edit' }));
+    const row = within(rowFor('Sample Beta'));
+    fireEvent.change(row.getByLabelText('Family employee start date for Sample Beta'), { target: { value: '2027-01-04' } });
+    fireEvent.click(row.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The family employee setting is for W-2 employees.');
+  });
+});
+
+describe('Mercury recipient id (GATE_PAYROLL_MERCURY_STATUS)', () => {
+  const withMercury = () => adminFetch.mockImplementation((path, options = {}) => {
+    if (options.method === 'PUT') {
+      writes.push({ path, method: options.method, body: options.body });
+      if (options.body.recipientId === 'bad') return reply({ error: 'Mercury has no recipient with that id.' }, false, 400);
+      return reply({ technician: { id: 'tech-a', mercuryRecipientId: options.body.recipientId, recipientName: 'Sample Alpha', verified: true } });
+    }
+    if (path === '/admin/payroll/technicians') return reply({ technicians: TECHS.map(tech => ({ ...tech, mercuryRecipientId: tech.id === 'tech-b' ? '22222222-2222-4222-8222-222222222222' : null })) });
+    if (path === '/admin/payroll/runs') return reply({ runs: [] });
+    return reply({}, false, 404);
+  });
+
+  it('shows no column when the server sends no field (gate off)', async () => {
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.queryByRole('columnheader', { name: 'Mercury recipient id' })).toBeNull();
+  });
+
+  it('shows the saved id, and saves a new one, showing the name Mercury reports', async () => {
+    withMercury();
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(screen.getByRole('columnheader', { name: 'Mercury recipient id' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Mercury recipient id for Sample Beta')).toHaveValue('22222222-2222-4222-8222-222222222222');
+    const input = screen.getByLabelText('Mercury recipient id for Sample Alpha');
+    const save = within(input.closest('form')).getByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    fireEvent.change(input, { target: { value: ' 33333333-3333-4333-8333-333333333333 ' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ path: '/admin/payroll/technicians/tech-a/mercury-recipient', method: 'PUT', body: { recipientId: '33333333-3333-4333-8333-333333333333' } });
+    await screen.findByText('Mercury recipient saved for Sample Alpha. Mercury shows the name Sample Alpha.');
+  });
+
+  it('shows the server answer when Mercury has no such recipient', async () => {
+    withMercury();
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    const input = screen.getByLabelText('Mercury recipient id for Sample Alpha');
+    fireEvent.change(input, { target: { value: 'bad' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await screen.findByText('Mercury has no recipient with that id.');
+  });
+});
+

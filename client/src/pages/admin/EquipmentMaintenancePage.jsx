@@ -250,7 +250,11 @@ export default function EquipmentMaintenancePage({
       // Build monthly cost trend from recent records
       const byMonth = {};
       (recRes.records || []).forEach(r => {
-        const m = (r.performed_at || "").slice(0, 7);
+        // The ET month the service happened in, like the record dates below:
+        // the first 7 characters of the UTC timestamp put an evening service
+        // on a month's last day into the next month.
+        const at = r.performed_at ? new Date(r.performed_at) : null;
+        const m = at && !Number.isNaN(at.getTime()) ? etDateString(at).slice(0, 7) : "";
         if (m) byMonth[m] = (byMonth[m] || 0) + parseFloat(r.total_cost || 0);
       });
       const months = Object.keys(byMonth).sort().slice(-6);

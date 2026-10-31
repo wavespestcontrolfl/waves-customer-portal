@@ -72,6 +72,7 @@ import {
   Link2,
   Mail,
   MessageSquare,
+  MessagesSquare,
   Ban,
   Mic,
   MicOff,
@@ -86,6 +87,8 @@ import EmailPage from "./EmailPage";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
+import PortalInboxTabV2 from "./PortalInboxTabV2";
+import MessengerTabV2 from "./MessengerTabV2";
 import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
@@ -291,6 +294,23 @@ const TABS = [
     adminOnly: true,
   },
 ];
+// Tabs behind a dark gate. Each is added to the nav only when its summary endpoint answers
+// enabled:true; the answer's count rides in the tab label. Listed in nav-insertion order: `after` names the
+// anchor tabs, the first one present wins.
+//  - Portal (GATE_PORTAL_INBOX): what customers asked for inside the customer portal and nobody answered.
+//    Owner-only, right after Triage.
+//  - Messenger (GATE_MESSENGER_INBOX): the Facebook page's Messenger threads. Every staff role (the server
+//    scopes a technician to their own customers); right after Portal, else Triage, else SMS.
+const GATED_TABS = [
+  { tab: { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true }, Component: PortalInboxTabV2, summary: "/admin/portal-inbox/summary", countField: "count", after: ["triage"] },
+  { tab: { key: "messenger", label: "Messenger", Icon: MessagesSquare }, Component: MessengerTabV2, summary: "/admin/messenger/summary", countField: "unanswered", after: ["portal", "triage", "sms"] },
+];
+// A tab placed right after the first of `anchors` that is in the nav.
+function insertTabAfter(tabs, tab, anchors) {
+  const index = anchors.map((key) => tabs.findIndex((t) => t.key === key)).find((i) => i >= 0);
+  const at = index === undefined ? 0 : index + 1;
+  return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
+}
 const SMS_LOG_PAGE_SIZE = 500;
 
 // Short reviewer-facing labels for an Agent Review draft's intended_actions
@@ -1139,7 +1159,17 @@ function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, 
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
-export function SmsTab({ active, customer = null, customerMessages = [], customerReadScope = null, onSent, linkRequest = 0 }) {
+export function SmsTab({
+  active,
+  customer = null,
+  customerMessages = [],
+  customerReadScope = null,
+  customerHistoryError = "",
+  feedbackEnabled = false,
+  onRetryCustomerHistory,
+  onSent,
+  linkRequest = 0,
+}) {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -1294,6 +1324,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const smsRequestRef = useRef(null);
   const activeThreadRef = useRef(activeThread);
   activeThreadRef.current = activeThread;
+  // The activity counts are office-wide and admin-only on the server, so a
+  // technician login never asks for them (it would only get a 403).
+  const smsSkipsStatsRef = useRef(smsIsTechnicianRole);
+  smsSkipsStatsRef.current = smsIsTechnicianRole;
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
@@ -1479,7 +1513,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     return Promise.allSettled([
       logRequest,
-      options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
+      options.background || smsSkipsStatsRef.current ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
@@ -1515,9 +1549,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
       }
       if (!options.background) {
-        const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
-        setSmsStatsError(!statsData || !!statsData.error);
-        if (statsData && !statsData.error) setStats(statsData);
+        if (!smsSkipsStatsRef.current) {
+          const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
+          setSmsStatsError(!statsData || !!statsData.error);
+          if (statsData && !statsData.error) setStats(statsData);
+        }
         const blockedData = blockedResult.status === "fulfilled" ? blockedResult.value : null;
         if (blockedData && Array.isArray(blockedData.numbers)) {
           setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
@@ -3155,6 +3191,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
 
   return (
     <div>
+      {customer && feedbackEnabled && customerHistoryError && (
+        <ActionFeedback error onRetry={onRetryCustomerHistory} className="mb-3">
+          {customerHistoryError}
+        </ActionFeedback>
+      )}
       {!customer && <div className="mb-3 flex flex-wrap items-center gap-3">
         <Button variant="secondary" disabled={smsRefreshing} onClick={() => loadData(smsSearchRef.current, { refresh: true })}>
           {smsRefreshing ? "Refreshing…" : "Refresh messages"}
@@ -3164,7 +3205,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {smsStatsError && <ActionFeedback error>Activity counts are unavailable. Previously loaded counts may be out of date.</ActionFeedback>}
       </div>}
       {/* Stats + auto-reply */}
-      {!customer && (!smsStatsError || stats) && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && !smsIsTechnicianRole && (!smsStatsError || stats) && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
@@ -4126,6 +4167,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       {active && selected360Id && (
         <Customer360ProfileV2
           customerId={selected360Id}
+          feedbackEnabled={feedbackEnabled}
           onClose={() => setSelected360Id(null)}
         />
       )}
@@ -4165,12 +4207,40 @@ export default function CommunicationsPageV2() {
   // Memoized by role: the hash-sync effect below depends on `tabs`, and a
   // fresh array every render would re-run applyHashTab() after each tab
   // click, snapping the user back to the deep-linked tab (codex P2).
-  const tabs = useMemo(
-    () => TABS.filter((t) => !t.adminOnly || isAdminRole),
-    [isAdminRole],
+  // counts: a gated tab's key is present only once its one-time summary read answered enabled:true (gate
+  // off, a failed read or a role without the tab leaves it out). The tabs report later counts through
+  // countSetters, which keep one identity for the life of the page.
+  const [counts, setCounts] = useState({});
+  const countSetters = useMemo(() => Object.fromEntries(GATED_TABS.map(({ tab: { key } }) => [
+    key, (n) => setCounts((prev) => (prev[key] === n ? prev : { ...prev, [key]: n })),
+  ])), []);
+  useEffect(() => {
+    let cancelled = false;
+    GATED_TABS.filter(({ tab }) => isAdminRole || !tab.adminOnly).forEach(async ({ tab, summary, countField }) => {
+      try {
+        const answer = await adminFetch(summary);
+        if (!cancelled && answer?.enabled === true) countSetters[tab.key](Number(answer[countField]) || 0);
+      } catch {
+        /* no tab when the summary cannot be read */
+      }
+    });
+    return () => { cancelled = true; };
+  }, [isAdminRole, countSetters]);
+  const shown = Object.keys(counts).join();
+  const tabs = useMemo(() => GATED_TABS.reduce(
+    (nav, { tab, after }) => (shown.split(",").includes(tab.key) ? insertTabAfter(nav, tab, after) : nav),
+    TABS.filter((t) => !t.adminOnly || isAdminRole),
+  ), [isAdminRole, shown]);
+  // The count rides in the label (the nav has no badge slot); label changes do
+  // not change `tabs`, so the hash-sync effect below never re-runs for them.
+  const navSections = useMemo(
+    () => tabs.map((t) => (counts[t.key] > 0 ? { ...t, label: `${t.label} (${counts[t.key]})` } : t)),
+    [tabs, counts],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
+  const gatedTab = GATED_TABS.find(({ tab: { key } }) => key === activeTab);
   const smsParams = new URLSearchParams(location.search);
+  const feedbackEnabled = smsParams.get("feedback") === "1";
   const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
   const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
   const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
@@ -4224,7 +4294,7 @@ export default function CommunicationsPageV2() {
   useRenderedTabBeacon("/admin/communications", usageLeafFor(activeTab, templateKind));
 
   const navigation = {
-    title: "Communications", icon: MessageSquare, sections: tabs,
+    title: "Communications", icon: MessageSquare, sections: navSections,
     activeKey: activeTab, onSectionChange: selectTab,
     ariaLabel: "Communications section", navGridClassName: "grid-cols-2 md:grid-cols-7",
   };
@@ -4244,9 +4314,10 @@ export default function CommunicationsPageV2() {
         secondaryNavGridClassName="grid-cols-2"
       />}
       {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
-      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
+      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
+      {gatedTab && <gatedTab.Component onCount={countSetters[activeTab]} routeHash={location.hash} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

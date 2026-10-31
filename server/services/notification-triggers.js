@@ -9,6 +9,8 @@
  *
  * Adding a new trigger:
  *   1. Add to TRIGGER_REGISTRY below (key, label, category, priority, build())
+ *      (with a `rule`: area, severity, who, and doneWhen + closedBy or expiryDays;
+ *      server/tests/admin-alert-catalog-contract.test.js enforces it)
  *   2. Add to the seed list in the notification_preferences migration
  *   3. Call `triggerNotification('your_key', { ... })` from the route that fires it
  */
@@ -19,6 +21,7 @@ const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
+const { agentName } = require('./voice-agent/relay-protocol');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -132,6 +135,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => {
       const failures = Array.isArray(p.failures) ? p.failures : [];
       return {
@@ -159,6 +163,7 @@ const TRIGGER_REGISTRY = {
     category: 'customer_landline_from_call',
     priority: 'normal',
     group: 'Leads & Sales',
+    rule: { area: 'Customers', severity: 'needs-you', who: 'person', expiryDays: 30 },
     allowContactDetails: true,
     build: (p) => ({
       title: `Landline on file: ${p.name || 'New customer'}`,
@@ -173,6 +178,7 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', doneWhen: 'lead_contacted', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Owner-only end to end: THIS PR makes /admin/leads requireAdmin (sales
     // is not a technician surface), so push and feed visibility follow the
     // surface — neither the bell row nor the push reaches non-admin staff.
@@ -205,6 +211,7 @@ const TRIGGER_REGISTRY = {
     category: 'job_application',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
     // Recruiting is requireAdmin — a technician receiving this bell/push
     // would land on a 403. Deliver to admin-role users only (codex P1).
     adminRoleOnly: true,
@@ -221,11 +228,11 @@ const TRIGGER_REGISTRY = {
   // Same no-PII contract as new_job_application: mode + when label only,
   // no name/phone/email cross the requireAdmin boundary.
   job_interview_booked: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Interview booked',
     category: 'job_application',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'fyi', who: 'person', expiryDays: 7 },
     adminRoleOnly: true,
     build: (p) => ({
       title: 'Interview booked',
@@ -239,11 +246,11 @@ const TRIGGER_REGISTRY = {
   },
   // Fired by the public interview link's "I'm no longer interested" action.
   job_application_withdrawn: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Applicant withdrew',
     category: 'job_application',
     priority: 'normal',
     group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'fyi', who: 'person', expiryDays: 7 },
     adminRoleOnly: true,
     build: (p) => ({
       title: 'Applicant withdrew',
@@ -261,6 +268,7 @@ const TRIGGER_REGISTRY = {
     category: 'job_application',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
     adminRoleOnly: true,
     build: (p) => ({
       title: 'Applicant replied',
@@ -270,15 +278,15 @@ const TRIGGER_REGISTRY = {
         : '/admin/recruiting',
     }),
   },
-  // Fired by reschedule-intent-flagger when an inbound SMS reads as a
-  // reschedule/away request while a visit is still armed — the automation
-  // does not act on these, so the owner must (2026-08-05 incident class:
-  // customer asked to reschedule at 12:30am, visit ran and invoiced anyway).
+  // Nothing fires this today (the reschedule-intent flagger and its gate were
+  // removed). Kept so the bell rows it wrote before 2026-08-15 still render,
+  // stay in the technician feed allowlist and keep their push tag.
   appointment_reschedule_intent: {
     label: 'Customer asked to reschedule by text',
     category: 'schedule',
     priority: 'urgent',
     group: 'Communication',
+    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     // Schedule-surface alert a field tech must see (their visit may still
     // be armed) — one of the few triggers in the non-admin bell feed.
     techVisible: true,
@@ -303,6 +311,7 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_closed', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Composed through docs/admin-notifications.md: `alert` carries the
     // structured parts (area, severity, subject, done-when, who) into the
     // row's metadata. A customer's own words that trip a copy rule never
@@ -367,6 +376,7 @@ const TRIGGER_REGISTRY = {
     // belong in the non-admin bell feed (fail-closed allowlist).
     techVisible: true,
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'text_answered', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     build: (p) => ({
       // One bell row per conversation: a known sender's later texts rewrite the
       // row while it is still open, so a count leads the title ("3 texts from
@@ -394,6 +404,8 @@ const TRIGGER_REGISTRY = {
       link: p.threadId
         ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
+      // Handled: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No reply.
+      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('handled') },
     }),
   },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
@@ -404,13 +416,14 @@ const TRIGGER_REGISTRY = {
   // registered here so the persisted rows carry a known trigger key and
   // `build` mirrors the shape it writes.
   sandy_transfer_no_context: {
-    label: 'Sandy transfer arrived without its summary',
+    label: `${agentName()} transfer arrived without its summary`,
     category: 'alert',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
     build: (p) => ({
-      title: 'Sandy transfer without context',
+      title: `${agentName()} transfer without context`,
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
       link: callLink(p),
     }),
@@ -422,6 +435,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/sms-operational-actions.js', promise: true },
     build: (p) => ({
       title: 'An SMS request needs follow-up',
       body: 'Open the customer profile to verify completion or take the next step.',
@@ -440,6 +454,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/call-commitments-watchdog.js', promise: true },
     build: (p) => ({
       title: p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue',
       body: p.summary || 'Open the Owed tab to mark it done or dismiss it.',
@@ -458,6 +473,7 @@ const TRIGGER_REGISTRY = {
     category: 'voicemail_callback',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     // Owner ruling (Adam, 2026-07-30, same as twilio_failure): the callback
     // bell shows the real number — a masked callback number is undialable.
     // Payload fields are built by call-recording-processor, not free text.
@@ -485,6 +501,7 @@ const TRIGGER_REGISTRY = {
     category: 'inbound_email',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'email_answered', closedBy: 'server/services/admin-alert-relevance.js', contact: true },
     build: (p) => ({
       title: `Email from ${p.fromName || 'a customer'}`,
       body: redactSensitiveText(p.subject || '(no subject)').slice(0, 140),
@@ -499,6 +516,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', closedBy: 'server/services/missed-call-bell.js', contact: true },
     // Same owner ruling as the voicemail bell: the number must be dialable.
     allowContactDetails: true,
     build: (p) => ({
@@ -510,6 +528,8 @@ const TRIGGER_REGISTRY = {
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
+      // Called back: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No call.
+      alert: { buttons: require('./admin-alert-buttons').closeNoteButtons('called_back') },
     }),
   },
   // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
@@ -518,6 +538,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     allowContactDetails: true,
     build: (p) => ({
       title: `Repeat caller — ${p.name || 'unknown number'}`,
@@ -533,6 +554,7 @@ const TRIGGER_REGISTRY = {
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/promise-chaser-bell.js', promise: true },
     allowContactDetails: true,
     build: (p) => {
       const who = p.name || p.phone || 'A lead';
@@ -556,17 +578,18 @@ const TRIGGER_REGISTRY = {
   // call ended with no booking, no lead and no transfer — gated by
   // GATE_RELAY_UNBOOKED_HANDOFF. See services/voice-agent/relay-unbooked-handoff.js.
   relay_unbooked_call: {
-    label: 'Sandy call ended without a booking',
+    label: `${agentName()} call ended without a booking`,
     category: 'missed_call',
     priority: 'high',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     // Same owner ruling as the voicemail bell: a callback number must be
     // dialable. The payload is built by the hand-off module from the
     // PAN-scrubbed call summary, not free model text.
     allowContactDetails: true,
     build: (p) => ({
-      title: 'Sandy call ended without a booking',
-      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : 'The caller spoke with Sandy, then the call ended.']
+      title: `${agentName()} call ended without a booking`,
+      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : `The caller spoke with ${agentName()}, then the call ended.`]
         .filter(Boolean).join(' - '),
       link: callLink(p),
     }),
@@ -579,6 +602,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Deposit paid but not credited',
       body: `Estimate ${String(p.estimateId || 'unknown').slice(0, 40)}: deposit is on the ledger but the first-invoice credit failed — reconcile manually`,
@@ -594,6 +618,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'Comms', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report not delivered',
       body: `${p.customerName || 'A customer'} did not receive their service report email${p.serviceLabel ? ` (${p.serviceLabel})` : ''} after ${p.attempts || 'multiple'} attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. Re-send it from the customer's service.`,
@@ -609,6 +634,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'normal',
     group: 'Alerts',
+    rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report PDF could not be generated',
       body: `The PDF for ${p.customerName || 'a customer'}'s service report${p.serviceLabel ? ` (${p.serviceLabel})` : ''} failed to render after ${p.attempts || 'multiple'} attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. The report link still works; re-render to restore the PDF.`,
@@ -627,6 +653,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report link unavailable — completion text withheld',
       body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
@@ -644,6 +671,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
@@ -657,6 +685,7 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
     // Tech-visible: urgent comms failures link to /admin/communications,
     // a technician-allowed surface — a failed customer call/SMS is exactly
     // what field staff must see and acknowledge.
@@ -696,11 +725,11 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_succeeded: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Payment received',
     category: 'payment',
     priority: 'low',
     group: 'Payments',
+    rule: { area: 'Billing', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => ({
       title: 'Payment received',
       body: `$${Number(p.amount || 0).toFixed(2)} from ${p.customerName || 'customer'}`,
@@ -712,6 +741,7 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'urgent',
     group: 'Payments',
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'invoice_paid', closedBy: 'server/services/payment-failed-alert-close.js' },
     // Owner audit 2026-10-01: the headline names WHO ("Billing — Dana Example's $85.00
     // payment failed"), the body says why the processor refused, and the link opens the
     // invoice, else the customer, never the revenue list. A customer with no name on file
@@ -737,6 +767,7 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'high',
     group: 'Payments',
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => {
       const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
       const method = p.methodLabel || 'Payment method';
@@ -749,11 +780,11 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_refunded: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Refund issued',
     category: 'payment',
     priority: 'normal',
     group: 'Payments',
+    rule: { area: 'Billing', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => ({
       title: p.isFullRefund ? 'Full refund issued' : 'Partial refund issued',
       body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}`,
@@ -761,7 +792,6 @@ const TRIGGER_REGISTRY = {
     }),
   },
   job_complete: {
-    informational: true, // a fact, not work: needs_me leaves it out
     // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
     techVisible: true,
     // Owner ruling 2026-09-24: 13% of these bells were ever opened — off
@@ -771,10 +801,14 @@ const TRIGGER_REGISTRY = {
     category: 'service',
     priority: 'low',
     group: 'Field Operations',
+    rule: { area: 'Schedule', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => ({
       title: 'Job complete',
       body: `${p.techName || 'Tech'} finished ${p.serviceName || 'service'} at ${p.customerName || 'customer'}`,
-      link: p.serviceId ? `/admin/schedule?service=${p.serviceId}` : '/admin/schedule',
+      // The dispatch page opens the visit's detail sheet from ?appointment= on ?date=.
+      link: p.serviceId && p.serviceDate
+        ? `/admin/dispatch?tab=schedule&date=${encodeURIComponent(p.serviceDate)}&appointment=${encodeURIComponent(p.serviceId)}`
+        : '/admin/schedule',
     }),
   },
   estimate_expired: {
@@ -782,6 +816,7 @@ const TRIGGER_REGISTRY = {
     category: 'estimate',
     priority: 'normal',
     group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', expiryDays: 30 },
     // Banner-first + actionable (owner ruling 2026-07-30): the WHO leads the
     // title, and the old nameless fallback ("Customer expired without a
     // decision.") never renders — a batch without names uses the count copy.
@@ -818,6 +853,7 @@ const TRIGGER_REGISTRY = {
     category: 'estimate',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
     build: (p) => ({
       title: p.bundled
         ? `Bundle self-applied: ${p.customerName || 'Customer'}`
@@ -847,11 +883,11 @@ const TRIGGER_REGISTRY = {
     }),
   },
   one_tap_purchase_completed: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'One-tap purchase completed',
     category: 'estimate',
     priority: 'high',
     group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => ({
       title: `One-tap purchase: ${p.customerName || 'Customer'}`,
       body: `Self-purchased ${p.serviceLabel || 'a service'} at $${Number(p.perVisit || 0).toFixed(2)} per application${p.firstVisitDate ? ` — first visit ${p.firstVisitDate}` : ''}. Booked and converted automatically; no action needed unless something looks off.`,
@@ -865,6 +901,7 @@ const TRIGGER_REGISTRY = {
     category: 'credential',
     priority: 'high',
     group: 'Compliance',
+    rule: { area: 'System', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: `${p.displayName || 'Credential'} expires in ${p.daysUntil || '?'}d`,
       body: `${p.credentialNumber ? '#' + p.credentialNumber + ' — ' : ''}${p.issuingAuthority || 'Issuer'}. Renew before ${p.expirationDate || 'expiry'} to avoid service interruption.`,
@@ -876,10 +913,11 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'high',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: `${p.source || 'SEO'} sync failed`,
       body: `${p.locationName ? p.locationName + ': ' : ''}${p.reason || 'unknown error'}. Check the Sync Health card on the SEO Advisor tab.`,
-      link: '/admin/seo?tab=advisor',
+      link: '/admin/seo?workspace=command&view=advisor',
     }),
   },
   // Fired by server/services/dashboard-alerts-cron.js when an
@@ -892,6 +930,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'urgent',
     group: 'Alerts',
+    rule: { area: 'System', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: p.title || 'Dashboard alert',
       body: p.body || null,
@@ -903,6 +942,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Alerts',
+    rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: p.title || 'Internal admin alert',
       body: p.body || null,
@@ -914,14 +954,15 @@ const TRIGGER_REGISTRY = {
     category: 'newsletter',
     priority: 'normal',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => {
       const warn = Array.isArray(p.preflightWarnings) && p.preflightWarnings.length
         ? ` Heads up: ${p.preflightWarnings.join('; ')}.`
         : '';
       return {
         title: 'Weekly newsletter draft ready',
-        body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events.${warn} Review and send when ready.`,
-        link: '/admin/newsletter?tab=compose',
+        body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events.${warn} It is in Newsletter → History.`,
+        link: '/admin/newsletter?tab=history',
       };
     },
   },
@@ -930,6 +971,7 @@ const TRIGGER_REGISTRY = {
     category: 'newsletter',
     priority: 'high',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Newsletter autopilot skipped',
       // p.report is the actionable preflight breakdown (counts + next
@@ -938,56 +980,28 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=dashboard',
     }),
   },
-  pest_insider_draft: {
-    label: 'Pest Insider monthly draft ready',
-    category: 'newsletter',
-    priority: 'normal',
-    group: 'Marketing',
-    build: (p) => ({
-      title: 'Pest Insider draft ready',
-      body: `Autopilot drafted the ${p.month || 'monthly'} Pest Insider: "${p.subject || 'Untitled'}". Review and send when ready.`,
-      // autopilotType deep-links Compose to the Pest Insider lane —
-      // without it, hydration defaults to the weekly flagship draft.
-      link: '/admin/newsletter?tab=compose&autopilotType=pest-insider-monthly',
-    }),
-  },
   newsletter_proof_sent: {
     label: 'Newsletter proof emailed for approval',
     category: 'newsletter',
     priority: 'normal',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Newsletter proof sent — reply APPROVED to send',
       body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
-      // Deep-link THE draft the notice is about — the bare compose tab opens
-      // the latest autopilot draft, not this one (codex round 16 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+      link: '/admin/newsletter?tab=history',
     }),
   },
   newsletter_proof_approved: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Newsletter approved via email reply',
     category: 'newsletter',
     priority: 'high',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => ({
       title: 'Newsletter approved — sending to the list',
       body: `"${p.subject || 'Untitled'}" was approved by ${p.approvedBy || 'the owner'} via email reply. Sending to ${p.recipientCount ?? '?'} active subscribers now.`,
       link: '/admin/newsletter?tab=history',
-    }),
-  },
-  newsletter_send_not_dispatched: {
-    label: 'Newsletter send cancelled: the draft changed after Send was clicked',
-    category: 'newsletter',
-    priority: 'high',
-    group: 'Marketing',
-    build: (p) => ({
-      title: 'Newsletter not sent',
-      body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
-      // Deep-link THE affected draft: the bare compose tab opens the latest
-      // autopilot draft, not the campaign whose send was cancelled (codex
-      // round 14 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   newsletter_proof_blocked: {
@@ -995,12 +1009,11 @@ const TRIGGER_REGISTRY = {
     category: 'newsletter',
     priority: 'high',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Newsletter proof blocked',
-      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
-      // Deep-link THE draft the notice is about — the bare compose tab opens
-      // the latest autopilot draft, not this one (codex round 16 P2).
-      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Nothing was sent.`,
+      link: '/admin/newsletter?tab=history',
     }),
   },
   event_sources_unhealthy: {
@@ -1008,6 +1021,7 @@ const TRIGGER_REGISTRY = {
     category: 'newsletter',
     priority: 'high',
     group: 'Marketing',
+    rule: { area: 'Content', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Event sources unhealthy',
       // p.summary lists each failing / zero-yield source with its streak;
@@ -1023,6 +1037,7 @@ const TRIGGER_REGISTRY = {
     category: 'knowledge',
     priority: 'high',
     group: 'Knowledge Base',
+    rule: { area: 'Content', severity: 'needs-you', who: 'either', expiryDays: 30 },
     build: (p) => {
       const count = Number(p.count || p.flagged || 0);
       const entries = Array.isArray(p.entries) ? p.entries : [];
@@ -1240,16 +1255,30 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // silenced categories) still buzzed the phone — and a push-only admin
     // bypassed it entirely (hook P1). Category overrides re-enable both.
     let policySilenced = false;
+    // GATE_CUSTOMER_ALERTS_RING: a customer alert (the type's rule declares `contact`/`promise`, or it is
+    // bill_payment_error) passes the policy, and its bell write below carries `bell: true` so
+    // NotificationService.create's own policy check, which sees only the category and the trigger key, agrees.
+    let declaredCustomerAlert = false;
     try {
       const bellPolicy = require('./notification-bell-policy');
       if (bellPolicy.isBellPolicyEnabled()) {
-        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey }));
+        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule }));
+        // Guarded: a test that mocks the policy module without the helper keeps today's bell write.
+        declaredCustomerAlert = !policySilenced && typeof bellPolicy.ringsAsCustomerAlert === 'function'
+          && bellPolicy.ringsAsCustomerAlert({ triggerKey, declared: trigger.rule });
       }
     } catch (err) {
       logger.warn(`[notification-triggers] bell policy check failed: ${err.message}; delivering`);
     }
     if (policySilenced) {
       logger.info('[bell-policy] silenced (bell + push)', { triggerKey, category: trigger.category });
+      // GATE_ALERT_CATALOG=watch: this return skips NotificationService.create, so the muted record is left here,
+      // by the same helper (it reads the gate). A failure costs the record, never the silence; the log has no title.
+      try {
+        await require('./audit-log').auditBellPolicyMuted({ category: trigger.category, triggerKey, title: built.title });
+      } catch (err) {
+        logger.warn(`[notification-triggers] muted-alert audit failed: ${err?.code || 'error'}`);
+      }
       return { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true };
     }
 
@@ -1270,6 +1299,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.title,
             built.body,
             { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload },
+              ...(declaredCustomerAlert ? { bell: true } : {}),
               ...(dedupeKey ? { dedupeKey } : {}),
               // A standing thread row (sms_reply, one per customer) is rewritten
               // in place by each new message instead of inserting another row.

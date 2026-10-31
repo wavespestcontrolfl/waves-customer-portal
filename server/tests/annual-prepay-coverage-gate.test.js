@@ -247,3 +247,32 @@ describe('seasonal mosquito is deliberately UNSUPPORTED for prepay coverage', ()
     expect(visitsPerYearForCadence('monthly')).toBe(12);
   });
 });
+
+describe('lawn_rounds_9 (lawn 9x rounds): 9 visits and its own coverage cadence', () => {
+  const { prepayCoverageCadenceForPattern, visitsPerYearForCadence } = require('../services/prepay-cadence');
+  const { normalizeCoverageCadence } = _private;
+
+  test('its visit count is the 9x lawn plan\'s', () => {
+    expect(visitsPerYearForCadence('lawn_rounds_9')).toBe(9);
+    expect(visitsPerYearForCadence('every_6_weeks')).toBe(9);
+  });
+
+  test('it is a supported coverage cadence (the sale is no longer downgraded)', () => {
+    expect(prepayCoverageCadenceForPattern('lawn_rounds_9')).toBe('lawn_rounds_9');
+    expect(prepayCoverageCadenceForPattern('every_6_weeks')).toBe('every_6_weeks');
+  });
+
+  test('the coverage layer accepts the exact token only, with no alias', () => {
+    expect(normalizeCoverageCadence('lawn_rounds_9')).toBe('lawn_rounds_9');
+    expect(normalizeCoverageCadence('Lawn Rounds 9')).toBe('lawn_rounds_9');
+    for (const word of ['lawn', 'rounds', 'lawn_rounds', 'lawn_rounds_6', 'lawn-rounds-90', 'nine_rounds', 'every_9_rounds']) {
+      expect(normalizeCoverageCadence(word)).toBeNull();
+    }
+    expect(normalizeCoverageCadence('every_6_weeks')).toBe('every_6_weeks');
+  });
+
+  test('seasonal_feb_oct stays unsupported', () => {
+    expect(prepayCoverageCadenceForPattern('seasonal_feb_oct')).toBeNull();
+    expect(normalizeCoverageCadence('seasonal_feb_oct')).toBeNull();
+  });
+});

@@ -3,7 +3,7 @@
 // Best / Soonest, parts of the day, the Date field searches, tech pick.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import OpenTimesBox, { addsPhrase, openTimesRows } from './OpenTimesBox';
+import OpenTimesBox, { addsPhrase, openTimesRows, arrivesAtWindowEnd, END_OF_WINDOW_TAG } from './OpenTimesBox';
 import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from './AvailabilityStrip';
 
 afterEach(cleanup);
@@ -189,5 +189,97 @@ describe('the box', () => {
     expect(screen.getByTestId('open-times-box')).toBeTruthy();
     expect(screen.queryByTestId('availability-strip')).toBeNull();
     expect(within(screen.getByRole('list', { name: 'Open dates' })).getAllByRole('listitem')).toHaveLength(4);
+  });
+});
+
+// GATE_ROUTE_CHECK_LATE_DAYS: a day whose booked stops already arrive late keeps its open hours and
+// carries a small tag. Owner 2026-10-24/25: still only open times, never a "doesn't fit" sentence.
+describe('already-late days', () => {
+  const lateDays = [
+    day('2035-01-01', [hour('2035-01-01', '15:00', 4, { dayAlreadyLate: true })], { alreadyLate: true }),
+    day('2035-01-02', [hour('2035-01-02', '10:00', 6)]),
+  ];
+
+  it('tags the day on its row, leaves the other days plain, and adds no sentence', () => {
+    render(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-05" currentStart="09:00" onPick={() => {}} />);
+    const rows = screen.getAllByTestId('open-time-row');
+    expect(rows).toHaveLength(2);
+    const tagged = rows.filter((row) => within(row).queryByTestId('already-late-tag'));
+    expect(tagged).toHaveLength(1);
+    expect(tagged[0].textContent).toContain('Mon Jan 1');
+    expect(tagged[0].textContent).toContain('already late');
+    expect(tagged[0].textContent).toContain('3 PM');
+    expect(screen.queryByText(/doesn't fit|fits\.|anyway|full/i)).toBeNull();
+  });
+
+  it('the one-day view tags the day header once, not every hour', () => {
+    const { rerender } = render(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-05" currentStart="15:00" onPick={() => {}} />);
+    rerender(<OpenTimesBox availability={answer(lateDays)} currentDate="2035-01-01" currentStart="15:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('already-late-tag')).toHaveLength(1);
+    expect(screen.getByText('Mon Jan 1').textContent).toContain('already late');
+    expect(rowTexts()).toEqual(['3 PMFixture Techadds ~4 min']);
+  });
+
+  it('a day with no flag shows no tag at all', () => {
+    render(<OpenTimesBox availability={answer()} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.queryByTestId('already-late-tag')).toBeNull();
+  });
+});
+
+describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+  const NOTE = 'Google road times paused: month limit reached. Times marked ~ use the estimate.';
+  it('sits under the "~" legend, and is absent without the server\'s line', () => {
+    render(<OpenTimesBox availability={answer(DAYS, { roadLimit: NOTE })} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.getByTestId('road-limit-note').textContent).toBe(NOTE);
+    cleanup();
+    render(<OpenTimesBox availability={answer()} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+  it('shows only while the legend does: every row on a road time, no line', () => {
+    const google = [day('2035-01-01', [hour('2035-01-01', '09:00', 4, { driveSource: 'google' })])];
+    render(<OpenTimesBox availability={answer(google, { roadLimit: NOTE })} currentDate="2035-01-01" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.queryByText('~ = straight-line estimate, not a road time.')).toBeNull();
+    expect(screen.queryByTestId('road-limit-note')).toBeNull();
+  });
+});
+
+// Route-dispatcher audit D (owner 2026-10-31 "ok go"): an hour the van reaches more than 90 minutes after it
+// starts carries a word tag, with the arrival as its title; the row keeps its one number (owner ruling #6655).
+describe('end-of-window tag', () => {
+  const LATE_DAYS = [
+    day('2035-01-01', [
+      hour('2035-01-01', '12:00', 4, { estimatedArrival: '13:55' }),
+      hour('2035-01-01', '09:00', 6, { estimatedArrival: '10:30' }),
+    ]),
+    day('2035-01-02', [hour('2035-01-02', '10:00', 3, { estimatedArrival: '10:20' })]),
+  ];
+
+  it('arrivesAtWindowEnd: more than 90 minutes after the hour; exactly 90, earlier or no arrival is not', () => {
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:55' })).toBe(true);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:31' })).toBe(true);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '13:30' })).toBe(false);
+    expect(arrivesAtWindowEnd({ start: '12:00', estimatedArrival: '12:40' })).toBe(false);
+    expect(arrivesAtWindowEnd({ start: '12:00' })).toBe(false);
+    expect(arrivesAtWindowEnd(null)).toBe(false);
+  });
+
+  it('all dates: the tag sits by the hour, titled with the arrival, and the row keeps one number', () => {
+    render(<OpenTimesBox availability={answer(LATE_DAYS)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    const tags = screen.getAllByTestId('end-of-window-tag');
+    expect(tags).toHaveLength(1);
+    expect(tags[0].textContent).toBe(END_OF_WINDOW_TAG);
+    expect(tags[0].getAttribute('title')).toBe('Arrives about 1:55 PM');
+    expect(rowTexts()).toEqual(['Tue Jan 2Fixture Tech10 AMadds ~3 min', `Mon Jan 1Fixture Tech12 PM${END_OF_WINDOW_TAG}adds ~4 min`]);
+  });
+
+  it('one day: every hour that reaches its stop late in the window is tagged, and only those', () => {
+    render(<OpenTimesBox availability={answer(LATE_DAYS)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    const mon = screen.getAllByTestId('open-time-row').find((row) => row.textContent.startsWith('Mon Jan 1'));
+    fireEvent.click(mon);
+    const rows = screen.getAllByTestId('open-time-row');
+    const tagged = rows.filter((row) => within(row).queryByTestId('end-of-window-tag'));
+    expect(tagged.map((row) => row.textContent)).toEqual([`12 PM${END_OF_WINDOW_TAG}Fixture Techadds ~4 min`]);
   });
 });

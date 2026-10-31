@@ -257,4 +257,49 @@ describe('why no instruction froze', () => {
     // No reportV2, but the instruction said why: that reason, not the generic one.
     expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
   });
+
+  // Owner 2026-10-27: a visit closed on a later day than it was worked gets no text and no alert.
+  test('gate on, a late close: its own reason, before any other, with or without a lawn report', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    // No photo read, so no lawn report (the 2026-10-26 close-out visits): late_close, not report_not_built.
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.lateClose = true;
+      opts.wateringInstructionOut.noLawnRead = true;
+      return {};
+    });
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'late_close', products: [] });
+    // A lawn report whose watering inputs also failed: still late_close (no read failure turns it into an alert).
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.lateClose = true;
+      opts.wateringInstructionOut.instruction = null;
+      opts.wateringInstructionOut.productsLoadFailed = true;
+      return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' } } };
+    });
+    const { knex, state } = fakeKnex({});
+    expect((await run(knex)).wateringNoClaim).toEqual({ reason: 'late_close', products: [] });
+    // Nothing froze: the only write is the report synthesis.
+    expect(state.statements.map((x) => x.keys)).toEqual([['lawnReportV2']]);
+  });
+
+  test('gate off, a late close: no reason (no alert is possible with the gate off)', async () => {
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.lateClose = true;
+      return {};
+    });
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+  });
+
+  test('gate on, a same-day visit with no confirmed photo read: no_lawn_read, never "the report could not be built"', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.lateClose = false;
+      opts.wateringInstructionOut.noLawnRead = true;
+      return {};
+    });
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'no_lawn_read', products: [] });
+    // A build that threw before saying anything stays the generic failure.
+    buildReportV1Data.mockImplementationOnce(async () => { throw new Error('boom'); });
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'report_not_built', products: [] });
+  });
 });

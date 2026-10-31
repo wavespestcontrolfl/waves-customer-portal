@@ -71,6 +71,51 @@ function draftPreviewPayload({ adminDraftPreview = true } = {}) {
   };
 }
 
+function draftDocumentPayload() {
+  const payload = draftPreviewPayload();
+  return {
+    ...payload,
+    documentRender: true,
+    publicOrigin: 'https://portal.wavespestcontrol.com',
+    estimate: {
+      ...payload.estimate,
+      id: 'estimate-fixture',
+      token: 'draft-preview-token',
+      slug: 'EST-DRAFT-1',
+      customerName: 'Dana Preview',
+      customerPhone: '+19415550123',
+      customerEmail: 'dana@example.test',
+      createdAt: '2026-10-26T14:00:00.000Z',
+      expiresAt: '2026-11-02T14:00:00.000Z',
+      category: 'RESIDENTIAL',
+      noGuaranteeClaims: true,
+    },
+    proposal: {
+      enabled: false,
+      synthesized: true,
+      noGuaranteeClaims: true,
+      pestRecurringOnly: false,
+      title: 'Service Proposal',
+      preparedFor: 'Dana Preview',
+      propertyAddress: '77 Preview Lane',
+      terms: null,
+      buildings: [{
+        name: '77 Preview Lane',
+        note: null,
+        lineItems: [{
+          description: 'Termite Trenching', quantity: 1, unitPrice: 2210,
+          amount: 2210, frequency: 'one_time', frequencyLabel: 'One-time',
+          taxable: false, termsScope: 'none',
+        }],
+      }],
+      totals: {
+        annualRecurring: 0, monthlyEquivalent: 0, oneTime: 2210,
+        totalTax: 0, firstYearTotal: 2210, hasTax: false, isMultiBuilding: false,
+      },
+    },
+  };
+}
+
 // jsdom in this runner ships without a usable localStorage (same workaround
 // as ReportViewPage.render.test.jsx) — stub a functional one per test.
 function stubLocalStorage(store = {}) {
@@ -84,6 +129,7 @@ function stubLocalStorage(store = {}) {
 afterEach(() => {
   cleanup();
   window.history.replaceState({}, '', '/estimate/draft-preview-token');
+  delete document.fonts;
   vi.unstubAllGlobals();
 });
 
@@ -154,6 +200,120 @@ describe('EstimateViewPage staff draft preview', () => {
     render(<DraftPreviewBanner />);
     expect(screen.getByText('Draft preview — not sent to the customer yet')).toBeInTheDocument();
   });
+
+  it('keeps an immediately-returned print on the Field document until afterprint, then restores exactly once with GETs only', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({ waves_admin_token: 'staff-jwt' });
+    let releaseFonts;
+    Object.defineProperty(document, 'fonts', {
+      configurable: true,
+      value: { ready: new Promise((resolve) => { releaseFonts = resolve; }) },
+    });
+    const fetchMock = vi.fn(async (url, opts = {}) => {
+      if (String(url).includes('mode=pdf')) return jsonResponse(draftDocumentPayload());
+      return jsonResponse(draftPreviewPayload());
+    });
+    const printMock = vi.fn(() => {
+      expect(screen.getByTestId('estimate-document-draft-mark')).toHaveTextContent('DRAFT — INTERNAL PREVIEW · NOT SENT TO CUSTOMER');
+      expect(document.querySelector('.waves-field-document.estimate-document-v1')).toBeTruthy();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('print', printMock);
+
+    render(<EstimateViewPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Print preview' }));
+
+    await screen.findByTestId('estimate-document-draft-mark');
+    expect(printMock).not.toHaveBeenCalled();
+    const documentCall = fetchMock.mock.calls.find(([url]) => String(url).includes('mode=pdf'));
+    expect(documentCall).toBeTruthy();
+    expect(documentCall[0]).toContain('adminPreview=1');
+    expect(documentCall[1]).toEqual(expect.objectContaining({
+      headers: { Authorization: 'Bearer staff-jwt' },
+    }));
+
+    await act(async () => { releaseFonts(); await Promise.resolve(); });
+    await waitFor(() => expect(printMock).toHaveBeenCalledTimes(1));
+    // window.print() returned immediately, but that is not proof the browser
+    // finished (Safari/resource-deferred print). Keep the canonical document
+    // and make the neutral manual escape available until afterprint.
+    expect(screen.getByTestId('estimate-document-draft-mark')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Return to preview' })).toBeInTheDocument();
+    const dataCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).includes('/estimates/') && String(url).includes('/data'));
+    expect(dataCalls()).toHaveLength(2);
+
+    act(() => {
+      window.dispatchEvent(new Event('afterprint'));
+      // The ref guard protects against a browser or embed dispatching twice
+      // before React has removed the one-shot listener.
+      window.dispatchEvent(new Event('afterprint'));
+    });
+    await screen.findByText('Draft preview — not sent to the customer yet');
+    expect(dataCalls()).toHaveLength(3);
+    expect(fetchMock.mock.calls.every(([, opts = {}]) => !opts.method || opts.method === 'GET')).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => /available-slots|find-slots|reserve|accept/.test(String(url)))).toBe(false);
+  });
+
+  it('lets staff return from the retained document when a browser omits afterprint', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({ waves_admin_token: 'staff-jwt' });
+    Object.defineProperty(document, 'fonts', { configurable: true, value: { ready: Promise.resolve() } });
+    const fetchMock = vi.fn(async (url) => jsonResponse(
+      String(url).includes('mode=pdf') ? draftDocumentPayload() : draftPreviewPayload(),
+    ));
+    const printMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('print', printMock);
+
+    render(<EstimateViewPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Print preview' }));
+    await waitFor(() => expect(printMock).toHaveBeenCalledTimes(1));
+    const dataCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).includes('/estimates/') && String(url).includes('/data'));
+    expect(dataCalls()).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return to preview' }));
+    await screen.findByText('Draft preview — not sent to the customer yet');
+    expect(dataCalls()).toHaveLength(3);
+    act(() => window.dispatchEvent(new Event('afterprint')));
+    expect(dataCalls()).toHaveLength(3);
+  });
+
+  it('restores the staff preview when window.print throws', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({ waves_admin_token: 'staff-jwt' });
+    Object.defineProperty(document, 'fonts', { configurable: true, value: { ready: Promise.resolve() } });
+    const fetchMock = vi.fn(async (url) => jsonResponse(
+      String(url).includes('mode=pdf') ? draftDocumentPayload() : draftPreviewPayload(),
+    ));
+    const printMock = vi.fn(() => { throw new Error('print unavailable'); });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('print', printMock);
+
+    render(<EstimateViewPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Print preview' }));
+
+    await waitFor(() => expect(printMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your browser could not open the print dialog'));
+    const dataCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).includes('/estimates/') && String(url).includes('/data'));
+    expect(dataCalls()).toHaveLength(3);
+    act(() => window.dispatchEvent(new Event('afterprint')));
+    expect(dataCalls()).toHaveLength(3);
+  });
+
+  it('does not add staff return controls to an existing PDF document render', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?mode=pdf');
+    stubLocalStorage();
+    const payload = draftDocumentPayload();
+    delete payload.adminDraftPreview;
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(payload)));
+
+    render(<EstimateViewPage />);
+
+    await screen.findByRole('heading', { name: 'Service Estimate' });
+    expect(document.querySelector('.waves-field-document.estimate-document-v1')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Return to preview' })).not.toBeInTheDocument();
+  });
+
   it('keeps a sent staff preview inert across booking, service details, Ask and schedule controls', async () => {
     window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
     stubLocalStorage({ waves_admin_token: 'staff-jwt' });

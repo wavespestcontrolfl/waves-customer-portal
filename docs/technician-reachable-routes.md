@@ -8,7 +8,7 @@ With GATE_STAFF_DEFAULT_DENY on, a technician reaches the routes in the first ta
 
 A route being listed as reachable means a technician may call it; routers still scope records to the assigned technician where they did before (schedule, customers, visits, timetracking).
 
-Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, admin-revenue, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
+Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
 
 Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
 
@@ -175,6 +175,11 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/lawn-assessment/history/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/latest/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/service/:serviceId` | admin-lawn-assessment |
+| GET | `/api/admin/messenger/summary` | admin-messenger |
+| GET | `/api/admin/messenger/threads` | admin-messenger |
+| GET | `/api/admin/messenger/threads/:id` | admin-messenger |
+| POST | `/api/admin/messenger/threads/:id/read` | admin-messenger |
+| POST | `/api/admin/messenger/threads/:id/reply` | admin-messenger |
 | POST | `/api/admin/neighborhood-access/visits/:visitId/entries` | admin-neighborhood-access |
 | POST | `/api/admin/neighborhood-access/visits/:visitId/entries/:entryId/wrong` | admin-neighborhood-access |
 | GET | `/api/admin/notifications` | admin-notifications |
@@ -218,6 +223,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/protocols/programs/:track/visit/:num` | admin-protocols |
 | GET | `/api/admin/protocols/scripts` | admin-protocols |
 | GET | `/api/admin/protocols/seasonal-index` | admin-protocols |
+| POST | `/api/admin/push/native-subscribe` | admin-push |
+| POST | `/api/admin/push/native-unsubscribe` | admin-push |
 | GET | `/api/admin/push/preferences` | admin-push |
 | PUT | `/api/admin/push/preferences` | admin-push |
 | POST | `/api/admin/push/subscribe` | admin-push |
@@ -301,6 +308,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
+| GET | `/api/tech/payroll/checks` | tech-payroll |
+| GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
 | POST | `/api/tech/services/:id/dictation` | tech-track |
 | GET | `/api/tech/services/:id/dictation/availability` | tech-track |
 | POST | `/api/tech/services/:id/en-route` | tech-track |
@@ -322,8 +331,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | DELETE | `/api/tech/services/:id/treatment-zone` | tech-track |
 | GET | `/api/tech/services/:id/treatment-zone` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone` | tech-track |
-| GET | `/api/tech/services/:id/treatment-zone/last` | tech-track |
-| POST | `/api/tech/services/:id/treatment-zone/reuse` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone/suggest` | tech-track |
 | POST | `/api/tech/social/generate` | tech-social |
 | GET | `/api/tech/social/locations` | tech-social |
@@ -375,7 +382,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/dashboard-ops/photos/:id/approve` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/photos/:id/flag` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/recent-photos` | admin-dashboard-ops |
-| GET | `/api/admin/dashboard-ops/weather` | admin-dashboard-ops |
 | POST | `/api/admin/discounts/calculate` | admin-discounts |
 | GET | `/api/admin/discounts/stats` | admin-discounts |
 | GET | `/api/admin/drafts` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
@@ -421,10 +427,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/equipment-maintenance/downtime/:id/resolve` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/issue` | admin-equipment-maintenance |
 | PUT | `/api/admin/equipment-maintenance/schedules/:scheduleId` | admin-equipment-maintenance |
-| PUT | `/api/admin/equipment-systems/:id/assets` | admin-equipment-systems |
-| POST | `/api/admin/equipment-systems/:id/calibrations` | admin-equipment-systems |
-| PUT | `/api/admin/equipment-systems/calibrations/:id` | admin-equipment-systems |
-| POST | `/api/admin/equipment-systems/calibrations/:id/verify` | admin-equipment-systems |
 | POST | `/api/admin/equipment/equipment/:id/calibration` | admin-equipment |
 | POST | `/api/admin/equipment/equipment/:id/maintenance` | admin-equipment |
 | POST | `/api/admin/equipment/tank-mixes/:id/recalculate` | admin-equipment |
@@ -451,10 +453,12 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/estimates/:id/send-booking-link` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/send-preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/slot-debug` | admin-estimate-slots |
+| PUT | `/api/admin/estimates/:id/sold-by` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/unarchive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/actuals-variance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/customer-spend/:customerId` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/lead-auto-send/preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/estimates/sold-by/options` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/source-performance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/win-loss-slices` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimator/calculate-estimate` | property-lookup-v2 |
@@ -504,6 +508,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/protocol-health` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/action` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/scrape-jobs` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/scrape-jobs/:vendorId/trigger` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/service-usage` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
@@ -529,14 +535,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/job-forms/templates` | admin-job-forms |
 | PUT | `/api/admin/job-forms/templates/:id` | admin-job-forms |
 | GET | `/api/admin/job-forms/templates/by-service/:serviceType` | admin-job-forms |
-| POST | `/api/admin/kb` | admin-kb |
-| DELETE | `/api/admin/kb/:id` | admin-kb |
-| PUT | `/api/admin/kb/:id` | admin-kb |
-| POST | `/api/admin/kb/:id/flag` | admin-kb |
-| POST | `/api/admin/kb/:id/verify` | admin-kb |
-| POST | `/api/admin/kb/audit/run` | admin-kb |
-| POST | `/api/admin/kb/auto-sync` | admin-kb |
-| POST | `/api/admin/kb/tokens/check` | admin-kb |
 | GET | `/api/admin/kb/tokens/status` | admin-kb |
 | POST | `/api/admin/knowledge-bridge/auto-link` | admin-knowledge-bridge |
 | GET | `/api/admin/knowledge-bridge/enrich/kb/:id` | admin-knowledge-bridge |
@@ -547,15 +545,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/knowledge-bridge/search` | admin-knowledge-bridge |
 | GET | `/api/admin/knowledge-bridge/stats` | admin-knowledge-bridge |
 | POST | `/api/admin/knowledge-bridge/sync` | admin-knowledge-bridge |
-| PUT | `/api/admin/knowledge/article/:id` | admin-knowledge |
-| POST | `/api/admin/knowledge/article/:id/verify` | admin-knowledge |
-| POST | `/api/admin/knowledge/compile` | admin-knowledge |
-| POST | `/api/admin/knowledge/compile-all` | admin-knowledge |
-| POST | `/api/admin/knowledge/file-back` | admin-knowledge |
-| POST | `/api/admin/knowledge/import-blog-posts` | admin-knowledge |
-| POST | `/api/admin/knowledge/queries/:id/rate` | admin-knowledge |
-| POST | `/api/admin/knowledge/rebuild-index` | admin-knowledge |
-| POST | `/api/admin/knowledge/seed-wiki-folder` | admin-knowledge |
 | GET | `/api/admin/lookup/property` | admin-property-lookup |
 | POST | `/api/admin/lookup/satellite-ai` | admin-property-lookup |
 | GET | `/api/admin/needs-me` | admin-needs-me |
@@ -563,9 +552,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/requests` | admin-requests |
 | PATCH | `/api/admin/requests/:id` | admin-requests |
 | GET | `/api/admin/requests/:id/photos` | admin-requests |
-| GET | `/api/admin/revenue/overview` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |

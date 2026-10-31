@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 import Customer360Workspace from './Customer360Workspace';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
+import { etDateString } from '../../lib/timezone';
 
 vi.mock('./StickyActionBar', async (importOriginal) => ({
   ...await importOriginal(),
@@ -190,7 +191,47 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Charged $100.00 successfully')).not.toBeInTheDocument();
     const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
     expect(charges).toHaveLength(1);
-    expect(charges[0][1]).toMatchObject({ method: 'POST', body: '{}' });
+    // the default is this month, posted as the month shown
+    expect(charges[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ billedMonth: etDateString().slice(0, 7) }) });
+  });
+
+  it('an earlier dues month picked beside Charge now is named in the confirm and posted, and resets for the next customer', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-30T15:00:00Z'), toFake: ['Date'] });
+    try {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      const details = { 'customer-a': customerDetail('customer-a', 'Avery'), 'customer-b': customerDetail('customer-b', 'Blair') };
+      Object.values(details).forEach((d) => Object.assign(d.customer, { billingMode: 'monthly_membership', monthlyRate: 100 }));
+      const confirmSpy = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirmSpy);
+      vi.stubGlobal('fetch', vi.fn((url) => {
+        const path = String(url);
+        const id = Object.keys(details).find((key) => path.endsWith(`/${key}`));
+        if (id) return response(details[id]);
+        if (path.endsWith('/charge-now')) return response({ success: true, payment: { status: 'processing', amount: '100.00' } });
+        return response({});
+      }));
+      const view = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+      await screen.findByRole('heading', { name: 'Avery Customer' });
+      view.container.querySelector('.c360-panel').scrollTo = vi.fn();
+      fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+      const month = screen.getByRole('combobox', { name: 'Dues month' });
+      expect([...month.options].map((o) => o.textContent)).toEqual(['October 2026', 'September 2026', 'August 2026']);
+      expect(month).toHaveValue('2026-10');
+      fireEvent.change(month, { target: { value: '2026-09' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Charge now ($100.00)' }));
+      expect(confirmSpy).toHaveBeenCalledWith('Charge Avery Customer $100.00 for September 2026 dues now?');
+      expect(await screen.findByText('Payment $100.00 is processing. Settlement is pending.')).toHaveAttribute('role', 'status');
+      const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
+      expect(charges).toHaveLength(1);
+      expect(charges[0][1]).toMatchObject({ method: 'POST', body: '{"billedMonth":"2026-09"}' });
+
+      // a month picked for one customer never carries to the next
+      view.rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} embedded />);
+      await screen.findByRole('heading', { name: 'Blair Customer' });
+      expect(await screen.findByRole('combobox', { name: 'Dues month' })).toHaveValue('2026-10');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('announces a failed charge and clears the error after a processing retry', async () => {
@@ -500,6 +541,25 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
+  it('does not request the admin-only payer list for a technician', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({ error: 'Forbidden' }, 403)));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/admin/payers'))).toBe(false);
+  });
+
+  it('still loads the payer list for an admin', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({})));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/admin/payers'))).toBe(true));
   });
 
   it.each(['initial load', 'earlier refresh'])(

@@ -1078,6 +1078,21 @@ describe('deferred-replay registry', () => {
     expect(open.eligible).toBe(true);
   });
 
+  test('a held Mark accepted consumer notice text is not sent once its gate is off; other document texts are unaffected', async () => {
+    const meta = { contract_id: 'ct1', origin_entry_point: 'manual_accept_consumer_notice' };
+    delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND;
+    expect(await recheckDeferredReplay('document_request_reminder_deferred', meta)).toEqual({ eligible: false, reason: 'gate-off' });
+    db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null }));
+    expect((await recheckDeferredReplay('document_request_reminder_deferred', { contract_id: 'ct1', origin_entry_point: 'document_request_manual_send' })).eligible).toBe(true);
+    process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND = 'true';
+    try {
+      db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null }));
+      expect((await recheckDeferredReplay('document_request_reminder_deferred', meta)).eligible).toBe(true);
+    } finally {
+      delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND;
+    }
+  });
+
   test('read failures fail CLOSED as retryable, never eligible', async () => {
     db.mockReturnValueOnce(throwChain());
     const res = await recheckDeferredReplay('cancellation_save_deferred', { sequence_id: 'seq-1' });

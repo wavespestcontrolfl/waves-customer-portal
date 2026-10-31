@@ -41,6 +41,8 @@ const envNum = (name, def) => {
 };
 
 const DAY_MS = 24 * 3600 * 1000;
+const BASELINE_TRIGGER = 'auto:autopromote-baseline'; // triggered_by on the loop's own baseline sittings
+const CANDIDATE_TRIGGER = 'auto:autopromote'; // and on its candidate sittings
 const EXAM_LEG = 'anthropic'; // the live primary SMS drafting provider (EXAM_LEG_ROUTES comment)
 const LOCK_NAME = 'sms-sealed-eval'; // the sealed exam's own processing lock
 
@@ -342,14 +344,67 @@ async function recordFailedSitting({ dbi, patch, now, stage, runId, failed }) {
   });
 }
 
+// Settle every running exam row THIS loop started (its baseline sittings and its candidate sittings,
+// told apart from the nightly sweep's and from manual runs by triggered_by) that no longer matches
+// what is live: the prompt version moved, the rule's base identity changed, or its patch is no longer
+// an open candidate. Such a row can never be resumed (runSealedExam refuses a version mismatch), yet the
+// one-running index would keep every later run from starting until the separately gated nightly sweep
+// retired it. It is marked failed under the exam lock, so a run another worker is processing is never
+// touched. { settled } | { skipped: 'lock_busy' }.
+async function settleStaleRuns({ dbi, lock }) {
+  const { expectedRunVersion, loadRunPatch } = require('./sms-sealed-eval');
+  const running = await dbi('sms_sealed_eval_runs')
+    .where({ status: 'running', provider_leg: EXAM_LEG })
+    .whereIn('triggered_by', [BASELINE_TRIGGER, CANDIDATE_TRIGGER]);
+  if (!running.length) return { settled: 0 };
+  const stale = [];
+  for (const run of running) {
+    const owner = run.prompt_patch_id ? await dbi(PATCHES).where({ id: run.prompt_patch_id }).first('status') : null;
+    const expected = expectedRunVersion(await loadRunPatch(run, dbi));
+    if (run.prompt_version !== expected || (run.prompt_patch_id && (!owner || owner.status !== 'candidate'))) stale.push(run.id);
+  }
+  if (!stale.length) return { settled: 0 };
+  let settled = 0;
+  const result = await lock(LOCK_NAME, async () => {
+    settled = await dbi('sms_sealed_eval_runs').whereIn('id', stale).where({ status: 'running' })
+      .update({ status: 'failed', error: 'superseded: the prompt or the rule it examined is no longer current', finished_at: new Date() });
+    return { settled };
+  }, { recordHealth: false });
+  if (result && result.skipped) return { skipped: 'lock_busy' };
+  logger.info(`[prompt-autopromote] settled ${settled} exam run(s) that no longer match the live prompt`);
+  return { settled };
+}
+
+// A run the loop may resume as a baseline: unfinished, no patch on it, and drafted under the prompt
+// that is live now (a finished-or-failed row from before a prompt change must never be resumed).
+const resumableBaseline = (row) => Boolean(row && row.status !== 'complete' && !row.prompt_patch_id
+  && row.prompt_version === require('./sms-shadow-drafter').currentPromptVersion());
+
 // The baseline for a candidate: a fresh complete run of the live prompt, else sit one, resuming
-// a baseline an earlier failed sitting left behind. { baseline } | { skipped } | { failed }.
+// a baseline an earlier failed or interrupted sitting left behind. { baseline } | { skipped } | { failed }.
+// The run's id is saved on the patch the moment the run row exists, before any paid item is processed:
+// a process that exits mid-baseline leaves the association, and the next tick resumes that run. Without
+// it the next tick would try a new run, get RUN_IN_PROGRESS for the stranded row, and wait for the
+// separately gated nightly sweep. A run row made but not yet linked (the gap between the two writes) is
+// found by its trigger tag: the loop's own baseline sitting, still running or failed, no patch on it.
 async function obtainBaseline({ dbi, patch, runner, lock, now }) {
   const fresh = await findFreshBaseline({ dbi, now });
   if (fresh) return { baseline: fresh };
-  const prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
-  const resume = prior && prior.status !== 'complete' && !prior.prompt_patch_id;
-  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: 'auto:autopromote-baseline' } });
+  let prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
+  if (!resumableBaseline(prior)) {
+    prior = await dbi('sms_sealed_eval_runs')
+      .where({ triggered_by: BASELINE_TRIGGER, provider_leg: EXAM_LEG, prompt_version: require('./sms-shadow-drafter').currentPromptVersion() })
+      .whereIn('status', ['running', 'failed'])
+      .whereNull('prompt_patch_id')
+      .orderBy('started_at', 'desc')
+      .first();
+  }
+  const resume = resumableBaseline(prior);
+  if (resume && patch.baseline_run_id !== prior.id) await dbi(PATCHES).where({ id: patch.id }).update({ baseline_run_id: prior.id, updated_at: now });
+  const onRunCreated = async (run) => {
+    await dbi(PATCHES).where({ id: patch.id }).update({ baseline_run_id: run.id, updated_at: now });
+  };
+  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: BASELINE_TRIGGER, onRunCreated } });
   if (sat.run) return { baseline: sat.run };
   if (sat.failed) await recordFailedSitting({ dbi, patch, now, stage: 'baseline', runId: sat.runId || (resume ? prior.id : null), failed: sat.failed });
   return sat;
@@ -372,7 +427,7 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     }
     const sitting = existing
       ? { runId: existing.id }
-      : { baselineRunId: baselineId, triggeredBy: 'auto:autopromote', promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text } };
+      : { baselineRunId: baselineId, triggeredBy: CANDIDATE_TRIGGER, promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text } };
     const sat = await sitExam({ dbi, runner, lock, args: sitting });
     if (sat.skipped) return sat;
     await dbi.transaction(async (trx) => {
@@ -403,6 +458,10 @@ async function actOnRecordedDecision({ dbi, patch, now, notify }) {
 async function examineCandidate({ dbi = db, now = new Date(), runner, lock, notify } = {}) {
   const mode = patchLib.promptAutopromoteMode();
   if (mode === 'off') return { skipped: 'gate_off' };
+  // Before anything is rejected or started: a stranded run that no longer matches the live prompt would
+  // otherwise block every later run and wait for the nightly sweep.
+  const settled = await settleStaleRuns({ dbi, lock: lock || require('../utils/cron-lock').runExclusive });
+  if (settled.skipped) return { skipped: settled.skipped };
   const patch = await dbi(PATCHES).where({ status: 'candidate' }).first();
   if (!patch) return { skipped: 'no_candidate' };
   if (patch.decided_at) return actOnRecordedDecision({ dbi, patch, now, notify });

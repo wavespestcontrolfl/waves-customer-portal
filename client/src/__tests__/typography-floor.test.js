@@ -46,12 +46,45 @@ describe('typography floor (UI audit unit 7)', () => {
     });
   }
 
-  it('TimeGridDays renders the Unassigned label at the 11px caption class (F0212)', () => {
+  it('TimeGridDays renders the Unassigned label at the 14px readability floor (F0212, dispatch audit 10-29)', () => {
     const label = read('components/schedule/TimeGridDays.jsx')
       .split('\n')
       .find((line) => line.includes('>Unassigned</span>'));
     expect(label).toBeDefined();
-    expect(label).toMatch(/\btext-11\b/);
+    expect(label).toMatch(/\btext-14\b/);
     expect(label).not.toMatch(/fontSize:\s*\d+/);
   });
+});
+
+// Schedule audit S9 (owner 2026-10-31): the Schedule tab's Day, 5-Day, Week
+// and Month views and the phone date strip draw no text under 14px. The
+// "Closeout owed" chip keeps its size (the dispatch audit, #7051, left it so
+// it does not crowd the name), and WeekViewV2 is skipped: nothing imports
+// it, so it never renders.
+const SCHEDULE_TAB_FILES = [
+  'components/schedule/TimeGridDay.jsx',
+  'components/schedule/TimeGridDays.jsx',
+  'components/schedule/MobileDayStrip.jsx',
+  'components/schedule/CalendarViewsV2.jsx',
+];
+const CLOSEOUT_CHIP = 'h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10';
+
+function withoutUnusedWeekView(src) {
+  const start = src.indexOf('// ─── WEEK VIEW');
+  const end = src.indexOf('// ─── MONTH VIEW');
+  return start >= 0 && end > start ? src.slice(0, start) + src.slice(end) : src;
+}
+
+describe('Schedule tab 14px floor (schedule audit S9)', () => {
+  for (const rel of SCHEDULE_TAB_FILES) {
+    it(`${rel} draws no text under 14px`, () => {
+      const hits = [];
+      withoutUnusedWeekView(read(rel)).split('\n').forEach((line, i) => {
+        if (/^\s*(\*|\/\/)/.test(line)) return;
+        if (/\btext-1[0-3]\b/.test(line) && !line.includes(CLOSEOUT_CHIP)) hits.push(`${i + 1}: ${line.trim()}`);
+        if (/\bu-label\b/.test(line) || /fontSize:\s*(9|1[0-3])\b/.test(line)) hits.push(`${i + 1}: ${line.trim()}`);
+      });
+      expect(hits).toEqual([]);
+    });
+  }
 });

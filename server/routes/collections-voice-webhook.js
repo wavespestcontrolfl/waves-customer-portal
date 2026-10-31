@@ -663,9 +663,8 @@ router.post('/collections-call-status', async (req, res) => {
     // A failed reconciliation must be RETRYABLE (gh prb-r11): a 204 here
     // acknowledges the webhook with nothing persisted, leaving an
     // unanswered case stuck in 'dialing' until an operator repairs it. 500
-    // makes Twilio retry the callback — the same contract the messenger
-    // webhook keeps (twilio-messenger-webhook.js), and every write in the
-    // transaction above is idempotent under replay.
+    // makes Twilio retry the callback, and every write in the transaction
+    // above is idempotent under replay.
     logger.error(`[collections-call-status] reconcile failed (will be retried by Twilio): ${err.message}`);
     return res.sendStatus(500);
   }

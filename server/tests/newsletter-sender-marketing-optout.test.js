@@ -117,7 +117,7 @@ describe('excludeMailboxNotMailable', () => {
   // cohortAwaitingWinback for why).
   test('every sunset audience/cohort/denominator read in newsletter-sunset.js carries excludeMailboxNotMailable', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sunset.js'), 'utf8');
-    const FUNCTIONS = ['findFlagCandidates', 'cohortAwaitingWinback', 'findSunsetCandidates', 'runNewsletterSunset'];
+    const FUNCTIONS = ['findFlagCandidates', 'cohortAwaitingWinback', 'cohortInGrace', 'findSunsetCandidates', 'runNewsletterSunset'];
     for (const name of FUNCTIONS) {
       const start = src.indexOf(`async function ${name}(`);
       expect(start).toBeGreaterThanOrEqual(0); // the function still exists under this exact name

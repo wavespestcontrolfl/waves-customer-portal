@@ -12,7 +12,10 @@
  *
  * Decision order (first match wins):
  *   1. Explicit site-level tag: options.bell === true / false
- *   2. triggerKey allowlist (registry-routed events that must ring)
+ *   1b. GATE_CUSTOMER_ALERTS_RING only: a declared customer contact or promise
+ *      (`declared.contact` / `declared.promise`) rings
+ *   2. triggerKey allowlist (registry-routed events that must ring; with
+ *      GATE_CUSTOMER_ALERTS_RING on, bill_payment_error too)
  *   3. triggerKey denylist — beats the category allowlist (payment FYIs and
  *      the alert firehose share categories with events that must ring)
  *   4. Owner category override: notification_preferences rows with
@@ -47,6 +50,10 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // bell stays behind the category toggle.
   'payment_failed',
 ]);
+
+// GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1): a customer's invoice payment that failed at checkout,
+// bank or card, rings beside payment_failed under the same 09-11 ruling. Read only while the gate is on.
+const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
 
 
 const TRIGGER_BELL_DENYLIST = new Set([
@@ -110,10 +117,13 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // truck_kit: one bell per truck when a technician's truck check finds a tool
 // missing or damaged (services/truck-kit.js). The dark GATE_TRUCK_KIT is the
 // switch; once on, the item must reach the office, who can still silence it.
+// payroll: a Mercury paycheck that failed, was rejected, was returned or is stuck (services/payroll-mercury-alerts.js,
+// owner plan A 2026-10-30). The dark GATE_PAYROLL_MERCURY_STATUS is the switch; once on, the item must reach the owner,
+// who can still silence the category here.
 // access_codes: the one standing row for the access codes waiting on
 // Customers → Gate codes (services/access-code-found-bell.js, owner ruling
 // 2026-10-24). The dark GATE_ACCESS_CODES_FOUND_BELL is the switch; same treatment.
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes']);
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes', 'payroll']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
@@ -164,6 +174,7 @@ const OVERRIDABLE_CATEGORIES = [
   'review_low_rating',
   'truck_kit',
   'access_codes',
+  'payroll',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 
@@ -220,9 +231,22 @@ function clearOverrideCache() {
  * Only meaningful when isBellPolicyEnabled() — callers check the gate first.
  * Never throws.
  */
-async function bellAllowed({ category, triggerKey, options = {} } = {}) {
+// GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1), read at call time: an alert declared as a customer contact
+// or as a promise we owe a customer (a registry rule's `contact`/`promise`, or the same flag in a composed alert's
+// metadata) rings, and so does a customer's failed invoice payment beside payment_failed. notification-triggers.js
+// asks the same question, so the bell write and the phone push agree. Guarded: a test that mocks feature-gates
+// without the reader reads it as off.
+function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
+  const gates = require('../config/feature-gates');
+  if (!(typeof gates.customerAlertsRingLive === 'function' && gates.customerAlertsRingLive())) return false;
+  return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
+}
+
+async function bellAllowed({ category, triggerKey, options = {}, declared = null } = {}) {
   if (options.bell === true) return true;
   if (options.bell === false) return false;
+  // Step 1b: a customer alert rings whatever the steps below say; a site's explicit `bell: false` above still wins.
+  if (ringsAsCustomerAlert({ triggerKey, declared })) return true;
   if (triggerKey && TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
   if (triggerKey && TRIGGER_BELL_DENYLIST.has(triggerKey)) return false;
   const overrides = await loadCategoryOverrides();
@@ -240,12 +264,14 @@ async function bellAllowed({ category, triggerKey, options = {} } = {}) {
 module.exports = {
   isBellPolicyEnabled,
   bellAllowed,
+  ringsAsCustomerAlert,
   clearOverrideCache,
   OVERRIDABLE_CATEGORIES,
   OVERRIDABLE_CATEGORY_SET,
   DEFAULT_ON_CATEGORIES,
   _private: {
     TRIGGER_BELL_ALLOWLIST,
+    GATED_TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
     CATEGORY_BELL_ALLOWLIST,
     loadCategoryOverrides,

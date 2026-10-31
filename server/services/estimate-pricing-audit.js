@@ -452,6 +452,57 @@ function termiteAnnualCostFromStations(stations, system, visitsPerYear) {
   }
 }
 
+// Pre-slab termiticide lines persist WHICH product was quoted (Termidor SC, Taurus SC or Talak 7.9 F)
+// and, in both persisted shapes (the quote-wizard projection and the raw engine result), its
+// product cost and slab area. The usage registry only knows Termidor SC, so a Talak or Taurus
+// slab costed from it carries Termidor's price per ounce. The line keeps the quote's own product
+// identity so the audit can cost the product that was actually sold.
+const PRE_SLAB_SERVICE_KEYS = new Set(['pre_slab_termiticide', 'pre_slab_termidor']);
+
+function preSlabQuoteFrom(serviceKey, item) {
+  if (!PRE_SLAB_SERVICE_KEYS.has(serviceKey)) return {};
+  const productKey = String(item?.productKey ?? '').trim().toLowerCase();
+  if (!productKey) return {};
+  const productCost = pickNum(item.productCost, item.allocatedProductCost);
+  const slabSqFt = pickNum(item.slabSqFt);
+  return {
+    preSlabQuote: {
+      productKey,
+      ...(Number.isFinite(productCost) && productCost > 0 ? { productCost: money(productCost) } : {}),
+      ...(Number.isFinite(slabSqFt) && slabSqFt > 0 ? { slabSqFt } : {}),
+    },
+  };
+}
+
+// Product cost of a pre-slab line from the product it quoted, or null when the line does not say
+// (old estimates keep the Termidor usage rows). Prefers the quote's own persisted product cost;
+// otherwise prices the quoted product's live container cost and rate over the slab area (the
+// quote's slab, else the property area the usage registry reads for this service).
+function preSlabQuotedCost(raw, dimensions) {
+  const quote = raw?.preSlabQuote;
+  if (!quote?.productKey) return null;
+  try {
+    const { SPECIALTY } = require('./pricing-engine/constants');
+    const product = SPECIALTY?.preSlabTermiticide?.products?.[quote.productKey];
+    if (!product) return null;
+    if (Number.isFinite(quote.productCost) && quote.productCost > 0) {
+      return { cost: money(quote.productCost), productKey: quote.productKey, source: 'quoted_product_cost' };
+    }
+    const area = quote.slabSqFt > 0 ? quote.slabSqFt : Number(dimensions?.[SERVICE_MAP[raw.serviceKey]?.areaField] || 0);
+    const containerCost = Number(product.containerCost);
+    const containerOz = Number(product.containerOz);
+    const ozPer10SqFt = Number(product.productOzPer10SqFt);
+    if (!(area > 0) || !(containerCost > 0) || !(containerOz > 0) || !(ozPer10SqFt > 0)) return null;
+    return {
+      cost: money((containerCost / containerOz) * ozPer10SqFt * (area / 10)),
+      productKey: quote.productKey,
+      source: 'live_product_constants',
+    };
+  } catch (_err) {
+    return null;
+  }
+}
+
 function normalizeRecurringLines(result) {
   const discount = Number(result?.recurring?.discount || 0);
   const lines = [];
@@ -563,6 +614,7 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
     const gross = pickNum(item.priceBeforeDiscount, item.price) ?? net;
     const line = {
       ...(quoted ? { quoted } : {}),
+      ...preSlabQuoteFrom(serviceKey, item),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
@@ -596,6 +648,7 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
     const gross = pickNum(item.priceBeforeDiscount, item.price) ?? net;
     lines.push({
       ...(quoted ? { quoted } : {}),
+      ...preSlabQuoteFrom(serviceKey, item),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
@@ -974,6 +1027,7 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
         cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,
       } : {}),
       ...(quoted ? { quoted } : {}),
+      ...preSlabQuoteFrom(serviceKey, item),
       // The bermuda removal cost this raw lawn line states itself: it travels with the line, so a lawn line
       // merged in from another container is costed from its own source.
       ...storedBermudaCost(serviceKey, item),
@@ -1161,13 +1215,17 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const lawnLineCount = rawLines.filter((line) => line.serviceKey === 'lawn_care').length;
   for (const raw of rawLines) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
+    const quotedPreSlab = raw.skipCogs || Number.isFinite(raw.explicitCogsCost) ? null : preSlabQuotedCost(raw, dimensions);
     const cogs = raw.skipCogs
       ? { status: 'not_applicable', totalPerVisit: 0, lines: [], warnings: [] }
       : (Number.isFinite(raw.explicitCogsCost)
         // The line carries its OWN persisted cost (engine installation
         // breakdowns) — authoritative over inventory mapping.
         ? { status: 'explicit', totalPerVisit: 0, lines: [], warnings: [], fixedCost: raw.explicitCogsCost }
-        : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers));
+        : quotedPreSlab
+          // A pre-slab line costs the product the quote named, not the Termidor usage rows.
+          ? { status: 'explicit', totalPerVisit: 0, lines: [], warnings: [], fixedCost: quotedPreSlab.cost, quotedProductKey: quotedPreSlab.productKey, costSource: quotedPreSlab.source }
+          : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers));
     const visits = visitsFor(raw, result);
     // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
     // not in the lawn inventory registry, so the quote's own cost line joins the

@@ -137,10 +137,10 @@ const ACTIONABLE_INVOICE_DELIVERY_FAILED = new Set(['receipt_no_recipient', 'rec
 // completion SMS); the card copy is written for it.
 const ACTIONABLE_COMMS_FAILED = new Set(['completion_sms_failed']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
-// operator gap (the queue / payment hold / send window owns them).
+// operator gap (the queue / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
   'awaiting_completion', 'report_not_published', 'delivery_queued', 'delivery_sending',
-  'project_delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight',
+  'project_delivery_sending', 'recap_sms_in_flight',
   // A combined-visit summary leg still claimed or awaiting the packet replay
   // is owned by the recovery worker until it reaches a terminal outcome.
   'visit_summary_delivery_pending',

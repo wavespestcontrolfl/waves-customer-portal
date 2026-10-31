@@ -83,18 +83,16 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
   // address: {line1, city, state, zip}, ... }, services, scheduled,
   // payments, cards, ... } — note camelCase on customer + nested address.
   const c = data?.customer || null;
-  const services = data?.services || [];
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
-  // Visit stats — pulled from service_records (completed visits). Counts any
-  // service record with a service_date, first = earliest, last = most recent.
-  const completedVisits = services.filter((s) => s.service_date);
-  const sortedAsc = [...completedVisits].sort((a, b) => String(a.service_date).localeCompare(String(b.service_date)));
-  const sortedDesc = [...sortedAsc].reverse();
-  const visitCount = completedVisits.length;
-  const lastVisitAt = sortedDesc[0]?.service_date || null;
-  const firstVisitAt = sortedAsc[0]?.service_date || null;
+  // Visit stats come from the server (data.visitStats): distinct days with a
+  // completed service record, over the whole history. Counting the capped
+  // `services` rows here showed one stop's several appointments, sibling
+  // records and not-yet-completed rows as separate visits.
+  const visitCount = data?.visitStats?.count || 0;
+  const lastVisitAt = data?.visitStats?.lastDate || null;
+  const firstVisitAt = data?.visitStats?.firstDate || null;
 
   // Upcoming reads the server's active-only list (data.upcomingScheduled);
   // data.scheduled is newest-first history and feeds the Previous tab.

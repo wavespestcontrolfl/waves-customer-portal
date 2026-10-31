@@ -362,6 +362,16 @@ function tierDiscountRate(tier) {
   return Number.isFinite(rate) ? rate : 0;
 }
 
+// Re-price a billed rate from the old tier discount to the new one: undo the
+// old discount to get the gross, then apply the new one. Shared by the plan
+// (monthly components, per-application rows) and the series-template step so
+// the rounding can never diverge.
+function repriceAtTier(rate, discountBefore, discountAfter) {
+  if (!(rate > 0)) return 0;
+  const gross = discountBefore < 1 ? rate / (1 - discountBefore) : rate;
+  return Math.round(gross * (1 - discountAfter) * 100) / 100;
+}
+
 /**
  * Plan the per-family billing wind-down WITHOUT writing: which ledger
  * components drop, what the remaining families reprice to at the demoted
@@ -440,11 +450,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinned
   const attributed = inScope.every((f) => byFamily.has(f) || heldByFamily.has(f)) && remaining.every((f) => byFamily.has(f) || heldByFamily.has(f));
   if (monthlyLane && !attributed) return { ok: false, error: 'scoped_unattributed' };
 
-  const reprice = (rate) => {
-    if (!(rate > 0)) return 0;
-    const gross = discountBefore < 1 ? rate / (1 - discountBefore) : rate;
-    return Math.round(gross * (1 - discountAfter) * 100) / 100;
-  };
+  const reprice = (rate) => repriceAtTier(rate, discountBefore, discountAfter);
   const remainingRates = remaining.map((f) => {
     const hold = heldByFamily.get(f);
     if (hold && hold.held_monthly_rate != null) {
@@ -491,9 +497,13 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinned
       perAppRows = perAppRows.filter((r) => !fixed.has(String(r.id)));
     }
   }
+  // Future visits the scheduler adds later price off the series template.
+  const templates = perApplicationLane
+    ? await planSeriesTemplates(dbh, rows, { remaining, perAppRows, discountBefore, discountAfter })
+    : { templateRows: [], templateSkips: [] };
   return {
     ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
-    monthlyLane, perApplicationLane, remainingRates, perAppRows,
+    monthlyLane, perApplicationLane, remainingRates, perAppRows, ...templates,
     scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
     billingMode: customer.billing_mode || null,
   };
@@ -516,11 +526,151 @@ function scopedPricingFingerprint(plan) {
     `perapp=${(plan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
     `tierbefore=${plan.tierBefore ?? ''}`,
     `mode=${plan.billingMode ?? ''}`,
+    require('./cancellation-resolution/template-keys').scopedTemplatesPart(plan.templateRows),
   ].join('|');
 }
 
 class ScopedPricingChangedError extends Error {
   constructor(message) { super(message); this.code = 'scoped_pricing_changed'; }
+}
+
+// ── Series price template ──────────────────────────────────────────────────
+// Visits the scheduler adds LATER (nightly top-up, completion auto-extend)
+// price off the series root's template, not off the rows repriced above:
+// extendSeriesOnceLocked -> overlayRecurringTemplateOverrides ->
+// resolveSeriesExtensionPriceTemplate (an explicit estimated_price /
+// primary_line_price override wins; else the anchored_split_per_visit marker;
+// else the root row's own price). A tier drop that repriced only the booked
+// children left the next added visit billing at the OLD tier price.
+//
+// The template change is PLANNED here (read-only, deterministic) so it rides
+// the approval fingerprint like every other displayed price, and APPLIED from
+// the approved boundary plan with a per-root compare-and-set.
+const TEMPLATE_PRICE_KEYS = ['estimated_price', 'primary_line_price'];
+// A root carrying any of these needs the restack math (add-on shares, line
+// and appointment discounts) the flat reprice cannot do: leave it for an
+// operator instead of guessing.
+const TEMPLATE_DISCOUNT_FIELDS = [
+  'discount_type', 'discount_amount', 'discount_dollars', 'discount_id',
+  'line_discount_type', 'line_discount_amount', 'line_discount_dollars', 'line_discount_id',
+];
+
+function readTemplateOverrides(raw) {
+  let value = raw;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return {}; }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function isSet(value) {
+  return value !== null && value !== undefined && value !== '';
+}
+
+// Template rows for one surviving root, mirroring
+// resolveSeriesExtensionPriceTemplate's precedence:
+//   override: explicit estimated_price / primary_line_price in the jsonb;
+//   marker:   else anchored_split_per_visit (read without the edit-scope gate);
+//   own:      else the root's own price is the template, so an explicit
+//             override is ADDED (the root row is never touched: a completed
+//             visit is history) — unless the root is itself repriced as a
+//             visit row in this plan.
+function templateRowsForRoot(root, family, repricedIds, reprice) {
+  const overrides = readTemplateOverrides(root.recurring_template_overrides);
+  const out = [];
+  const add = (field, source, before) => {
+    const after = reprice(before);
+    if (before > 0 && after > 0 && after !== before) out.push({ rootId: root.id, family, field, source, before, after });
+  };
+  const explicitKeys = TEMPLATE_PRICE_KEYS.filter((k) => isSet(overrides[k]));
+  const marker = Number(overrides.anchored_split_per_visit);
+  if (explicitKeys.length) {
+    for (const k of explicitKeys) add(k, 'override', Number(overrides[k]));
+  } else if (marker > 0) {
+    add('anchored_split_per_visit', 'marker', marker);
+  } else if (!repricedIds.has(String(root.id))) {
+    const field = isSet(root.primary_line_price) ? 'primary_line_price' : 'estimated_price';
+    add(field, 'own', Number(root[field]));
+  }
+  return out;
+}
+
+async function templateBlockedReason(dbh, root) {
+  // The scheduler prices off the root OVERLAID with its overrides, so a
+  // discount carried only in the override jsonb counts the same.
+  const overrides = readTemplateOverrides(root.recurring_template_overrides);
+  const fields = TEMPLATE_DISCOUNT_FIELDS.filter((f) => isSet(root[f]) || isSet(overrides[f]));
+  if (fields.length) return `discount field ${fields.join('/')}`;
+  const addon = await dbh('scheduled_service_addons').where({ scheduled_service_id: root.id }).first('id');
+  return addon ? 'add-on rows' : null;
+}
+
+// Plan the template reprice for every ongoing series root of a SURVIVING
+// family (per-application lane only). `rows` = the plan's live row read.
+// A template that cannot be repriced safely lands in `templateSkips`, named
+// in the audit note: never an error (a partial cancel would downgrade the
+// customer text).
+async function planSeriesTemplates(dbh, rows, ctx) {
+  const out = { templateRows: [], templateSkips: [] };
+  if (ctx.discountBefore === ctx.discountAfter) return out;
+  const { uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  const reprice = (rate) => repriceAtTier(rate, ctx.discountBefore, ctx.discountAfter);
+  const overrideGateOn = require('../config/feature-gates').isEnabled('editApptPriceServiceScope');
+  const repricedIds = new Set((ctx.perAppRows || []).map((r) => String(r.id)));
+  for (const root of rows) {
+    if (!(root.is_recurring && root.recurring_ongoing) || root.recurring_parent_id != null) continue;
+    if (isCommercialServiceRow(root) || isRodentLedServiceRow(root)) continue;
+    const family = uniqueServiceFamilies(detectWaveGuardPlanKeys(root))[0];
+    if (!family || !ctx.remaining.includes(family)) continue;
+    const found = templateRowsForRoot(root, family, repricedIds, reprice);
+    if (!found.length) continue;
+    const reason = (found.some((r) => r.source !== 'marker') && !overrideGateOn)
+      ? 'price-override gate is off, so the scheduler would ignore an override'
+      : await templateBlockedReason(dbh, root);
+    if (reason) out.templateSkips.push({ rootId: root.id, family, reason });
+    else out.templateRows.push(...found);
+  }
+  return out;
+}
+
+// Write the approved plan's template rows in the caller's transaction. Each
+// root is re-read FOR UPDATE and must still yield EXACTLY its approved rows
+// (field, source, before, after): a changed price, or an override or marker
+// written since the re-plan (which changes WHICH value the scheduler reads),
+// throws and aborts the whole wind-down (tier demote included), exactly like
+// the per-application row CAS.
+async function applySeriesTemplates(trx, plan) {
+  const approved = plan.templateRows || [];
+  if (!approved.length) return;
+  const reprice = (rate) => repriceAtTier(rate, plan.discountBefore, plan.discountAfter);
+  const repricedIds = new Set((plan.perAppRows || []).map((r) => String(r.id)));
+  const rowKey = (r) => `${r.field}:${r.source}:${r.before}:${r.after}`;
+  const byRoot = new Map();
+  for (const r of approved) byRoot.set(String(r.rootId), [...(byRoot.get(String(r.rootId)) || []), r]);
+  for (const [rootId, rows] of byRoot) {
+    const root = await trx('scheduled_services').where({ id: rows[0].rootId }).forUpdate()
+      .first('id', 'recurring_template_overrides', 'estimated_price', 'primary_line_price');
+    const live = root ? templateRowsForRoot(root, rows[0].family, repricedIds, reprice) : [];
+    if (live.map(rowKey).sort().join('|') !== rows.map(rowKey).sort().join('|')) {
+      throw new Error(`series template CAS failed for root ${rootId} — template changed since the approved preview`);
+    }
+    const overrides = readTemplateOverrides(root.recurring_template_overrides);
+    for (const r of rows) overrides[r.field] = r.after;
+    await trx('scheduled_services').where({ id: rows[0].rootId })
+      .update({ recurring_template_overrides: JSON.stringify(overrides), updated_at: new Date() });
+  }
+}
+
+// Audit-note text for the template step; also logs each skipped template once
+// (the plan itself stays quiet: it runs on every preview).
+function templateNoteLine(plan, customerId) {
+  const changes = (plan.templateRows || []).map((r) => `Future-visit price ${r.family} ${r.before} → ${r.after}`);
+  const skips = plan.templateSkips || [];
+  for (const k of skips) {
+    logger.warn(`[cancellation-processor] series template ${k.rootId} (${k.family}) left at the old tier price${customerId ? ` for ${customerId}` : ''}: ${k.reason}`);
+  }
+  return (changes.length ? ` ${changes.join('; ')}.` : '')
+    + (skips.length ? ` Future-visit price NOT changed (needs a manual look): ${skips.map((k) => `${k.family} series ${k.rootId} (${k.reason})`).join('; ')}.` : '');
 }
 
 // Apply the scoped wind-down (tier demote + surviving-family reprice).
@@ -632,6 +782,9 @@ async function applyScopedWindDown(customerId, entryPlan, {
           throw new Error(`per-application reprice matched zero rows for visit ${r.id} — price changed since the approved preview`);
         }
       }
+      // Visits the scheduler adds later price off the series template: the
+      // approved plan's template rows, each compare-and-set under row lock.
+      await applySeriesTemplates(trx, plan);
     }
     const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
     if (plan.monthlyLane) update.monthly_rate = plan.scalarAfter;
@@ -658,12 +811,13 @@ async function applyScopedWindDown(customerId, entryPlan, {
     const rateLine = plan.monthlyLane
       ? ` Monthly ${plan.scalarBefore} → ${plan.scalarAfter}; ${plan.remainingRates.map((r) => `${r.family} ${r.before} → ${r.after}`).join(', ')}.`
       : '';
+    const templateLine = templateNoteLine(plan, customerId);
     await db('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'note',
       subject: `Cancelled ${plan.inScope.join(', ')} — plan continues with ${plan.remaining.join(', ')}`,
       body: `${actorLabel} cancellation request ${requestId || ''}`.trim()
-        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}`
+        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}${templateLine}`
         + (lateFeeWaived ? ' Scheduled-visit fee waived.' : ''),
     });
   } catch (noteErr) {
@@ -1104,6 +1258,11 @@ async function processCancellationRequest({
   // legacy status AND a leading track_state whose status sync lagged (the two
   // queries are disjoint — the second excludes statuses the first matched;
   // terminal statuses there are stale-drift history, not live work).
+  // A flagged visit dated BEFORE today is a tech who never closed it out,
+  // not live work: it is still flagged for the office, and also listed in
+  // staleInProgressVisitIds so a caller may tell the customer the cancel is
+  // done (owner 2026-10-30).
+  const staleInProgressVisitIds = [];
   try {
     const inProgressByStatus = await db('scheduled_services')
       .where({ customer_id: customerId })
@@ -1116,18 +1275,19 @@ async function processCancellationRequest({
       .select('id', 'scheduled_date');
     for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
       if (scopedIds && !scopedIds.has(row.id)) continue;
+      const d = row.scheduled_date instanceof Date
+        ? row.scheduled_date.toISOString().slice(0, 10)
+        : String(row.scheduled_date || '').slice(0, 10);
       // Keep-through (end of paid coverage): a covered visit inside the
       // retained window is deliberately staying on the calendar, so a tech
       // mid-delivery on it needs no manual cancellation — flagging it would
       // report an otherwise clean end-of-coverage cancel as partial and skip
       // the term's cancel decision merely because a paid visit is underway.
       if (keepIds && keepIds.includes(String(row.id))) {
-        const d = row.scheduled_date instanceof Date
-          ? row.scheduled_date.toISOString().slice(0, 10)
-          : String(row.scheduled_date || '').slice(0, 10);
         if (d && d <= sweepAfter) continue;
       }
       errors.push(`in_progress_visit:${row.id}`);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d < today) staleInProgressVisitIds.push(String(row.id));
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }
   } catch (err) {
@@ -1693,6 +1853,9 @@ async function processCancellationRequest({
 
   return {
     cancelledCount, cancelledIds, recurrenceStopped, churned, ok, errors,
+    // Subset of the in_progress_visit errors dated before today (see the
+    // in-progress check above).
+    staleInProgressVisitIds,
     // Rows a PRIOR attempt of this same request already cancelled (found by
     // its note) — disjoint from cancelledCount; a caller whose first-run
     // record was lost reconstructs the pull count from it.

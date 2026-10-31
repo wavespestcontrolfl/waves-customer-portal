@@ -191,6 +191,18 @@ describe('atomic publishing claim', () => {
     expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(7);
   });
 
+  test('the review handoff after publishAstro lands only while this run holds the claim (audit BLOG-04)', async () => {
+    mockState.pendingBlogs = [blog];
+    await ContentScheduler.processScheduledPosts();
+
+    const handoff = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending_review'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(handoff).toBeDefined();
+    expect(handoff.filters).toEqual(expect.arrayContaining([['publish_status', 'publishing']]));
+  });
+
   test('skips the blog when another instance claimed it first (0 rows updated)', async () => {
     mockState.pendingBlogs = [blog];
     mockState.updateResult = (table, filters, updates) =>
@@ -372,6 +384,7 @@ describe('atomic SOCIAL publishing claim', () => {
     source_url: 'https://wavespestcontrol.com/blog/x/',
     source_guid: 'g1',
     publish_status: 'pending',
+    scheduled_for: new Date('2026-10-31T14:00:00.000Z'),
     custom_content: null,
   };
 
@@ -395,9 +408,25 @@ describe('atomic SOCIAL publishing claim', () => {
     expect(claim.filters).toEqual(expect.arrayContaining([
       ['id', 'soc-1'],
       ['publish_status', 'pending'],
+      ['scheduled_for', social.scheduled_for],
     ]));
     expect(SocialMedia.publishToAll).toHaveBeenCalledTimes(1);
     expect(result.socialCount).toBe(1);
+  });
+
+  test('a row unscheduled after this tick selected it is not posted (the claim needs the same time)', async () => {
+    const SocialMedia = enableSocial();
+    mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder' }];
+    // The unschedule cleared scheduled_for (publish_status stays 'pending'),
+    // so a claim that requires the selected time matches no row.
+    mockState.updateResult = (table, filters, updates) => (
+      table === 'social_media_posts' && updates.publish_status === 'publishing'
+        && filters.some(([col]) => col === 'scheduled_for') ? 0 : 1);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(SocialMedia.publishToAll).not.toHaveBeenCalled();
+    expect(result.socialCount).toBe(0);
   });
 
   test('skips the post when another instance claimed it first — no duplicate publishToAll', async () => {
@@ -418,6 +447,67 @@ describe('atomic SOCIAL publishing claim', () => {
       && u.updates.publish_status !== 'publishing'
       && u.filters.some(([col, val]) => col === 'id' && val === 'soc-1'));
     expect(writes).toHaveLength(0);
+  });
+
+  test('a saved campaign draft posts its stored image and folds the result into its own row; a title-only row is unchanged (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    const saved = {
+      ...social,
+      id: 'soc-2',
+      source_type: 'campaign_builder',
+      source_guid: 'campaign_builder_1',
+      image_url: 'https://cdn.example.com/card.png',
+      platforms_posted: '["facebook","instagram"]',
+      custom_content: '{"facebook":"fb copy","instagram":"ig copy"}',
+    };
+    mockState.pendingSocials = [saved, social];
+
+    await ContentScheduler.processScheduledPosts();
+
+    const [savedCall, plainCall] = SocialMedia.publishToAll.mock.calls.map(([arg]) => arg);
+    // the saved image rides along, so no fresh generated image replaces it
+    expect(savedCall).toMatchObject({
+      guid: 'campaign_builder_1',
+      source: 'scheduled',
+      channels: ['facebook', 'instagram'],
+      customContent: { facebook: 'fb copy', instagram: 'ig copy' },
+      imageUrl: 'https://cdn.example.com/card.png',
+      noAiImage: true,
+      // a real publish folds its results into the saved row: one History entry
+      postId: 'soc-2',
+    });
+    // a row with no image and no campaign source publishes exactly as before
+    expect(plainCall).not.toHaveProperty('imageUrl');
+    expect(plainCall).not.toHaveProperty('postId');
+    expect(plainCall).not.toHaveProperty('noAiImage');
+  });
+
+  test('on a dry run a saved draft passes no postId, so its requested channels survive for the next tick (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.SOCIAL_FLAGS.dryRun = true;
+    try {
+      SocialMedia.publishToAll.mockResolvedValue({ dryRun: true });
+      mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder', platforms_posted: JSON.stringify(['gbp']) }];
+
+      await ContentScheduler.processScheduledPosts();
+
+      const call = SocialMedia.publishToAll.mock.calls[0][0];
+      expect(call).not.toHaveProperty('postId');
+      expect(call.channels).toEqual(['gbp']);
+    } finally {
+      SocialMedia.SOCIAL_FLAGS.dryRun = false;
+    }
+  });
+
+  test('a stored image that is not http(s) is never passed to the publishers (SOC-01)', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    mockState.pendingSocials = [{ ...social, source_type: 'campaign_builder', image_url: 'javascript:alert(1)' }];
+
+    await ContentScheduler.processScheduledPosts();
+
+    expect(SocialMedia.publishToAll.mock.calls[0][0]).not.toHaveProperty('imageUrl');
   });
 
   test('publishToAll failure marks failed only under the claim we hold', async () => {

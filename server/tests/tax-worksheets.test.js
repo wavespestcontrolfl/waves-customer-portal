@@ -11,7 +11,9 @@
  *     of the first $1,200 of tax ($30 at most) and only on time; a late
  *     return owes 10% of the tax, at least $50 even with no tax.
  *  3. 1099 list: contract labor and legal payments grouped by payee from the
- *     bank text; card, debit card and platform payments are left out.
+ *     bank text (the bank's original wording names the payee when the
+ *     expense's own name is generic); card, debit card and platform payments
+ *     are left out.
  *  4. The sheet reads the P&L revenue and the P&L's own tax legs, maps the
  *     filing calendar row, warns for a period in progress and refuses a
  *     future period.
@@ -226,6 +228,57 @@ describe('1099 list', () => {
     ]);
   });
 
+  test("a generic bank name takes the payee from the bank's original wording, and those payments add up", () => {
+    const zelle = (over) => row({ vendor_name: 'Zelle', description: 'Zelle', bank_text: 'Zelle', ...over });
+    const r = ws.build1099List(2026, [
+      zelle({ expense_id: 'z1', amount: 1200, bank_original: 'Zelle money sent to Pat Example Conf# AB12CD' }),
+      zelle({ expense_id: 'z2', amount: 900, bank_original: 'Zelle money sent to PAT EXAMPLE' }),
+      row({ expense_id: 'v1', amount: 100, vendor_name: 'Pat Example', bank_text: 'Pat Example' }),
+    ]);
+    expect(r.payees.map((p) => [p.key, p.name, p.total, p.count, p.unresolved, p.needs_1099])).toEqual([
+      ['pat example', 'Pat Example', 2200, 3, false, true],
+    ]);
+    expect(r.payees[0].payments.map((p) => [p.expense_id, p.channel])).toEqual([['z1', 'zelle'], ['z2', 'zelle'], ['v1', 'unknown']]);
+  });
+
+  test('a typed vendor name is never overridden; wording that names no one stays unresolved, one line each', () => {
+    const r = ws.build1099List(2026, [
+      row({ expense_id: 'a1', amount: 700, vendor_name: 'Acme Lawn LLC', bank_text: 'Zelle', bank_original: 'Zelle money sent to Pat Example' }),
+      row({ expense_id: 'u1', amount: 300, vendor_name: 'Zelle', bank_text: 'Zelle', bank_original: 'ZELLE PAYMENT' }),
+      row({ expense_id: 'u2', amount: 300, vendor_name: 'Zelle', bank_text: 'Zelle', bank_original: null }),
+      row({ expense_id: 'k1', amount: 300, payment_method: 'check', vendor_name: 'Check 1042', bank_text: 'Check 1042', bank_original: 'CHECK 1042' }),
+    ]);
+    expect(r.payees.map((p) => [p.key, p.unresolved])).toEqual([
+      ['acme lawn llc', false],
+      ['unresolved:k1', true],
+      ['unresolved:u1', true],
+      ['unresolved:u2', true],
+    ]);
+  });
+
+  test('raw bank descriptors that name an action, not a person, never add up as one payee', () => {
+    const generic = (id, vendor, original, amount = 100) => row({ expense_id: id, amount, vendor_name: vendor, description: vendor, bank_text: vendor, bank_original: original });
+    const r = ws.build1099List(2026, [
+      // two different people paid by PayPal transfer: together they would cross $2,000
+      generic('p1', 'PayPal', 'PAYPAL INST XFER 240101 WEB ID: PAYPALSI77', 1200),
+      generic('p2', 'PayPal', 'PAYPAL INST XFER 250315 WEB ID: PAYPALSI77', 900),
+      generic('v1', 'Venmo', 'VENMO 1030 PAYMENT 250101'),
+      generic('c1', 'Cash App', 'CASH APP*CASH OUT'),
+      generic('o1', 'Online Transfer', 'ONLINE TRANSFER TO CHK ...1234'),
+      // only Zelle's own wording is read: other apps report on a 1099-K
+      generic('p3', 'PayPal', 'PAYPAL *PAT EXAMPLE'),
+      // a Zelle phrase with no name (phone number only) names no one
+      generic('z9', 'Zelle', 'Zelle money sent to 9415550100'),
+      // a digit left in the name is too ambiguous to add up by: these are two businesses
+      generic('d1', 'Zelle', 'Zelle money sent to A1 Consulting LLC', 1200),
+      generic('d2', 'Zelle', 'Zelle money sent to B2 Consulting LLC', 1200),
+      generic('d3', 'Zelle', 'Zelle payment to Pat Example JPM99999999 10/12'),
+    ]);
+    expect(r.payees.every((p) => p.unresolved && p.count === 1)).toBe(true);
+    expect(r.payees.some((p) => p.needs_1099)).toBe(false);
+    expect(r.payees).toHaveLength(10);
+  });
+
   test('2025 payments use the $600 threshold', () => {
     const r = ws.build1099List(2025, [row({ amount: 900, vendor_name: 'Zelle money sent to Lee Sample', bank_text: 'Zelle money sent to Lee Sample' })]);
     expect(r.threshold).toBe(600);
@@ -279,13 +332,17 @@ describe('form1099List', () => {
   test('lists the year, counts payment-app debits still in the Inbox, adds the notes', async () => {
     tables['expenses as e'] = () => [
       { expense_id: 'a', expense_date: '2026-02-03', amount: '2500.00', payment_method: 'ach', vendor_name: 'Zelle money sent to Pat Example', description: 'x', line: '11', category: 'Contract Labor', bank_text: 'Zelle money sent to Pat Example' },
+      // a feed row: the cleaned name is just "Zelle", the bank's wording names the payee
+      { expense_id: 'b', expense_date: '2026-02-10', amount: '100.00', payment_method: 'ach', vendor_name: 'Zelle', description: 'Zelle', line: '11', category: 'Contract Labor', bank_text: 'Zelle', bank_original: 'Zelle money sent to Pat Example' },
     ];
     tables.bank_transactions = () => ({ count: 3, total: '410.50' });
     const r = await ws.form1099List('2026');
-    expect(r.payees).toEqual([expect.objectContaining({ name: 'Pat Example', total: 2500, needs_1099: true })]);
+    expect(r.payees).toEqual([expect.objectContaining({ name: 'Pat Example', total: 2600, count: 2, needs_1099: true })]);
     expect(r.payees[0].payments[0]).toMatchObject({ date: '2026-02-03', channel: 'zelle', line: '11' });
     expect(r.inbox_pending).toEqual({ count: 3, total: 410.5 });
     expect(r.notes.some((n) => n.includes('1099-MISC'))).toBe(true);
+    // the payee can come from the matched bank row's original wording
+    expect(mockDb.raw.mock.calls.some(([sql]) => /select b\.original_description from bank_transactions b where b\.matched_expense_id = e\.id .* as bank_original/.test(String(sql)))).toBe(true);
     // the Inbox count never puts a "?" in raw SQL (knex would read it as a binding)
     expect(mockDb.raw.mock.calls.every(([sql]) => !String(sql).includes('?') || /\(\?, \?\)/.test(String(sql)))).toBe(true);
   });

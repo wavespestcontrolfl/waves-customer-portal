@@ -7,10 +7,11 @@ const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
+const { sendEmailMessage } = require('../services/email/send-message');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { emailSendLaterLive } = require('../config/feature-gates');
-const { parseETDateTime, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
+const { parseETDateTime, etParts, etDateString, etWallClockOccurrences } = require('../utils/datetime-et');
 const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
   createStaffOAuthState,
@@ -18,6 +19,13 @@ const {
 } = require('../services/staff-oauth-state');
 
 const MAX_PAGE_LIMIT = 200;
+// The Vendor view: the classifier's two vendor classes plus 'vendor', the
+// known-vendor-domain class email-sync stores at insert, which stays until
+// (or if) the background classifier replaces it.
+const VENDOR_CLASSES = ['vendor', 'vendor_invoice', 'vendor_communication'];
+// "Today" is the Eastern day: the server runs in UTC, where local midnight
+// is 8 PM (EDT) or 7 PM (EST) the evening before.
+const etMidnight = () => parseETDateTime(`${etDateString()}T00:00:00`);
 const GMAIL_OAUTH_STATE_PREFIX = 'gmail.oauth_state:';
 const GMAIL_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -155,7 +163,7 @@ router.get('/inbox', async (req, res) => {
 
     if (category === 'unread') query = query.where('is_read', false);
     else if (category === 'starred') query = query.where('is_starred', true);
-    else if (category === 'vendor') query = query.whereIn('classification', ['vendor_invoice', 'vendor_communication']);
+    else if (category === 'vendor') query = query.whereIn('classification', VENDOR_CLASSES);
     else if (category === 'leads') query = query.where('classification', 'lead_inquiry');
     else if (category === 'invoices') query = query.where('classification', 'vendor_invoice');
     else if (category === 'customer') query = query.whereIn('classification', ['customer_request', 'scheduling']);
@@ -213,6 +221,25 @@ router.get('/thread/:threadId', async (req, res) => {
   }
 });
 
+// Gmail is the source of truth for read, star, archive and trash: the sync
+// copies its labels back onto the row. Each action therefore asks Gmail
+// first and changes the row only after Gmail accepts, so a refused action
+// answers 502 instead of a success the next sync would quietly reverse.
+// A message Gmail no longer has (404, as email-sync treats it) has nothing
+// left to disagree with, so the portal change stands.
+const gmailMessageGone = (err) => err?.code === 404 || err?.response?.status === 404;
+const GMAIL_REFUSED = 'Gmail did not accept the change. Try again.';
+async function applyInGmail(change) {
+  try {
+    await change();
+    return true;
+  } catch (err) {
+    if (gmailMessageGone(err)) return true;
+    logger.warn(`[email] Gmail label change failed: ${err.message}`);
+    return false;
+  }
+}
+
 // GET /message/:id — full email with body
 router.get('/message/:id', async (req, res) => {
   try {
@@ -221,16 +248,16 @@ router.get('/message/:id', async (req, res) => {
 
     const attachments = await db('email_attachments').where('email_id', email.id);
 
-    // Mark as read
+    // Mark as read, Gmail first (see applyInGmail). A refusal still opens
+    // the email: it is answered unread, and the client's read toggle then
+    // retries with visible feedback.
+    let isRead = email.is_read;
     if (!email.is_read) {
-      await db('emails').where('id', email.id).update({ is_read: true });
-      // Sync read status to Gmail
-      try {
-        await gmailClient.modifyLabels(email.gmail_id, [], ['UNREAD']);
-      } catch (e) { /* non-critical */ }
+      isRead = await applyInGmail(() => gmailClient.modifyLabels(email.gmail_id, [], ['UNREAD']));
+      if (isRead) await db('emails').where('id', email.id).update({ is_read: true });
     }
 
-    res.json({ ...email, attachments });
+    res.json({ ...email, is_read: isRead, attachments });
   } catch (err) {
     logger.error(`[email] Message error: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -271,11 +298,11 @@ router.post('/message/:id/read', async (req, res) => {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
     const newRead = !email.is_read;
+    const applied = await applyInGmail(() => (newRead
+      ? gmailClient.modifyLabels(email.gmail_id, [], ['UNREAD'])
+      : gmailClient.modifyLabels(email.gmail_id, ['UNREAD'], [])));
+    if (!applied) return res.status(502).json({ error: GMAIL_REFUSED });
     await db('emails').where('id', req.params.id).update({ is_read: newRead });
-    try {
-      if (newRead) await gmailClient.modifyLabels(email.gmail_id, [], ['UNREAD']);
-      else await gmailClient.modifyLabels(email.gmail_id, ['UNREAD'], []);
-    } catch (e) { /* non-critical */ }
     res.json({ is_read: newRead });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -286,8 +313,8 @@ router.post('/message/:id/archive', async (req, res) => {
   try {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
+    if (!(await applyInGmail(() => gmailClient.archiveMessage(email.gmail_id)))) return res.status(502).json({ error: GMAIL_REFUSED });
     await db('emails').where('id', req.params.id).update({ is_archived: true });
-    try { await gmailClient.archiveMessage(email.gmail_id); } catch (e) { /* non-critical */ }
     res.json({ archived: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -299,11 +326,11 @@ router.post('/message/:id/star', async (req, res) => {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
     const newStarred = !email.is_starred;
+    const applied = await applyInGmail(() => (newStarred
+      ? gmailClient.modifyLabels(email.gmail_id, ['STARRED'], [])
+      : gmailClient.modifyLabels(email.gmail_id, [], ['STARRED'])));
+    if (!applied) return res.status(502).json({ error: GMAIL_REFUSED });
     await db('emails').where('id', req.params.id).update({ is_starred: newStarred });
-    try {
-      if (newStarred) await gmailClient.modifyLabels(email.gmail_id, ['STARRED'], []);
-      else await gmailClient.modifyLabels(email.gmail_id, [], ['STARRED']);
-    } catch (e) { /* non-critical */ }
     res.json({ is_starred: newStarred });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -314,30 +341,48 @@ router.post('/message/:id/trash', async (req, res) => {
   try {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
+    if (!(await applyInGmail(() => gmailClient.trashMessage(email.gmail_id)))) return res.status(502).json({ error: GMAIL_REFUSED });
     await db('emails').where('id', req.params.id).update({ is_archived: true });
-    try { await gmailClient.trashMessage(email.gmail_id); } catch (e) { /* non-critical */ }
     res.json({ trashed: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /send — send or reply
+// The replied-to email's RFC Message-ID, from a row in the reply's own
+// thread (headers from another conversation would contradict the thread
+// id). A failed lookup, or a row synced before the header was captured,
+// only loses the threading headers: the reply still goes with its thread id
+// (scheduled-email-sender's rule).
+async function sourceMessageId(replyEmailId, threadId) {
+  if (typeof replyEmailId !== 'string') return null;
+  try {
+    const source = await db('emails').where({ id: replyEmailId, ...(threadId ? { gmail_thread_id: threadId } : {}) }).first('message_id');
+    return source?.message_id || null;
+  } catch (err) {
+    logger.warn(`[email] reply source lookup failed (${err.code || 'error'})`);
+    return null;
+  }
+}
+
+// POST /send — send or reply. The send itself is services/email/send-message.js, shared with the Intelligence Bar's
+// compose_email card.
 router.post('/send', async (req, res) => {
   try {
-    const { to, subject, body, threadId, inReplyTo } = req.body;
+    const { to, subject, body, threadId, replyEmailId } = req.body;
     if (!to || !body) return res.status(400).json({ status: 'failed', error: 'to and body required' });
 
-    const result = await gmailClient.sendMessage(to, subject || '(no subject)', body, threadId, inReplyTo);
-    // Log only the provider message id — no recipient address, even masked.
-    if (!result?.id) return res.status(202).json({ status: 'outcome_unknown', error: 'Check the Sent folder before retrying.' });
-    logger.info(`[email] Sent email: ${result.id}`);
-    res.json({ success: true, status: 'provider_accepted', messageId: result.id });
+    // A reply joins its conversation only with the source Message-ID in
+    // In-Reply-To / References as well as the thread id (Gmail's threading
+    // rules). The page sends the replied-to row's id; the header comes from
+    // the stored row, as the scheduled send resolves it.
+    const inReplyTo = req.body.inReplyTo || (replyEmailId ? await sourceMessageId(replyEmailId, threadId) : undefined);
+    const { status, json } = await sendEmailMessage({ to, subject, body, threadId, inReplyTo });
+    res.status(status).json(json);
   } catch (err) {
-    const unknown = err.providerOutcome?.outcomeUnknown === true;
-    logger.error(`[email] Send outcome: ${unknown ? 'unknown' : 'failed'}`);
-    res.status(unknown ? 202 : 502).json({ status: unknown ? 'outcome_unknown' : 'failed',
-      error: unknown ? 'Check the Sent folder before retrying.' : 'The email was not accepted. Try again.' });
+    // A malformed body (no req.body) is the only way here: sendEmailMessage answers its own failures.
+    logger.error('[email] Send outcome: failed');
+    res.status(502).json({ status: 'failed', error: 'The email was not accepted. Try again.' });
   }
 });
 
@@ -555,13 +600,11 @@ router.get('/stats', async (req, res) => {
     const [total] = await db('emails').where({ is_archived: false }).count('* as count');
     const [vendor] = await db('emails')
       .where({ is_archived: false })
-      .whereIn('classification', ['vendor_invoice', 'vendor_communication'])
+      .whereIn('classification', VENDOR_CLASSES)
       .count('* as count');
     const [starred] = await db('emails').where({ is_starred: true, is_archived: false }).count('* as count');
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const [todayCount] = await db('emails').where('received_at', '>=', today).count('* as count');
+    const [todayCount] = await db('emails').where('received_at', '>=', etMidnight()).count('* as count');
 
     res.json({
       unread: parseInt(unread.count),
@@ -882,8 +925,7 @@ router.get('/vendor-invoices', async (req, res) => {
 // GET /daily-digest — today's email activity summary
 router.get('/daily-digest', async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = etMidnight();
 
     const todayEmails = await db('emails').where('received_at', '>=', today);
 

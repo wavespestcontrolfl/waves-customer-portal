@@ -95,8 +95,6 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
-import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from '../components/FieldDocument';
-import './pay-invoice-document.css';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
@@ -353,7 +351,7 @@ function CoverageVisitsList({ visits, status }) {
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div className="field-section-heading" style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
       <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
         {children}
       </div>
@@ -2279,9 +2277,13 @@ export default function PayPageV2() {
           setData((prev) => {
             if (!prev?.invoice) return prev;
             const total = Number(prev.invoice.total ?? setupAmountDue);
+            // Part payments already received are not credit: leave them out
+            // of the derived credit, or a part-paid invoice reads "Account
+            // credit applied" for money the office recorded by hand.
+            const amountPaid = Math.max(0, Number(prev.invoice.amountPaid) || 0);
             const creditApplied = setup.creditApplied != null
               ? Math.max(0, Number(setup.creditApplied))
-              : Math.max(0, Math.round((total - setupAmountDue) * 100) / 100);
+              : Math.max(0, Math.round((total - amountPaid - setupAmountDue) * 100) / 100);
             // CRITICAL: return the SAME object reference when nothing changed. The
             // setup effect depends on `data`, so handing back a new object every
             // time would re-run it and re-POST /setup forever. Only the first
@@ -2714,10 +2716,25 @@ export default function PayPageV2() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      {/* Keep the shared pay/receipt marker for glass payment controls. */}
+      {/* The Print button below calls window.print() — back the
+          waves-no-print marker with an actual print rule (ReceiptPage
+          defines its own local copy) so the newsletter card + identity
+          footer and shell chrome stay out of the invoice printout. */}
+      <style>{`
+        @media print {
+          @page { margin: 0.5in; }
+          body { background: #FFFFFF !important; }
+          header, footer, .waves-no-print { display: none !important; }
+        }
+      `}</style>
+      {/* waves-print-root: glass-theme.css scopes its soft-inner-box rule to
+          `.waves-print-root [data-glass-clear]`; the inactive payment-method
+          icon tile below relies on it (pre-R2a this page carried
+          waves-receipt-page for the same match). The only other rule on the
+          class is ReceiptPage's own print override, which is not mounted here. */}
       <CustomerColumn className="waves-print-root">
         {isOverdue && (
-          <div className="waves-no-print" style={{
+          <div style={{
             marginBottom: SP.md,
             padding: SP.md,
             borderRadius: RADIUS.input,
@@ -2742,15 +2759,15 @@ export default function PayPageV2() {
           pdfFileName="Waves_Invoice.pdf"
           shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
         />
-        <FieldDocumentBody className="waves-invoice-document" style={{ marginBottom: SP.lg }}>
-          <FieldMasthead />
+        <BrandCard padding={24}>
           {/* No status chip (owner 2026-09-04) — the due panel below carries
               the due / overdue state. */}
-          <FieldTitle
-            eyebrow="Invoice"
-            title="Review and pay"
-            reference={`Invoice ${invoice.invoiceNumber}`}
-            subtitle={invoice.dueDate ? (
+          <div style={{ marginBottom: SP.lg }}>
+            <div style={{ ...eyebrow, marginBottom: SP.xs }}>
+              Invoice · {invoice.invoiceNumber}
+            </div>
+            <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
+            {invoice.dueDate ? (
               <div style={{ fontSize: FS.body, color: isOverdue ? DOC.danger : DOC.muted, fontWeight: isOverdue ? FW.bold : FW.regular }}>
                 {isOverdue ? 'Was due ' : 'Due '}{formatInvoiceDate(invoice.dueDate)}
               </div>
@@ -2758,7 +2775,7 @@ export default function PayPageV2() {
               /* No due date = payable now (the retired chip's fallback). */
               <div style={{ fontSize: FS.body, color: DOC.muted }}>Due now</div>
             )}
-          />
+          </div>
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
               shows in the line items and on the Pay button). */}
@@ -2777,7 +2794,7 @@ export default function PayPageV2() {
                 {/* Calendar icon tile removed (owner 2026-07-09 — no decorative icons). */}
                 <div style={{ minWidth: 0 }}>
                   <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Annual prepayment</div>
-                  <div className="field-document-prose" style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+                  <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
                     {prepayCalloutText}
                   </div>
                   <CoverageVisitsList
@@ -2790,7 +2807,7 @@ export default function PayPageV2() {
 
             <AnnualPrepayInvoicePanel term={annualPrepay} />
 
-            <div className="field-info-grid" style={{
+            <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
               gap: SP.md,
@@ -2836,8 +2853,8 @@ export default function PayPageV2() {
 
             {visibleLineItems.length > 0 && (
               <div style={{ marginBottom: SP.lg }}>
-                <div className="field-section-heading">Invoice items</div>
-                <div className="field-invoice-items" style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Invoice items</div>
+                <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
                   <div data-glass="soft" style={{
                     ...eyebrow,
                     display: 'grid',
@@ -2882,7 +2899,7 @@ export default function PayPageV2() {
 
             {invoiceAttachments.length > 0 && (
               <div style={{ marginBottom: SP.lg }}>
-                <div className="field-section-heading">Attachments</div>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Attachments</div>
                 <div style={{ display: 'grid', gap: SP.xs }}>
                   {invoiceAttachments.map((attachment) => (
                     <a
@@ -2943,7 +2960,8 @@ export default function PayPageV2() {
               const hasAdjustments = invoice.discountAmount > 0
                 || invoice.taxAmount > 0
                 || depositCreditTotal > 0
-                || Number(invoice.creditApplied) > 0;
+                || Number(invoice.creditApplied) > 0
+                || Number(invoice.amountPaid) > 0;
               const combinedPreviewPossible = !!(stripeSetup?.combined || (!stripeSetup && data.previousBalance?.invoices?.length));
               // Only a SINGLE line item states the total on its own; zero
               // items shows no figure at all and multiple items show only
@@ -2951,7 +2969,7 @@ export default function PayPageV2() {
               const needsTotalFallback = visibleLineItems.length !== 1;
               /* token-sheet preview: totals always render */
               return (
-            <div className="field-invoice-totals" data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
+            <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -2965,6 +2983,9 @@ export default function PayPageV2() {
               {Number(invoice.creditApplied) > 0 && (
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
               )}
+              {Number(invoice.amountPaid) > 0 && (
+                <SummaryRow label="Paid so far" value={`− ${fmtCurrency(invoice.amountPaid)}`} />
+              )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
               {(() => {
                 // Combined balance payment (server-gated): itemize the other
@@ -2974,7 +2995,12 @@ export default function PayPageV2() {
                 const combinedSetup = stripeSetup?.combined;
                 const prev = combinedSetup
                   ? (() => {
-                    const others = combinedSetup.invoices.filter((i) => !i.isCurrent);
+                    // The setup breakdown carries no past-due verdict (it is
+                    // money-path data); keep the GET preview's, by invoice number.
+                    const pastDueByNumber = new Map((data.previousBalance?.invoices || []).map((i) => [i.invoiceNumber, i.pastDue === true]));
+                    const others = combinedSetup.invoices
+                      .filter((i) => !i.isCurrent)
+                      .map((i) => ({ ...i, pastDue: pastDueByNumber.get(i.invoiceNumber) === true }));
                     return {
                       invoices: others,
                       total: Math.round(others.reduce((s, i) => s + Number(i.amountDue || 0), 0) * 100) / 100,
@@ -2999,7 +3025,11 @@ export default function PayPageV2() {
                       return (
                         <SummaryRow
                           key={inv.invoiceNumber}
-                          label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                          label={<>
+                            {`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                            {/* pastDue is the server's ET-correct overdue verdict (open-balance is_overdue) — no date math here. */}
+                            {inv.pastDue && inv.dueDate && <span style={{ display: 'block', color: DOC.danger, fontSize: FS.body, fontWeight: FW.medium }}>Past due since {fmtDate(inv.dueDate)}</span>}
+                          </>}
                           value={fmtCurrency(inv.amountDue)}
                           muted
                         />
@@ -3007,6 +3037,9 @@ export default function PayPageV2() {
                     })}
                     <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
                     <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
+                    <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, fontFamily: DOC_FONT }}>
+                      See every invoice in detail in your <a href="/login" style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a> or the Waves app.
+                    </div>
                   </>
                 );
               })()}
@@ -3015,19 +3048,16 @@ export default function PayPageV2() {
             })()}
 
             {invoice.notes && (
-              <div className="field-invoice-notes" data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
-                <div className="field-section-heading">Notes</div>
+              <div data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
                 <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
                 </p>
               </div>
             )}
 
-          <FieldFooter label="Invoice" reference={invoice.invoiceNumber} />
-        </FieldDocumentBody>
-
-        <BrandCard padding={24} className="waves-no-print">
-            <div className="waves-pay-payment-panel">
+            {/* waves-no-print: the payment inputs, consent and Pay button stay off the invoice printout. */}
+            <div className="waves-pay-payment-panel waves-no-print">
             {/* "Pay securely / amount / status" header removed (owner
                 2026-08-31: the Pay button already states the charge); the
                 Secure badge went with every other status chip (owner

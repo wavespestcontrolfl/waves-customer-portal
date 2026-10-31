@@ -99,7 +99,7 @@ beforeEach(() => {
     }
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
-    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate, service_type: account.serviceType, lawn_protocol_version: account.pin }] : []);
+    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate, service_type: account.serviceType, lawn_protocol_version: account.pin, recurring_pattern: account.recurringPattern }] : []);
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
     if (table === 'customer_properties') return readQuery(account.properties, account.failProperties === true);
@@ -654,5 +654,47 @@ describe('/programs and the recipe readers with the removal gate off', () => {
     expect(await call({ track: 'st_augustine' })).not.toContain('Recognition');
     process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
     expect((await call({ track: 'zoysia' })).match(/"addOns"/g)).toHaveLength(2);
+  });
+});
+
+// A visit on a 9x rounds series reads the step of its ROUND for the program recipe (round 3 reads February), but whether it carries
+// Bermuda removal, and the removal rows, follow the appointment's own month: a round-3 visit dated in April keeps April's step.
+describe('a 9x rounds visit keeps the removal step of its appointment month', () => {
+  const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+  const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+  const febRows = [{ productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} }];
+  const aprilRows = [ROWS.f44, ROWS.rec, ROWS.fus, ROWS.nis];
+  beforeEach(() => {
+    CATALOG.push({ id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_p: 0, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' });
+    account.recurringPattern = 'lawn_rounds_9';
+    account.visitDate = '2027-04-05';
+    // Each window read answers with the rows of the month it is asked for (the service date's month; the round step's month is February).
+    operatingLayer.getProtocolWindowContext.mockImplementation(async (knex, options) => ({ protocol: { version: LAWN_V13_VERSION }, month: new Date(options.serviceDate).getUTCMonth() + 1 }));
+    operatingLayer.summarizeProtocolContext.mockImplementation((ctx) => ({ version: LAWN_V13_VERSION, products: ctx.month === 2 ? febRows : aprilRows }));
+  });
+  afterEach(() => { CATALOG.splice(CATALOG.findIndex((row) => row.id === 'f24'), 1); });
+
+  test('tank sheet: February\'s 24-0-11 and April\'s three removal lines, read from the April window', async () => {
+    const body = await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID });
+    expect(body.month).toBe('Feb');
+    expect(itemFor(body, F24).selected).toBe(true);
+    expect(body.items.filter((item) => item.bermudaStep).map((item) => item.product?.name).sort()).toEqual([FUS, NIS, REC].sort());
+    expect(blockCodes(body)).toEqual([]);
+    expect(body.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
+  });
+
+  test('completion actions: the removal group is offered beside February\'s round-3 bag', async () => {
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+    const body = JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+    expect(body.month).toBe('Feb');
+    expect(body.actions.filter((a) => a.group).map((a) => a.product?.name).sort()).toEqual([FUS, NIS, REC].sort());
+  });
+
+  test('a rounds visit whose appointment month has no step (round 3 in March) opens none', async () => {
+    account.visitDate = '2027-03-20';
+    const body = await lawnMix({ month: '3', scheduledServiceId: SERVICE_ID });
+    expect(body.items.filter((item) => item.bermudaStep)).toEqual([]);
   });
 });

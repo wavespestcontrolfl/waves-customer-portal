@@ -1,6 +1,6 @@
 import { Smartphone } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { isNativeApp } from '../../native/platform';
+import { isNativeApp, isWavesAdminApp } from '../../native/platform';
 
 /**
  * iOS "Add to Home Screen" onboarding hint for the field-tech portal.
@@ -54,7 +54,7 @@ export default function AddToHomeScreenHint() {
   const [show, setShow] = useState(false);
 
   useEffect(() => {
-    if (isNativeApp()) return;
+    if (isNativeApp() || isWavesAdminApp()) return;
     if (isStandalone()) return;
     if (!isIosWebKit()) return;
     try {

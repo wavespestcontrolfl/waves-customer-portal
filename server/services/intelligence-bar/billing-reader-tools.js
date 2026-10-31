@@ -248,7 +248,9 @@ function parseLineItems(raw) {
 }
 
 // The Invoices page's overdue predicate (InvoiceService.list status=overdue), for an invoice that is collectible.
-function isOverdue(invoice, today) {
+// `awaiting` (awaitingFirstVisitInvoiceIds): annual prepays charged after the first visit, never overdue before it.
+function isOverdue(invoice, today, awaiting) {
+  if (awaiting.has(String(invoice.id))) return false;
   return invoiceStatusKey(invoice.status) === 'overdue' || Boolean(dateOnly(invoice.due_date) && dateOnly(invoice.due_date) < today);
 }
 
@@ -543,7 +545,7 @@ async function fenceAll(invoices, database) {
 function effectiveRow(listedRow, fence) {
   return fence.row ? { ...listedRow, ...fence.row } : listedRow;
 }
-function projectDue(row, fence, today) {
+function projectDue(row, fence, today, awaiting) {
   return {
     amount_due_after_credit: fence.collectible ? invoiceAmountDue(row) : null,
     collectible: fence.collectible,
@@ -553,7 +555,7 @@ function projectDue(row, fence, today) {
     bank_payment_processing: fence.state === 'bank_payment_processing',
     // The row's own payer fields, or the fence's live payer verdict: the flag and the reason never disagree.
     payer_billed: isPayerBilled(row) || fence.payer_billed === true,
-    overdue: fence.collectible ? isOverdue(row, today) : null,
+    overdue: fence.collectible ? isOverdue(row, today, awaiting) : null,
   };
 }
 function projectPlan(plan, fence) {
@@ -635,7 +637,7 @@ function paymentPlanFromList(row) {
   };
 }
 
-async function accountSummary(InvoiceService, customer, today, database) {
+async function accountSummary(InvoiceService, customer, today, database, awaiting) {
   const customerId = customer.id;
   // One snapshot: the unpaid and processing buckets, the fences, credit and hold all read the same state, so an
   // invoice cannot fall out of (or into) both buckets mid-read.
@@ -676,7 +678,7 @@ async function accountSummary(InvoiceService, customer, today, database) {
     outstanding_count: fenced ? rowsWhere(() => true).length : null,
     needs_reconciliation_count: reconcileCount,
     // Only collectible invoices count as overdue (the list's own `overdue` is null for the rest): never a raw status count.
-    overdue_count: fenced ? rowsWhere((invoice) => isOverdue(invoice, today)).length : null,
+    overdue_count: fenced ? rowsWhere((invoice) => isOverdue(invoice, today, awaiting)).length : null,
     not_yet_sent_due: sum(rowsWhere(notYetSent)),
     presented_self_pay_due: sum(rowsWhere((invoice) => !notYetSent(invoice))),
     processing: {
@@ -697,7 +699,7 @@ async function accountSummary(InvoiceService, customer, today, database) {
 }
 
 // `fence` is the invoice's invoiceCollectibility() verdict: the balance is stated only when it is collectible.
-function invoiceItem(listedRow, today, fence, heldIds) {
+function invoiceItem(listedRow, today, fence, heldIds, awaiting) {
   const row = effectiveRow(listedRow, fence);
   return {
     id: row.id,
@@ -712,7 +714,7 @@ function invoiceItem(listedRow, today, fence, heldIds) {
     receipt_sent_at: receiptSentAt(row.receipt_sent_at),
     total: money(row.total),
     credit_applied: money(row.credit_applied) || 0,
-    ...projectDue(row, fence, today),
+    ...projectDue(row, fence, today, awaiting),
     has_active_payment_plan: Boolean(paymentPlanFromList(row)),
     payment_plan: projectPlan(paymentPlanFromList(row), fence),
     dispute_hold: heldIds ? heldIds.has(String(row.id)) : null,
@@ -764,7 +766,8 @@ async function listForCustomer(customer, input, database, secrets) {
   });
   for (const row of page.invoices) if (row.token) secrets.add(row.token);
   await attachTermSidePrepay(page.invoices, database);
-  const summary = await accountSummary(InvoiceService, customer, today, database);
+  const awaiting = await require('../paf-prepay-release').awaitingFirstVisitInvoiceIds(database);
+  const summary = await accountSummary(InvoiceService, customer, today, database, awaiting);
   const fences = await fenceAll(page.invoices, database);
   const unknowns = [];
   let heldIds = new Set();
@@ -785,7 +788,7 @@ async function listForCustomer(customer, input, database, secrets) {
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: shown.map((row) => invoiceItem(row, today, fences.get(String(row.id)), heldIds)),
+    invoices: shown.map((row) => invoiceItem(row, today, fences.get(String(row.id)), heldIds, awaiting)),
     ...(unavailable.length ? { unavailable_invoices: unavailable.map((row) => ({ id: row.id, reason: RECORD_CHANGED_REASON })) } : {}),
     returned_count: shown.length,
     total_matching: page.total,
@@ -1001,7 +1004,7 @@ function detailWarnings({ hold, plans, recorded, lines }) {
 }
 
 // The invoice document: facts from the one snapshot row, the due projection from the fence.
-function invoiceDocument(facts, fence, today) {
+function invoiceDocument(facts, fence, today, awaiting) {
   return {
     id: facts.id,
     invoice_number: facts.invoice_number,
@@ -1022,7 +1025,7 @@ function invoiceDocument(facts, fence, today) {
     tax_amount: money(facts.tax_amount) || 0,
     total: money(facts.total),
     credit_applied: money(facts.credit_applied) || 0,
-    ...projectDue(facts, fence, today),
+    ...projectDue(facts, fence, today, awaiting),
     payment_method: facts.payment_method || null,
     payment_reference: scrub(facts.payment_reference, 120),
     payment_recorded_by: scrub(facts.payment_recorded_by, 80),
@@ -1054,9 +1057,10 @@ async function detailInSnapshot(input, actionContext, database, secrets) {
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
   const hold = await readDisputeHold(customer.id, database);
   const prepay = await resolvePrepayTerm(facts, database);
+  const awaiting = await require('../paf-prepay-release').awaitingFirstVisitInvoiceIds(database);
   const lines = lineItems(facts.line_items);
   return {
-    invoice: invoiceDocument(facts, fence, etDateString()),
+    invoice: invoiceDocument(facts, fence, etDateString(), awaiting),
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     line_items: lines.items,
     line_items_truncated: lines.truncated,

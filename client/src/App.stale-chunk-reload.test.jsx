@@ -16,6 +16,7 @@ import {
   CHUNK_RELOAD_FLAG,
   handleVitePreloadError,
   isStaleChunkReloadPending,
+  markPageNavigating,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
 
@@ -45,7 +46,7 @@ beforeEach(() => {
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -87,6 +88,54 @@ test('a chunk that fails after a CSS preload already started the reload shows th
   expect(await screen.findByRole('status')).toHaveTextContent('Loading...');
   expect(screen.queryByText('Couldn’t load this page')).not.toBeInTheDocument();
   expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+});
+
+test('while an app link navigates away, a cancelled chunk holds the placeholder and never reloads over the navigation', async () => {
+  markPageNavigating();
+  const reload = vi.fn();
+  const cancelled = preloadErrorEvent();
+  handleVitePreloadError(cancelled, reload);
+  expect(cancelled.defaultPrevented).toBe(true);
+  expect(reload).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  const LeavingPage = lazyWithRetry(swallowedImport);
+  renderInBoundary(LeavingPage);
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading...');
+  expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+  expect(reported.calls).toHaveLength(0);
+});
+
+test('a navigation that has held no chunk does not hide a real page crash', async () => {
+  markPageNavigating(vi.fn());
+  function Broken() { throw new TypeError('real render bug'); }
+  renderInBoundary(Broken);
+  expect(await screen.findByText('Something went wrong')).toBeInTheDocument();
+  expect(reported.calls).toHaveLength(1);
+});
+
+test('a chunk held during a navigation that never commits is recovered by a reload when the window ends', () => {
+  vi.useFakeTimers();
+  const heal = vi.fn();
+  markPageNavigating(heal);
+  handleVitePreloadError(preloadErrorEvent(), vi.fn());
+  vi.advanceTimersByTime(29999);
+  expect(heal).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  expect(heal).toHaveBeenCalledTimes(1);
+  expect(isStaleChunkReloadPending()).toBe(true);
+});
+
+test('a navigation window with no held chunk ends without a reload, and later stale chunks reload as before', () => {
+  vi.useFakeTimers();
+  const heal = vi.fn();
+  markPageNavigating(heal);
+  vi.advanceTimersByTime(30000);
+  expect(heal).not.toHaveBeenCalled();
+  const reload = vi.fn();
+  const stale = preloadErrorEvent();
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 test('with no reload pending, a real page crash still shows the crash screen and is reported', async () => {

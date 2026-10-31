@@ -82,6 +82,20 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
 
+// GATE_ROUTE_CHECK_BOOKING_SAVES: the rebooker numbers a moved visit's day
+// (placeMovedVisit) when its caller passes placeInRoute. Stop numbers only: a
+// customer call has no road spender, so nothing buys road times, and
+// overlapAdvisory stays off, so the placement is not a staff save. Gate off or
+// any reader failure: false, the options are exactly as before.
+function bookingPlacesInRoute() {
+  try {
+    const { routeCheckBookingSavesLive } = require('../services/scheduling/arrival-route');
+    return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 // Days the target date sits EARLIER than the visit's current date (negative
 // for push-backs). Both args are YYYY-MM-DD strings; UTC-noon parse avoids
 // DST edges.
@@ -602,7 +616,7 @@ function searchParseOpts(config, now = new Date()) {
   };
 }
 
-async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
+async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
 
@@ -640,6 +654,11 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
+    // Offer lists only (GATE_CUSTOMER_ROUTE_CHECK): the GET list and find-slots pass
+    // `offer: true`. Every confirmation rebuild omits it, so it serves the unfiltered list.
+    // The two list routes also omit it while a late-move limit holds the page back: the limit
+    // drops later days AFTER this build, so the route check could not judge its floor on the final list.
+    ...(offer ? { surface: 'reschedule' } : {}),
     serviceKey,
     serviceIdentity,
     // Self-serve surface — a new target starting within the notice window
@@ -676,6 +695,13 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     const inSeason = (d) => { const m = Number(String(d || '').slice(5, 7)); return m >= 2 && m <= 10; };
     availability.days = (availability.days || []).filter((day) => inSeason(day.date));
     availability.slots = (availability.slots || []).filter((slot) => inSeason(slot.date || slot.day));
+  }
+  // A lawn_rounds_9 visit stays inside its round (SmartRebooker refuses a
+  // non-admin move out of it), so the picker only lists the round's days.
+  if (availability && svc.recurring_pattern === 'lawn_rounds_9') {
+    const inRound = (d) => !SmartRebooker.leavesOwnRound('lawn_rounds_9', apptDateStr(svc.scheduled_date), String(d || '').slice(0, 10));
+    availability.days = (availability.days || []).filter((day) => inRound(day.date));
+    availability.slots = (availability.slots || []).filter((slot) => inRound(slot.date || slot.day));
   }
   return availability;
 }
@@ -741,7 +767,7 @@ router.get('/:token', async (req, res, next) => {
         return null;
       });
     try {
-      availability = await buildAvailabilityForService(svc, { ...range, config });
+      availability = await buildAvailabilityForService(svc, { ...range, config, offer: !limit?.lastDate });
     } catch (err) {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
@@ -812,6 +838,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
         rangeTo: when.dateTo,
         config,
         timeOfDay: when.timeOfDay,
+        offer: !limit?.lastDate,
       });
     } catch (err) {
       logger.error(`[reschedule-public] find-slots availability failed for ${svc.id}: ${err.message}`);
@@ -1127,6 +1154,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             sourceSurface: 'customer_web',
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
+            // GATE_ROUTE_CHECK_BOOKING_SAVES: number each moved visit's day (stop
+            // numbers only; no road purchase, no message). Gate off: false.
+            placeInRoute: bookingPlacesInRoute(),
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
             beforeMove: noticeRecheck,
@@ -1156,6 +1186,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
+            placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

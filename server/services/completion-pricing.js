@@ -14,6 +14,7 @@ const { completionInvoiceAmount } = require('./billing-lane');
 const { applyDiscount } = require('./booking/visit-financial-stamps');
 const { splitTerminalCompletionInvoice } = require('./completion-invoice-candidate');
 const { recurringServiceKey } = require('./estimate-converter');
+const { LAWN_ROUNDS_9 } = require('./lawn-rounds');
 
 const MONEY_FIELDS = [
   'estimated_price', 'primary_line_price', 'line_discount_id', 'line_discount_name',
@@ -61,6 +62,16 @@ function propertyMatches(service, estimate) {
   return samePropertyKey(normalizedEstimatePropertyKey(estimate.address), scheduledPropertyKey(service));
 }
 
+// A lawn rounds job is the 9x lawn plan. Estimate lines carry that plan as the
+// scheduler's 'custom' with intervalDays 42 (or, from other sources, every_6_weeks).
+function jobCadenceIsLineCadence(cadence, line) {
+  if (cadence === LAWN_ROUNDS_9) {
+    return line.cadence === LAWN_ROUNDS_9 || line.cadence === 'every_6_weeks'
+      || (line.cadence === 'custom' && Number(line.intervalDays) === 42);
+  }
+  return cadence === line.cadence;
+}
+
 function matchServiceLine(job, lines) {
   const matches = lines.filter((line) => {
     if (job.service_id && line.serviceId) return String(job.service_id) === String(line.serviceId);
@@ -70,7 +81,7 @@ function matchServiceLine(job, lines) {
   if (matches.length !== 1) return { status: matches.length ? 'ambiguous' : 'unmatched', line: null };
   const line = matches[0];
   const cadence = job.recurring_pattern;
-  if (cadence && line.cadence && cadence !== line.cadence) return { status: 'unmatched', line: null };
+  if (cadence && line.cadence && !jobCadenceIsLineCadence(cadence, line)) return { status: 'unmatched', line: null };
   if ((job.is_recurring === true) !== (line.source === 'recurring')) return { status: 'unmatched', line: null };
   return { status: 'matched', line };
 }

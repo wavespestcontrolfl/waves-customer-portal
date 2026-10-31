@@ -131,6 +131,23 @@ async function mutationFetch(url, init) {
   catch (e) { if (e && typeof e === 'object' && !isPreSendFailure(e)) e.transport = true; throw e; }
 }
 
+// Google answers an occasional single 503 UNAVAILABLE on reviews.list and the
+// next hourly sync succeeds; without a retry that blip rings the owner's
+// "sync degraded" bell. Reads only: mutations are never retried.
+const GBP_READ_RETRY_DELAYS_MS = [2000, 8000];
+const GBP_TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+// Backoff wait that ends early, with a throw, if the caller's deadline
+// signal aborts, so a retry never outlives the caller's deadline.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('GBP review lookup aborted (deadline)'));
+    const onAbort = () => { clearTimeout(timer); reject(new Error('GBP review lookup aborted (deadline)')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function readJsonOrThrow(res, label) {
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
@@ -380,9 +397,16 @@ class GoogleBusinessService {
     const params = new URLSearchParams({ pageSize: String(pageSize) });
     if (pageToken) params.set('pageToken', pageToken);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/reviews?${params.toString()}`;
-    const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
-    const data = await readJsonOrThrow(res, 'GBP getReviews');
-    return data;
+    const delays = this._reviewRetryDelaysMs || GBP_READ_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
+      if (res.ok || !GBP_TRANSIENT_STATUSES.has(res.status) || attempt >= delays.length) {
+        return readJsonOrThrow(res, 'GBP getReviews');
+      }
+      await res.text().catch(() => {});
+      logger.warn(`GBP getReviews ${res.status}: retrying (attempt ${attempt + 2} of ${delays.length + 1}) in ${delays[attempt]}ms`);
+      await abortableDelay(delays[attempt], signal);
+    }
   }
 
   // `signal` lets a caller with a total deadline cancel the paginated
@@ -1273,6 +1297,7 @@ class GoogleBusinessService {
             customerId: row.customer_id,
             locationId: row.location_id,
             starRating: row.star_rating,
+            reviewCreatedAt: existing?.review_created_at || normalized.review_created_at,
             source: 'google_review',
           });
         }, (outcome) => outcome && outcome.reason === 'error');
@@ -1456,6 +1481,10 @@ class GoogleBusinessService {
       // (after both branches) has the row's id either way — existing.id on
       // the update path, the freshly inserted id on the insert path.
       let placesReviewRowId = existing?.id || null;
+      // The review's Google post time either way: the stored row's on the
+      // update path, Places' `time` on the insert path. The thank-you's age
+      // rule reads it (an edit moves Places' `time`; the stored date does not).
+      const placesPostedAt = existing ? existing.review_created_at : new Date(review.time * 1000).toISOString();
       // review.linked_5star's durable intent marker id, set inside whichever
       // branch below actually writes the customer_id transition (codex
       // round 3 on #5154) — mirrors _upsertGbpReview's attributionIntentId.
@@ -1589,7 +1618,6 @@ class GoogleBusinessService {
         // recovers and takes the update path, so this insert is its only
         // chance to enter the pipeline.
         const { autoReplyInsertFields } = require('./review-reply/runner');
-        const placesCreatedAt = new Date(review.time * 1000).toISOString();
         const insertStarRating = review.rating || 0;
         placesReviewRowId = await db.transaction(async (trx) => {
           const [insertedReview] = await trx('google_reviews').insert({
@@ -1601,10 +1629,10 @@ class GoogleBusinessService {
             review_text: review.text || null,
             review_reply: ownerReply,
             reply_updated_at: ownerReply ? new Date() : null,
-            review_created_at: placesCreatedAt,
+            review_created_at: placesPostedAt,
             customer_id: customerId,
             synced_at: sampleSyncStart.toISOString(),
-            ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: insertStarRating }),
+            ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesPostedAt, star_rating: insertStarRating }),
           }).returning('id');
           const newId = insertedReview?.id || null;
           // A brand-new Places-sourced review the name matcher already tied
@@ -1640,6 +1668,7 @@ class GoogleBusinessService {
             customerId: effectiveCustomerId,
             locationId: loc.id,
             starRating: review.rating || 0,
+            reviewCreatedAt: placesPostedAt,
             source: 'google_review_places',
           });
           // review.linked_5star (email_template_automation, dark/shadow) —

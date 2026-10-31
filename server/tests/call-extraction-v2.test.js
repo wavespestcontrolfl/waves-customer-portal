@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.28.0');
+    expect(SCHEMA_VERSION).toBe('1.29.0');
   });
 
   describe('model-output schema', () => {
@@ -225,6 +225,54 @@ describe('schema validation', () => {
       const bad = validModelOutput();
       bad.caller.ani_cannot_text = 'yes';
       expect(validateModelOutput(bad).valid).toBe(false);
+    });
+
+    test('1.29.0: service_request.billing_choice validates in both schemas as an optional nullable enum, older payloads without it still do, bad values are refused', () => {
+      expect(validateModelOutput(validModelOutput()).valid).toBe(true); // absent: unchanged
+      for (const value of ['annual_prepay', 'per_application', null]) {
+        const out = validModelOutput();
+        out.service_request.billing_choice = value;
+        expect(validateModelOutput(out).valid).toBe(true);
+        const persisted = validPersisted();
+        persisted.meta.schema_version = '1.29.0';
+        persisted.service_request.billing_choice = value;
+        expect(validatePersisted(persisted).valid).toBe(true);
+      }
+      const older = validPersisted();
+      older.meta.schema_version = '1.28.0';
+      expect(validatePersisted(older).valid).toBe(true);
+      for (const bad of ['prepay', 'annual', 'monthly', true, 12]) {
+        const out = validModelOutput();
+        out.service_request.billing_choice = bad;
+        expect(validateModelOutput(out).valid).toBe(false);
+        const persisted = validPersisted();
+        persisted.service_request.billing_choice = bad;
+        expect(validatePersisted(persisted).valid).toBe(false);
+      }
+      for (const schema of [require('../schemas/call-extraction.model-output.schema.json'), require('../schemas/call-extraction.persisted.schema.json')]) {
+        const field = schema.properties.service_request.properties.billing_choice;
+        expect(field.type).toEqual(['string', 'null']);
+        expect(field.enum).toEqual(['annual_prepay', 'per_application', null]);
+        expect(schema.properties.service_request.required).not.toContain('billing_choice');
+        expect(field.description).toContain('/service_request/billing_choice');
+      }
+    });
+
+    test('1.29.0: billing_choice survives normalization and reads in the flat view, null when absent or not a plan', () => {
+      for (const value of ['annual_prepay', 'per_application']) {
+        const out = validModelOutput();
+        out.service_request.billing_choice = value;
+        out.meta.schema_version = '1.29.0'; // flatView reads only a stamped (V2) extraction
+        expect(normalizeExtractionV2(out).service_request.billing_choice).toBe(value);
+        expect(flatView(out).billing_choice).toBe(value);
+      }
+      const bare = validModelOutput();
+      bare.meta.schema_version = '1.29.0';
+      expect(flatView(bare).billing_choice).toBeNull();
+      const odd = validModelOutput();
+      odd.meta.schema_version = '1.29.0';
+      odd.service_request.billing_choice = 'monthly';
+      expect(flatView(odd).billing_choice).toBeNull();
     });
 
     test('1.18.0: a family_member caller validates in both schemas', () => {

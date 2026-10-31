@@ -1,6 +1,6 @@
 // Bid Desk rules (GATE_BID_DESK): the addendum / date rule, reminder eligibility and the notification copy.
 // Pure: no database, no clock. Synthetic bids only.
-const { attachPatch, reminderDue, daysLeft } = require('../services/bid-desk/rules');
+const { attachPatch, reminderDue, daysLeft, lapsedBid, notOurWork, NOT_OUR_WORK_NOTE } = require('../services/bid-desk/rules');
 const { newBidSpec, addendumSpec, reminderSpec } = require('../services/bid-desk/alerts');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -170,5 +170,116 @@ describe('notification copy follows the admin notification rule', () => {
     expect(detail).not.toMatch(/confirm the due date/);
     // A moved deadline on an active notice is still a date question.
     expect(addendumSpec({ ...closed, source_active: true }, null).spec.doneWhen).toBe('due_date_confirmed');
+  });
+});
+
+describe('lapsedBid (GATE_BID_DESK_AUTO_DATES): a bid that closes itself', () => {
+  const dueDaysAgo = (days) => new Date(NOW.getTime() - days * DAY);
+  const lapsed = (over = {}) => bid({ due_at: dueDaysAgo(2), submitted_at: null, decision_note: null, ...over });
+
+  test('a new bid two days past its due date closes', () => {
+    expect(lapsedBid(lapsed(), NOW)).toBe(true);
+  });
+
+  test('a bid marked bid, decided, or submitted never closes', () => {
+    expect(lapsedBid(lapsed({ status: 'bid' }), NOW)).toBe(false);
+    for (const status of ['no_bid', 'submitted', 'won', 'lost']) expect(lapsedBid(lapsed({ status }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ submitted_at: dueDaysAgo(3) }), NOW)).toBe(false);
+  });
+
+  test('a bid with no date never closes', () => {
+    expect(lapsedBid(lapsed({ due_at: null }), NOW)).toBe(false);
+  });
+
+  test('the first day after the due date is a grace day', () => {
+    expect(lapsedBid(lapsed({ due_at: dueDaysAgo(0.5) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ due_at: dueDaysAgo(1) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ due_at: new Date(NOW.getTime() - DAY - 1000) }), NOW)).toBe(true);
+    expect(lapsedBid(lapsed({ due_at: new Date(NOW.getTime() + DAY) }), NOW)).toBe(false);
+  });
+
+  test('a date flagged for an addendum check waits 30 days', () => {
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(5) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(30) }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ needs_date_confirmation: true, due_at: dueDaysAgo(31) }), NOW)).toBe(true);
+  });
+
+  test('a bid that closed itself once, and was set back to new, never closes again', () => {
+    expect(lapsedBid(lapsed({ decision_note: 'Closed by itself: the due date (Sep 28) passed with no decision.' }), NOW)).toBe(false);
+    expect(lapsedBid(lapsed({ decision_note: 'Pest scope looks too big' }), NOW)).toBe(true);
+  });
+});
+
+describe('notOurWork (GATE_BID_DESK_NOT_OUR_WORK, owner 2026-10-29: we do not mow)', () => {
+  test.each([
+    'Lot Mowing for Code Compliance - Annual Contract',
+    'Facilities Grounds Maintenance - Annual Contract',
+    'Tree Trimming Services',
+    'Right-of-Way Mowing',
+    'ROW Maintenance - North District',
+    'String Trimmer Edging of Canal Banks',
+    'Leaf Blowing and Litter Pickup',
+    'Janitorial Services',
+    'Irrigation Repair Annual Contract',
+    'Landscape Maintenance Services',
+  ])('%s is not our work', (title) => {
+    expect(notOurWork(title)).toBe(true);
+  });
+
+  test.each([
+    'Right-of-Way Herbicide Application',
+    'Mowing and Fertilization',
+    'Mosquito Control',
+    'Hurricane Repairs at Darst Park',
+    'Lawn Care Services',
+    'Grounds Maintenance and Pest Control',
+    'Lot Clearing with Vegetation Control',
+    'Trimble Road Termite Treatment',
+    'Edgewater Pest Control',
+    'Edgewater Park Hurricane Repairs',
+    'Trimble Road Culvert Replacement',
+    // A hyphenated name of our work keeps the bid (Codex #7049 r1).
+    'Grounds Maintenance and Weed-Control',
+    'Mowing and Fire-Ant Treatment',
+    'Lawn Maintenance with Mole-Cricket Bait',
+    'Lot Clearing and Vegetation-Control',
+    'Landscape Maintenance and Turf-Treatment',
+  ])('%s is kept', (title) => {
+    expect(notOurWork(title)).toBe(false);
+  });
+
+  test('empty and non-text input is false', () => {
+    for (const value of ['', '   ', null, undefined, 42, {}]) expect(notOurWork(value)).toBe(false);
+  });
+
+  test('matches whole words only and ignores case', () => {
+    expect(notOurWork('LOT MOWING')).toBe(true);
+    expect(notOurWork('Sodium Hypochlorite Delivery')).toBe(false);
+    expect(notOurWork('Plantation Road Resurfacing')).toBe(false);
+    expect(notOurWork('Blower Motor Replacement')).toBe(false);
+    expect(notOurWork('Unedged Surfaces')).toBe(false);
+  });
+
+  test('the note names the owner ruling', () => {
+    expect(NOT_OUR_WORK_NOTE).toBe('Not our work: mowing, edging or trimming (owner 2026-10-29).');
+  });
+});
+
+describe('GATE_BID_DESK_NOT_OUR_WORK reader', () => {
+  const { bidDeskNotOurWorkLive } = require('../config/feature-gates');
+  afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_NOT_OUR_WORK; });
+
+  test('dark by default, strict, and it needs the Bid Desk on', () => {
+    expect(bidDeskNotOurWorkLive()).toBe(false);
+    process.env.GATE_BID_DESK = 'true';
+    expect(bidDeskNotOurWorkLive()).toBe(false);
+    for (const value of ['true ', '1', 'TRUE', 'on', 'yes']) {
+      process.env.GATE_BID_DESK_NOT_OUR_WORK = value;
+      expect(bidDeskNotOurWorkLive()).toBe(false);
+    }
+    process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
+    expect(bidDeskNotOurWorkLive()).toBe(true);
+    delete process.env.GATE_BID_DESK;
+    expect(bidDeskNotOurWorkLive()).toBe(false);
   });
 });

@@ -85,7 +85,7 @@ describe('Customer360ProfileV2 sub-modals', () => {
     expect(screen.getAllByText('Avery Customer').length).toBeGreaterThan(0);
 
     // With no sub-modal open, Escape closes the profile as before.
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

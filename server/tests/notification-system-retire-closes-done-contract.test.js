@@ -34,6 +34,9 @@ const PERSON_OR_OTHER_TABLE = {
     { includes: 'read_by_admin_user_id', reason: 'writes the messages table (a person opened the thread), not notifications' },
     { includes: 'retargetOrClearUnknownSenderBell', reason: 'a person opened the thread in Communications; the unknown-sender bell is read, not done' },
   ],
+  'services/messenger-inbox.js': [
+    { includes: "db('messages')", reason: 'marks Messenger messages read in the messages table (opening a thread), not notifications' },
+  ],
   'services/notification-service.js': [
     { includes: 'async markRead(', reason: 'a customer (or a person) marking one notification read' },
     { includes: 'async markReadAdmin(', reason: 'a person marking one admin bell read' },

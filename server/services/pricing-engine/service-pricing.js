@@ -6214,6 +6214,105 @@ function priceSanitation(options = {}) {
 }
 
 // ============================================================
+// DEAD RODENT REMOVAL & ODOR TREATMENT (one-time; GATE_DEAD_ANIMAL_REMOVAL)
+// ============================================================
+// Owner approved 2026-10-26. Fixed tier prices from RODENT.deadAnimalRemoval
+// (the owner's add-on cost formula is documented there and in the pricing
+// engine README; it is NOT evaluated here).
+//
+// Input: { tier: 'reachable' | 'attic' | 'in_wall' }
+//   reachable  easy reach (garage, crawl-space opening, under a cabinet, attic floor near the hatch)
+//   attic      attic search (found by smell, insulation moved as needed)
+//   in_wall    inside a wall or ceiling (needs an opening): a CUSTOM QUOTE, never priced here
+//   no tier    not chosen: a CUSTOM QUOTE (there is no default tier)
+// One price per access tier (owner 2026-10-29: "think we just have the 3 options,
+// and can discount if they have other work"): other rodent work on the same
+// estimate does not lower it. Staff give a discount on the estimate itself
+// (input.manualDiscount, percent or dollars), which reaches this line.
+//
+// Gate (NEW QUOTES ONLY): enforced here, the deepest chokepoint, like
+// assertAreaAddOnsEnabled. Off = a 400 failClosed error, never a silent drop.
+// An estimate saved with the line before the gate went off stays a normal
+// estimate: nothing in send, accept, booking or completion calls this pricer.
+function assertDeadAnimalRemovalEnabled() {
+  if (require('../../config/feature-gates').deadAnimalRemovalLive?.() === true) return;
+  const err = new Error('Dead Rodent Removal & Odor Treatment is not enabled on this environment (GATE_DEAD_ANIMAL_REMOVAL) - remove the service or flip the gate.');
+  err.name = 'PricingError';
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'DEAD_ANIMAL_REMOVAL_GATED';
+  err.isOperational = true;
+  err.failClosed = true;
+  throw err;
+}
+
+// The tier a request names, or null when none was chosen. An unknown non-empty
+// tier is a typo, not "unchosen": it throws instead of becoming a custom quote.
+function normalizeDeadAnimalTier(rawTier) {
+  if (rawTier === undefined || rawTier === null || rawTier === '') return null;
+  if (typeof rawTier !== 'string' || !RODENT.deadAnimalRemoval.tiers.includes(rawTier)) {
+    throw buildPricingError(`deadAnimalRemoval.tier must be one of: ${RODENT.deadAnimalRemoval.tiers.join(', ')}`, { field: 'deadAnimalRemoval.tier', value: rawTier });
+  }
+  return rawTier;
+}
+
+function priceDeadAnimalRemoval(options = {}) {
+  assertDeadAnimalRemovalEnabled();
+  const cfg = RODENT.deadAnimalRemoval;
+  const tier = normalizeDeadAnimalTier(options.tier);
+  const base = {
+    service: 'rodent_dead_animal_removal',
+    name: 'Dead Rodent Removal & Odor Treatment',
+    tier,
+    oneTime: true,
+  };
+  const customQuote = (reason) => ({
+    ...base,
+    price: null,
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: reason,
+    requiresManualReview: true,
+    manualReviewReasons: [reason],
+    warnings: [],
+    detail: tier === 'in_wall'
+      ? 'Inside a wall or ceiling - needs an opening, custom quote'
+      : 'Access not chosen - custom quote',
+  });
+  if (tier === null) return customQuote('dead_animal_access_not_chosen');
+  if (tier === 'in_wall') return customQuote('dead_animal_in_wall_custom_quote');
+
+  const tierCfg = cfg[tier];
+  // `alone` is the tier's one price (the key predates the one-price rule; the stored
+  // pricing_config row keeps it).
+  const price = tierCfg.alone;
+  // The cost this price stands for, stated for the pricing audit (it reads costs.total when
+  // no inventory mapping exists). Never used to compute the price.
+  const driveMin = GLOBAL.DRIVE_TIME;
+  const adminCost = AREA_ADDONS.adminPerJob;
+  const laborCost = (tierCfg.durationMin + driveMin) * GLOBAL.LABOR_RATE / 60;
+  const totalCost = tierCfg.material + laborCost + adminCost;
+  return {
+    ...base,
+    price,
+    pricingBasis: 'fixed_tier',
+    durationMin: tierCfg.durationMin,
+    costs: {
+      material: roundMoney(tierCfg.material),
+      labor: roundMoney(laborCost),
+      admin: adminCost,
+      onSiteMin: tierCfg.durationMin,
+      driveMin,
+      total: roundMoney(totalCost),
+    },
+    margin: Math.round((price - totalCost) / price * 1000) / 1000,
+    manualReviewReasons: [],
+    warnings: [],
+    detail: `${tierCfg.label} - ${tierCfg.durationMin} min on site`,
+  };
+}
+
+// ============================================================
 // BAIT-STATION SETUP FEE — non-WaveGuard members only (owner 2026-08-29)
 // ============================================================
 // $99 one-time, charged ONLY when the customer has no OTHER WaveGuard
@@ -9256,6 +9355,32 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
   };
 }
 
+// Plugging is priced only from the area to plug, never the whole lawn (owner
+// 2026-10-31: the whole-lawn fallback priced a 12,000 sq ft lawn at about
+// $29,300 for a few bare patches). With
+// no area the line carries no dollars and the same measurement contract as a
+// pre-slab job with no slab sq ft, so every send, accept and public-quote gate
+// holds it until someone enters the area.
+const PLUGGING_AREA_REQUIRED_REASON = 'missing_plugging_area_sqft';
+function pluggingAreaRequiredLine(spacing = 12) {
+  spacing = assertNonNegativeQuantity(spacing, 'pluggingSpacing');
+  assertEnum(spacing, [6, 9, 12], 'pluggingSpacing');
+  const label = spacing === 6 ? '6" Premium' : spacing === 9 ? '9" Standard' : '12" Economy';
+  return {
+    service: 'plugging',
+    name: 'Lawn Plugging Service',
+    price: null,
+    quoteRequired: true,
+    requiresMeasurement: true,
+    requiresManualReview: true,
+    manualReviewReasons: [PLUGGING_AREA_REQUIRED_REASON],
+    warnings: [PLUGGING_AREA_REQUIRED_REASON],
+    detail: `${label} | area to plug not entered`,
+    lawnSqFt: null, spacing, totalPlugs: null, trays: null, perSf: null, label,
+    sodWarning: spacing === 6,
+  };
+}
+
 // ============================================================
 // FOAM & DRILL (termite perimeter injection)
 // ============================================================
@@ -10172,6 +10297,7 @@ module.exports = {
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
@@ -10190,6 +10316,7 @@ module.exports = {
   assertAreaAddOnsEnabled,
   buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pluggingAreaRequiredLine, PLUGGING_AREA_REQUIRED_REASON,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,

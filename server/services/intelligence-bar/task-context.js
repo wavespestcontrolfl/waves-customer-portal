@@ -18,10 +18,12 @@ const RECORDS = {
   lead_id: { table: 'leads', fields: ['id', 'customer_id', 'first_name', 'last_name', 'updated_at', 'deleted_at'] },
   email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'gmail_thread_id', 'updated_at'] },
   call_id: { table: 'call_log', fields: ['id', 'customer_id', 'updated_at'] },
+  // An Agent Review draft (agent_decisions): the decision's customer must be a task customer.
+  decision_id: { table: 'agent_decisions', fields: ['id', 'customer_id'] },
   review_id: { table: 'google_reviews', fields: ['id', 'customer_id', 'reviewer_name', 'missing_since', 'dismissed', 'updated_at'] },
 };
 const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids', lead_id: 'lead_ids' };
-const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId' };
+const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId', decision_id: 'decisionId' };
 const normalizeName = value => String(value || '').toLowerCase().replace(/[’']/g, "'").replace(/'s\b/g, '')
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
@@ -1079,7 +1081,7 @@ function requestedRecordFields(prompt, page, nameHint) {
   // operation after "and/then <action>" retains its explicit target IDs.
   const explicitRecordClause = targetClause(prompt, true).split(ACTION_CLAUSE_SPLIT)
     .map(clause => clause.split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0]).join(' and ');
-  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
+  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead|decision)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
   }
   for (const [kind, ids] of Object.entries(explicitRecords)) {
@@ -1127,6 +1129,8 @@ async function resolve(input) {
   return null;
 }
 
+const UNLINKED_DRAFT_KINDS = new Set(['decision_id']);
+
 async function unlinkedRecordIsReferenced(record, context) {
   if (Object.hasOwn(context.requestedRecords || {}, record.kind) && ![context.requestedRecords[record.kind]].flat().includes(record.id)) return false;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
@@ -1137,6 +1141,9 @@ async function unlinkedRecordIsReferenced(record, context) {
     return threads.length === 1 && threads[0].thread_key === (record.gmail_thread_id || record.id);
   }
   if (record.customer_id) return true;
+  // A draft with no customer belongs to no one the task could name: inside a task for a resolved customer it is somebody else's, so
+  // it is refused; with no task customer only the exact draft the request typed is admitted (as for an unlinked call).
+  if (UNLINKED_DRAFT_KINDS.has(record.kind)) return targets.length === 0 && [context.requestedRecords?.[record.kind]].flat().includes(record.id);
   const ids = context.page?.ids || {};
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
   if (['call_id', 'appointment_id'].includes(record.kind)) return targets.length === 0 && [context.requestedRecords?.[record.kind]].flat().includes(record.id);
@@ -1286,6 +1293,24 @@ async function bindSavedAddress(supplied, targets) {
   return match ? { address: match.address, lat: match.lat, lng: match.lng } : null;
 }
 
+// The visit a dispatch alert belongs to: the call's own job_id, or the alert's job_id. Refuses a call that names no
+// alert or visit, an alert that does not exist, and an alert tied to no visit (no customer to check).
+async function alertVisitBinding(params) {
+  const alertId = String(params.alert_id || '').trim().toLowerCase();
+  const jobId = String(params.job_id || '').trim().toLowerCase();
+  if (!alertId && !jobId) {
+    return { error: 'This request names a customer, so name the alert (alert_id) or the visit (job_id) to resolve. Listing every open alert is not available here.', code: 'customer_scope_required' };
+  }
+  if (jobId) return UUID_RE.test(jobId) ? { visitId: jobId } : { error: 'A valid record identifier is required', code: 'invalid_target' };
+  if (!UUID_RE.test(alertId)) return { error: 'A valid record identifier is required', code: 'invalid_target' };
+  const alert = await db('dispatch_alerts').where({ id: alertId }).first('id', 'job_id');
+  if (!alert) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
+  if (!alert.job_id) {
+    return { error: 'This alert is not tied to a visit or a customer, so it cannot be resolved from a request about a specific customer. Run it from a request that does not name a customer.', code: 'customer_scope_required' };
+  }
+  return { visitId: alert.job_id };
+}
+
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // Owner-direct (owner ruling 2026-10-01, owner-direct.js): for the owner
   // login the record the bar picks IS the target, so the request-text
@@ -1334,6 +1359,15 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
     const invoice = await db('invoices').where({ invoice_number: String(params.invoice_number).trim().toUpperCase() }).first('id');
     if (!invoice) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
     references.invoice_id = invoice.id;
+  }
+  // resolve_dispatch_alert: inside a customer-specific request the alert is bound to its own visit, so the ordinary
+  // appointment check below proves that visit belongs to the task customer (outside such a request the alert is
+  // admitted on its own, as any dispatcher may resolve any card). An alert with no visit has no customer to prove, and
+  // a call with no selector lists every open card: neither fits a request about one customer.
+  if (toolName === 'resolve_dispatch_alert' && customerSpecific(context) && !direct) {
+    const bound = await alertVisitBinding(params);
+    if (bound.error) return bound;
+    references.appointment_id = bound.visitId;
   }
   const pair = customerPairIds(params, toolName);
   if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
@@ -1686,4 +1720,21 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+// compose_email inside a customer-scoped task may only email the task customer: its customer_id, or that customer's own
+// saved address typed out. Any other address cannot be tied to the task's customer, so it is refused there.
+async function validateComposeRecipient(params, context) {
+  if (!context?.targets?.length || context.ownerDirect === true) return null;
+  const targets = context.targets.map(target => String(target.customer_id).toLowerCase());
+  if (params.customer_id) {
+    return targets.includes(String(params.customer_id).trim().toLowerCase()) ? null
+      : { error: 'Use the task customer for this email', code: 'target_relationship_mismatch' };
+  }
+  const email = normalizeEmail(params.email_address);
+  const owners = await db('customers').whereIn('id', targets).whereNull('deleted_at').select('email');
+  if (!email || !owners.some(owner => normalizeEmail(owner.email) === email)) {
+    return { error: 'Use the task customer\'s own email address for this email', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, validateComposeRecipient, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

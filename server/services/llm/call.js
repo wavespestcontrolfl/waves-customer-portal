@@ -92,8 +92,9 @@ const DEFAULT_FALLBACK_BUDGET_MS = 4 * 60 * 1000;
 // caller's cap and effort unchanged.
 const OPENAI_REASONING_FLOOR_TOKENS = 1024;
 const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const geminiUrl = (model, key) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+// The key travels in the x-goog-api-key header, never the URL: URLs end up in logs and traces.
+const geminiUrl = (model) =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
 // Minimal OpenAI Responses-API text extractor (from lawn-diagnostic-prompt.js).
 function extractOpenAIText(data) {
@@ -666,9 +667,9 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel };
   const t0 = nowMs();
   try {
-    const resp = await fetch(geminiUrl(model, key), {
+    const resp = await fetch(geminiUrl(model), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
       ...abortAfter(timeoutMs, signal),
     });

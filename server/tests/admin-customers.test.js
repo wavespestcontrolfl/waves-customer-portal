@@ -272,6 +272,18 @@ describe('admin customers route helpers', () => {
     });
   });
 
+  test('customer list rows carry the canonical membership verdict (hasActivePlan)', () => {
+    const row = (extra) => mapCustomerListRow({ id: 'c', first_name: 'Ada', tags_str: '', ...extra });
+    // A tiered member with a zero monthly rate IS a member.
+    expect(row({ waveguard_tier: 'Gold', monthly_rate: '0' }).hasActivePlan).toBe(true);
+    // A legacy member with a positive rate and no tier IS a member.
+    expect(row({ waveguard_tier: null, monthly_rate: '129.50' }).hasActivePlan).toBe(true);
+    // Sentinel tiers are not members, even with a rate.
+    expect(row({ waveguard_tier: 'Commercial', monthly_rate: '129.50' }).hasActivePlan).toBe(false);
+    expect(row({ waveguard_tier: 'none', monthly_rate: '129.50' }).hasActivePlan).toBe(false);
+    expect(row({ waveguard_tier: null, monthly_rate: '0' }).hasActivePlan).toBe(false);
+  });
+
   test('propertyCount reads 0, never 1, when the list query did not select property_count', () => {
     const mapped = mapCustomerListRow({ id: 'customer-2', first_name: 'Ada', tags_str: '' });
     expect(mapped.propertyCount).toBe(0);
@@ -1199,6 +1211,91 @@ describe('admin customers route helpers', () => {
 
   });
 
+});
+
+// Pipeline audit 2026-10-30, item 2: an authored commercial proposal is the agreement and prices its own visits. Its
+// programs, building lines and corrective work become the schedule lines; the engine rows and the totals fallback
+// never stand in for them (a $300 quarterly application was prefilled at the $100 monthly average).
+describe('scheduleLinesFromEstimate: an authored commercial proposal', () => {
+  const index = indexServicesForSchedule([
+    { id: 'svc-pest-q', service_key: 'pest_control_quarterly', name: 'Pest Control', category: 'pest', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+  ]);
+  const proposalEstimate = (proposal, extra = {}) => ({
+    id: 'est-commercial', status: 'accepted', service_interest: 'Commercial Pest Control',
+    monthly_total: 100, annual_total: 1200, onetime_total: 0,
+    estimate_data: { proposal: { enabled: true, taxRate: 0, buildings: [{ name: 'Main', lineItems: [] }], ...proposal }, ...extra },
+  });
+
+  test('a programs-only proposal books each program at its price per application and its cadence', () => {
+    const estimate = proposalEstimate({
+      programs: [{ service: 'pest', label: 'Quarterly commercial pest', frequencyPerYear: 4, pricePerApplication: 300, taxable: true }],
+    });
+    const lines = scheduleLinesFromEstimate(estimate, index);
+    expect(lines).toEqual([{
+      serviceId: null, serviceKey: null, name: 'Quarterly commercial pest', estimateLabel: 'Quarterly commercial pest',
+      category: null, billingType: 'recurring', frequency: null, visitsPerYear: 4, duration: null, price: 300,
+      cadence: 'quarterly', intervalDays: null, source: 'recurring', estimateId: 'est-commercial', perApplicationPrice: 300,
+    }]);
+    // The completion price references and Customer 360 read the same lines.
+    expect(scheduleLinesFromEstimate(estimate, index, { includeSourceLines: true })).toEqual(lines);
+  });
+
+  test('several programs keep their own cadences; a count with no named cadence books an even interval', () => {
+    const lines = scheduleLinesFromEstimate(proposalEstimate({
+      programs: [
+        { service: 'pest', label: 'Interior pest', frequencyPerYear: 12, pricePerApplication: 81.67, visitMinutes: 45, taxable: true },
+        { service: 'rodent', label: 'Rodent stations', frequencyPerYear: 4, pricePerApplication: 60, taxable: true },
+        { service: 'other', label: 'Drain treatment', frequencyPerYear: 8, pricePerApplication: 40, taxable: true },
+      ],
+    }), index);
+    expect(lines.map(({ name, price, cadence, intervalDays, duration }) => ({ name, price, cadence, intervalDays, duration }))).toEqual([
+      { name: 'Interior pest', price: 81.67, cadence: 'monthly', intervalDays: null, duration: 45 },
+      { name: 'Rodent stations', price: 60, cadence: 'quarterly', intervalDays: null, duration: null },
+      { name: 'Drain treatment', price: 40, cadence: 'custom', intervalDays: 46, duration: null },
+    ]);
+  });
+
+  test('building lines bill once per period, one-time lines and corrective work ride as one-time, and names carry the building', () => {
+    const lines = scheduleLinesFromEstimate(proposalEstimate({
+      buildings: [
+        { name: 'Tower A', lineItems: [
+          { description: 'Monthly pest', quantity: 1, unitPrice: 260, frequency: 'monthly', taxable: true },
+          { description: 'Initial knockdown', quantity: 1, unitPrice: 450, frequency: 'one_time', taxable: true },
+        ] },
+        { name: 'Lake Houses', lineItems: [
+          { description: 'Quarterly lawn', quantity: 50, unitPrice: 30, frequency: 'quarterly', taxable: false },
+          { description: 'Bait check', quantity: 1, unitPrice: 25, frequency: 'per_application', visitsPerYear: 6, taxable: true },
+        ] },
+      ],
+      correctiveWork: [{ label: 'Door sweeps', amount: 180, taxable: true }],
+    }), index);
+    expect(lines.map(({ name, price, cadence, source, visitsPerYear, perApplicationPrice, monthlyPrice }) => ({
+      name, price, cadence, source, visitsPerYear, perApplicationPrice, monthlyPrice,
+    }))).toEqual([
+      { name: 'Tower A — Monthly pest', price: 260, cadence: 'monthly', source: 'recurring', visitsPerYear: 12, perApplicationPrice: undefined, monthlyPrice: 260 },
+      { name: 'Tower A — Initial knockdown', price: 450, cadence: 'one_time', source: 'one_time', visitsPerYear: null, perApplicationPrice: undefined, monthlyPrice: undefined },
+      { name: 'Lake Houses — Quarterly lawn', price: 1500, cadence: 'quarterly', source: 'recurring', visitsPerYear: 4, perApplicationPrice: undefined, monthlyPrice: undefined },
+      { name: 'Lake Houses — Bait check', price: 25, cadence: 'bimonthly', source: 'recurring', visitsPerYear: 6, perApplicationPrice: 25, monthlyPrice: undefined },
+      { name: 'Door sweeps', price: 180, cadence: 'one_time', source: 'one_time', visitsPerYear: null, perApplicationPrice: undefined, monthlyPrice: undefined },
+    ]);
+  });
+
+  test('the authored proposal wins over older engine rows still stored beside it', () => {
+    const lines = scheduleLinesFromEstimate(proposalEstimate(
+      { programs: [{ service: 'pest', label: 'Quarterly commercial pest', frequencyPerYear: 4, pricePerApplication: 300, taxable: true }] },
+      { result: { recurring: { services: [{ service: 'commercial_pest', name: 'Commercial Pest Control', perTreatment: 250, visitsPerYear: 4, mo: 83.33 }] } } },
+    ), index);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ name: 'Quarterly commercial pest', price: 300, perApplicationPrice: 300 });
+  });
+
+  test('an estimate with no authored proposal keeps the engine-row path (the totals fallback included)', () => {
+    const [line] = scheduleLinesFromEstimate({
+      id: 'est-plain', service_interest: 'Commercial Pest Control', monthly_total: 100, annual_total: 1200, onetime_total: 0,
+      estimate_data: { proposal: { enabled: false } },
+    }, index);
+    expect(line).toMatchObject({ price: 100, derived: 'estimate_totals_fallback' });
+  });
 });
 
 // #3140 resolution: the inferred-monthly vector — admin creates/edits that

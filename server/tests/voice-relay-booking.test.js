@@ -28,11 +28,16 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../services/scheduling/line-technician', () => {
   const actual = jest.requireActual('../services/scheduling/line-technician');
-  return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
+  return {
+    ...actual,
+    recordLinePickShadow: jest.fn(actual.recordLinePickShadow),
+    serviceLineFor: jest.fn(actual.serviceLineFor),
+    liveServiceLine: jest.fn(actual.liveServiceLine),
+  };
 });
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
-  serviceLineMapMode: () => (process.env.GATE_SERVICE_LINE_MAP === 'shadow' ? 'shadow' : 'off'),
+  serviceLineMapMode: () => (['shadow', 'live'].includes(process.env.GATE_SERVICE_LINE_MAP) ? process.env.GATE_SERVICE_LINE_MAP : 'off'),
 }));
 // ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
 // once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
@@ -101,6 +106,11 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), sendCustomerMessage
 jest.mock('../services/email', () => ({ sendEmail: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(), handleReschedule: jest.fn() }));
 jest.mock('../services/outbound-review-confirm', () => ({ runOutboundReviewConfirmHook: jest.fn() }));
+// GATE_ROUTE_CHECK_BOOKING_SAVES: the stop-number placement is asserted by its own calls below; this suite's
+// feature-gates mock has no gateEnvValue, so the real helper would only log a skipped placement.
+jest.mock('../services/scheduling/staff-save-route-check', () => ({
+  placeBookingSavedVisit: jest.fn(() => Promise.resolve(null)),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -903,6 +913,44 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(call[0]).not.toHaveProperty('serviceIdentity');
   });
 
+  // Build 4 (GATE_SERVICE_LINE_MAP=live): the booked service's line rides to the re-check as
+  // `serviceLines` (NOT an identity: the line rule changes no geometry), so the saved technician is
+  // the line's. Not live: nothing is read and nothing is passed.
+  describe('service-line map', () => {
+    const lineTech = require('../services/scheduling/line-technician');
+    afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; lineTech.serviceLineFor.mockClear(); lineTech.liveServiceLine.mockClear(); });
+
+    test('live: the re-check passes [line] of the resolved catalog row, and still no serviceIdentity', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lineTech.liveServiceLine.mockResolvedValueOnce('lawn');
+      await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+      expect(call[0].serviceLines).toEqual(['lawn']);
+      expect(call[0]).not.toHaveProperty('serviceIdentity');
+      expect(lineTech.liveServiceLine).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ serviceType: PEST_ROW.name }));
+    });
+
+    test('live but the service has no line (or is a Waves Assessment): nothing passed', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lineTech.liveServiceLine.mockResolvedValueOnce(null);
+      await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+      expect(call[0].serviceLines).toBeUndefined();
+    });
+
+    test('shadow or off: no line read and nothing passed', async () => {
+      for (const mode of [undefined, 'shadow']) {
+        if (mode) process.env.GATE_SERVICE_LINE_MAP = mode; else delete process.env.GATE_SERVICE_LINE_MAP;
+        booking.buildBookingAvailability.mockClear();
+        await executeTool('request_booking', GOOD_INPUT, slotCtx());
+        const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+        expect(call[0].serviceLines).toBeUndefined();
+      }
+      expect(lineTech.serviceLineFor).not.toHaveBeenCalled();
+      expect(lineTech.liveServiceLine).not.toHaveBeenCalled();
+    });
+  });
+
   test('the probe never covers LESS than the written duration, even if the offered end is short', async () => {
     // Belt: a slot whose end predates start + the row's duration must not
     // shrink the conflict window (COALESCE(window_end, …) is what every other
@@ -962,7 +1010,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(lockCustomerComms).toHaveBeenCalledWith(trx, CUSTOMER.id);
     // Second half of the contract: the GLOBAL probe, under the lock — scoped to
     // the technician the offer (and so the row) carries; occupancy.js ignores
-    // it unless GATE_MULTI_TECH_CONFIRM + capacity mode are on.
+    // it unless GATE_MULTI_TECH_CONFIRM is on (hour or capacity mode).
     expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       db: trx, date: BOOK_DATE, windowStart: '09:00', windowEnd: '10:00', technicianId: 't-1',
     }));
@@ -1236,5 +1284,65 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     delete process.env.GATE_VOICE_AI_BOOKING;
     const contextOnly = buildBasePrompt(true);
     expect(contextOnly).not.toContain('BOOKING REQUESTS');
+  });
+});
+
+// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30): the pending voice booking is numbered on its technician's day
+// inside the booking transaction, after the review card is written. Stop numbers only: nothing is sent.
+describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the voice booking gets its stop number', () => {
+  const { placeBookingSavedVisit } = require('../services/scheduling/staff-save-route-check');
+  beforeEach(() => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    process.env.GATE_VOICE_AI_BOOKING = 'true';
+    delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
+  });
+
+  test('a booked request is placed once, on the booking transaction, with source voice_relay, after the review card', async () => {
+    const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+    expect(out).toMatch(/Booking REQUEST submitted/);
+    expect(placeBookingSavedVisit).toHaveBeenCalledTimes(1);
+    expect(placeBookingSavedVisit).toHaveBeenCalledWith(trx, { visit: { id: 'ss-501', customer_id: CUSTOMER.id }, source: 'voice_relay' });
+    expect(trxBuilders.triage_items.insert.mock.invocationCallOrder[0]).toBeLessThan(placeBookingSavedVisit.mock.invocationCallOrder[0]);
+    assertNoComms();
+  });
+
+  test('a booking that rolls back (the call already holds a review card) is never placed', async () => {
+    primeDb({ reviewCardTaken: true });
+    await executeTool('request_booking', { slot_ref: 'S2' }, slotCtx());
+    expect(placeBookingSavedVisit).not.toHaveBeenCalled();
+  });
+
+  test('a refused booking (slot taken) is never placed', async () => {
+    occupancy.findConflictingVisits.mockResolvedValue([{ id: 'other' }]);
+    await executeTool('request_booking', GOOD_INPUT, CTX);
+    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    expect(placeBookingSavedVisit).not.toHaveBeenCalled();
+  });
+
+  test('the real helper: gate on places once with source voice_relay; gate off never; a throwing placement still books', async () => {
+    const real = jest.requireActual('../services/scheduling/staff-save-route-check');
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    placeBookingSavedVisit.mockImplementation(real.placeBookingSavedVisit);
+    const liveSpy = jest.spyOn(arrivalRoute, 'routeCheckBookingSavesLive').mockReturnValue(true);
+    const placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
+    try {
+      expect(await executeTool('request_booking', GOOD_INPUT, CTX)).toMatch(/Booking REQUEST submitted/);
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+      expect(placeSpy).toHaveBeenCalledWith(trx, { serviceId: 'ss-501', staffSave: true, source: 'voice_relay' });
+
+      placeSpy.mockClear();
+      liveSpy.mockReturnValue(false);
+      expect(await executeTool('request_booking', GOOD_INPUT, slotCtx())).toMatch(/Booking REQUEST submitted/);
+      expect(placeSpy).not.toHaveBeenCalled();
+
+      liveSpy.mockReturnValue(true);
+      placeSpy.mockRejectedValueOnce(new Error('route boom'));
+      expect(await executeTool('request_booking', GOOD_INPUT, slotCtx())).toMatch(/Booking REQUEST submitted/);
+      expect(placeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      liveSpy.mockRestore();
+      placeSpy.mockRestore();
+      placeBookingSavedVisit.mockImplementation(() => Promise.resolve(null));
+    }
   });
 });

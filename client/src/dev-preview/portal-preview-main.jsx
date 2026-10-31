@@ -351,6 +351,7 @@ const PROPERTY_PREFERENCES = {
 Object.assign(api, {
   getPhotoIds: async () => ({ items: [] }),
   getWateringPlan: async () => ({ available: false }),
+  getMistingSystem: async () => ({ system: null }),
   // auth
   getMe: async () => CUSTOMER,
   getAuthProperties: async () => (SAVED_PROPERTIES

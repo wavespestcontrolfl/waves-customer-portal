@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import CustomerReviews from './CustomerReviews';
+import CustomerReviews, { businessFitReviews } from './CustomerReviews';
 
 afterEach(() => {
   cleanup();
@@ -69,5 +69,34 @@ describe('CustomerReviews', () => {
     render(<CustomerReviews />);
 
     expect(await screen.findByRole('img', { name: 'Rated 5 out of 5 stars' })).toBeInTheDocument();
+  });
+});
+
+describe('CustomerReviews on a commercial proposal (owner 2026-10-26, choice 2A)', () => {
+  const POOL = [
+    { reviewerName: 'Home A.', starRating: 5, text: 'They treated around the house and the pool cage, and my dogs stayed inside the whole time.' },
+    { reviewerName: 'Office B.', starRating: 5, text: 'Very knowledgeable and professional. The ant problem was under control after the first visit, as promised.' },
+    { reviewerName: 'Yard C.', starRating: 5, text: 'The yard and the garden look better than ever since the team started coming every quarter.' },
+    { reviewerName: 'Service D.', starRating: 5, text: 'On time, explained exactly what he treated, and followed up the next week without being asked to.' },
+  ];
+
+  it('businessFitReviews keeps only the reviews with no home, family, pets or yard words', () => {
+    expect(businessFitReviews(POOL).map((r) => r.reviewerName)).toEqual(['Office B.', 'Service D.']);
+  });
+
+  it('shows the business-fit reviews under the business heading, as a glass card', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ reviews: POOL }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<CustomerReviews commercial />);
+
+    expect(await screen.findByRole('heading', { name: 'What our customers say' })).toBeInTheDocument();
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/reviews\/featured\?limit=40$/);
+    expect(screen.getByText('Office B.')).toBeInTheDocument();
+    expect(screen.getByText('Service D.')).toBeInTheDocument();
+    expect(screen.queryByText('Home A.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Yard C.')).not.toBeInTheDocument();
+    expect(screen.getByTestId('commercial-reviews')).toHaveAttribute('data-glass', 'card');
+    expect(screen.queryByText(/homeowners/i)).not.toBeInTheDocument();
   });
 });

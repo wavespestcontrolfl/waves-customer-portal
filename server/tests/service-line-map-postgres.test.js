@@ -177,6 +177,70 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     });
   });
 
+  describe('live pickers on real rows (GATE_SERVICE_LINE_MAP=live)', () => {
+    beforeEach(() => { process.env.GATE_SERVICE_LINE_MAP = 'live'; });
+    const pest = { serviceType: 'General Pest Control' };
+
+    test('lineOfferRanking: home 0, gap 1, anyone else dropped; null when the gate is not live or no line has a technician set', async () => {
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('lawn', ownerId, null)]);
+      const general = await lineTech.lineOfferRanking(db, { lines: ['general'] });
+      expect(general.lines).toEqual(['general']);
+      expect([hireId, ownerId, futureId, null].map((id) => general.rankOf(id))).toEqual([0, 1, null, null]);
+      // Two lines: the owner is the gap of one and the home of the other; the hire is not on the lawn line.
+      const both = await lineTech.lineOfferRanking(db, { lines: ['general', 'lawn'] });
+      expect([ownerId, hireId].map((id) => both.rankOf(id))).toEqual([1, null]);
+      // A line with nobody set adds no rule; the other line still does.
+      const withTermite = await lineTech.lineOfferRanking(db, { lines: ['termite', 'lawn'] });
+      expect(withTermite.lines).toEqual(['lawn']);
+      expect(await lineTech.lineOfferRanking(db, { lines: ['termite'] })).toBeNull();
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      expect(await lineTech.lineOfferRanking(db, { lines: ['general'] })).toBeNull();
+    });
+
+    test('lineOfferRanking: a technician switched Off for the line is dropped', async () => {
+      await db('service_line_techs').insert(lineRow('rodent', hireId, ownerId));
+      await db('technician_capabilities').insert({ technician_id: hireId, service_category: 'rodent', active: false, capability_level: 'qualified' });
+      const ranking = await lineTech.lineOfferRanking(db, { lines: ['rodent'] });
+      expect([hireId, ownerId].map((id) => ranking.rankOf(id))).toEqual([null, 1]);
+      await db('technician_capabilities').where({ technician_id: hireId }).del();
+    });
+
+    test('pickLineTechnician: home, then gap on an off day or an absence, then nobody; the caller\'s list bounds it', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('mosquito', futureId, null)]);
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toEqual({ mapped: true, line: 'general', technicianId: hireId, reason: 'home' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: FRIDAY })).toMatchObject({ technicianId: ownerId, reason: 'gap_off_day' });
+      await db('technician_absences').insert({ technician_id: hireId, absence_date: MONDAY, reason: 'sick' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toMatchObject({ technicianId: ownerId, reason: 'gap_absent' });
+      await db('technician_absences').where({ technician_id: hireId }).del();
+      // The caller's own eligible list: the home tech is not on it, so the gap tech takes it.
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY, candidateIds: [ownerId] })).toMatchObject({ technicianId: ownerId, reason: 'gap_not_listed' });
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY, candidateIds: [futureId] })).toMatchObject({ technicianId: null, reason: 'none' });
+      // A not-yet-started home tech with no gap: nobody (the caller saves the visit unassigned).
+      expect(await lineTech.pickLineTechnician(db, { serviceType: 'Mosquito Control', date: MONDAY })).toEqual({ mapped: true, line: 'mosquito', technicianId: null, reason: 'none' });
+    });
+
+    test('pickLineTechnician: an unmapped line and a gate that is not live both tell the caller to keep today\'s choice', async () => {
+      await db('service_line_techs').insert(lineRow('general', hireId, ownerId));
+      expect(await lineTech.pickLineTechnician(db, { serviceType: 'Termite Inspection', date: MONDAY })).toMatchObject({ mapped: false, line: 'termite', reason: 'no_map' });
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      expect(await lineTech.pickLineTechnician(db, { ...pest, date: MONDAY })).toMatchObject({ mapped: false, technicianId: null, reason: 'off' });
+    });
+
+    test('the Team-tab card works in live: GET and PUT answer with mode live, and the roster marks the response', async () => {
+      const got = await call('get', '/service-lines');
+      expect(got.statusCode).toBe(200);
+      expect(got.body.mode).toBe('live');
+      const saved = await call('put', '/service-lines', { technicianId: ownerId, body: { lines: [
+        { service_category: 'termite', home_technician_id: ownerId, gap_technician_id: null },
+      ] } });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.body.mode).toBe('live');
+      expect((await call('get', '/technicians')).body.serviceLinesEnabled).toBe(true);
+      expect((await call('get', '/service-lines/shadow-summary')).statusCode).toBe(200);
+    });
+  });
+
   describe('recorder', () => {
     test('gate off: no row and the log table is never queried', async () => {
       await db('service_line_techs').insert(lineRow('general', hireId, ownerId));
@@ -293,6 +357,83 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       // The accept's transaction never committed (this suite rolls it back): no row, and no stray fixture.
       expect(await db('service_line_pick_shadow').where({ scheduled_service_id: visitId })).toHaveLength(0);
       expect(await db('customers').where({ id: customerId }).first()).toBeUndefined();
+    });
+  });
+
+  describe('estimate accept, live (build 4 part B)', () => {
+    // A pest + lawn estimate accepted on the pest slot of the pest home tech: live books the
+    // lawn program the same day with no time on the lawn technician; shadow copies the slot.
+    const acceptPestLawn = async (mode) => {
+      process.env.GATE_SERVICE_LINE_MAP = mode;
+      await db('service_line_techs').insert([lineRow('general', hireId, ownerId), lineRow('lawn', ownerId, null)]);
+      const converter = require('../services/estimate-converter');
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      const service = await db('services').where({ service_key: 'pest_general_quarterly' }).first('id', 'name', 'service_key');
+      const trx = await db.transaction();
+      try {
+        await trx('customers').insert({
+          id: customerId, first_name: 'Synthetic', last_name: 'Fixture', email: `${customerId}@example.invalid`,
+          phone: '+19415550101', active: true, property_type: 'residential', address_line1: '101 Example Court',
+          city: 'Parrish', state: 'FL', zip: '34219', pipeline_stage: 'active_customer', autopay_enabled: false,
+        });
+        await trx('estimates').insert({
+          id: estimateId, customer_id: customerId, status: 'accepted', token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
+          category: 'RESIDENTIAL', monthly_total: 95, annual_total: 1140,
+          estimate_data: { result: { recurring: { services: [
+            { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly', annual: 600, mo: 50, perTreatment: 150 },
+            { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9, frequency: 'every_6_weeks', annual: 540, mo: 45, perTreatment: 60 },
+          ] } } },
+        });
+        await trx('scheduled_services').insert({
+          customer_id: customerId, technician_id: hireId, source_estimate_id: estimateId, service_id: service.id,
+          service_key_snapshot: service.service_key, service_type: service.name, scheduled_date: MONDAY,
+          window_start: '09:00', window_end: '10:00', status: 'pending', estimated_duration_minutes: 60, estimated_price: 150,
+        });
+        await converter.convertEstimate(estimateId, {
+          database: trx, skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true,
+          deferFollowUpReminderRegistration: true, deferCommercialScheduleNotification: true,
+        });
+        const rows = await trx('scheduled_services').where({ source_estimate_id: estimateId })
+          .whereNull('recurring_parent_id')
+          .select('service_type', 'scheduled_date', 'window_start', 'technician_id', 'notes');
+        return rows.find((r) => /lawn/i.test(r.service_type)) || null;
+      } finally {
+        await trx.rollback();
+      }
+    };
+
+    test('live: the lawn program is booked the same day with no time on the lawn technician', async () => {
+      const lawn = await acceptPestLawn('live');
+      expect(lawn).not.toBeNull();
+      expect(lawn.window_start).toBeNull();
+      expect(lawn.technician_id).toBe(ownerId);
+      expect(String(lawn.scheduled_date instanceof Date ? lawn.scheduled_date.toISOString() : lawn.scheduled_date)).toContain(MONDAY);
+      expect(lawn.notes).toContain('This program has its own technician, so we will set its time separately.');
+    });
+
+    test('live: a database error inside the map lookup stays in its savepoint; the accept completes with today\'s copy', async () => {
+      const spy = jest.spyOn(lineTech, 'pickLineTechnician').mockImplementation(async (conn) => {
+        await conn.raw('select 1/0'); // a real PostgreSQL error on the accept's connection
+        return null;
+      });
+      try {
+        const lawn = await acceptPestLawn('live');
+        expect(spy).toHaveBeenCalled();
+        expect(lawn).not.toBeNull();
+        expect(String(lawn.window_start).slice(0, 5)).toBe('09:00');
+        expect(lawn.technician_id).toBe(hireId);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('shadow: the lawn program copies the picked slot and technician, as today', async () => {
+      const lawn = await acceptPestLawn('shadow');
+      expect(lawn).not.toBeNull();
+      expect(String(lawn.window_start).slice(0, 5)).toBe('09:00');
+      expect(lawn.technician_id).toBe(hireId);
+      expect(lawn.notes).not.toContain('its own technician');
     });
   });
 

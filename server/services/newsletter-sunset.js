@@ -4,9 +4,11 @@
  * for the owner to approve, then suppress the ones who still don't respond.
  *
  * Weekly (Mon 7:30am ET, scheduler.js), dark behind GATE_NEWSLETTER_SUNSET
- * (default off; unset the var to kill). The job NEVER sends email — the
- * win-back it stages is a normal draft in /admin/newsletter that the owner
- * edits and fires through the existing send flow. Four phases, in order:
+ * (default off; unset the var to kill). The job never sends email itself.
+ * With GATE_NEWSLETTER_AUTO_SEND on (owner 2026-10-30, option A) the
+ * win-back it stages is queued for the next scheduler tick, which sends it;
+ * off, it is parked as a draft, which cannot go out by hand since the manual
+ * newsletter tools were removed. Four phases, in order:
  *
  *   A. RECOVER — flagged subscribers who CONFIRMED (stay-subscribed quiz
  *      submit) since flagging lose the 'reengagement_due' tag, and sunset
@@ -26,8 +28,9 @@
  *      delivers would otherwise valve at 0 flag candidates while the whole
  *      flagged cohort sails into sunset).
  *   C. STAGE — if flagged subscribers are still awaiting a win-back and no
- *      reengagement-type send is open, insert ONE parked draft targeting the
- *      tag (segment_filter { tags: [REENGAGEMENT_TAG] }).
+ *      reengagement-type send is open, insert ONE win-back targeting the
+ *      tag (segment_filter { tags: [REENGAGEMENT_TAG] }): queued under the
+ *      auto-send switch, a parked draft without it.
  *   D. SUNSET — flagged subscribers whose win-back was DELIVERED ≥GRACE_DAYS
  *      ago (after their flag date) with still-zero engagement flip to
  *      status='inactive' — suppressed, not deleted: buildSubscriberQuery's
@@ -44,6 +47,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { newsletterAutoSendLive } = require('../config/feature-gates');
 
 const MIN_DELIVERED_SENDS = 6;
 const INACTIVITY_DAYS = 90;
@@ -242,7 +246,15 @@ const WINBACK_TEXT = [
   '— The Waves Pest Control Team',
 ].join('\n');
 
-function buildWinbackDraftRow() {
+// queued = GATE_NEWSLETTER_AUTO_SEND on: the row is scheduled for now, so
+// the next scheduler tick sends it. autoQueued() marks it the way the proof
+// step marks an auto-send issue (approved, no approving email), so the
+// dispatcher holds it while the switch is off.
+function autoQueued(now = new Date()) {
+  return { status: 'scheduled', scheduled_for: now, proof_approved_at: now };
+}
+
+function buildWinbackDraftRow({ queued = false } = {}) {
   return {
     subject: WINBACK_SUBJECT,
     subject_b: null,
@@ -250,9 +262,10 @@ function buildWinbackDraftRow() {
     text_body: WINBACK_TEXT,
     preview_text: "One click keeps you on the list — otherwise we'll quietly stop.",
     from_name: 'Waves Pest Control',
-    from_email: 'newsletter@wavespestcontrol.com',
+    // Same sending subdomain as the weekly issue (owner 2026-10-31).
+    from_email: 'newsletter@news.wavespestcontrol.com',
     reply_to: 'contact@wavespestcontrol.com',
-    status: 'draft',
+    ...(queued ? autoQueued() : { status: 'draft' }),
     segment_filter: { tags: [REENGAGEMENT_TAG] },
     newsletter_type: REENGAGEMENT_TYPE,
     // slug stays null — the public archive falls back to send.id, and the
@@ -273,36 +286,70 @@ function buildWinbackDraftRow() {
 // subscriber is never actually sent the win-back (the sender skips them at
 // send time), so without this filter they count as "awaiting" forever and
 // ensureWinbackDraft keeps parking a fresh draft that can never resolve them.
+// This flag episode's win-back, sent to the outer subscriber row.
+function winbackSentThisEpisode() {
+  this.select(db.raw('1'))
+    .from('newsletter_send_deliveries as wd')
+    .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
+    .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
+    .where('ws.newsletter_type', REENGAGEMENT_TYPE)
+    .whereNotNull('wd.sent_at')
+    .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
+}
+
 async function cohortAwaitingWinback() {
   const { excludeMailboxNotMailable } = require('./newsletter-sender');
   const row = await excludeMailboxNotMailable(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNotNull('reengagement_flagged_at')
-      .whereNotExists(function () {
-        this.select(db.raw('1'))
-          .from('newsletter_send_deliveries as wd')
-          .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
-          .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
-          .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-          .whereNotNull('wd.sent_at')
-          .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
-      }),
+      .whereNotExists(winbackSentThisEpisode),
   )
     .count('* as c')
     .first();
   return Number(row?.c || 0);
 }
 
-async function ensureWinbackDraft(cohort) {
+// Flagged actives who already got this episode's win-back. They keep the tag
+// through their grace window, and a win-back targets the whole tag, so a new
+// one would mail them again. Same mailable filter as cohortAwaitingWinback.
+async function cohortInGrace() {
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
+  const row = await excludeMailboxNotMailable(
+    db('newsletter_subscribers')
+      .where({ status: 'active' })
+      .whereNotNull('reengagement_flagged_at')
+      .whereExists(winbackSentThisEpisode),
+  )
+    .count('* as c')
+    .first();
+  return Number(row?.c || 0);
+}
+
+async function ensureWinbackDraft(cohort, { autoSend = false } = {}) {
   const open = await db('newsletter_sends')
     .where({ newsletter_type: REENGAGEMENT_TYPE })
     .whereIn('status', ['draft', 'scheduled', 'sending'])
-    .first('id');
-  if (open) return { created: false, openSendId: open.id };
+    .first('id', 'status');
+  // Only a win-back this job stages under the switch queues itself. A draft
+  // parked earlier may have been edited (copy, audience), so it stays parked
+  // for the owner, and its alert stays open.
+  if (open) return { created: false, openSendId: open.id, parked: open.status === 'draft' };
   if (!cohort) return { created: false, openSendId: null };
-  const [row] = await db('newsletter_sends').insert(buildWinbackDraftRow()).returning('id');
-  return { created: true, openSendId: row?.id ?? row };
+  const [row] = await db('newsletter_sends').insert(buildWinbackDraftRow({ queued: autoSend })).returning('id');
+  return { created: true, openSendId: row?.id ?? row, queued: autoSend };
+}
+
+// Phase C. Under the auto-send switch a queued win-back goes to the whole
+// tag, so it waits while an earlier cohort is still in its grace window
+// (at most GRACE_DAYS: each of them recovers or is sunset). Switch off, the
+// parked draft is the owner's to review, as before.
+async function stageWinback(cohortAwaiting, { autoSend = false } = {}) {
+  if (autoSend && cohortAwaiting > 0) {
+    const inGrace = await cohortInGrace();
+    if (inGrace > 0) return { created: false, openSendId: null, waitingOnGrace: inGrace };
+  }
+  return ensureWinbackDraft(cohortAwaiting, { autoSend });
 }
 
 // Phase D candidates — flagged, win-back SENT for this flag episode with the
@@ -373,10 +420,21 @@ async function applySunset(ids, now) {
 // the owner has something to do (valve tripped, or a win-back draft is
 // waiting to be sent); resolved and silent otherwise. Mirrors the
 // lawn-pricing-invariant-sweep upsert shape.
+// The owner's one step for a parked win-back. Only a win-back this job stages
+// under the auto-send switch sends itself; a parked one never does.
+function winbackNextStep(autoSend) {
+  return autoSend
+    ? 'An older re-engagement draft is parked in Newsletter → History. Delete it there, and the next Monday run stages one that sends itself.'
+    : 'A re-engagement draft is parked in Newsletter → History. It cannot go out while GATE_NEWSLETTER_AUTO_SEND is off. With the switch on, delete it there, and the next Monday run stages one that sends itself.';
+}
+
 async function syncAlert(summary, now) {
   if (!(await db.schema.hasTable('admin_alerts'))) return null;
 
-  const needsOwner = summary.valveTripped || (summary.cohortAwaiting > 0);
+  // Under the auto-send switch a win-back the job stages queues itself, so
+  // only the safety valve, or a draft parked before the switch, needs the owner.
+  const needsOwner = summary.valveTripped
+    || (summary.cohortAwaiting > 0 && (!summary.autoSend || summary.winbackParked));
   if (!needsOwner) {
     const resolved = await db('admin_alerts')
       .where({ type: ALERT_TYPE, status: 'open' })
@@ -403,12 +461,10 @@ async function syncAlert(summary, now) {
       : `Newsletter win-back waiting: ${summary.cohortAwaiting} inactive subscriber${summary.cohortAwaiting === 1 ? '' : 's'} flagged`,
     description: summary.valveTripped
       ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} sendable active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
-    : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. A re-engagement draft is parked in /admin/newsletter — review, edit, and send it; non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
-    // Deep-link straight into the parked draft: tab=compose mounts
-    // ComposeView (the page defaults to the dashboard tab otherwise), and
-    // ?autopilotType= names the lane it hydrates (same mechanism as the
-    // Pest Insider bell).
-    href: '/admin/newsletter?tab=compose&autopilotType=reengagement',
+    : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. ${winbackNextStep(summary.autoSend)} Non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
+    // History lists the parked draft with its Delete button (there is no
+    // manual send any more).
+    href: '/admin/newsletter?tab=history',
     detected_at: now,
     last_seen_at: now,
     created_by_rule: 'newsletter_sunset_weekly',
@@ -458,13 +514,14 @@ async function runNewsletterSunset(now = new Date()) {
   let cohortAwaiting = 0;
   let draft = { created: false, openSendId: null };
   let sunset = 0;
+  const autoSend = newsletterAutoSendLive();
   if (!valveTripped) {
     flagged = await applyFlags(candidateIds, now);
     // Sunset BEFORE staging: this week's non-responders leave the cohort
     // first, so the draft decision sees only people still owed a win-back.
     sunset = await applySunset(sunsetIds, now);
     cohortAwaiting = await cohortAwaitingWinback();
-    draft = await ensureWinbackDraft(cohortAwaiting);
+    draft = await stageWinback(cohortAwaiting, { autoSend });
   }
 
   const summary = {
@@ -479,6 +536,10 @@ async function runNewsletterSunset(now = new Date()) {
     cohortAwaiting,
     draftCreated: draft.created,
     openSendId: draft.openSendId || null,
+    winbackQueued: Boolean(draft.queued),
+    winbackParked: Boolean(draft.parked),
+    winbackWaitingOnGrace: draft.waitingOnGrace || 0,
+    autoSend,
   };
   await syncAlert(summary, now);
   logger.info(`[newsletter-sunset] ${JSON.stringify(summary)}`);
@@ -490,6 +551,9 @@ module.exports = {
   // Exported for unit tests
   safetyValveTripped,
   buildWinbackDraftRow,
+  ensureWinbackDraft,
+  stageWinback,
+  syncAlert,
   MIN_DELIVERED_SENDS,
   INACTIVITY_DAYS,
   GRACE_DAYS,

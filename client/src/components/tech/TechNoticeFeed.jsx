@@ -1,7 +1,7 @@
 /**
  * TechNoticeFeed
  *
- * Polls /api/tech/notifications every 10s and renders:
+ * Polls /api/tech/notifications every 10s while the page is visible and renders:
  *   - a visit card for `visit_assigned` / `visit_unassigned` /
  *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
  *     no auto-dismiss: it waits until the tech taps "Got it"
@@ -46,6 +46,7 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import { useTechBasePath } from './techBasePath';
 import { formatETDateOnly } from '../../lib/timezone';
 
@@ -80,8 +81,9 @@ const TRACKING_TYPES = new Set(['follow_through_tracking']);
 // The 7 PM open-visits reminder (tech-open-visit-nudge.js) is kept too: it is
 // the durable copy when the push reaches no device. The 9 PM clock-out
 // reminder and the 11 PM automatic clock-out notice (time-tracking-crons.js,
-// GATE_SHIFT_CLOSE_REVIEW) use the same card: headline + server message.
-const NUDGE_TYPES = new Set(['tech_open_visit_nudge', 'tech_clock_out_reminder', 'tech_auto_clock_out']);
+// GATE_SHIFT_CLOSE_REVIEW) use the same card: headline + server message. So does the one
+// summary card a series handover sends the new technician (ops/agents/second-tech-handover-execute.js).
+const NUDGE_TYPES = new Set(['tech_open_visit_nudge', 'tech_clock_out_reminder', 'tech_auto_clock_out', 'series_handover']);
 // A customer's visit-prep photo submission (visit-prep-tech-alert.js) —
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.
@@ -192,11 +194,12 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
     }
   }, []);
 
-  useEffect(() => {
-    poll();
-    const id = setInterval(poll, POLL_MS);
-    return () => clearInterval(id);
-  }, [poll]);
+  // One read on mount. After that the shared hook reads every POLL_MS only while
+  // the page is visible and online, and once at once when the tech comes back
+  // (tab shown, window focused, app resumed). A hidden tab or a phone in a
+  // pocket makes no reads.
+  useEffect(() => { poll(); }, [poll]);
+  useVisiblePageRefresh(poll, { intervalMs: POLL_MS });
 
   // Storm cards are capped so a burst of alerts can never bury the home
   // screen: one card per stop (newest wins when the sweep re-alerts), at

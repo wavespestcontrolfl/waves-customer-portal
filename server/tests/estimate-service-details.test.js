@@ -37,12 +37,17 @@ const {
   buildServiceDetailsContent,
 } = require('../services/estimate-service-details');
 const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
+const PDFDocument = require('pdfkit');
+const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
-describe('interior spray copy (owner R1 2026-09-29)', () => {
-  test('recurring pest details state the interior spray is included and never disclaim baseboard spraying', () => {
+// Owner R1 2026-09-29 made the interior spray part of every pest visit; owner 2026-10-22 replaced that: the first
+// visit includes an inside spray, after that the inside is up to the customer (services/sms-company-facts.js).
+describe('interior spray copy (owner 2026-10-22, replacing R1 2026-09-29)', () => {
+  test('recurring pest details state the first-visit inside spray, then inside on request, and never disclaim baseboard spraying', () => {
     const text = JSON.stringify(SERVICE_DETAILS_COPY);
-    expect(text).toContain('Interior service is included for pests covered by your recurring plan: an interior spray plus baits, gels, monitors');
-    expect(text).toContain('an interior spray is part of your pest visits at no extra charge');
+    expect(text).toContain('Interior service is included on your first visit and whenever you ask for it on later visits: an interior spray plus baits, gels, monitors');
+    expect(text).toContain('your first visit includes an inside spray, and on later visits we treat inside whenever you ask');
+    expect(text).not.toContain('an interior spray is part of your pest visits');
     expect(text).not.toMatch(/rather than routine baseboard spraying/i);
   });
 });
@@ -107,9 +112,18 @@ describe('service-details PDF renderer', () => {
       address: '123 Monitoring Way, Sarasota, FL 34235',
       estimate_slug: 'EST-2026-0002',
     });
-    const buffer = await renderServiceDetailsPdf(content);
+    const drawn = [];
+    const realText = PDFDocument.prototype.text;
+    const textSpy = jest.spyOn(PDFDocument.prototype, 'text').mockImplementation(function captureText(str, ...rest) {
+      drawn.push(String(str));
+      return realText.call(this, str, ...rest);
+    });
+    const buffer = await renderServiceDetailsPdf(content).finally(() => textSpy.mockRestore());
     expect(buffer.length).toBeGreaterThan(1500);
     expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    // Masthead + footer print the Luxe Ave office, never the dropped 9040 Town Center Pkwy line.
+    expect(drawn.join('\n')).toContain(WAVES_ADDRESS_LINE);
+    expect(drawn.join('\n')).not.toContain('Town Center');
   });
 
   test('renders for every supported service with an EMPTY registry (fallback note path)', async () => {
@@ -128,14 +142,14 @@ describe('service-details PDF renderer', () => {
     expect(mosquito.productImages).toBeNull();
     const termite = await buildServiceDetailsContent('termite_bait', {});
     expect(termite.productImages).toBeNull();
-    // Generic imagery (no product name: surfactant, fertilizer bags) still
-    // renders without registry approval.
+    // Generic imagery (no product name: fertilizer bags) still renders
+    // without registry approval. The pest set is Taurus only (2026-10-26),
+    // so an empty registry leaves no pest image.
     const pest = await buildServiceDetailsContent('pest_control', {});
-    expect(pest.productImages.images.map((i) => i.file)).toEqual(['product-surfactant.png']);
+    expect(pest.productImages).toBeNull();
     const lawn = await buildServiceDetailsContent('lawn_care', {});
     expect(lawn.productImages.images.map((i) => i.file)).toEqual([
       'product-lesco-fertilizer-bag.png',
-      'product-lesco-am-micros.png',
     ]);
   });
 });

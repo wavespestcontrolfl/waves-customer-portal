@@ -66,6 +66,11 @@ function makeRecorder({ first = { n: 0 }, rows = [] } = {}) {
     });
   }
   rec.first = jest.fn(() => Promise.resolve(first));
+  // pluck resolves that column of the rows, as knex does
+  rec.pluck = jest.fn((column) => {
+    calls.push(['pluck', column]);
+    return Promise.resolve(rows.map((row) => row?.[column]).filter((value) => value !== undefined));
+  });
   rec.catch = jest.fn(() => Promise.resolve(first));
   rec.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   rec.calls = calls;

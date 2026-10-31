@@ -802,6 +802,33 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               await db('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'hold-claim-stranded:%'").del();
             }
           });
+
+          // Production runs the admin bell policy (GATE_ADMIN_BELL_POLICY), which writes no row for an 'alert' that does
+          // not ask to ring: the sweep would park the invoice with no alert standing.
+          test('under the admin bell policy both hold-claim alerts reach the bell before the sweep parks the invoice', async () => {
+            const policy = jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(true);
+            const keys = [];
+            try {
+              const c = await newCustomer();
+              await placeHold(c);
+              const strandedToken = randomUUID();
+              const stranded = await newInvoice(c, { status: 'sending', send_claim_token: strandedToken, scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
+              const stuckToken = randomUUID();
+              const stuck = await newInvoice(c, { status: 'sending', send_claim_token: stuckToken });
+              keys.push(dedupeKey(stranded, strandedToken), `hold-claim-maybe-stuck:${stuck}:${stuckToken}`);
+              await makeStale(stranded);
+              await makeStale(stuck);
+              await Invoices.processScheduledSends({ limit: 25 });
+              const standing = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]).first();
+              expect(await standing(keys[0])).toBeTruthy();
+              expect(await standing(keys[1])).toBeTruthy();
+              expect((await invoice(stranded)).status).toBe('scheduled');
+              expect((await invoice(stuck)).status).toBe('scheduled');
+            } finally {
+              policy.mockRestore();
+              await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).del();
+            }
+          });
         });
 
         // Codex #5459 r6 P2: a failed hold LOOKUP is not a confirmed hold; the stranded outcome and alert must not tell staff

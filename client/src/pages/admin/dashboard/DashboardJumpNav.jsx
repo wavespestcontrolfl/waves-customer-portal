@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LayoutDashboard } from "lucide-react";
 import AdminCommandHeader from "../../../components/admin/AdminCommandHeader";
 import {
@@ -25,13 +25,43 @@ const PERIODS = [
   { id: "ytd", label: "YTD", long: "Year to date" },
 ];
 
+// A clicked tab keeps its highlight while its smooth scroll runs; the hold
+// ends once scrolling has been quiet this long.
+const JUMP_SETTLE_MS = 200;
+
+// The nearest scrolling ancestor: the admin shell's main pane (overflow-y
+// auto) on desktop, else the document.
+function scrollParent(el) {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+// Scroll mode's active section, from live geometry: the last section whose
+// top has passed a line a quarter of the way down the area under the sticky
+// nav (measured, since the nav's height changes with the breakpoint and the
+// period card's wrapping). A jumped-to heading lands at its scroll margin
+// just under the nav, above that line. At the very end of the page the last
+// section wins: a short one can never reach the line.
+function activeSectionId(els, navBottom, atEnd) {
+  if (atEnd) return els[els.length - 1].id;
+  const line = navBottom + (window.innerHeight - navBottom) / 4;
+  let id = els[0].id;
+  for (const el of els) {
+    if (el.getBoundingClientRect().top <= line) id = el.id;
+  }
+  return id;
+}
+
 // Sticky section tabs + the period selector that drives the period-scoped
 // panels (Core-KPI tiles + Marketing Attribution). Two modes:
 //   - scroll mode (default): sections are anchors on the same page; the active
-//     tab tracks scroll via one IntersectionObserver.
+//     tab tracks scroll position (activeSectionId above).
 //   - controlled mode (activeSection + onSelectSection passed — the mobile
 //     scorecard): the pills are real tabs; the parent owns which single
-//     section renders, so the observer is skipped entirely.
+//     section renders, so scroll tracking is skipped entirely.
 export default function DashboardJumpNav({
   title,
   dateLabel,
@@ -49,31 +79,69 @@ export default function DashboardJumpNav({
   const [active, setActive] = useState(sections[0]?.id || null);
   const [showRangePicker, setShowRangePicker] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
+  const navRef = useRef(null);
+  // Set while scroll mode is tracking: hold(id) keeps a clicked section lit
+  // while its smooth scroll passes other sections.
+  const tracker = useRef(null);
   const current = controlled ? activeSection : active;
 
   useEffect(() => {
-    // Controlled mode renders one section at a time — nothing to observe.
-    if (controlled) return undefined;
-    // jsdom (tests) has no IntersectionObserver — the nav still renders and
-    // scrolls, it just won't live-track the active section.
-    if (typeof IntersectionObserver === "undefined") return undefined;
-    const els = sections
-      .map((s) => document.getElementById(s.id))
-      .filter(Boolean);
-    if (!els.length) return undefined;
-    // A narrow band around the upper third of the viewport: the section whose
-    // content crosses it becomes active. Bottom-heavy margin so short trailing
-    // sections still win when scrolled to the end.
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) setActive(entry.target.id);
-        }
+    // Controlled mode renders one section at a time — nothing to track.
+    const nav = navRef.current;
+    if (controlled || !nav) return undefined;
+    const scroller = scrollParent(nav);
+    const scrollEvents = scroller === document.documentElement || scroller === document.body ? window : scroller;
+    let frame = null;
+    let holdId = null;
+    let holdTimer = null;
+    const sync = () => {
+      frame = null;
+      const els = sections.map((s) => document.getElementById(s.id)).filter(Boolean);
+      const navRect = nav.getBoundingClientRect();
+      // Nothing laid out yet (or no layout at all, as in jsdom): no geometry
+      // to read, so keep the current highlight.
+      if (holdId || !els.length || !navRect.height) return;
+      const atEnd = scroller.scrollHeight > scroller.clientHeight
+        && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      setActive(activeSectionId(els, navRect.bottom, atEnd));
+    };
+    // The click's scroll went quiet. The clicked section stays lit while its
+    // heading is on screen under the nav, even when it is too short to reach
+    // the line; if the user scrolled it away mid-flight, follow them instead.
+    const release = () => {
+      const target = holdId && document.getElementById(holdId);
+      holdId = null;
+      if (!target) return;
+      const { top } = target.getBoundingClientRect();
+      if (top < nav.getBoundingClientRect().bottom - 1 || top >= window.innerHeight) sync();
+    };
+    const settle = () => {
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(release, JUMP_SETTLE_MS);
+    };
+    const onScroll = () => {
+      if (holdId) {
+        settle();
+        return;
+      }
+      if (frame == null) frame = requestAnimationFrame(sync);
+    };
+    tracker.current = {
+      hold(id) {
+        holdId = id;
+        settle();
       },
-      { rootMargin: "-15% 0px -70% 0px", threshold: 0 },
-    );
-    els.forEach((el) => io.observe(el));
-    return () => io.disconnect();
+    };
+    scrollEvents.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    frame = requestAnimationFrame(sync);
+    return () => {
+      scrollEvents.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      if (frame != null) cancelAnimationFrame(frame);
+      clearTimeout(holdTimer);
+      tracker.current = null;
+    };
   }, [sections, controlled]);
 
   const jumpTo = (id) => {
@@ -84,6 +152,7 @@ export default function DashboardJumpNav({
     setActive(id);
     const el = document.getElementById(id);
     if (el && typeof el.scrollIntoView === "function") {
+      tracker.current?.hold(id);
       el.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   };
@@ -95,7 +164,7 @@ export default function DashboardJumpNav({
   };
 
   return (
-    <div data-qa="dashboard-jump-nav" className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
+    <div ref={navRef} data-qa="dashboard-jump-nav" className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
       <AdminCommandHeader
         title={title}
         subtitle={dateLabel}

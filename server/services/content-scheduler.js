@@ -2,7 +2,9 @@
  * Content Scheduler Service
  *
  * Manages the content calendar — scheduling blog posts and social media posts,
- * and auto-publishing them when their scheduled time arrives.
+ * and acting on them when their scheduled time arrives: a social post
+ * publishes, and a blog post opens its Astro preview PR, which goes live when
+ * an admin approves it.
  */
 
 const db = require('../models/db');
@@ -13,10 +15,85 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
+// Astro states the scheduled-publish consumer (processScheduledPosts) skips:
+// a row in one of them, or carrying PR/branch markers, would be accepted and
+// then never published (audit BLOG-03).
+const SCHEDULE_BLOCKING_ASTRO = ['pr_open', 'build_failed', 'publish_failed', 'merged', 'live', 'unpublish_pending'];
+
+function scheduleConflict(message) {
+  const err = new Error(message);
+  err.isOperational = true;
+  err.statusCode = 409;
+  return err;
+}
+
+// Why the consumer could not publish this row, or null when it can.
+function scheduleRefusal(post) {
+  if (post.publish_status === 'publishing') return 'Publishing has already started for this post.';
+  if (post.astro_pr_number || post.astro_branch_name || SCHEDULE_BLOCKING_ASTRO.includes(post.astro_status)) {
+    const pr = post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : '';
+    return `This post already has Astro state '${post.astro_status || 'pending'}'${pr}. Open it in the post editor instead.`;
+  }
+  if (!post.content) return 'This draft has no content to publish.';
+  return null;
+}
+
 function parseScheduledTime(value, label) {
   const parsed = parseETDateTime(value);
   if (Number.isNaN(parsed.getTime())) throw new Error(`${label} is invalid`);
   return parsed;
+}
+
+// Only http(s) image URLs reach the publishers; anything else posts text-only.
+function httpUrlOrNull(value) {
+  const text = String(value || '').trim();
+  try {
+    const { protocol } = new URL(text);
+    return protocol === 'http:' || protocol === 'https:' ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+// A saved Social Studio campaign draft (Campaign Builder > Save Draft, SOC-01)
+// waits at status 'draft' with no time until the Calendar gives it one.
+const SAVED_DRAFT = { source_type: 'campaign_builder', status: 'draft', publish_status: 'pending' };
+
+// An autonomous Studio run also saves its draft through saveCampaignDraft
+// (social_content_studio_runs.social_media_post_id), but that draft posts only
+// through its own guarded approval (approveAutonomousRun: review liveness,
+// milestone, season and location checks, one shared claim). Never list or
+// schedule it here, or an approval could post it a second time.
+function notAutonomousRunDraft(query) {
+  return query.whereNotIn('id', db('social_content_studio_runs')
+    .whereNotNull('social_media_post_id')
+    .select('social_media_post_id'));
+}
+
+// Pre-publish, platforms_posted holds the REQUESTED channel list (strings, or
+// {platform} objects once publishToAll has written results).
+function storedChannels(platformsPosted) {
+  let stored = platformsPosted;
+  if (typeof stored === 'string') {
+    try { stored = JSON.parse(stored); } catch { stored = null; }
+  }
+  return Array.isArray(stored)
+    ? stored.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
+    : [];
+}
+
+// Extra publishToAll options for a saved campaign draft only: its own image,
+// and never a fresh generated image in place of the saved one. A real publish
+// folds its results into this same row (postId: one History entry). A dry run
+// does not: publishToAll would replace the REQUESTED channels in
+// platforms_posted with results, and the next tick reads them; it records like
+// a typed scheduled post instead. GBP takes no shared image (only an approved
+// card), so a saved draft posts to GBP text-only. Every other scheduled row
+// gets none and publishes exactly as before.
+function storedPostOptions(social, { dryRun = false } = {}) {
+  if (social.source_type !== SAVED_DRAFT.source_type) return {};
+  const imageUrl = httpUrlOrNull(social.image_url);
+  return { ...(imageUrl ? { imageUrl } : {}), noAiImage: true, ...(dryRun ? {} : { postId: social.id }) };
 }
 
 function parseCalendarStart(value) {
@@ -363,7 +440,7 @@ const ContentScheduler = {
             .where('publish_date', '<', range.end);
         });
       })
-      .select('id', 'title', 'status', 'publish_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
+      .select('id', 'title', 'status', 'publish_status', 'astro_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
 
     const socials = await db('social_media_posts')
       .where('scheduled_for', '>=', range.start)
@@ -379,6 +456,7 @@ const ContentScheduler = {
         title: b.title,
         scheduledDate: b.scheduled_publish_at || dateColumnKey(b.publish_date),
         status: b.publish_status || b.status,
+        astroStatus: b.astro_status || null,
         platforms: ['blog'],
         tag: b.tag,
         city: b.city,
@@ -406,15 +484,26 @@ const ContentScheduler = {
   },
 
   /**
-   * Schedule a blog post for auto-publish at a specific time.
+   * Schedule a blog post to open its Astro preview PR at a specific time. The
+   * post goes live when an admin approves that PR (Approve & Go Live).
+   * Refuses rows the consumer would skip, so success always means the
+   * scheduled run will pick the row up.
    */
   async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = true) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Blog post not found');
     const scheduledAt = parseScheduledTime(publishAt, 'publishAt');
+    const refusal = scheduleRefusal(post);
+    if (refusal) throw scheduleConflict(refusal);
 
+    // Same predicate on the write: a publish that starts between the read
+    // and here must not be re-armed under its running claim.
     const [updated] = await db('blog_posts')
       .where('id', blogPostId)
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+      .whereNull('astro_pr_number')
+      .whereNull('astro_branch_name')
+      .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', SCHEDULE_BLOCKING_ASTRO))
       .update({
         scheduled_publish_at: scheduledAt,
         auto_share_social: autoShareSocial,
@@ -422,6 +511,7 @@ const ContentScheduler = {
         updated_at: new Date(),
       })
       .returning('*');
+    if (!updated) throw scheduleConflict('This post changed while scheduling. Reload and try again.');
 
     logger.info(`[content-scheduler] Scheduled blog "${updated.title}" for ${publishAt}`);
     return updated;
@@ -449,6 +539,62 @@ const ContentScheduler = {
 
     logger.info(`[content-scheduler] Scheduled social post "${title}" for ${scheduledFor}`);
     return post;
+  },
+
+  /**
+   * Saved campaign drafts the Calendar can still schedule: no time, not
+   * published, not already queued.
+   */
+  async listSavedSocialDrafts() {
+    const rows = await db('social_media_posts')
+      .where(SAVED_DRAFT)
+      .whereNull('scheduled_for')
+      .modify(notAutonomousRunDraft)
+      .orderBy('created_at', 'desc')
+      .limit(100)
+      .select('id', 'title', 'platforms_posted');
+    return rows.map((r) => ({ id: r.id, title: r.title, channels: storedChannels(r.platforms_posted) }));
+  },
+
+  /**
+   * Give a saved campaign draft its time. The same row posts later, with its
+   * own copy, image, channels, title and link. The WHERE is the whole check:
+   * a row that published, is queued, or is not a campaign draft updates
+   * nothing and reads as a conflict.
+   */
+  async scheduleSavedSocialDraft(postId, scheduledFor) {
+    const scheduledAt = parseScheduledTime(scheduledFor, 'scheduledFor');
+    const [post] = await db('social_media_posts')
+      .where({ id: postId, ...SAVED_DRAFT })
+      .whereNull('scheduled_for')
+      .modify(notAutonomousRunDraft)
+      .update({ scheduled_for: scheduledAt, status: 'scheduled' })
+      .returning('*');
+    if (!post) throw scheduleConflict('This draft is no longer available to schedule. Reload and pick again.');
+
+    logger.info(`[content-scheduler] Scheduled saved social draft "${post.title}" for ${scheduledFor}`);
+    return post;
+  },
+
+  /**
+   * Take a social row off the schedule. A saved campaign draft goes back to
+   * status 'draft' with publish_status 'pending' and no time, so it can be
+   * picked again; once the scheduler claimed it, that is a conflict.
+   */
+  async unscheduleSocialPost(social) {
+    // Exactly the states processScheduledPosts selects ('pending', 'dry_run'):
+    // nothing has posted yet. The scheduler claims a row by moving it to
+    // 'publishing', so the WHERE refuses a claimed (or finished) row instead
+    // of reporting a cancel. A saved draft goes back to 'pending' (also out of
+    // a dry run) so it can be picked again.
+    const saved = social.source_type === SAVED_DRAFT.source_type;
+    const back = await db('social_media_posts')
+      .where({ id: social.id })
+      .whereIn('publish_status', ['pending', 'dry_run'])
+      .update(saved
+        ? { scheduled_for: null, status: 'draft', publish_status: 'pending' }
+        : { scheduled_for: null, publish_status: null, status: 'draft' });
+    if (!back) throw scheduleConflict('Posting already started for this post, so it can no longer be unscheduled.');
   },
 
   /**
@@ -567,7 +713,9 @@ const ContentScheduler = {
         } else {
           const AstroPublisher = require('./content-astro/astro-publisher');
           await AstroPublisher.publishAstro(blog.id);
-          await db('blog_posts').where('id', blog.id).update({
+          // Only while this run still holds the claim: an unschedule or the
+          // stale sweep that moved the row on must not be overwritten (BLOG-04).
+          await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing').update({
             publish_status: 'pending_review',
             updated_at: new Date(),
           });
@@ -703,6 +851,10 @@ const ContentScheduler = {
         claimed = (await db('social_media_posts')
           .where('id', social.id)
           .where('publish_status', social.publish_status)
+          // Still scheduled for the time this tick selected: an unschedule
+          // (time cleared; a saved draft keeps publish_status 'pending') or a
+          // reschedule landing after the select must not post the row now.
+          .where('scheduled_for', social.scheduled_for)
           .update({ publish_status: 'publishing' })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] social ${social.id} already claimed by a concurrent tick — skipping`);
@@ -719,13 +871,7 @@ const ContentScheduler = {
         // results afterwards). Pass it through so a post scheduled for a
         // narrower set (e.g. Facebook-only) never fans out to platforms the
         // admin didn't select. Empty/missing → publishToAll's default set.
-        let storedPlatforms = social.platforms_posted;
-        if (typeof storedPlatforms === 'string') {
-          try { storedPlatforms = JSON.parse(storedPlatforms); } catch { storedPlatforms = null; }
-        }
-        const requestedChannels = Array.isArray(storedPlatforms)
-          ? storedPlatforms.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
-          : [];
+        const requestedChannels = storedChannels(social.platforms_posted);
 
         const result = await SocialMediaService.publishToAll({
           title: social.title,
@@ -735,6 +881,7 @@ const ContentScheduler = {
           source: 'scheduled',
           channels: requestedChannels.length ? requestedChannels : undefined,
           customContent,
+          ...storedPostOptions(social, { dryRun: SocialMediaService.SOCIAL_FLAGS?.dryRun === true }),
         });
 
         const complianceRejected = !result?.dryRun && !result?.success

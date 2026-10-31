@@ -24,7 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY } = require('../constants/email-replay-exclusions');
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY } = require('../constants/email-replay-exclusions');
 const billingReplay = require('./billing-email-provider-replay');
 const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
@@ -83,6 +83,26 @@ function isHardBounceEvent(ev) {
     return reason === 'bounced address' || reason === 'invalid';
   }
   return false;
+}
+
+/**
+ * GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a send that failed because the
+ * recipient's domain has no mail server. SendGrid files it as a "blocked"
+ * bounce ("unable to get mx info: ..."), which isHardBounceEvent rightly
+ * leaves to the sender-retry rail for real IP blocks; a dead domain is a bad
+ * address, so the webhook sends it to people instead (the bounced-contact
+ * alert and the recording re-check card), never to an automatic correction
+ * or resend (recovery and the rescue both can repair a domain on their own).
+ * Only the blocked events the retry rail would claim: a hard bounce keeps
+ * its own path. A temporary DNS failure is not one (call-email-checks.js
+ * isNoMailServerReason). Suppression is not widened:
+ * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
+ */
+function isNoMailServerEvent(ev) {
+  const { callEmailChecksLive, isNoMailServerReason } = require('./call-email-checks');
+  if (!callEmailChecksLive()) return false;
+  if (!require('./transactional-email-provider-retry').isProviderBlockedEvent(ev)) return false;
+  return isNoMailServerReason(ev?.reason || ev?.response || '');
 }
 
 function parseJsonArray(value) {
@@ -165,7 +185,7 @@ function recoveryIdFromMessage(message) {
  */
 function decideRecoveryAction({
   candidate, suppressed, ownedByOther, hasAttachments,
-  addressOnFile = true, senderRendered = false, averageCopy = false, moveNoticeCopy = false, min = 'high',
+  addressOnFile = true, senderRendered = false, averageCopy = false, moveNoticeCopy = false, carbonCopy = false, min = 'high',
 }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
@@ -194,6 +214,8 @@ function decideRecoveryAction({
   // A reschedule or cancellation notice is true only while the visit stays as it says;
   // its stored copy is not replayed (the visit's later reminders carry the current details).
   if (moveNoticeCopy) return { action: 'skip', status: 'move_notice_not_replayed' };
+  // A message copied to a second address: a replay to one corrected address would drop the copy.
+  if (carbonCopy) return { action: 'skip', status: 'cc_not_replayed' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -796,6 +818,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     senderRendered: isSenderRenderedEmail(bouncedMessage),
     averageCopy: parseJsonArray(bouncedMessage.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY),
     moveNoticeCopy: parseJsonArray(bouncedMessage.categories).includes(MOVE_NOTICE_CATEGORY),
+    carbonCopy: parseJsonArray(bouncedMessage.categories).includes(CARBON_COPY_CATEGORY),
     min: minConfidence(),
   });
 
@@ -821,7 +844,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     // when we have one, e.g. a medium-confidence typo below the auto-send bar).
     if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
       'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
-      'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed'].includes(decision.status)) {
+      'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(decision.status)) {
       await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       // Audio re-verification lane (gated, best-effort): the domain
       // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -1097,6 +1120,9 @@ async function alertRecoveryResendUncertain(row) {
   }, {
     detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
     dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+    // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to ring. This one
+    // rings unless the owner silences the category.
+    bellDefault: true,
     metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
   });
   if (!raised) throw new Error('the uncertain-resend alert was not recorded');
@@ -1430,6 +1456,7 @@ const UNRECOVERABLE_REASONS = {
   sender_rendered_not_replayed: 'billing reminders are not re-sent from their old copy',
   monthly_average_not_replayed: 'estimate follow-ups with a monthly average are not re-sent from their old copy',
   move_notice_not_replayed: 'reschedule and cancellation notices are not re-sent from their old copy',
+  cc_not_replayed: 'it was copied (CC) to a second address, so it is not re-sent from its old copy',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
 };
@@ -1446,7 +1473,7 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected
-    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed'].includes(status)
+    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(status)
     ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({
@@ -1458,6 +1485,47 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
     link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
     metadata: { customer_id: customerId || null, original_message_id: bouncedMessage?.id || null, status, suggested_email: candidate?.corrected || null },
   });
+}
+
+// A hard bounce on the CC'd copy of a message (sendTemplate `cc`, the invoice Send's CC). The webhook leaves the message row
+// alone (its recipient is the main address), so without this nobody learns the copy the operator asked for never arrived.
+// One bell per message and address; the address rides the detail, not the headline.
+async function alertBouncedCcCopy(message, bouncedEmail) {
+  const email = String(bouncedEmail || '').trim().toLowerCase();
+  if (!email || !parseJsonArray(message?.cc_email_snapshot).includes(email)) return { skipped: 'not_cc' };
+  const { invoiceId, customerId } = ccCopyTargets(message);
+  if (!invoiceId && !customerId) return { skipped: 'no_subject' };
+  const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const name = await customerDisplayName(customerId);
+  await raiseAdminAlert('alert', {
+    area: 'Comms',
+    action: fitAction('Comms', name, [(who) => `resend ${who}'s CC copy`]),
+    why: cutAtWord(`The CC copy of "${message.subject_snapshot || 'an email'}" bounced; the main recipient was not affected`, 110),
+    severity: 'needs-you',
+    link: invoiceId ? `/admin/invoices?invoice=${encodeURIComponent(invoiceId)}` : `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: invoiceId ? { type: 'invoice', id: invoiceId } : { type: 'customer', id: String(customerId) },
+    doneWhen: 'cc_copy_resent',
+    who: 'person',
+  }, {
+    dedupeKey: `email-cc-bounce:${message.id}:${email}`,
+    detail: `CC address that bounced: ${email}\nEmail: ${message.subject_snapshot || message.template_key || 'email'}`,
+    metadata: { email_message_id: message.id, customer_id: customerId, invoice_id: invoiceId },
+  });
+  return { alerted: true };
+}
+
+// The invoice a CC'd copy carried (an invoice.sent row's trigger) and the customer it went to, each or null.
+function ccCopyTargets(message) {
+  const invoiceId = /^invoice_sent:(.+)$/.exec(String(message.trigger_event_id || ''))?.[1] || null;
+  return { invoiceId, customerId: message.recipient_type === 'customer' ? (message.recipient_id || null) : null };
+}
+
+async function customerDisplayName(customerId) {
+  const customer = customerId
+    ? await db('customers').where({ id: customerId }).first('first_name', 'last_name', 'company_name').catch(() => null)
+    : null;
+  return [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || customer?.company_name || 'a customer';
 }
 
 async function alertEmailCollision({ recovery, correctedEmail }) {
@@ -1636,6 +1704,7 @@ module.exports = {
   recoveryEnabled,
   minConfidence,
   isHardBounceEvent,
+  isNoMailServerEvent,
   isRecoveryMessage,
   decideRecoveryAction,
   asmGroupIdForStream,
@@ -1643,6 +1712,7 @@ module.exports = {
   retryHeldRecoveries,
   HELD_RECOVERY_STATUS,
   alertBouncedContactAddress,
+  alertBouncedCcCopy,
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests

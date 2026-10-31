@@ -91,3 +91,14 @@ node server/scripts/replay-call-extraction-variance.js \
 ```
 
 Use `--include-values` only for manual review when PII is appropriate.
+
+## Synthetic transcripts (`synthetic-day-conflict-and-billing-choice.json`)
+
+Added 2026-10-29 for extraction prompt v32 (the DAY/TIME CONFLICT rule and
+`service_request.billing_choice`). Unlike `reviewed-calls.json`, these cases carry
+a transcript, so every name, number and address in them is invented (Pat
+Example, Sam, 100 Example Lane, Sampleton); no real call or customer is stored.
+Each case has `expect`, the extraction a correct model should return for it. The
+tests in `server/tests/call-agreed-time-misses.test.js` pin the prompt contract
+and what routing does with each expected shape; the file is also replay input
+for a model bake-off. Never paste a real transcript into it.

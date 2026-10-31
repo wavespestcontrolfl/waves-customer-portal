@@ -44,7 +44,7 @@ Three interfaces:
 ## Key Team Members
 
 - **Adam Benetti** — Owner-operator: primary admin user and a field technician (uses both admin and Tech portals). Design tech features for a multi-technician team (`docs/technician-provisioning-runbook.md`).
-- **Virginia** — Office manager/CSR; uses CommunicationsPage and LeadsPage daily
+- **Virginia** — Office manager/CSR; uses Communications (`CommunicationsPageV2.jsx`) and the Pipeline Leads tab (`LeadsTabs.jsx`) daily
 
 ## Rules
 

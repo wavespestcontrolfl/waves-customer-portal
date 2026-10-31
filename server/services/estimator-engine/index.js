@@ -639,6 +639,9 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     quote_promised: quotePromised === true,
     lane: lane || null,
     estimateId,
+    // GATE_CUSTOMER_ALERTS_RING: a quote we promised is a promise we owe the customer; a quote the customer asked
+    // for is the customer reaching us. Either one rings once the gate is on (muted by the bell policy before).
+    ...(quotePromised === true ? { promise: true } : { contact: true }),
   };
   // SMS-origin bells dedupe on the phone-scoped thread key the way call
   // bells dedupe on callSid — repeated quote-flavored texts upgrade ONE

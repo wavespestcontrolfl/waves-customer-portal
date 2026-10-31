@@ -6,7 +6,7 @@ const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
-const { parseETDateTime, etWeekStart } = require('../utils/datetime-et');
+const { parseETDateTime, etWeekStart, etMonthStart, etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -270,17 +270,18 @@ router.get('/cash-flow', async (req, res) => {
     const { period, start_date, end_date } = req.query;
     validateDateParam(start_date, 'start_date');
     validateDateParam(end_date, 'end_date');
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const startDate = start_date || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
-    const endDate = end_date || localDate(now);
+    // Defaults follow the Eastern calendar, not the UTC server clock.
+    const startDate = start_date || etMonthStart();
+    const endDate = end_date || etDateString();
 
     const cashFlow = await StripeBanking.getCashFlow(startDate, endDate);
     res.json(summarizeCashFlowForUi(cashFlow, period || 'daily'));
   } catch (err) {
     logger.error('[banking] Cash flow failed:', err);
-    res.status(err.status || 500).json({ error: err.message });
+    // A failed source query fails the whole report (getCashFlow). The page
+    // shows the reason in its "unavailable, not zero" notice, so send a
+    // plain one instead of the SQL text; a 400 keeps its own reason.
+    res.status(err.status || 500).json({ error: err.status ? err.message : 'the cash-flow read failed' });
   }
 });
 
@@ -349,11 +350,8 @@ router.get('/export', async (req, res) => {
     const { format = 'csv', start_date, end_date } = req.query;
     validateDateParam(start_date, 'start_date');
     validateDateParam(end_date, 'end_date');
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-    const rangeStart = start_date || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
-    const rangeEnd = end_date || todayStr;
+    const rangeStart = start_date || etMonthStart();
+    const rangeEnd = end_date || etDateString();
 
     // Exports feed the accounting books: only payouts that actually reached
     // the bank belong in them (failed/canceled rows keep their arrival dates
@@ -391,9 +389,9 @@ router.get('/export', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 router.get('/stats', async (req, res) => {
   try {
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const mtdStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+    // The Eastern month: on the UTC server clock the month turns over at
+    // 8 PM ET (7 PM in winter) on its last day.
+    const mtdStart = etMonthStart();
 
     let statsQuery = db('stripe_payouts')
       .where('status', 'paid');

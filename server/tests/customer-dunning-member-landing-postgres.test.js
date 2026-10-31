@@ -48,9 +48,8 @@ postgres('customer-level reminders leave every member row with what was delivere
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     mockDatabase = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
     if (!(await mockDatabase.schema.hasTable(TABLE))) throw new Error('run the migrations first: customer_dunning_schedules is missing');
-    for (const k of ['GATE_DUNNING_LADDER_90', 'GATE_LATE_PAYMENT_CHECKER_OFF']) saved[k] = process.env[k];
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true'; // both revival passes live
+    for (const k of ['GATE_DUNNING_LADDER_90']) saved[k] = process.env[k];
+    process.env.GATE_DUNNING_LADDER_90 = 'true'; // both revival passes live
   });
 
   afterAll(async () => {

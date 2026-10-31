@@ -5,6 +5,7 @@ const {
   recipientPhoneKey,
   optinBlocksSend,
   markRecipientOptin,
+  yesWouldConfirmAsk,
 } = require('../services/recipient-optin');
 
 describe('recipient double opt-in', () => {
@@ -133,6 +134,76 @@ describe('recipient double opt-in', () => {
     const dbh = queuedDbh(markerRecoveryQueues({ smsLogFails: true }));
     const updated = await markRecipientOptin('+19415550123', 'confirmed', { dbh });
     expect(updated).toBe(1);
+  });
+});
+
+// GATE_SMS_BARE_YES_REPLY asks this before treating a bare YES as a plain reply.
+// It must agree with markRecipientOptin('confirmed') above: a YES that would
+// confirm an ask stays an opt-in, and an ask_failed or confirmed row never
+// keeps one.
+describe('yesWouldConfirmAsk: does a YES from this phone confirm an ask?', () => {
+  function chain({ rows = [], first = null, firstRejects = false } = {}) {
+    const calls = [];
+    const q = { calls };
+    ['where', 'whereNot', 'whereRaw', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy'].forEach((m) => {
+      q[m] = jest.fn((arg, ...rest) => {
+        calls.push([m, arg, ...rest]);
+        if (typeof arg === 'function') arg.call(q);
+        return q;
+      });
+    });
+    q.select = jest.fn(async () => rows);
+    q.first = jest.fn(() => (firstRejects ? Promise.reject(new Error('db down')) : Promise.resolve(first)));
+    return q;
+  }
+  function queued(queues) {
+    return jest.fn((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected table ${table}`);
+      return queue.shift();
+    });
+  }
+
+  test('an ask that went out and is not confirmed yet: true, read with the confirm predicate', async () => {
+    const open = chain({ first: { phone_key: '9415550123' } });
+    const dbh = queued({ recipient_optin: [open] });
+    await expect(yesWouldConfirmAsk('+19415550123', { dbh })).resolves.toBe(true);
+    expect(open.calls).toEqual(expect.arrayContaining([
+      ['where', { phone_key: '9415550123' }],
+      ['whereNot', { status: 'ask_failed' }],
+      ['whereNotNull', 'dispatched_at'],
+      ['orWhere', { status: 'declined' }],
+      ['whereNot', { status: 'confirmed' }],
+    ]));
+  });
+
+  test('nothing confirmable and no pending row: false', async () => {
+    const dbh = queued({ recipient_optin: [chain(), chain({ rows: [] })] });
+    await expect(yesWouldConfirmAsk('+19415550123', { dbh })).resolves.toBe(false);
+  });
+
+  test('an undispatched pending row whose own ask was accepted: true (marker recovery)', async () => {
+    const ask = chain({ first: { id: 'log-1', status: 'delivered' } });
+    const dbh = queued({ recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] })], sms_log: [ask] });
+    await expect(yesWouldConfirmAsk('+19415550123', { dbh })).resolves.toBe(true);
+    expect(ask.calls).toEqual(expect.arrayContaining([['where', { customer_id: 'c1' }]]));
+  });
+
+  test('an undispatched pending row whose ask failed: false', async () => {
+    const failedAsk = chain({ first: { id: 'log-1', status: 'undelivered' } });
+    const dbh = queued({ recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] })], sms_log: [failedAsk] });
+    await expect(yesWouldConfirmAsk('+19415550123', { dbh })).resolves.toBe(false);
+  });
+
+  test('a read error reaches the caller', async () => {
+    const dbh = queued({ recipient_optin: [chain({ firstRejects: true })] });
+    await expect(yesWouldConfirmAsk('+19415550123', { dbh })).rejects.toThrow('db down');
+  });
+
+  test('an unusable phone reads nothing', async () => {
+    const dbh = jest.fn();
+    await expect(yesWouldConfirmAsk('', { dbh })).resolves.toBe(false);
+    expect(dbh).not.toHaveBeenCalled();
   });
 });
 

@@ -31,11 +31,15 @@
  *   - 2× DKIM CNAMEs at s1._domainkey + s2._domainkey on the root
  *   - 1× return-path CNAME (provider-named, e.g. wavesnewsletter.*)
  *   - 1× link-tracking CNAME (e.g. click.*)
+ *   The newsletter (issues, signup confirms, win-backs) sends from the separately
+ *   authenticated subdomain news.wavespestcontrol.com (em2241.news + s1/s2._domainkey.news,
+ *   owner 2026-10-31); the click.* link branding is the account default, so it covers it.
  *   - SPF include is implicit via the Sender Authentication wizard
  */
 
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { untrackAppLinks } = require('./messaging/email-link-policy');
 
 const API_BASE = 'https://api.sendgrid.com/v3';
 
@@ -117,6 +121,12 @@ function serviceGroupId() {
 function asmBlockFor(groupId) {
   if (!groupId) return undefined;
   return { group_id: Number(groupId) };
+}
+
+// An optional list field (cc, attachments): the list when it has entries, else
+// undefined, so JSON.stringify leaves the key out of the payload.
+function nonEmptyList(list) {
+  return Array.isArray(list) && list.length ? list : undefined;
 }
 
 // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm/Ydn — structural move):
@@ -244,7 +254,7 @@ async function applyAnnualOfferGuard({ html, text, estimateIds, templateKey, wit
  * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
 async function sendOne({
-  to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
+  to, cc, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
   customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
   database, providerBoundaryCheck = async () => ({ ok: true }),
   // Per-request bound override for callers that hold a connection/lock across
@@ -265,6 +275,7 @@ async function sendOne({
   const payload = {
     personalizations: [{
       to: (Array.isArray(to) ? to : [to]).map((email) => ({ email })),
+      cc: nonEmptyList(cc)?.map((email) => ({ email })),
       headers: headers || undefined,
       // Echoed back on every webhook event for this send — lets the event
       // handler resolve the row by a stable id even before provider_message_id
@@ -276,11 +287,13 @@ async function sendOne({
     subject,
     content: [
       ...(sendText ? [{ type: 'text/plain', value: sendText }] : []),
-      ...(sendHtml ? [{ type: 'text/html', value: sendHtml }] : []),
+      // Customer-page links skip the click rewrite so the app can open them
+      // (messaging/email-link-policy.js); every other link stays tracked.
+      ...(sendHtml ? [{ type: 'text/html', value: untrackAppLinks(sendHtml) }] : []),
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
-    attachments: Array.isArray(attachments) && attachments.length ? attachments : undefined,
+    attachments: nonEmptyList(attachments),
     // Standard sends keep the existing provider tracking behavior. Security
     // emails opt out so one-time credentials never enter click/open metadata.
     tracking_settings: {

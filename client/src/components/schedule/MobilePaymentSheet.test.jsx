@@ -11,6 +11,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
+import { launchTapToPay } from '../../lib/tapToPay';
+
+vi.mock('../../lib/tapToPay', () => ({ launchTapToPay: vi.fn() }));
 
 function stubLocalStorage(entries) {
   vi.stubGlobal('localStorage', {
@@ -125,5 +128,70 @@ describe('MobilePaymentSheet Invoice tender request contract (fourth round-1 P2 
     fireEvent.click(screen.getByText('Invoice'));
     await waitFor(() => expect(onInvoiceSent).toHaveBeenCalledTimes(1));
     expect(screen.queryByText(/Failed to send invoice/)).not.toBeInTheDocument();
+  });
+});
+
+// Inside the Waves Admin app, Tap to Pay answers on this page. A paid tap
+// finishes like the other card tenders (the parents re-read the invoice);
+// a failed or canceled tap leaves the sheet usable for another try.
+describe('MobilePaymentSheet Tap to Pay inside the Waves Admin app', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  function renderTapSheet() {
+    stubLocalStorage({
+      waves_admin_token: 'test-token',
+      waves_admin_user: JSON.stringify({ id: 'u2', role: 'technician' }),
+    });
+    const onChargeSuccess = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <MobilePaymentSheet
+        desktopVisible
+        service={{ id: 'svc-1' }}
+        invoiceId="inv-1"
+        amount={125}
+        onChargeSuccess={onChargeSuccess}
+        onClose={onClose}
+      />,
+    );
+    return { onChargeSuccess, onClose };
+  }
+
+  it('a paid tap reports the charge and closes the sheet', async () => {
+    launchTapToPay.mockResolvedValue({ inApp: true, status: 'succeeded', paymentIntentId: 'pi_1', message: null });
+    const { onChargeSuccess, onClose } = renderTapSheet();
+    fireEvent.click(screen.getByText('Tap to Pay on iPhone'));
+    await waitFor(() => expect(onChargeSuccess).toHaveBeenCalledWith({ paymentIntentId: 'pi_1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(launchTapToPay).toHaveBeenCalledWith('inv-1');
+  });
+
+  it('a failed tap shows the reason and re-enables Tap to Pay', async () => {
+    launchTapToPay.mockResolvedValue({
+      inApp: true,
+      status: 'failed',
+      paymentIntentId: null,
+      message: 'The invoice total changed. Close this and tap Tap to Pay again.',
+    });
+    const { onChargeSuccess, onClose } = renderTapSheet();
+    fireEvent.click(screen.getByText('Tap to Pay on iPhone'));
+    expect(await screen.findByText('The invoice total changed. Close this and tap Tap to Pay again.')).toBeInTheDocument();
+    expect(screen.getByText('Tap to Pay on iPhone')).not.toBeDisabled();
+    expect(onChargeSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('a canceled tap re-enables Tap to Pay with no error', async () => {
+    launchTapToPay.mockResolvedValue({ inApp: true, status: 'canceled', paymentIntentId: null, message: null });
+    const { onChargeSuccess, onClose } = renderTapSheet();
+    fireEvent.click(screen.getByText('Tap to Pay on iPhone'));
+    await waitFor(() => expect(screen.getByText('Tap to Pay on iPhone')).not.toBeDisabled());
+    expect(screen.queryByText(/did not go through/)).not.toBeInTheDocument();
+    expect(onChargeSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

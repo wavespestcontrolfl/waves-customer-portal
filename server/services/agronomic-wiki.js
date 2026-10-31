@@ -18,6 +18,23 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const MODEL = require('../config/models').ROUTINE;
 const { createDeepMessage } = require('./llm/deep');
 
+// 32000 (was 16000, 2026-10-26): the St. Augustine track page (56 records,
+// ~36K input tokens) needed 9.7K, then 12.3K, then 15.5K output tokens as it
+// grew, and hit 16000 on 2026-10-23 and 10-25 — a discarded page withholds the
+// weekly marker, so wiki-weekly-refresh failed on every daily retry. Billing
+// is per generated token, so the higher cap costs nothing unless used;
+// PAGE_WORD_BUDGET below is what keeps pages from growing into it again.
+const PAGE_MAX_TOKENS = 32000;
+// Above ~21K max_tokens the SDK refuses a non-streaming request unless the
+// client sets an explicit timeout (it assumes 128K tokens an hour). 10 min is
+// the SDK's own default; the largest page took ~2 min at 16000 (~135 tok/s).
+const PAGE_TIMEOUT_MS = 10 * 60 * 1000;
+// Every update rewrote the whole page and kept "existing content that is still
+// supported", so each revision appended reconciliation notes and the largest
+// pages reached ~25K characters (~3,800 words). A budget makes an update fold
+// superseded detail into the current numbers instead of accreting it.
+const PAGE_WORD_BUDGET = 2000;
+
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
@@ -39,6 +56,10 @@ function trackIdFromPage(page) {
 function escapeLike(text) {
   return String(text).replace(/[\\%_]/g, (m) => `\\${m}`);
 }
+
+// GATE_LAWN_WIKI_PAUSE (owner 2026-10-30): no automatic AI page writes. Read
+// at call time; a partial feature-gates mock without the reader reads as off.
+const lawnWikiPaused = () => require('../config/feature-gates').lawnWikiPauseLive?.() === true;
 
 // Assessment-pairing recency windows. An unbounded pre/post lookup can pair
 // a treatment with an assessment from a different program season, producing
@@ -348,7 +369,7 @@ async function callClaude(systemPrompt, userPrompt) {
     return null;
   }
   try {
-    const client = new Anthropic();
+    const client = new Anthropic({ timeout: PAGE_TIMEOUT_MS });
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
@@ -361,8 +382,8 @@ async function callClaude(systemPrompt, userPrompt) {
       // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
       // exactly (avg output 7515) with thinking eating the whole cap —
       // paid-for output was being discarded as anthropic_incomplete.
-      // knowledge/wiki-compiler.js uses the same effort + 16000.
-      max_tokens: 16000,
+      // 32000 (2026-10-26): see PAGE_MAX_TOKENS.
+      max_tokens: PAGE_MAX_TOKENS,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
@@ -732,6 +753,12 @@ const AgronomicWiki = {
         // link; a transient failure leaves the columns null and the
         // early-return path above retries on the next link attempt.
         await backfillOutcomeWeather(outcome, post, treatmentDate, sr.created_at);
+        // Paused: flag the pages this outcome feeds instead of writing them,
+        // so the weekly refresh after a resume rewrites them.
+        if (lawnWikiPaused()) {
+          await AgronomicWiki.markOutcomePagesStale(outcome);
+          return;
+        }
         try {
           // Update product pages
           for (const p of productsApplied) {
@@ -1208,7 +1235,9 @@ ${JSON.stringify((data.outcomes || []).map((o) => ({
   photo_verified_visual_change: o.vision_delta_score ?? null,
 })), null, 2)}
 
-Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing content that is still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.`;
+Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing findings that are still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.
+
+Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as it stands now rather than appending to it: fold superseded detail into the current statistics, and keep at most one short note on what changed in this revision, replacing any earlier revision, reconciliation or change notes. Never drop a contradiction flag or an open review item to fit the budget — shorten the supporting prose instead.`;
 
       const result = await callClaude(systemPrompt, userPrompt);
 
@@ -1607,10 +1636,15 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         .where({ stale_flag: false })
         .update({ stale_flag: true });
 
+      // GATE_LAWN_WIKI_PAUSE: steps 0-1 above still run (database only), so
+      // the stale flags stay current; steps 2-3 write no page while paused.
+      // The weekly marker keeps the cadence.
+      const paused = lawnWikiPaused();
+
       // 2. Refresh stale pages (up to 10 per run to control API costs).
       // Only categories with a refresh path — anything else would sit in the
       // stale list forever, permanently occupying refresh slots.
-      const stalePages = await db('knowledge_entries')
+      const stalePages = paused ? [] : await db('knowledge_entries')
         .where({ stale_flag: true })
         .whereIn('category', ['product', 'track', 'seasonal', 'condition'])
         .orderBy('last_data_update', 'asc')
@@ -1665,12 +1699,14 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // generation here withholds the marker like any stale-loop failure
       // (no_data is normal early in a month with no outcomes yet).
       const currentMonth = new Date().getMonth() + 1;
-      try {
-        const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
-        if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
-      } catch (err) {
-        failed++;
-        logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+      if (!paused) {
+        try {
+          const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
+          if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
+        } catch (err) {
+          failed++;
+          logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+        }
       }
 
       if (failed > 0 || reconcileFailed > 0) {
@@ -1685,6 +1721,14 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           triggerType: 'weekly_cron_error',
         });
         return { refreshed, failed, reconcileFailed, staleFound: stalePages.length, error };
+      }
+
+      if (paused) {
+        await logUpdate('lint', null, 'Weekly refresh paused (GATE_LAWN_WIKI_PAUSE): stale flags updated, no pages written', {
+          triggerType: 'weekly_cron',
+        });
+        logger.info('[agronomic-wiki] Weekly refresh paused: no pages written');
+        return { refreshed: 0, staleFound: 0, paused: true };
       }
 
       await logUpdate('lint', null, `Weekly refresh: ${refreshed} stale pages refreshed, seasonal page updated for month ${currentMonth}`, {

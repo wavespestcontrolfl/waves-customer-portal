@@ -509,13 +509,13 @@ async function getArAging(input) {
   // partially credit-applied invoice owes only the reduced amount.
   const invoices = await db('invoices')
     .whereIn('status', ['sent', 'viewed', 'overdue'])
-    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > ?', [min_amount])
+    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) > ?', [min_amount])
     .leftJoin('customers', 'invoices.customer_id', 'customers.id')
     .select(
       'invoices.*', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customers.phone',
-      db.raw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) as amount_due'),
+      db.raw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) as amount_due'),
     )
-    .orderByRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) desc');
+    .orderByRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) desc');
 
   const todayAnchor = parseETDateTime(etDateString() + 'T12:00');
   const aging = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };

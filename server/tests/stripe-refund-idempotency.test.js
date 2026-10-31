@@ -98,6 +98,19 @@ describe('StripeService.refund', () => {
     }));
   });
 
+  test('an invoice that was also paid in part by hand is not refunded here: the refund math assumes one payment covered the bill', async () => {
+    paymentRow.metadata = JSON.stringify({ invoice_id: 'inv-1' });
+    const lookups = [];
+    const paymentsQuery = dbMock('payments');
+    paymentsQuery.whereRaw = jest.fn((sql) => { lookups.push(sql); return paymentsQuery; });
+    paymentsQuery.first = jest.fn(async () => (lookups.length ? { id: 'pay-part' } : paymentRow));
+    const StripeService = loadService();
+    await expect(StripeService.refund('pay-1', { amount: 40 })).rejects.toThrow(/paid in part by hand/);
+    expect(lookups.some((sql) => /partial_payment/.test(sql))).toBe(true);
+    expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    expect(updatePayments).not.toHaveBeenCalled();
+  });
+
   test('partial refund persists the attempt key before Stripe and accumulates refund_amount', async () => {
     const StripeService = loadService();
     const result = await StripeService.refund('pay-1', { amount: 40 });

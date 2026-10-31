@@ -1776,10 +1776,24 @@ export function FilingCalendarTab() {
           update.amountPaid = amt;
         }
         if (status === "filed" || status === "paid") {
-          // Optional: the confirmation number from EFTPS, the state or the
-          // agency. Cancel aborts the change; blank sends none.
-          const conf = window.prompt("Confirmation number (optional):", "");
+          // The confirmation number from EFTPS, the state or the agency. Cancel
+          // aborts the change; blank sends none. A payroll row (source_key
+          // payroll:) requires one; the server refuses without it.
+          const payrollRow = String(
+            filings.find((f) => f.id === id)?.sourceKey || "",
+          ).startsWith("payroll:");
+          const conf = window.prompt(
+            payrollRow
+              ? "Confirmation number (required):"
+              : "Confirmation number (optional):",
+            "",
+          );
           if (conf === null) return;
+          if (payrollRow && conf.trim() === "") {
+            return alert(
+              "Enter the confirmation number — a payroll filing cannot be marked done without one.",
+            );
+          }
           if (conf.trim() !== "") update.confirmationNumber = conf.trim();
         }
         await adminFetch(`/admin/tax/filings/${id}`, {
@@ -1795,12 +1809,12 @@ export function FilingCalendarTab() {
       setPendingAction("");
     }
   };
-  const upcoming = filings.filter(
-    (f) => f.status === "upcoming" || f.status === "prepared",
-  );
-  const completed = filings.filter(
-    (f) => f.status === "filed" || f.status === "paid",
-  );
+  // Every filing that is not filed or paid is still open, Late included (the
+  // server's dashboard and advisor read it the same way). "All caught up!"
+  // means no open filing at all.
+  const isDone = (f) => f.status === "filed" || f.status === "paid";
+  const upcoming = filings.filter((f) => !isDone(f));
+  const completed = filings.filter(isDone);
   if (read.loading || read.error)
     return <TaxReadFeedback read={read} label="filings" />;
   return (
@@ -1911,6 +1925,7 @@ export function FilingCalendarTab() {
               {f.extendedDueDate && (
                 <span>Extended: {fmtD(f.extendedDueDate)}</span>
               )}
+              {f.bankSeenOn && <span>Seen in the bank on {fmtD(f.bankSeenOn)}</span>}
               {f.amountDue && (
                 <span>
                   Amount:{" "}
@@ -2012,6 +2027,16 @@ export function FilingCalendarTab() {
                   }}
                 >
                   Filed: {fmtD(f.filedDate)}
+                </span>
+              )}
+              {f.bankSeenOn && (
+                <span
+                  style={{
+                    fontSize: 14,
+                    color: "#71717A",
+                  }}
+                >
+                  Seen in the bank on {fmtD(f.bankSeenOn)}
                 </span>
               )}
               {f.amountPaid && (
@@ -2859,7 +2884,7 @@ function ExemptionsTab() {
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE TAB
 // ═══════════════════════════════════════════════════════════════
-function MileageTab() {
+export function MileageTab() {
   const actionRef = useRef(false);
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
@@ -2876,11 +2901,12 @@ function MileageTab() {
   const [purposeFilter, setPurposeFilter] = useState("all");
   const [selected, setSelected] = useState(() => new Set());
   const [classifying, setClassifying] = useState(false);
+  // Field names are POST /admin/tax/mileage's own: the form is the body.
   const [form, setForm] = useState({
-    trip_date: etDateString(),
-    start_address: "",
-    end_address: "",
-    distance_miles: "",
+    tripDate: etDateString(),
+    startAddress: "",
+    endAddress: "",
+    distanceMiles: "",
     purpose: "business",
     notes: "",
   });
@@ -2976,8 +3002,10 @@ function MileageTab() {
         const r = await adminFetch("/admin/tax/mileage/sync-bouncie", {
           method: "POST",
         });
+        const range =
+          r.startDate && r.endDate ? ` (${r.startDate} to ${r.endDate})` : "";
         alert(
-          `Bouncie sync: ${r.tripsImported || 0} trips imported, ${r.totalMiles?.toFixed(1) || 0} miles, ${fmtM(r.deductionAmount)} deduction`,
+          `Bouncie sync${range}: ${r.tripsImported || 0} trips imported, ${r.totalMiles?.toFixed(1) || 0} miles, ${fmtM(r.deductionAmount)} deduction`,
         );
         load();
       } catch (e) {
@@ -2995,7 +3023,7 @@ function MileageTab() {
     setPendingAction("handleAdd");
     setActionError("");
     try {
-      if (!form.distance_miles) return;
+      if (!form.distanceMiles) return;
       try {
         await adminFetch("/admin/tax/mileage", {
           method: "POST",
@@ -3003,9 +3031,9 @@ function MileageTab() {
         });
         setForm((f) => ({
           ...f,
-          start_address: "",
-          end_address: "",
-          distance_miles: "",
+          startAddress: "",
+          endAddress: "",
+          distanceMiles: "",
           notes: "",
         }));
         load();
@@ -3179,11 +3207,11 @@ function MileageTab() {
             <Field label="Date" className="min-w-0">
               <Input
                 type="date"
-                value={form.trip_date}
+                value={form.tripDate}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    trip_date: e.target.value,
+                    tripDate: e.target.value,
                   }))
                 }
                 style={{
@@ -3196,11 +3224,11 @@ function MileageTab() {
           <div>
             <Field label="From" className="min-w-0">
               <Input
-                value={form.start_address}
+                value={form.startAddress}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    start_address: e.target.value,
+                    startAddress: e.target.value,
                   }))
                 }
                 placeholder="Start"
@@ -3214,11 +3242,11 @@ function MileageTab() {
           <div>
             <Field label="To" className="min-w-0">
               <Input
-                value={form.end_address}
+                value={form.endAddress}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    end_address: e.target.value,
+                    endAddress: e.target.value,
                   }))
                 }
                 placeholder="End"
@@ -3233,11 +3261,11 @@ function MileageTab() {
             <Field label="Miles" className="min-w-0">
               <Input
                 type="number"
-                value={form.distance_miles}
+                value={form.distanceMiles}
                 onChange={(e) =>
                   setForm((f) => ({
                     ...f,
-                    distance_miles: e.target.value,
+                    distanceMiles: e.target.value,
                   }))
                 }
                 placeholder="0.0"
@@ -5436,6 +5464,74 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
   );
 }
 
+// What the payroll match says about one bank line: the paychecks or payroll tax rows it may be (the owner picks one,
+// or the existing expense the owner already entered), or the pair it was matched to.
+function PayrollBankLineNotes({ r, claimable, busy, act }) {
+  const candidates = claimable && r.direction === "debit" ? r.suggestion?.payrollCandidates : null;
+  const match = r.suggestion?.payrollMatch;
+  const linkPath = `/admin/tax/bank-import/${r.id}/link-payroll`;
+  return (
+    <>
+      {candidates?.length > 0 && (
+        <div className="mb-1 text-14 text-ink-primary" style={{ whiteSpace: "normal" }}>
+          {candidates.map((c) => {
+            const idField = c.kind === "check" ? { checkId: c.id } : { filingId: c.id };
+            const existing = c.existingExpenses?.length > 0;
+            const nearMiss = c.nearMiss ? " (one cent off)" : "";
+            return (
+              <div key={c.id} className="mb-1">
+                {c.kind === "check"
+                  ? `Paycheck for ${c.name}, ${fmtM(c.netCents / 100)}, pay date ${fmtD(c.payDate)}${nearMiss}`
+                  : `${c.title}, ${fmtM(c.amountCents / 100)}, due ${fmtD(c.dueDate)}${nearMiss}`}
+                {existing ? (
+                  <>
+                    <div className="mt-1">
+                      You may already have entered this payment. Link it to the existing expense, or book it as new.
+                    </div>
+                    {c.existingExpenses.map((e) => (
+                      <Button
+                        key={e.id}
+                        type="button"
+                        variant="secondary"
+                        className="mr-2 mt-1"
+                        disabled={!!busy}
+                        onClick={() => act("link-payroll", linkPath, { ...idField, expenseId: e.id })}
+                      >
+                        {`Use existing expense ${e.vendor_name || ""} ${fmtM(e.amount)} ${fmtD(e.expense_date)}`}
+                      </Button>
+                    ))}
+                  </>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="ml-2"
+                  disabled={!!busy}
+                  onClick={() =>
+                    act("link-payroll", linkPath, {
+                      ...idField,
+                      // "Book as new" is offered only beside the existing expenses the owner just saw
+                      ...(existing ? { createNew: true } : {}),
+                    })
+                  }
+                >
+                  {existing ? "Book as new" : c.kind === "check" ? "Link paycheck" : "Link tax payment"}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {match && (
+        <div className="text-14 text-ink-secondary" style={{ whiteSpace: "normal" }}>
+          {match.checkId ? "Matched to a paycheck" : "Matched to a payroll tax payment"}
+          {match.by === "auto" ? " automatically" : ""}
+        </div>
+      )}
+    </>
+  );
+}
+
 function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
@@ -6249,6 +6345,7 @@ function BankImportTab() {
                       </span>
                     </div>
                   )}
+                  <PayrollBankLineNotes r={r} claimable={bankRowClaimable(r)} busy={busy} act={act} />
                   {/* a transfer-flagged CREDIT with candidates falls through
                       to the select — a vendor refund whose descriptor says
                       "transfer" still needs its Apply refund action (the
@@ -6793,7 +6890,10 @@ export default function TaxPage() {
   const [activeTab, setActiveTab] = useState(() =>
     new URLSearchParams(window.location.search).has("oauth_state_id")
       ? "bankimport"
-      : "overview",
+      : // a tax deadline bell opens the Filing calendar (?tab=filings)
+        new URLSearchParams(window.location.search).get("tab") === "filings"
+        ? "filings"
+        : "overview",
   );
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).

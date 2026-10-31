@@ -62,7 +62,7 @@ export default function DispatchBoardLayout({ left, center, right }) {
             aria-selected={activePane === p.key}
             onClick={() => setActivePane(p.key)}
             className={cn(
-              'flex-1 py-2.5 text-12 uppercase tracking-label font-medium',
+              'flex-1 py-2.5 text-14 uppercase tracking-label font-medium',
               'border-b-2 -mb-px transition-colors u-focus-ring',
               activePane === p.key
                 ? 'border-zinc-900 text-ink-primary'

@@ -221,11 +221,15 @@ function appendCallAuth(wsUrl, { callSid, secret = process.env.VOICE_RELAY_WS_SE
 
 // The agent's spoken name (persona parity with the relay system prompt —
 // relay-conversation reads the same env). Read at call time, not module load.
+// Owner 2026-10-31: the agent is Jennifer (replaces Sandy). This is the ONE
+// place the default name lives; every caller- and staff-facing string reads
+// agentName().
+const DEFAULT_AGENT_NAME = 'Jennifer';
 function agentName() {
-  return String(process.env.VOICE_AGENT_NAME || '').trim() || 'Sandy';
+  return String(process.env.VOICE_AGENT_NAME || '').trim() || DEFAULT_AGENT_NAME;
 }
 
-// The relay greeting is Sandy's OPENER, not a legal notice (owner ruling
+// The relay greeting is the agent's OPENER, not a legal notice (owner ruling
 // 2026-08-28): the recorded-line disclosure is carried by the greeting MP3
 // that plays BEFORE the relay on every production path (/voice staff-ring,
 // AI-answers-first — which now plays the MP3 too — and inside the language
@@ -234,7 +238,7 @@ function agentName() {
 // when asked. VOICE_RELAY_GREETING overrides the line verbatim; the ONE guard
 // left is that an override may not CLAIM to be human — an identity lie is
 // discarded wholesale (refusing would strand live calls on a bad env value).
-const DEFAULT_WELCOME_GREETING = 'Waves, this is Sandy. How can I help you {dayPart}?';
+const DEFAULT_WELCOME_GREETING = 'Waves, this is {name}. How can I help you {dayPart}?';
 
 // ET day-part for the greeting: morning until noon, afternoon until 5 PM,
 // evening after — the same clock every other spoken-time rule uses.
@@ -256,13 +260,13 @@ const HUMAN_CLAIM_ES_RE = /\b(?:habla|hablando|est[áa]\s+hablando|soy)\b[^.!?]{
 // A press-2 caller may have cut the English greeting MP3 short, so the
 // Spanish opener keeps a one-clause recorded-line notice; no AI mention.
 const SPANISH_LANGUAGE = 'es-US';
-const DEFAULT_WELCOME_GREETING_ES = 'Waves, habla Sandy. Esta llamada puede ser grabada. ¿En qué puedo ayudarle hoy?';
+const DEFAULT_WELCOME_GREETING_ES = 'Waves, habla {name}. Esta llamada puede ser grabada. ¿En qué puedo ayudarle hoy?';
 const RECORDING_DISCLOSURE_ES_RE = /\b(?:puede|podr[ií]a|va a|ser[áa]|est[áa] siendo|es|est[áa])\s+(?:ser\s+)?grabad[ao]s?\b/i;
 const RECORDING_NEGATION_ES_RE = /\b(?:no|nunca|jam[áa]s|nada|ning[uú]n[ao]?)\b[^.!?]{0,40}\b(?:grabad[ao]s?|grabando|graba)\b/i;
 const RECORDING_SUFFIX_ES = 'Esta llamada puede ser grabada.';
 
 function spanishWelcomeGreeting() {
-  const canonical = DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
+  const canonical = DEFAULT_WELCOME_GREETING_ES.replace('{name}', agentName());
   const override = String(process.env.VOICE_RELAY_GREETING_ES || '').trim();
   if (!override) return canonical;
   if (HUMAN_CLAIM_ES_RE.test(override) || RECORDING_NEGATION_ES_RE.test(override)) return canonical;
@@ -271,7 +275,7 @@ function spanishWelcomeGreeting() {
 }
 
 function defaultWelcomeGreeting(now = new Date()) {
-  const canonical = DEFAULT_WELCOME_GREETING.replace('Sandy', agentName()).replace('{dayPart}', greetingDayPart(now));
+  const canonical = DEFAULT_WELCOME_GREETING.replace('{name}', agentName()).replace('{dayPart}', greetingDayPart(now));
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
   if (!override) return canonical;
   if (HUMAN_CLAIM_RE.test(override)) return canonical;
@@ -281,12 +285,18 @@ function defaultWelcomeGreeting(now = new Date()) {
 const DEFAULT_TTS_PROVIDER = 'ElevenLabs'; // matches the existing Waves voice-agent stack
 const DEFAULT_LANGUAGE = 'en-US';
 
-// Provider-specific voice id for the agent's TTS — the Sandy voice by default
-// (owner ruling 2026-08-11: voice id 21m00Tcm4TlvDq8ikWAM, name parity with
-// the sandbox), overridable via VOICE_RELAY_TTS_VOICE. Read at call time (not
-// module load) so an env change takes effect on restart even if this module
-// was required before the var existed in the environment.
-const DEFAULT_TTS_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+// Provider-specific voice id for the agent's TTS, overridable via
+// VOICE_RELAY_TTS_VOICE. Owner 2026-10-31: "implement the newest elevenlabs
+// model, and find a new voice to replace sandy, we'll call her jennifer".
+// Voice g7LVvkPWALzPxOQbF6OE is ElevenLabs "Jade - Upbeat and Natural", the
+// replacement ElevenLabs names for Jessica (cgSgspJ2msm6clMCkdW9), a Default
+// voice that ElevenLabs retires 2026-12-31. The model is Eleven v4 Turbo
+// (Twilio ConversationRelay suffix `-v4_turbo`). v3/v4 take no SSML and no
+// speed (Twilio rejects a speed other than 1.0), so the string uses the
+// STABILITY_SIMILARITY form `<voice>-<model>-<stability>_<similarity>`.
+// Read at call time (not module load) so an env change takes effect on
+// restart even if this module was required before the var existed.
+const DEFAULT_TTS_VOICE_ID = 'g7LVvkPWALzPxOQbF6OE-v4_turbo-0.5_0.8';
 function defaultTtsVoice() {
   return String(process.env.VOICE_RELAY_TTS_VOICE || '').trim() || DEFAULT_TTS_VOICE_ID;
 }
@@ -504,6 +514,7 @@ module.exports = {
   DEFAULT_WELCOME_GREETING_ES,
   spanishWelcomeGreeting,
   agentName,
+  DEFAULT_AGENT_NAME,
   DEFAULT_TTS_PROVIDER,
   DEFAULT_LANGUAGE,
   DEFAULT_TTS_VOICE_ID,

@@ -33,6 +33,53 @@
  *                                    W-2/W-3 (the year) from finalized, not-voided checks.
  *                                    400 on a bad year or quarter. Off answers 404.
  *
+ * Paid time off and holidays (GATE_PAYROLL_TIME_OFF, also dark; off answers 404 { enabled: false }).
+ * GET    /time-off?from=&to=         entries in the range (at most 400 days), with technician name.
+ * POST   /time-off                   { technicianId, workDate, kind: 'pto' | 'holiday', hours, note }
+ *                                    201 { entry, warning } (409 on a second entry for the date).
+ * PUT    /time-off/:id               { kind, hours, note } -> { entry, warning }
+ * DELETE /time-off/:id               remove an entry.
+ *                                    Create, change and delete answer 409 once the pay run for the
+ *                                    week that holds the date is final (whichever technician it
+ *                                    paid): void the pay run first.
+ * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
+ * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
+ *                                    The allowance only warns; it never blocks an entry.
+ *
+ * Pay lines (GATE_PAYROLL_PAY_LINES, also dark; off answers 404 { enabled: false }).
+ * GET    /pay-lines?technicianId=&status=   lines, newest week first (status open, paid or voided).
+ * GET    /pay-lines/technicians             every W-2 employee a line can be for, one who has left too.
+ * POST   /pay-lines                         { kind: 'review_bonus' | 'commission' | 'health_allowance' |
+ *                                    'hsa_employer', technicianId, amountCents, earnedWeekStart (a Monday),
+ *                                    coversFrom?, coversTo?, note? } 201 { payLine }. The next pay run
+ *                                    that reaches the week pays it. A span (coversFrom, coversTo) is for
+ *                                    a commission or monthly allowance that covers several weeks.
+ * DELETE /pay-lines/:id                     remove a line that is not paid yet (409 once a final run paid it).
+ * PUT    /technicians/:id/flsa-coverage     { covered: true | false | null } whether federal overtime law
+ *                                    covers the employee; W-2 box 12 code TT is filled only for true.
+ *
+ * Family employee (GATE_PAYROLL_FAMILY_EMPLOYEE, also dark; off answers 404 { enabled: false }).
+ * PUT    /technicians/:id/family-employment { relationship: 'parent' | 'spouse', entity:
+ *                                    'sole_proprietorship' | 'single_member_llc', exemptFrom (YYYY-MM-DD) },
+ *                                    or { relationship: null } to clear all three. W-2 employees only (409
+ *                                    otherwise). A pay run dated on or after exemptFrom skips federal and
+ *                                    Florida unemployment tax for that employee and nothing else.
+ *
+ * Mercury paychecks (owner plan A, 2026-10-30; GATE_PAYROLL_MERCURY_STATUS and GATE_PAYROLL_MERCURY_PAY, both
+ * dark; off answers 404 { enabled: false }). Mercury sends a paycheck only after the owner approves the request in
+ * the Mercury app. No route here calls Mercury's direct send.
+ * PUT  /technicians/:id/mercury-recipient  { recipientId | null } (status gate) the technician's Mercury recipient
+ *                                    id. With a key set it reads the recipient and returns the NAME only (404 from
+ *                                    Mercury answers 400).
+ * GET  /runs/:id/send-preview        (status gate) the three warnings before a send: funding, key health, approve-by.
+ * POST /runs/:id/send                (pay gate) request payment for each bank-transfer check with no payment yet.
+ *                                    Answers { results: [{ checkId, name, outcome, reason?, message? }], run }.
+ * POST /checks/:id/send-again        (pay gate) { confirmNothingWaiting? } a new attempt after failed, rejected,
+ *                                    cancelled or returned, or after unknown when the owner confirms.
+ * POST /payments/:id/link-request   (status gate, moves no money) { requestId } names the Mercury request that belongs
+ *                                    to a payment whose outcome is unknown; refused unless it matches the attempt.
+ * POST /checks/:id/paper             (status gate) { checkNumber } paid by paper check instead.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -40,10 +87,17 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { payrollLive, payrollFormFiguresLive } = require('../config/feature-gates');
+const {
+  payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
+  payrollMercuryStatusLive, payrollMercuryPayLive,
+} = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
+const payrollTimeOff = require('../services/payroll-time-off');
+const payrollPayLines = require('../services/payroll-pay-lines');
+const payrollFamilyEmployee = require('../services/payroll-family-employee');
+const payrollMercury = require('../services/payroll-mercury');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -75,6 +129,145 @@ router.get('/forms', async (req, res) => {
   try {
     res.json(await payrollFormFigures.readFormFigures(payrollFormFigures.parseFormPeriod(req.query)));
   } catch (err) { fail(res, 'read tax form figures', err); }
+});
+
+// GATE_PAYROLL_TIME_OFF off: the same answer the payroll routes give when their gate is off.
+const timeOffOnly = (req, res, next) => {
+  if (!(typeof payrollTimeOffLive === 'function' && payrollTimeOffLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.get('/time-off/balance', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ balance: await payrollTimeOff.balance(req.query) });
+  } catch (err) { fail(res, 'read time off balance', err); }
+});
+
+router.get('/time-off', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ entries: await payrollTimeOff.listTimeOff(req.query) });
+  } catch (err) { fail(res, 'list time off', err); }
+});
+
+router.post('/time-off', timeOffOnly, async (req, res) => {
+  try {
+    res.status(201).json(await payrollTimeOff.createTimeOff(req.body, req.technicianId));
+  } catch (err) { fail(res, 'record time off', err); }
+});
+
+router.put('/time-off/:id', timeOffOnly, async (req, res) => {
+  try {
+    res.json(await payrollTimeOff.updateTimeOff(req.params.id, req.body, req.technicianId));
+  } catch (err) { fail(res, 'change time off', err); }
+});
+
+router.delete('/time-off/:id', timeOffOnly, async (req, res) => {
+  try {
+    res.json(await payrollTimeOff.deleteTimeOff(req.params.id, req.technicianId));
+  } catch (err) { fail(res, 'remove time off', err); }
+});
+
+router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set time off allowance', err); }
+});
+
+// GATE_PAYROLL_PAY_LINES off: the same answer the payroll routes give when their gate is off.
+const payLinesOnly = (req, res, next) => {
+  if (!(typeof payrollPayLinesLive === 'function' && payrollPayLinesLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.get('/pay-lines', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ payLines: await payrollPayLines.listPayLines(req.query) });
+  } catch (err) { fail(res, 'list pay lines', err); }
+});
+
+router.get('/pay-lines/technicians', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ technicians: await payrollPayLines.listPayLineTechnicians() });
+  } catch (err) { fail(res, 'list pay line employees', err); }
+});
+
+router.post('/pay-lines', payLinesOnly, async (req, res) => {
+  try {
+    res.status(201).json({ payLine: await payrollPayLines.createPayLine(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'add pay line', err); }
+});
+
+router.delete('/pay-lines/:id', payLinesOnly, async (req, res) => {
+  try {
+    res.json(await payrollPayLines.deletePayLine(req.params.id, req.technicianId));
+  } catch (err) { fail(res, 'remove pay line', err); }
+});
+
+router.put('/technicians/:id/flsa-coverage', payLinesOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set overtime coverage', err); }
+});
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE off: the same answer the payroll routes give when their gate is off.
+const familyEmployeeOnly = (req, res, next) => {
+  if (!(typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/family-employment', familyEmployeeOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollFamilyEmployee.setFamilyEmployment(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set family employee', err); }
+});
+
+// GATE_PAYROLL_MERCURY_STATUS / _PAY off: the same answer the payroll routes give when their gate is off.
+const mercuryStatusOnly = (req, res, next) => {
+  if (!(typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+const mercuryPayOnly = (req, res, next) => {
+  if (!(typeof payrollMercuryPayLive === 'function' && payrollMercuryPayLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/mercury-recipient', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollMercury.setMercuryRecipient(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set Mercury recipient', err); }
+});
+
+router.get('/runs/:id/send-preview', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ preview: await payrollMercury.sendPreview(req.params.id) });
+  } catch (err) { fail(res, 'read Mercury send preview', err); }
+});
+
+router.post('/runs/:id/send', mercuryPayOnly, async (req, res) => {
+  try {
+    const results = await payrollMercury.sendRun(req.params.id, req.technicianId);
+    // The requests are made and saved. A failed re-read must not hide what happened.
+    const run = await payrollRuns.getRun(req.params.id).catch(() => null);
+    res.json({ results, run });
+  } catch (err) { fail(res, 'send pay run to Mercury', err); }
+});
+
+router.post('/checks/:id/send-again', mercuryPayOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.sendAgain(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'send paycheck to Mercury again', err); }
+});
+
+router.post('/payments/:id/link-request', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.linkRequest(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'link Mercury request', err); }
+});
+
+router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {
+  try {
+    res.json({ result: await payrollMercury.recordPaper(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'record paper check', err); }
 });
 
 router.get('/technicians', async (req, res) => {

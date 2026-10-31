@@ -66,7 +66,9 @@ describe('recipe text', () => {
     const track = v13[grass];
     expect(track.notes.some((line) => line.startsWith('North Port: no Nutra-TECH on the June, August and September visits'))).toBe(true);
     expect(track.safety_rules.some((line) => line.startsWith('North Port: no Nutra-TECH June through September'))).toBe(true);
-    for (const month of ['Jun', 'Aug', 'Sep']) expect(visit(grass, month).notes).toContain('North Port: skip Nutra-TECH on this visit until the city confirms.');
+    // June has no potassium row; August and September also carry the Nutra-TECH potassium (20261029170000), and both names start with Nutra-TECH.
+    expect(visit(grass, 'Jun').notes).toContain('North Port: skip Nutra-TECH on this visit until the city confirms.');
+    for (const month of ['Aug', 'Sep']) expect(visit(grass, month).notes).toContain(require('../models/migrations/20261029170000_lawn_v13_summer_potassium').VISIT_SKIP);
     for (const month of ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jul', 'Oct', 'Nov', 'Dec']) expect(visit(grass, month).notes).not.toMatch(/North Port: skip Nutra-TECH/);
   });
 

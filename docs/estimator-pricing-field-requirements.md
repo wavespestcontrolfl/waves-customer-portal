@@ -151,7 +151,7 @@ Required: species, tier (1–4), removal option; optional aggressiveness/height/
 
 ## 15. Lawn specialty (`plugging`, `top_dressing`, `dethatching`)
 
-- Plugging: plug area (blank → **whole lawn**, e.g. 4,500 sf → $10,995) and spacing → require an explicit area.
+- Plugging: plug area and spacing. **Fixed (owner 2026-10-31):** UI-A and the website forms require the area, and a blank area no longer prices the whole lawn (it did: 4,500 sf → $10,995). The engine returns a no-price `missing_plugging_area_sqft` line instead (`pluggingAreaRequiredLine` in `service-pricing.js`), so UI-P answers `quote_required`.
 - Top dressing: area (blank → 65% of lawn when no recurring lawn; show the assumption), depth.
 - Dethatching: lawn sq ft, grass type (St. Augustine needs manager approval), cleanup level, access, thatch probes (raw strings pass through by design).
 

@@ -17,11 +17,17 @@ const ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY = 'estimate_followup_monthly_average';
 // one settles as not sent, and the visit's later reminders carry the current details.
 const MOVE_NOTICE_CATEGORY = 'appointment_move_notice';
 
+// Category stamped on an email sent with a CC (email-template-library.js sendTemplate `cc`,
+// the invoice Send's copy to a second address). The stored-copy rails replay to one address,
+// so a replay would quietly drop the copy: neither rail re-sends it.
+const CARBON_COPY_CATEGORY = 'email_cc';
+
 // Every category whose stored copy is never re-sent, with the reason a stopped
 // provider retry records.
 const NO_STORED_COPY_REPLAY = new Map([
   [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, 'Not re-sent from stored copy (monthly average may be stale).'],
   [MOVE_NOTICE_CATEGORY, 'Not re-sent from stored copy (the visit may have changed since).'],
+  [CARBON_COPY_CATEGORY, 'Not re-sent from stored copy (it was copied to a second address).'],
 ]);
 
 // The stop reason for a message's categories (an array), or null when its stored copy may be re-sent.
@@ -30,4 +36,4 @@ function staleStoredCopyReason(categories) {
   return hit ? NO_STORED_COPY_REPLAY.get(hit) : null;
 }
 
-module.exports = { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, NO_STORED_COPY_REPLAY, staleStoredCopyReason };
+module.exports = { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, NO_STORED_COPY_REPLAY, staleStoredCopyReason };

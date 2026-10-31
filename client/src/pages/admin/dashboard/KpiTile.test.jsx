@@ -3,7 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { KpiTile } from "./KpiTile";
+import { KpiGrid, KpiTile } from "./KpiTile";
 
 afterEach(cleanup);
 
@@ -136,5 +136,31 @@ describe("KpiTile target-store integration", () => {
     const num = screen.getByText("$96.00");
     expect(num.className).toContain("text-amber-600");
     expect(num.className).not.toContain("text-alert-fg");
+  });
+});
+
+// jsdom has no layout, so these pin the classes that carry the narrow-pane
+// fix (audit D01); the browser geometry check is the audit's reproduce runner.
+describe("KpiTile layout on narrow panes", () => {
+  it("keeps the default strip at two columns until lg and stretches an odd last tile", () => {
+    const { container } = render(<KpiGrid><div /><div /><div /></KpiGrid>);
+    const grid = container.firstChild;
+    // From md the fixed sidebar leaves ~500px: four columns waited for lg.
+    expect(grid).toHaveClass("grid-cols-2", "lg:grid-cols-4", "max-lg:[&>:last-child:nth-child(odd)]:col-span-2");
+    expect(grid).not.toHaveClass("md:grid-cols-4");
+  });
+
+  it("wraps a gauge caption under the ring instead of squeezing it beside", () => {
+    render(
+      <KpiTile
+        label="Autopay Coverage"
+        value="40%"
+        sub="70 of 173 customers"
+        chart={{ kind: "gauge", value: 40, max: 100 }}
+      />,
+    );
+    const caption = screen.getByText("70 of 173 customers");
+    expect(caption.parentElement).toHaveClass("flex-wrap");
+    expect(caption).toHaveClass("min-w-0", "grow", "basis-24");
   });
 });

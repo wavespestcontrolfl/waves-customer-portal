@@ -7,7 +7,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { addMonthsSameDay } = require('../utils/date-only');
 
 // ─── Nightly Maintenance Check ───────────────────────────────────
 /**
@@ -30,8 +31,9 @@ async function checkMaintenanceDue() {
         'equipment.category'
       );
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Due dates are ET calendar days; the server clock is UTC, which put
+    // "today" a day ahead from 8 PM ET (operations audit OP-15).
+    const today = etDateString();
     let overdueCount = 0;
     let dueSoonCount = 0;
 
@@ -41,9 +43,7 @@ async function checkMaintenanceDue() {
 
       // Check date-based due
       if (schedule.next_due_at) {
-        const dueDate = new Date(schedule.next_due_at);
-        dueDate.setHours(0, 0, 0, 0);
-        const daysUntilDue = Math.floor((dueDate - today) / (1000 * 60 * 60 * 24));
+        const daysUntilDue = etCalendarDaysUntil(schedule.next_due_at);
 
         if (daysUntilDue <= 0) {
           isOverdue = true;
@@ -86,7 +86,7 @@ async function checkMaintenanceDue() {
     // Check for follow-ups due
     const followUps = await db('maintenance_records')
       .where('follow_up_needed', true)
-      .where('follow_up_date', '<=', today.toISOString().split('T')[0])
+      .where('follow_up_date', '<=', today)
       .whereNotExists(function () {
         this.select('id').from('maintenance_alerts')
           .whereRaw('maintenance_alerts.equipment_id = maintenance_records.equipment_id')
@@ -190,15 +190,13 @@ async function recordMaintenance({
         if (milesAtService) scheduleUpdates.last_performed_miles = milesAtService;
         if (hoursAtService) scheduleUpdates.last_performed_hours = hoursAtService;
 
-        // Calculate next due
+        // Calculate next due from today's ET date (the UTC clock is a day
+        // ahead from 8 PM ET). Months use the shared same-day rule, clamped
+        // to the month's last day (Jan 31 + 1 → Feb 28/29).
         if (schedule.interval_days) {
-          const next = new Date();
-          next.setDate(next.getDate() + schedule.interval_days);
-          scheduleUpdates.next_due_at = next.toISOString().split('T')[0];
+          scheduleUpdates.next_due_at = etDateString(addETDays(new Date(), schedule.interval_days));
         } else if (schedule.interval_months) {
-          const next = new Date();
-          next.setMonth(next.getMonth() + schedule.interval_months);
-          scheduleUpdates.next_due_at = next.toISOString().split('T')[0];
+          scheduleUpdates.next_due_at = addMonthsSameDay(etDateString(), schedule.interval_months);
         }
 
         if (schedule.interval_miles && milesAtService) {
@@ -419,7 +417,9 @@ async function generateMaintenanceAlert(schedule, isOverdue) {
 
     let description = '';
     if (schedule.next_due_at) {
-      const dueDate = new Date(schedule.next_due_at);
+      // A DATE arrives as UTC midnight; formatted in ET it read one day early.
+      // Anchor its own calendar day at noon UTC before formatting.
+      const dueDate = new Date(`${etCalendarDayOf(schedule.next_due_at)}T12:00:00Z`);
       description += `Due date: ${dueDate.toLocaleDateString('en-US', { timeZone: 'America/New_York' })}. `;
     }
     if (schedule.next_due_miles) description += `Due at ${schedule.next_due_miles.toLocaleString()} miles. `;
@@ -465,11 +465,14 @@ async function getFleetOverview() {
       .count('id as count')
       .first();
 
-    const now = new Date();
-    const yearStart = `${now.getFullYear()}-01-01`;
+    // The ET business year: UTC rolled YTD into the new year at 7 PM ET on
+    // Dec 31 (operations audit OP-15).
+    const yearStart = etYearStart();
 
+    // performed_at is a timestamp: start at midnight ET on Jan 1, not UTC
+    // midnight (7 PM ET on Dec 31).
     const ytdMaintenance = await db('maintenance_records')
-      .where('performed_at', '>=', yearStart)
+      .where('performed_at', '>=', parseETDateTime(`${yearStart}T00:00`))
       .select(db.raw('COALESCE(SUM(total_cost), 0) as total'))
       .first();
 
@@ -576,10 +579,8 @@ async function reportEquipmentIssue({ equipmentId, technicianId, description, se
 async function checkWarrantyExpirations() {
   const tag = '[equipment-maintenance] checkWarrantyExpirations';
   try {
-    const thirtyDaysFromNow = new Date();
-    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
     const today = etDateString();
-    const futureDate = thirtyDaysFromNow.toISOString().split('T')[0];
+    const futureDate = etDateString(addETDays(new Date(), 30));
 
     const expiringWarranties = await db('equipment')
       .whereNotNull('warranty_expiration')

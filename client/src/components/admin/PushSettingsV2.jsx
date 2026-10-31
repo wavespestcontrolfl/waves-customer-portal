@@ -33,6 +33,7 @@ import {
   isPushEnabled,
   sendTestPush,
 } from "../../lib/push-subscribe.js";
+import { isWavesAdminApp } from "../../native/platform";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -90,6 +91,7 @@ const BELL_CATEGORY_LABELS = {
   email_digest: "Email digest",
   token_alert: "Token alerts",
   tax: "Tax",
+  payroll: "Payroll payments (Mercury)",
   payout: "Payout deposits",
   call_pipeline_drift: "Call pipeline drift",
   social_compliance_rejected: "Social compliance rejections",
@@ -233,7 +235,19 @@ export default function PushSettingsV2() {
             </Button>{" "}
           </div>{" "}
         </div>
-        {/* Device push card */}
+        {/* Device push card. Waves Admin (the iOS staff app) registers its own
+            iPhone notifications at sign-in; web push cannot run there. */}
+        {isWavesAdminApp() ? (
+          <div className="p-3 mb-4 bg-zinc-50 border-hairline rounded-md">
+            <div className="text-13 font-medium text-ink-primary">
+              Push notifications on this iPhone
+            </div>
+            <div className="text-12 text-ink-tertiary mt-1">
+              The Waves Admin app delivers them. To turn them off, open iPhone
+              Settings, then Waves Admin, then Notifications.
+            </div>
+          </div>
+        ) : (
         <div className="p-3 mb-4 bg-zinc-50 border-hairline rounded-md flex items-center justify-between gap-3 flex-wrap">
           {" "}
           <div>
@@ -257,6 +271,7 @@ export default function PushSettingsV2() {
             {busy ? "…" : pushOn ? "Disable" : "Enable"}
           </Button>{" "}
         </div>
+        )}
         {/* Push error */}
         {pushError && (
           <div className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md flex items-start gap-2.5">

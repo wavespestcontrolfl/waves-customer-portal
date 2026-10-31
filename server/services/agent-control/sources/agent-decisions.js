@@ -61,7 +61,7 @@ const STATUS_MAP = Object.freeze({
   failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' },
   qualification_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'incorrect' },
   auto_applied: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // contact-correction
-  auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // reschedule-intent-watcher
+  auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // historical comms_guards rows (reschedule-intent watcher, removed)
   auto_answered: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // sms-unanswered-reply ANSWERED_STATUS
   reviewed: { lifecycle: 'terminal', result: 'succeeded' },
   // the owner's verdict is persisted as the row status too (admin-agent-
@@ -90,7 +90,7 @@ const WORKFLOW_MAP = Object.freeze({
   sms_house_voice_suggest: { laneId: 'sms_suggest', area: 'sms' }, // sms-suggest-mode SUGGEST_WORKFLOW
   sms_house_voice_auto_send: { laneId: 'sms_draft', area: 'sms' }, // sms-auto-send AUTOSEND_WORKFLOW (sends the drafter's draft)
   sms_gratitude_qualification: { laneId: 'sealed_eval', area: 'sms' }, // sms-gratitude-qualification WORKFLOW
-  comms_guards: { laneId: null, area: 'sms' }, // reschedule-intent-flagger
+  comms_guards: { laneId: null, area: 'sms' }, // historical rows (reschedule-intent flagger, removed)
   contact_correction: { laneId: 'contact_correction', area: null }, // contact-correction
   estimate_conversion_sms: { laneId: 'estimate_followup', area: null }, // estimate-conversion-agent
   service_scheduling_sms: { laneId: 'estimate_followup', area: null },
