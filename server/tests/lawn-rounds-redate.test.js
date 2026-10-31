@@ -161,30 +161,37 @@ describe('stayReason (the 10-08 rule)', () => {
 
 describe('reviewPlan', () => {
   const plan = () => planSeriesRedate(series(legacy()));
-  const connWith = (overlaps) => ({ raw: jest.fn(async () => ({ rows: overlaps })) });
+  const conn = {};
+  // The rebooker's read-only twin of its commit check (previewMoveConflicts): the conflicts it would refuse.
+  const scheduleWith = (conflicts) => ({ previewMoveConflicts: jest.fn(async () => conflicts) });
 
   test('a free schedule leaves the plan alone', async () => {
-    const out = await reviewPlan(connWith([]), plan());
+    const out = await reviewPlan(conn, plan(), { rebooker: scheduleWith([]) });
     expect(out.held).toBeNull();
   });
 
-  test('an hour the technician already has holds the series: hour taken', async () => {
-    const out = await reviewPlan(connWith([{ id: 'x', ws: '09:30', dur: 60 }]), plan());
+  test('an hour the rebooker would refuse holds the series: hour taken; every timed move is checked, unassigned too', async () => {
+    const rebooker = scheduleWith([{ id: 'x' }]);
+    const unassigned = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: null }))));
+    const out = await reviewPlan(conn, unassigned, { rebooker });
     expect(out.held).toBe('hour taken');
+    expect(rebooker.previewMoveConflicts.mock.calls.map(([id, date, window, opts]) => [id, date, window, opts.conn]))
+      .toEqual(unassigned.moves.map((m) => [m.id, m.to, { start: '09:00', end: '10:00' }, conn]));
   });
 
   test('a closed day holds the series', async () => {
-    const out = await reviewPlan(connWith([]), plan(), { closedDates: new Set(['2027-01-12']) });
+    const out = await reviewPlan(conn, plan(), { closedDates: new Set(['2027-01-12']), rebooker: scheduleWith([]) });
     expect(out.held).toBe('closed day');
   });
 
-  test('an earlier planned series in the run claims its hour; a held series claims none', async () => {
+  test('an earlier planned series in the run claims its hour, whatever the technician; a held series claims none', async () => {
     const reserved = new Map();
-    const conn = connWith([]);
-    expect((await reviewPlan(conn, plan(), { reserved })).held).toBeNull();
-    expect((await reviewPlan(conn, plan(), { reserved })).held).toBe('hour taken');
+    const rebooker = scheduleWith([]);
+    expect((await reviewPlan(conn, plan(), { reserved, rebooker })).held).toBeNull();
+    const otherTech = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: 'another-tech' }))));
+    expect((await reviewPlan(conn, otherTech, { reserved, rebooker })).held).toBe('hour taken');
     const heldFirst = new Map();
-    await reviewPlan(conn, planSeriesRedate(series(legacy()), { maxShiftDays: 3 }), { reserved: heldFirst });
+    await reviewPlan(conn, planSeriesRedate(series(legacy()), { maxShiftDays: 3 }), { reserved: heldFirst, rebooker });
     expect(heldFirst.size).toBe(0);
   });
 });
@@ -226,6 +233,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     transaction: jest.fn(async (fn) => fn(makeTrx(state, live, log))),
   });
   const rebooker = {
+    previewMoveConflicts: jest.fn(async () => []),
     reschedule: jest.fn(async (id, date, window, reason, by, options) => {
       log.push(`move:${id}`);
       if (fail.id === id) throw new Error('refused');
@@ -244,7 +252,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     lockComms: jest.fn(async () => { log.push('lock-comms'); }),
     prepay: { normalizeCoverageCadence: (v) => v || null, inferCoverageCadence: () => 'quarterly' },
   };
-  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { termId: r.term_id, prepaid: !!r.term_id })))), {});
+  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { termId: r.term_id, prepaid: !!r.term_id })))), { rebooker });
   return { conn, deps, rebooker, reminders, log, rows, state, replan, fail };
 }
 
@@ -447,20 +455,6 @@ describe('applySeries', () => {
     const out = await applySeries(w.conn, w.deps, plan, async () => plan);
     expect(out.status).toBe('error');
     expect(out.why).toMatch(/changed since the plan/);
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
-  });
-
-  test('an hour taken since the plan stops the move, before the rebooker', async () => {
-    const w = world();
-    const plan = await w.replan();
-    w.conn.raw.mockImplementation(async (sql, params) => {
-      if (/where technician_id/.test(sql)) return { rows: [{ id: 'x', ws: '09:00', dur: 60 }] };
-      if (/where ss\.id = \?/.test(sql)) return { rows: [w.rows.get(params[0])] };
-      return { rows: [] };
-    });
-    const out = await applySeries(w.conn, w.deps, plan, async () => plan);
-    expect(out.status).toBe('error');
-    expect(out.why).toMatch(/is taken/);
     expect(w.rebooker.reschedule).not.toHaveBeenCalled();
   });
 

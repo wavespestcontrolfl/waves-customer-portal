@@ -200,34 +200,25 @@ async function readSeriesContext(conn, root, { todayET, nowMs = Date.now(), anch
   };
 }
 
-// The live visits of `tech` on `date` that overlap [start, end), other than `id`.
-async function readOverlaps(conn, { id, tech, date, start, end }) {
-  if (!tech) return [];
-  const { rows } = await conn.raw(`select id::text, to_char(window_start,'HH24:MI') ws, coalesce(estimated_duration_minutes,60) dur
-    from scheduled_services where technician_id = ? and scheduled_date = ?::date and id <> ? and window_start is not null
-      and coalesce(status,'pending') not in ${DEAD}`, [tech, date, id]);
-  const [a, b] = [toMin(start), toMin(end)];
-  return rows.filter((o) => toMin(o.ws) < b && a < toMin(o.ws) + Number(o.dur));
-}
-
 const windowEnd = (row) => row.we || hhmm(toMin(row.ws) + Number(row.dur));
 
-// The schedule half of the plan: a move onto a closed day or onto an hour the technician already has (or an
-// earlier planned series in this run will take) holds the series. The app cannot hand a recurring visit to
+// The schedule half of the plan: a move onto a closed day, onto an hour the rebooker's own commit check refuses
+// (previewMoveConflicts: its technician scope and statuses, unassigned visits included), or onto an hour an
+// earlier planned series in this run takes holds the series. The app cannot hand a recurring visit to
 // auto-dispatch untimed through SmartRebooker.reschedule, so a taken hour is a hold, not a hand-off.
-// `reserved` (Map tech|date -> [[start, end]]) carries the hours earlier series in this run claim; this call
-// adds this plan's moves to it when the plan is not held.
-async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new Map() } = {}) {
+// `reserved` (Map date -> [[start, end]]) carries the hours earlier series in this run claim, whatever the
+// technician (never looser than the commit check); this call adds this plan's moves to it when the plan is not held.
+async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new Map(), rebooker = require('./rebooker') } = {}) {
   const reasons = [...plan.heldReasons];
   const claims = [];
   for (const move of plan.moves) {
     if (closedDates.has(move.to)) reasons.push('closed day');
-    if (!move.tech || !move.ws) continue;
+    if (!move.ws) continue;
     const [start, end] = [move.ws, windowEnd(move)];
-    const taken = (await readOverlaps(conn, { id: move.id, tech: move.tech, date: move.to, start, end })).length > 0
-      || (reserved.get(`${move.tech}|${move.to}`) || []).some(([s, e]) => toMin(s) < toMin(end) && toMin(start) < toMin(e));
+    const taken = (await rebooker.previewMoveConflicts(move.id, move.to, { start, end }, { conn })).length > 0
+      || (reserved.get(move.to) || []).some(([s, e]) => toMin(s) < toMin(end) && toMin(start) < toMin(e));
     if (taken) reasons.push('hour taken');
-    claims.push([`${move.tech}|${move.to}`, [start, end]]);
+    claims.push([move.to, [start, end]]);
   }
   const held = [...new Set(reasons)];
   if (!held.length) for (const [key, span] of claims) reserved.set(key, [...(reserved.get(key) || []), span]);
@@ -249,8 +240,7 @@ async function moveVisitToRound(conn, deps, row) {
   };
   const v = await unchanged(conn);
   const end = windowEnd(v);
-  const clash = await readOverlaps(conn, { id: row.id, tech: v.tech, date: row.to, start: v.ws, end });
-  if (clash.length) throw new Error(`visit ${row.id}: ${row.to} ${v.ws}-${end} is taken`);
+  // A taken hour is refused by the rebooker's own commit check (SLOT_TAKEN), under its date lock; nothing is written.
   const result = await deps.rebooker.reschedule(row.id, row.to, { start: v.ws, end }, MOVE_REASON, 'admin', {
     seriesPolicy: 'single',
     visitPolicy: 'single',
