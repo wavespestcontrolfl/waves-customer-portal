@@ -1180,38 +1180,55 @@ router.get('/queue', async (_req, res, next) => {
   } catch (err) { return next(err); }
 });
 
-router.get('/overview', async (_req, res) => {
-  const [loaded, leadConversion] = await Promise.all([
-    loadOverviewSources(),
-    loadLeadConversionDetails(),
-  ]);
+const OVERVIEW_FEED_LIMIT = 80;
 
-  const sources = loaded.map((item) => item.source);
-  const generatedTasks = sortTasks(loaded.flatMap((item) => item.tasks)).slice(0, 120);
-  const stateApplied = await applyTaskStates(generatedTasks);
-  const tasks = sortTasks(stateApplied.tasks).slice(0, 80);
+router.get('/overview', async (_req, res, next) => {
+  try {
+    // Lead details are optional enrichment: a failed read degrades that panel
+    // only, never the whole Overview.
+    const [loaded, leadConversion] = await Promise.all([
+      loadOverviewSources(),
+      loadLeadConversionDetails().catch((err) => {
+        logger.warn(`[admin-agents] lead conversion details failed: ${err.message}`);
+        return { unavailable: true, metrics: {} };
+      }),
+    ]);
 
-  const agents = buildAgents(tasks, sources);
-  res.json({
-    generatedAt: new Date().toISOString(),
-    summary: {
-      agents: agents.length,
-      activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
-      blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
-      // 'info' items are activity, not workload — excluded from open/approval
-      // counts (they still render in the task feed itself).
-      openTasks: tasks.filter((item) => item.status !== 'info').length,
-      hiddenTasks: stateApplied.hiddenCount,
-      needsApproval: tasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
-      highPriority: tasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
-    },
-    agents,
-    tasks,
-    sources,
-    agentDetails: {
-      lead_conversion: leadConversion,
-    },
-  });
+    const sources = loaded.map((item) => item.source);
+    // Every source loader is bounded on its own, so this list is "what the
+    // sources loaded". KPIs and agent statuses use all of it; only the feed
+    // below is cut to the top OVERVIEW_FEED_LIMIT.
+    const stateApplied = await applyTaskStates(sortTasks(loaded.flatMap((item) => item.tasks)));
+    const allTasks = sortTasks(stateApplied.tasks);
+    const tasks = allTasks.slice(0, OVERVIEW_FEED_LIMIT);
+
+    const agents = buildAgents(allTasks, sources);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      summary: {
+        agents: agents.length,
+        activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
+        blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
+        // 'info' items are activity, not workload — excluded from open/approval
+        // counts (they still render in the task feed itself).
+        openTasks: allTasks.filter((item) => item.status !== 'info').length,
+        hiddenTasks: stateApplied.hiddenCount,
+        needsApproval: allTasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
+        highPriority: allTasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
+        shownTasks: tasks.length,
+        totalTasks: allTasks.length,
+        truncated: allTasks.length > tasks.length,
+      },
+      agents,
+      tasks,
+      sources,
+      agentDetails: {
+        lead_conversion: leadConversion,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post('/tasks/:taskId/state', async (req, res, next) => {

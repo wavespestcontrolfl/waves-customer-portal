@@ -167,3 +167,37 @@ it("clears foreground loading when a newer background overview read wins", async
   await act(async () => resolveRetry(payload("Stale retry")));
   expect(screen.queryByText("Stale retry")).not.toBeInTheDocument();
 });
+
+it("shows a plain unavailable state instead of zeros when lead details failed", async () => {
+  adminFetch.mockResolvedValue({
+    ...payload("Fixture task"),
+    agentDetails: { lead_conversion: { unavailable: true, metrics: {} } },
+  });
+
+  render(<MemoryRouter><AgentOpsPage embedded /></MemoryRouter>);
+  await screen.findByText("Fixture task");
+
+  expect(screen.getByText("Lead details unavailable")).toBeInTheDocument();
+  expect(screen.queryByText("Booked 30d")).not.toBeInTheDocument();
+});
+
+it("tells the operator when the task feed is a window of a larger total", async () => {
+  adminFetch.mockResolvedValue({
+    ...payload("Fixture task"),
+    summary: { shownTasks: 80, totalTasks: 131, truncated: true },
+  });
+
+  render(<MemoryRouter><AgentOpsPage embedded /></MemoryRouter>);
+  expect(await screen.findByText("Showing 80 of 131 tasks")).toBeInTheDocument();
+});
+
+it("shows no window note when the feed holds every task", async () => {
+  adminFetch.mockResolvedValue({
+    ...payload("Fixture task"),
+    summary: { shownTasks: 1, totalTasks: 1, truncated: false },
+  });
+
+  render(<MemoryRouter><AgentOpsPage embedded /></MemoryRouter>);
+  await screen.findByText("Fixture task");
+  expect(screen.queryByText(/^Showing \d+ of/)).not.toBeInTheDocument();
+});

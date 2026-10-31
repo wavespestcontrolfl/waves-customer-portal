@@ -297,6 +297,9 @@ function LeadConversionPanel({ details }) {
         <CalendarClock size={16} color={D.heading} />
         <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Lead Conversion</div>
       </div>
+      {details?.unavailable ? (
+        <div style={{ padding: 18, color: D.muted, fontSize: 14 }}>Lead details unavailable</div>
+      ) : (<>
       <div className="lead-agent-metrics" style={{ padding: 12 }}>
         <MetricCell label="New" value={metrics.newLeads} tone={metrics.newLeads ? D.red : D.heading} />
         <MetricCell label="Unanswered" value={metrics.unanswered} tone={metrics.unanswered ? D.red : D.heading} />
@@ -309,7 +312,18 @@ function LeadConversionPanel({ details }) {
         <div><strong style={{ color: D.heading }}>{valueLabel(metrics.staleSpeedToLead)}</strong> leads are beyond the 15-minute speed-to-lead target.</div>
         <div><strong style={{ color: D.heading }}>{valueLabel(metrics.draftsQueued7d)}</strong> lead-agent drafts queued in the last 7 days.</div>
       </div>
+      </>)}
     </section>
+  );
+}
+
+function FeedWindowNote({ data }) {
+  const summary = data?.summary;
+  if (!summary?.truncated) return null;
+  return (
+    <div style={{ padding: "10px 16px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 14 }}>
+      {`Showing ${numberLabel(summary.shownTasks)} of ${numberLabel(summary.totalTasks)} tasks`}
+    </div>
   );
 }
 
@@ -479,6 +493,7 @@ export default function AgentOpsPage({ embedded = false } = {}) {
                 </button>
               )}
             </div>
+            <FeedWindowNote data={data} />
             {loading && !data ? (
               <div style={{ padding: 18, color: D.muted, fontSize: 13 }}>Loading tasks...</div>
             ) : tasks.length ? (
