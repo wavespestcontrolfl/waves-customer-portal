@@ -25,6 +25,7 @@ const {
   drawFieldSectionHeading,
 } = require('./field-pdf');
 const {
+  WAVES_ADDRESS_LINE,
   WAVES_WEBSITE_HOST,
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
@@ -42,12 +43,6 @@ const PAGE_W = 612;
 const L = 40;
 const W = PAGE_W - 80;
 const CONTENT_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
-
-// Guides are GLOBAL customer documents, so they carry the headquarters
-// contact (Town Center Pkwy + main line) per the 2026-07-11 publishing rule;
-// the Luxe Ave WAVES_ADDRESS_LINE stays on formal/corporate documents
-// (invoices, notices) and Bradenton-specific surfaces.
-const GUIDE_ADDRESS_LINE = '9040 Town Center Pkwy, Lakewood Ranch, FL 34202';
 
 // App screenshots (same PNG assets the app-intro email uses) — optional,
 // cached; the guide renders fine without them.
@@ -121,7 +116,7 @@ function footer(doc) {
   // estimate-pdf.js footerBar).
   drawFieldFooter(doc, {
     tagline: 'Service details and preparation',
-    detail: `${GUIDE_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
+    detail: `${WAVES_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
   });
 }
 
@@ -140,7 +135,7 @@ function headerBar(doc, title) {
   drawFieldMasthead(doc, {
     title,
     eyebrow: 'Service guide',
-    addressLine: GUIDE_ADDRESS_LINE,
+    addressLine: WAVES_ADDRESS_LINE,
   });
   doc.y = Math.max(152, doc.y);
 }
