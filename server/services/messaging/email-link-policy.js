@@ -28,6 +28,15 @@ const APP_LINK_PATH_PREFIXES = Object.freeze([
   '/inspection', '/price-change',
 ]);
 
+// Customer-reachable pages that open in the browser on purpose. Android's
+// allowlist leaves them out and the iOS association file excludes them
+// (routes/well-known.js).
+const BROWSER_ONLY_PATH_ROOTS = Object.freeze([
+  '/card', // a tech's business card for prospects: Save contact downloads a vCard
+  '/careers', // job applicants, not customers
+  '/newsletter', // public newsletter pages
+]);
+
 // /quote, bare /estimate and the /estimate/<service> pages redirect to the
 // marketing site, so the app would only bounce them to the browser.
 function isAppLinkPath(pathname) {
@@ -63,4 +72,4 @@ function untrackAppLinks(html) {
   });
 }
 
-module.exports = { APP_LINK_PATH_PREFIXES, untrackAppLinks };
+module.exports = { APP_LINK_PATH_PREFIXES, BROWSER_ONLY_PATH_ROOTS, untrackAppLinks };
