@@ -376,6 +376,40 @@ jest.mock('../services/customer-credit', () => ({
     expect(postCreditMovement).toHaveBeenCalledTimes(2);
   });
 
+  test('a referral saved with a domestic phone earns on the first plan visit once; its same-phone sibling is retired', async () => {
+    const engine = require('../services/referral-engine');
+    const referrer = await customer({ first_name: 'Jane', last_name: 'Smith' });
+    const otherReferrer = await customer({ first_name: 'Lee', last_name: 'Park' });
+    const friend = await customer({ phone: '+19415550123', waveguard_tier: 'Silver', monthly_rate: 119.1 });
+    const promoterFor = async (who, code) => (await db('referral_promoters').insert({
+      customer_phone: who.phone, first_name: who.first_name, last_name: who.last_name, customer_id: who.id,
+      referral_code: code, pending_earnings_cents: 2500, total_earned_cents: 2500,
+    }).returning('*'))[0];
+    const staged = async (who, promoter, phone, createdAt) => (await db('referrals').insert({
+      referrer_customer_id: who.id, referee_name: 'Sam Friend', referee_phone: phone, referral_code: promoter.referral_code,
+      status: 'signed_up', referrer_reward_status: 'pending_service', referrer_reward_amount: 25,
+      promoter_id: promoter.id, created_at: createdAt,
+    }).returning('*'))[0];
+    const first = await staged(referrer, await promoterFor(referrer, 'WAVES-JANE'), '(941) 555-0123', new Date('2026-10-27T12:00:00Z'));
+    const sibling = await staged(otherReferrer, await promoterFor(otherReferrer, 'WAVES-LEE'), '941-555-0123', new Date('2026-10-28T12:00:00Z'));
+    const visit = await recurringVisit(friend.id, 'completed', '2026-10-29');
+
+    const result = await engine.creditReferralOnFirstService({ customerId: friend.id, serviceId: visit.id });
+    expect(result).toEqual({ referralId: first.id, referrerDollars: 25, refereeDollars: 25 });
+    expect(postCreditMovement.mock.calls.map(([m]) => [m.customerId, m.delta])).toEqual([[friend.id, 25], [referrer.id, 25]]);
+    expect(await db('referrals').where({ id: first.id }).first())
+      .toMatchObject({ status: 'credited', referrer_reward_status: 'earned', first_service_completed: true });
+    expect(await db('referrals').where({ id: sibling.id }).first())
+      .toMatchObject({ status: 'signed_up', referrer_reward_status: 'superseded', first_service_completed: true });
+    expect(await db('referral_promoters').where({ customer_id: otherReferrer.id }).first())
+      .toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 0 });
+
+    // A later plan visit pays nothing more.
+    const next = await recurringVisit(friend.id, 'completed', '2026-11-12');
+    expect(await engine.creditReferralOnFirstService({ customerId: friend.id, serviceId: next.id })).toBeNull();
+    expect(postCreditMovement).toHaveBeenCalledTimes(2);
+  });
+
   test('one answer per customer: a second confirm or a later dismissal is refused', async () => {
     const referrer = await customer({ referral_code: 'WAVES-JANE' });
     const friend = await linkCustomer('WAVES-JANE');

@@ -697,9 +697,12 @@ export default function ReferralsPageV2() {
   const [enrollModal, setEnrollModal] = useState(false);
   const [settingsEditing, setSettingsEditing] = useState(null);
 
-  // Customer search for enroll/convert
+  // Customer search for enroll/convert. custReq numbers each lookup so a
+  // reply for an older query, or one landing after a pick, a clear or a
+  // close, is dropped.
   const [custSearch, setCustSearch] = useState("");
   const [custResults, setCustResults] = useState([]);
+  const custReq = useRef(0);
 
   // Dialog + payout request state. A request in flight disables its control;
   // a failure stays inside the dialog (or beside the payout) with the draft kept.
@@ -716,6 +719,7 @@ export default function ReferralsPageV2() {
 
   const closeConvert = () => {
     if (inFlight.current.has("convert")) return;
+    custReq.current += 1;
     setConvertModal(null);
     setConvertError("");
     setCustSearch("");
@@ -723,6 +727,7 @@ export default function ReferralsPageV2() {
   };
   const closeEnroll = () => {
     if (inFlight.current.has("enroll")) return;
+    custReq.current += 1;
     setEnrollModal(false);
     setEnrollError("");
     setCustSearch("");
@@ -841,8 +846,12 @@ export default function ReferralsPageV2() {
     if (tab === "analytics" && !analytics) loadAnalytics();
   }, [tab]);
 
+  // Editing the text also drops the convert dialog's picked customer, so the
+  // field can never show one name while Convert sends another customer's id.
   const searchCustomers = async (q) => {
+    const req = ++custReq.current;
     setCustSearch(q);
+    setConvertModal((m) => (m?.customerId ? { ...m, customerId: "" } : m));
     if (q.length < 2) {
       setCustResults([]);
       return;
@@ -851,8 +860,10 @@ export default function ReferralsPageV2() {
       const r = await af(
         `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
       );
+      if (req !== custReq.current) return;
       setCustResults(r.customers || []);
     } catch {
+      if (req !== custReq.current) return;
       setCustResults([]);
     }
   };
@@ -904,6 +915,14 @@ export default function ReferralsPageV2() {
 
   const handleConvert = async () => {
     if (!convertModal || inFlight.current.has("convert")) return;
+    // Text in the search field means a customer link was intended; it is
+    // linked only by picking a result.
+    if (custSearch.trim() && !convertModal.customerId) {
+      setConvertError(
+        "Pick the customer from the search results, or clear the search to convert without one.",
+      );
+      return;
+    }
     inFlight.current.add("convert");
     setConvertPending(true);
     setConvertError("");
@@ -2358,9 +2377,11 @@ export default function ReferralsPageV2() {
                         type="button"
                         key={c.id}
                         onClick={() => {
+                          custReq.current += 1;
                           setConvertModal((m) => ({ ...m, customerId: c.id }));
                           setCustSearch(customerDisplayName(c));
                           setCustResults([]);
+                          setConvertError("");
                           // The pressed result unmounts; keep focus in the form.
                           tierSelectRef.current?.focus();
                         }}

@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const mockState = { credits: [], messages: {}, promoters: {}, ledgerCalls: [] };
+const mockState = { credits: [], immediate: [], messages: {}, promoters: {}, ledgerCalls: [], referralCalls: [] };
 function mockBuilder(table) {
   const calls = [];
   const builder = new Proxy({}, {
@@ -16,6 +16,9 @@ function mockBuilder(table) {
       if (prop === 'then') return undefined;
       if (prop === 'select' && table === 'customer_credit_ledger as l') {
         return (...args) => { calls.push(['select', args]); mockState.ledgerCalls = calls; return Promise.resolve(mockState.credits); };
+      }
+      if (prop === 'select' && table === 'referrals') {
+        return (...args) => { calls.push(['select', args]); mockState.referralCalls = calls; return Promise.resolve(mockState.immediate); };
       }
       if (prop === 'first') {
         return async () => {
@@ -59,6 +62,7 @@ const credit = (over = {}) => ({
 beforeEach(() => {
   mockSendTemplate.mockClear();
   mockState.credits = [];
+  mockState.immediate = [];
   mockState.messages = {};
   mockState.promoters = { 'pro-1': { id: 'pro-1', first_name: 'Lea', customer_email: 'lea@example.com' } };
   mockState.ledgerCalls = [];
@@ -81,7 +85,7 @@ describe('sendDueReferralRewardEmails', () => {
   test('a credit from yesterday afternoon sends one email at 9:00 AM: the referrer, account-credit wording, keyed by referral', async () => {
     mockState.credits = [credit()];
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
-    expect(out).toEqual({ credits: 1, attempted: 1 });
+    expect(out).toEqual({ credits: 1, immediate: 0, attempted: 1 });
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
     const sent = mockSendTemplate.mock.calls[0][0];
     expect(sent).toMatchObject({
@@ -97,7 +101,7 @@ describe('sendDueReferralRewardEmails', () => {
   test('before its 9:00 AM a credit waits: posted 10:00 AM, checked 10:15 AM the same day', async () => {
     mockState.credits = [credit({ credited_at: '2026-11-05T15:00:00.000Z' })];
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T15:15:00.000Z') });
-    expect(out).toEqual({ credits: 1, attempted: 0 });
+    expect(out).toEqual({ credits: 1, immediate: 0, attempted: 0 });
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
@@ -108,7 +112,7 @@ describe('sendDueReferralRewardEmails', () => {
       'referral.reward_earned:ref-failed': { status: 'failed' },
     };
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:15:00.000Z') });
-    expect(out).toEqual({ credits: 2, attempted: 1 });
+    expect(out).toEqual({ credits: 2, immediate: 0, attempted: 1 });
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
     expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('referral.reward_earned:ref-failed');
   });
@@ -116,7 +120,7 @@ describe('sendDueReferralRewardEmails', () => {
   test('no promoter row: nothing to send', async () => {
     mockState.credits = [credit({ promoter_id: 'pro-gone' })];
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
-    expect(out).toEqual({ credits: 1, attempted: 0 });
+    expect(out).toEqual({ credits: 1, immediate: 0, attempted: 0 });
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
@@ -132,6 +136,45 @@ describe('sendDueReferralRewardEmails', () => {
     expect(has('where', 'r.status', 'credited')).toBe(true);
     const since = calls.find(([m, a]) => m === 'where' && a[0] === 'l.created_at');
     expect(since[1][1]).toBe('>=');
+    expect(since[1][2].toISOString()).toBe('2026-10-29T14:00:00.000Z');
+  });
+});
+
+describe('a reward paid at once (require_service_completion off) whose conversion email never went out', () => {
+  const converted = (over = {}) => ({
+    id: 'ref-now', promoter_id: 'pro-1', referee_name: 'Ames Fielder', status: 'signed_up',
+    referrer_reward_status: 'earned', first_service_completed: false, referrer_reward_amount: '25.00',
+    converted_at: '2026-11-04T19:15:00.000Z', ...over,
+  });
+
+  test('is emailed once at the next 9:00 AM with referral-balance wording; no money moves', async () => {
+    const { postCreditMovement } = require('../services/customer-credit');
+    mockState.immediate = [converted()];
+    const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    expect(out).toEqual({ credits: 0, immediate: 1, attempted: 1 });
+    const sent = mockSendTemplate.mock.calls[0][0];
+    expect(sent).toMatchObject({ to: 'lea@example.com', idempotencyKey: 'referral.reward_earned:ref-now' });
+    expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your referral balance.');
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('is not sent again when the conversion email already went out', async () => {
+    mockState.immediate = [converted()];
+    mockState.messages = { 'referral.reward_earned:ref-now': { status: 'delivered' } };
+    const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    expect(out).toEqual({ credits: 0, immediate: 1, attempted: 0 });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('reads only converted, paid-at-once referrals with a promoter from the last 7 days', async () => {
+    await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    const calls = mockState.referralCalls;
+    const has = (method, ...args) => calls.some(([m, a]) => m === method && JSON.stringify(a) === JSON.stringify(args));
+    expect(has('where', 'status', 'signed_up')).toBe(true);
+    expect(has('where', 'referrer_reward_status', 'earned')).toBe(true);
+    expect(has('where', 'first_service_completed', false)).toBe(true);
+    expect(has('whereNotNull', 'promoter_id')).toBe(true);
+    const since = calls.find(([m, a]) => m === 'where' && a[0] === 'converted_at');
     expect(since[1][2].toISOString()).toBe('2026-10-29T14:00:00.000Z');
   });
 });
