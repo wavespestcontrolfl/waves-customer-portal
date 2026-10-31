@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 
 // Schedule changes on the Today page (owner ruling 2026-10-03). A change that
 // touches today or tomorrow keeps its own card; every other one folds into a
@@ -208,12 +209,10 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     }
   }, []);
 
-  useEffect(() => {
-    load();
-    const id = setInterval(load, POLL_MS);
-    window.addEventListener('focus', load);
-    return () => { clearInterval(id); window.removeEventListener('focus', load); };
-  }, [load]);
+  // One read on mount; then the shared hook reads every POLL_MS while the page
+  // is visible, and again on focus or resume. A hidden tab makes no reads.
+  useEffect(() => { load(); }, [load]);
+  useVisiblePageRefresh(load, { intervalMs: POLL_MS });
   useEffect(() => () => onReady?.(false), [onReady]);
 
   const soon = changes.filter((c) => c.soon);

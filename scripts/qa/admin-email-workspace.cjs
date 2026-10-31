@@ -92,6 +92,8 @@ async function main() {
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/blocked-numbers') body = { blocked: [] };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
+      // The Communications page asks whether the Portal tab is on (GATE_PORTAL_INBOX, off here).
+      else if (api === '/admin/portal-inbox/summary') body = { enabled: false };
       // The SMS composer's mic asks whether server dictation is on (GATE_SERVER_DICTATION, off here).
       else if (api === '/tech/dictation/availability') body = { available: false };
       else { report.unmatched.push(record); body = { error: 'Unmatched synthetic request' }; status = 500; }

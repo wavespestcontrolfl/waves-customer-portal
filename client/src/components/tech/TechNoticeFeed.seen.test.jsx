@@ -353,4 +353,24 @@ describe('notices stay until seen', () => {
     await advance(100);
     expect(screen.queryByTestId('notice-stack')).not.toBeInTheDocument();
   });
+
+  // Today audit TODAY-03: a hidden tab or a phone in a pocket kept reading the
+  // feed every 10 s.
+  it('makes no feed reads while the page is hidden, and reads at once when it is shown again', async () => {
+    const calls = stubFeed([]);
+    const reads = () => calls.filter((c) => c.method === 'GET').length;
+    mount();
+    await advance(0);
+    expect(reads()).toBe(1);
+    await advance(10_000);
+    expect(reads()).toBe(2);
+    setDocumentVisibility('hidden');
+    await advance(MIN);
+    expect(reads()).toBe(2);
+    setDocumentVisibility('visible');
+    await advance(0);
+    expect(reads()).toBe(3);
+    await advance(10_000);
+    expect(reads()).toBe(4);
+  });
 });

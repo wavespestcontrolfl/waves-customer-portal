@@ -72,6 +72,7 @@ import {
   Link2,
   Mail,
   MessageSquare,
+  MessagesSquare,
   Ban,
   Mic,
   MicOff,
@@ -86,6 +87,7 @@ import EmailPage from "./EmailPage";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
+import PortalInboxTabV2 from "./PortalInboxTabV2";
 import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
@@ -291,6 +293,10 @@ const TABS = [
     adminOnly: true,
   },
 ];
+// Portal (GATE_PORTAL_INBOX): what customers asked for inside the customer
+// portal and nobody answered. Owner-only; added to the nav only when the
+// summary endpoint answers enabled:true, right after Triage.
+const PORTAL_TAB = { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true };
 const SMS_LOG_PAGE_SIZE = 500;
 
 // Short reviewer-facing labels for an Agent Review draft's intended_actions
@@ -4187,9 +4193,34 @@ export default function CommunicationsPageV2() {
   // Memoized by role: the hash-sync effect below depends on `tabs`, and a
   // fresh array every render would re-run applyHashTab() after each tab
   // click, snapping the user back to the deep-linked tab (codex P2).
-  const tabs = useMemo(
-    () => TABS.filter((t) => !t.adminOnly || isAdminRole),
-    [isAdminRole],
+  // portalCount: null until the one-time summary read answers; stays null
+  // (no Portal tab) when the gate is off, the read fails or the role is not admin.
+  const [portalCount, setPortalCount] = useState(null);
+  const portalOn = portalCount !== null;
+  useEffect(() => {
+    if (!isAdminRole) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const summary = await adminFetch("/admin/portal-inbox/summary");
+        if (!cancelled && summary?.enabled === true) setPortalCount(Number(summary.count) || 0);
+      } catch {
+        /* no Portal tab when the summary cannot be read */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isAdminRole]);
+  const tabs = useMemo(() => {
+    const visible = TABS.filter((t) => !t.adminOnly || isAdminRole);
+    if (!isAdminRole || !portalOn) return visible;
+    const at = visible.findIndex((t) => t.key === "triage") + 1;
+    return [...visible.slice(0, at), PORTAL_TAB, ...visible.slice(at)];
+  }, [isAdminRole, portalOn]);
+  // The count rides in the label (the nav has no badge slot); label changes do
+  // not change `tabs`, so the hash-sync effect below never re-runs for them.
+  const navSections = useMemo(
+    () => tabs.map((t) => (t.key === "portal" && portalCount > 0 ? { ...t, label: `Portal (${portalCount})` } : t)),
+    [tabs, portalCount],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   const smsParams = new URLSearchParams(location.search);
@@ -4247,7 +4278,7 @@ export default function CommunicationsPageV2() {
   useRenderedTabBeacon("/admin/communications", usageLeafFor(activeTab, templateKind));
 
   const navigation = {
-    title: "Communications", icon: MessageSquare, sections: tabs,
+    title: "Communications", icon: MessageSquare, sections: navSections,
     activeKey: activeTab, onSectionChange: selectTab,
     ariaLabel: "Communications section", navGridClassName: "grid-cols-2 md:grid-cols-7",
   };
@@ -4270,6 +4301,7 @@ export default function CommunicationsPageV2() {
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
+      {activeTab === "portal" && <PortalInboxTabV2 onCount={setPortalCount} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>
