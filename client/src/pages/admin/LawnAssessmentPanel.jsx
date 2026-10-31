@@ -16,6 +16,7 @@ import {
 } from "../../components/ui";
 import lawnScores from "@lawn-scores";
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
+import { formatETDateOnly } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -149,13 +150,25 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     () => !localStorage.getItem("lawn_guide_seen"),
   );
   const fileRef = useRef(null);
+  // Every step change takes a new view number. A history, profile or analysis
+  // response for an earlier view (another customer, or a view the operator
+  // left) is dropped, so A's data never shows, or saves, under B's name.
+  const viewSeq = useRef(0);
+  const startView = () => ++viewSeq.current;
+  // loading | ready | failed: a failed read is never "nothing scheduled".
+  const [customersState, setCustomersState] = useState("loading");
+  const [customersAttempt, setCustomersAttempt] = useState(0);
 
   // Load customers
   useEffect(() => {
+    setCustomersState("loading");
     adminFetch("/admin/lawn-assessment/customers")
-      .then((d) => setCustomers(d.customers || []))
-      .catch(() => {});
-  }, []);
+      .then((d) => {
+        setCustomers(d.customers || []);
+        setCustomersState("ready");
+      })
+      .catch(() => setCustomersState("failed"));
+  }, [customersAttempt]);
 
   // Server-side search when local results are empty
   useEffect(() => {
@@ -208,6 +221,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
 
   const handleAnalyze = async () => {
     if (!selectedCustomer || photos.length === 0) return;
+    const seq = startView();
     setAnalyzing(true);
     setStep("analyzing");
     try {
@@ -225,6 +239,13 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           photos: photoData,
         }),
       });
+      if (seq !== viewSeq.current) return;
+      // HTTP 200 with success:false (every photo failed the quality check, or
+      // the AI read failed) stores no assessment: stay on capture with the
+      // server's retake message instead of an empty, unconfirmable scorecard.
+      if (r.success === false || !r.assessment?.id) {
+        throw new Error(r.message || "no assessment was returned");
+      }
       setResult(r);
       setVisitReview(createVisitReview(r.visitAssessment, r.assessment?.observations !== undefined ? r.assessment.observations : r.observations));
       // Pre-fill grass type from the AI read when the turf profile has none yet,
@@ -246,10 +267,12 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       });
       setStep("review");
     } catch (e) {
+      if (seq !== viewSeq.current) return;
       alert("Analysis failed: " + e.message);
       setStep("capture");
+    } finally {
+      setAnalyzing(false);
     }
-    setAnalyzing(false);
   };
 
   const handleConfirm = async () => {
@@ -311,6 +334,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   };
 
   const finishAssessment = () => {
+    startView();
     setStep("select");
     setPhotos([]);
     setResult(null);
@@ -338,21 +362,26 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   };
 
   const loadHistory = async (customerId) => {
+    const seq = startView();
     try {
       const d = await adminFetch(
         `/admin/lawn-assessment/history/${customerId}`,
       );
+      if (seq !== viewSeq.current) return;
       setHistory(d.history || d.assessments || []);
       setStep("history");
-    } catch {
-      setHistory([]);
+    } catch (e) {
+      if (seq !== viewSeq.current) return;
+      alert("Failed to load history: " + e.message);
     }
   };
 
   const loadTurfProfile = async (customerId) => {
+    const seq = startView();
     setProfileLoading(true);
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/turf-profile`);
+      if (seq !== viewSeq.current) return;
       profileHomeStampRef.current = d.irrigation_home_changed_at ?? null;
       setBermudaRemovalAvailable(d.bermudaRemovalAvailable === true);
       setOtherGrassOptions(d.lawnLimitsAvailable === true && Array.isArray(d.otherGrassOptions) ? d.otherGrassOptions : null);
@@ -376,9 +405,10 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       setGrassTouched(false);
       setStep("profile");
     } catch (e) {
+      if (seq !== viewSeq.current) return;
       alert("Failed to load turf profile: " + e.message);
     } finally {
-      setProfileLoading(false);
+      if (seq === viewSeq.current) setProfileLoading(false);
     }
   };
 
@@ -450,6 +480,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     setTurfProfile((prev) => ({ ...prev, [key]: value }));
 
   const backToSelect = () => {
+    startView();
     setStep("select");
     setPhotos([]);
     setResult(null);
@@ -544,6 +575,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 key={c.serviceId || c.id}
                 className="flex cursor-pointer flex-col justify-between gap-3 p-4 sm:flex-row sm:items-center"
                 onClick={() => {
+                  startView();
                   setSelectedCustomer(c);
                   setStep("capture");
                 }}
@@ -595,7 +627,21 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 </div>{" "}
               </Card>
             ))}
-            {filteredCustomers.length === 0 && (
+            {customersState === "failed" && (
+              <ActionFeedback
+                error
+                onRetry={() => setCustomersAttempt((n) => n + 1)}
+                className="justify-center p-8 text-center"
+              >
+                Couldn&apos;t load today&apos;s lawn customers.
+              </ActionFeedback>
+            )}
+            {customersState === "loading" && filteredCustomers.length === 0 && (
+              <ActionFeedback className="justify-center p-8 text-center">
+                Loading today&apos;s lawn customers…
+              </ActionFeedback>
+            )}
+            {customersState === "ready" && filteredCustomers.length === 0 && (
               <ActionFeedback className="justify-center p-8 text-center">
                 No lawn services scheduled today (or all assessed)
               </ActionFeedback>
@@ -929,10 +975,13 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   <div className="flex flex-wrap items-center gap-2">
                     {" "}
                     <span className="text-ui-body font-medium text-zinc-900">
-                      {new Date(a.service_date).toLocaleDateString()}
+                      {/* A DATE column arrives as UTC midnight; read it as
+                          its calendar day, not an instant (10/30 showed 10/29). */}
+                      {formatETDateOnly(a.service_date, { month: "numeric", day: "numeric", year: "numeric" })}
                     </span>{" "}
                     <Badge tone="neutral">{a.season}</Badge>
                     {a.is_baseline && <Badge tone="warn">Baseline</Badge>}
+                    {!a.confirmed_by_tech && <Badge tone="neutral">Not confirmed</Badge>}
                   </div>{" "}
                 </div>{" "}
                 <div className="grid grid-cols-5 gap-1 md:gap-3">
@@ -942,20 +991,32 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     ["Color", a.color_health],
                     ["Fungus", a.fungus_control],
                     ["Thatch", a.thatch_level],
-                  ].map(([label, val]) => (
+                  ].map(([label, raw]) => {
+                    // A metric nobody scored is "—", never a red 0%.
+                    const val = lawnScores.lawnScoreValue(raw);
+                    return (
                     <div key={label} className="min-w-0 text-center">
                       {" "}
                       <div
-                        style={{ color: scoreColor(val || 0) }}
-                        className="u-nums text-ui-body font-medium md:text-16"
+                        style={val == null ? undefined : { color: scoreColor(val) }}
+                        className={cn(
+                          "u-nums text-ui-body font-medium md:text-16",
+                          val == null && "text-ink-secondary",
+                        )}
                       >
-                        {val || 0}%
+                        {val == null ? (
+                          <>
+                            <span aria-hidden="true">—</span>
+                            <span className="sr-only">Not scored</span>
+                          </>
+                        ) : `${val}%`}
                       </div>{" "}
                       <div className="truncate text-ui-caption text-ink-secondary">
                         {label}
                       </div>{" "}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 {a.observations && (
                   <div className="mt-2 text-ui-caption text-ink-secondary">
