@@ -27,11 +27,26 @@
  * (PDF downloads, webhooks) should never be claimed by an app.  Android App
  * Links have no exclude syntax — the shell's existing staff-redirect handles
  * those paths there.
+ *
+ * The browser-only pages (/card, /careers, /newsletter: the pages Android's
+ * allowlist leaves out) and the pages that 301 to wavespestcontrol.com
+ * (/quote, bare /estimate, /estimate/<service>) are excluded too: claimed,
+ * they open the app only for it to hand the link to Safari, and
+ * /newsletter's in-page redirect leaves the app on a blank page.
  */
 const express = require('express');
 const { isEnabled } = require('../config/feature-gates');
+const { BROWSER_ONLY_PATH_ROOTS } = require('../services/messaging/email-link-policy');
+const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
 
 const router = express.Router();
+
+// Marketing paths are exact (with and without the trailing slash, as the
+// redirect accepts both), so /estimate/<token> customer estimates stay claimed.
+const BROWSER_PAGE_EXCLUDES = Object.freeze([
+  ...BROWSER_ONLY_PATH_ROOTS.flatMap((root) => [root, `${root}/*`]),
+  ...Object.keys(ESTIMATE_MARKETING_REDIRECTS).flatMap((path) => [path, `${path}/`]),
+].map((path) => Object.freeze({ '/': path, exclude: true, caseSensitive: false })));
 
 const SECURITY_CONTACT = 'mailto:contact@wavespestcontrol.com';
 const SECURITY_CANONICAL = 'https://portal.wavespestcontrol.com/.well-known/security.txt';
@@ -100,6 +115,7 @@ router.get('/apple-app-site-association', (req, res) => {
             // claiming them would strand the app's webview off-portal.
             { '/': '/r', exclude: true },
             { '/': '/r/*', exclude: true },
+            ...BROWSER_PAGE_EXCLUDES,
             { '/': '*' },
           ],
         },
