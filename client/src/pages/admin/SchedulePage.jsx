@@ -9253,14 +9253,27 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const [manualDate, setManualDate] = useState("");
   const [manualTime, setManualTime] = useState("08:00");
 
-  useEffect(() => {
-    adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
+  // A failed load must read as a failure, not as "no suggestions": the
+  // dialog shows Retry and points at the custom date picker.
+  const [optionsError, setOptionsError] = useState(false);
+  const loadOptions = useCallback(() => {
+    setLoading(true);
+    setOptionsError(false);
+    return adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
       .then((d) => {
         setOptions(d.options || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setOptions([]);
+        setOptionsError(true);
+        setLoading(false);
+      });
   }, [service.id]);
+
+  useEffect(() => {
+    loadOptions();
+  }, [loadOptions]);
 
   const notifyCustomer = notificationType === "sms";
 
@@ -9509,6 +9522,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasons={REASONS}
       loading={loading}
       options={options}
+      optionsError={optionsError}
+      onRetryOptions={loadOptions}
       windowFor={windowFor}
       handleReschedule={handleReschedule}
       showManual={showManual}

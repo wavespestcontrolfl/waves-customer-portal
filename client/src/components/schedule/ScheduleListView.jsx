@@ -561,7 +561,16 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                       className="w-4 h-4" style={{ accentColor: '#18181B' }} />
                   </td>
                   <td className={cn(tdClass, 'font-medium text-zinc-900')}>
-                    {s.customerName || 'Unassigned'}
+                    {/* The row click is mouse-only; this button opens the
+                        appointment from the keyboard too. */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onEdit?.(s); }}
+                      aria-label={`Open appointment: ${s.customerName || 'Unassigned'}, ${fmtDate(s.scheduledDate)}`}
+                      className="text-left font-medium text-zinc-900 hover:underline u-focus-ring rounded-sm"
+                    >
+                      {s.customerName || 'Unassigned'}
+                    </button>
                     {s.tier && <Badge tone="neutral" className="ml-1.5">{s.tier}</Badge>}
                   </td>
                   <td className={tdClass}>{s.serviceType}</td>
