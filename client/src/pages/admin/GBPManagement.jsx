@@ -29,6 +29,11 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
+// Owner 2026-10-30 (audit RR-10/11/12, option A): the push to Google is
+// retired. It called Google's deprecated v4 locations API and would have
+// sent this page's stored snapshot, not the live listing.
+const GOOGLE_EDITS_NOTE =
+  "Edits here are saved in the portal only. To change the live listing, edit it in Google Business Profile.";
 const DAYS = [
   "monday",
   "tuesday",
@@ -90,7 +95,6 @@ export default function GBPManagement() {
   const updatesFilterRef = useRef(updatesFilter);
   updatesFilterRef.current = updatesFilter;
   const [syncing, setSyncing] = useState(false);
-  const [pushing, setPushing] = useState(false);
   const [toast, setToast] = useState("");
 
   // Load locations
@@ -202,18 +206,6 @@ export default function GBPManagement() {
     await loadLocations();
     await refreshUpdates();
     setSyncing(false);
-  };
-  const handlePush = async (locId) => {
-    setPushing(true);
-    try {
-      const d = await adminFetch(`/admin/gbp/locations/${locId}/push`, {
-        method: "POST",
-      });
-      showToast(`Pushed to Google: ${d.updatedFields?.join(", ")}`);
-    } catch (e) {
-      showToast(`Push failed: ${e.message}`);
-    }
-    setPushing(false);
   };
   const handleApprove = async (updateId) => {
     try {
@@ -412,9 +404,7 @@ export default function GBPManagement() {
               loc={loc}
               gbp={gbp}
               onSync={() => handleSync(loc.id)}
-              onPush={() => handlePush(loc.id)}
               syncing={syncing}
-              pushing={pushing}
             />
           )}
           {subTab === "info" && (
@@ -491,7 +481,7 @@ export default function GBPManagement() {
 // ══════════════════════════════════════════════════════════════
 // OVERVIEW TAB
 // ══════════════════════════════════════════════════════════════
-function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
+function OverviewTab({ loc, gbp, onSync, syncing }) {
   const info = gbp || {};
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)]">
@@ -618,19 +608,9 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
             >
               {syncing ? "Syncing from Google..." : "Sync from Google"}
             </Button>{" "}
-            <Button
-              onClick={onPush}
-              disabled={pushing || !loc.hasCredentials}
-              variant="primary"
-              className="w-full"
-            >
-              {pushing ? "Pushing..." : "Push to Google"}
-            </Button>
-            {!loc.hasCredentials && (
-              <div className="text-ui-body text-alert-fg text-center">
-                OAuth not configured — push disabled
-              </div>
-            )}
+            <div className="text-ui-body text-ink-secondary">
+              {GOOGLE_EDITS_NOTE}
+            </div>
             <a
               href={`https://business.google.com/dashboard/l/${loc.googlePlaceId}`}
               className={buttonStyles({
@@ -830,12 +810,9 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           <Button onClick={handleSave} disabled={saving} variant="primary">
             {saving ? "Saving..." : "Save Changes"}
           </Button>{" "}
-          <Button
-            onClick={() => showToast("Push to Google to apply changes")}
-            variant="secondary"
-          >
-            Push to Google
-          </Button>{" "}
+        </div>{" "}
+        <div className="text-ui-body text-ink-secondary mt-[8px]">
+          {GOOGLE_EDITS_NOTE}
         </div>{" "}
       </Card>{" "}
     </div>

@@ -354,129 +354,6 @@ router.put('/locations/:id', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /locations/:id/push — push stored state to Google via GBP API
-// =========================================================================
-router.post('/locations/:id/push', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const configLoc = WAVES_LOCATIONS.find(l => l.id === id);
-    if (!configLoc) return res.status(404).json({ error: 'Location not found' });
-    if (!configLoc.googleLocationResourceName) {
-      return res.status(400).json({ error: 'No GBP resource name configured for this location' });
-    }
-
-    const stored = await db('gbp_locations').where({ location_id: id }).first();
-    if (!stored) return res.status(404).json({ error: 'No stored profile data — sync first' });
-
-    const headers = await gbpService._getHeaders(id);
-    const resourceName = configLoc.googleLocationResourceName;
-
-    // Build GBP API update payload
-    const updateBody = {};
-    const updateMask = [];
-
-    if (stored.business_name) {
-      updateBody.title = stored.business_name;
-      updateMask.push('title');
-    }
-    if (stored.phone) {
-      updateBody.phoneNumbers = { primaryPhone: stored.phone };
-      if (stored.additional_phones) {
-        const addl = typeof stored.additional_phones === 'string'
-          ? JSON.parse(stored.additional_phones) : stored.additional_phones;
-        if (addl.length) updateBody.phoneNumbers.additionalPhones = addl;
-      }
-      updateMask.push('phoneNumbers');
-    }
-    if (stored.website_url) {
-      updateBody.websiteUri = stored.website_url;
-      updateMask.push('websiteUri');
-    }
-    if (stored.description) {
-      updateBody.profile = { description: stored.description };
-      updateMask.push('profile');
-    }
-    if (stored.regular_hours) {
-      const hours = typeof stored.regular_hours === 'string'
-        ? JSON.parse(stored.regular_hours) : stored.regular_hours;
-      const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-      const periods = [];
-      for (const [day, times] of Object.entries(hours)) {
-        if (!times || !times.open) continue;
-        const [openH, openM] = times.open.split(':').map(Number);
-        const [closeH, closeM] = (times.close || '17:00').split(':').map(Number);
-        periods.push({
-          openDay: day.toUpperCase(),
-          openTime: { hours: openH, minutes: openM },
-          closeDay: day.toUpperCase(),
-          closeTime: { hours: closeH, minutes: closeM },
-        });
-      }
-      updateBody.regularHours = { periods };
-      updateMask.push('regularHours');
-    }
-    if (stored.special_hours) {
-      const special = typeof stored.special_hours === 'string'
-        ? JSON.parse(stored.special_hours) : stored.special_hours;
-      if (special.length) {
-        updateBody.specialHours = {
-          specialHourPeriods: special.map(s => ({
-            startDate: { year: parseInt(s.date.split('-')[0]), month: parseInt(s.date.split('-')[1]), day: parseInt(s.date.split('-')[2]) },
-            openTime: s.closed ? undefined : { hours: parseInt((s.open || '08:00').split(':')[0]), minutes: parseInt((s.open || '08:00').split(':')[1]) },
-            closeTime: s.closed ? undefined : { hours: parseInt((s.close || '17:00').split(':')[0]), minutes: parseInt((s.close || '17:00').split(':')[1]) },
-            closed: !!s.closed,
-          })),
-        };
-        updateMask.push('specialHours');
-      }
-    }
-    if (stored.service_areas) {
-      const areas = typeof stored.service_areas === 'string'
-        ? JSON.parse(stored.service_areas) : stored.service_areas;
-      if (areas.length) {
-        updateBody.serviceArea = {
-          businessType: 'CUSTOMER_AND_BUSINESS_LOCATION',
-          places: { placeInfos: areas.map(a => ({ placeName: a.name || a, placeId: a.placeId })) },
-        };
-        updateMask.push('serviceArea');
-      }
-    }
-    if (stored.hide_address !== null && stored.hide_address !== undefined) {
-      updateBody.storefront_address = stored.hide_address ? undefined : { addressLines: [stored.address] };
-    }
-
-    if (updateMask.length === 0) {
-      return res.status(400).json({ error: 'No fields to push' });
-    }
-
-    const apiUrl = `https://mybusiness.googleapis.com/v4/${resourceName}?updateMask=${updateMask.join(',')}`;
-    const pushRes = await fetch(apiUrl, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify(updateBody),
-    });
-
-    if (!pushRes.ok) {
-      const errText = await pushRes.text();
-      logger.error(`[gbp-mgmt] Push failed for ${id}: ${pushRes.status} ${errText}`);
-      return res.status(502).json({ error: `GBP API error: ${pushRes.status}`, details: errText });
-    }
-
-    const result = await pushRes.json();
-
-    await db('gbp_locations').where({ location_id: id }).update({
-      last_synced_at: new Date(),
-      updated_at: new Date(),
-    });
-
-    logger.info(`[gbp-mgmt] Pushed updates to Google for ${id}: ${updateMask.join(', ')}`);
-    res.json({ success: true, updatedFields: updateMask, googleResponse: result });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
 // GET /updates — list pending/recent updates
 // =========================================================================
 router.get('/updates', async (req, res, next) => {
@@ -547,7 +424,7 @@ router.post('/updates/:id/approve', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /updates/:id/reject — reject update, push old value back to Google
+// POST /updates/:id/reject — reject update (local only: Google keeps its value)
 // =========================================================================
 router.post('/updates/:id/reject', async (req, res, next) => {
   try {

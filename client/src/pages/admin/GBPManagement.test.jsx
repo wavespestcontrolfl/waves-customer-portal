@@ -106,6 +106,17 @@ describe("Google profile workspace", () => {
     expect(screen.getByRole("button", { name: /Fixture Bradenton Saved/ })).toHaveClass("bg-zinc-900");
   }, 15000);
 
+  it("offers no push to Google; Overview and Profile say where to edit the live listing", async () => {
+    await open();
+    expect(screen.queryByRole("button", { name: /Push to Google/ })).toBeNull();
+    expect(screen.getByText(/To change the live listing, edit it in Google Business Profile/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Profile" }));
+    await screen.findByLabelText("Business Name");
+    expect(screen.queryByRole("button", { name: /Push to Google/ })).toBeNull();
+    expect(screen.getByText(/To change the live listing, edit it in Google Business Profile/)).toBeInTheDocument();
+    expect(calls.some((c) => c.path.endsWith("/push"))).toBe(false);
+  });
+
   it("removing the last special-hours date saves an empty list", async () => {
     routes["GET /admin/gbp/locations"] = () =>
       response({

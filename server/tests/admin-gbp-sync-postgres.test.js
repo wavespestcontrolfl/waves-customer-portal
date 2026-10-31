@@ -141,6 +141,11 @@ const googleProfile = (title) => ({
     expect(await pendingTitles()).toHaveLength(1);
   });
 
+  test('the retired push to Google is gone (owner 2026-10-30)', async () => {
+    const res = await fetch(`${base}/admin/gbp/locations/bradenton/push`, { method: 'POST' });
+    expect(res.status).toBe(404);
+  });
+
   test('a difference already decided is queued again by the next sync', async () => {
     await sync();
     await db('gbp_updates').where({ field_name: 'business_name' }).update({ status: 'approved' });
