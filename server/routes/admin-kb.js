@@ -1,10 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const KBService = require('../services/knowledge-base');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// A technician reads the knowledge base; every write, verify, flag and paid
+// job below is owner-only here too, not only behind GATE_STAFF_DEFAULT_DENY
+// (KnowledgeBasePage hides them from technicians; operations audit OP-13).
 
 // ═══════════════════════════════════════════
 // STATS
@@ -59,7 +62,7 @@ router.get('/:id', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // CREATE
 // ═══════════════════════════════════════════
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { title, content, category, tags, source, confidence, metadata } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
@@ -72,7 +75,7 @@ router.post('/', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // UPDATE
 // ═══════════════════════════════════════════
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const entry = await KBService.update(req.params.id, req.body);
     if (!entry) return res.status(404).json({ error: 'Not found' });
@@ -84,7 +87,7 @@ router.put('/:id', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // DELETE
 // ═══════════════════════════════════════════
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     await KBService.delete(req.params.id);
     res.json({ deleted: true });
@@ -94,7 +97,7 @@ router.delete('/:id', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // VERIFY (mark as reviewed / high-confidence)
 // ═══════════════════════════════════════════
-router.post('/:id/verify', async (req, res, next) => {
+router.post('/:id/verify', requireAdmin, async (req, res, next) => {
   try {
     const entry = await KBService.verify(req.params.id, req.body.verifiedBy || 'waves');
     res.json(entry);
@@ -104,7 +107,7 @@ router.post('/:id/verify', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // FLAG
 // ═══════════════════════════════════════════
-router.post('/:id/flag', async (req, res, next) => {
+router.post('/:id/flag', requireAdmin, async (req, res, next) => {
   try {
     const entry = await KBService.flag(req.params.id, req.body.reason);
     res.json(entry);
@@ -114,7 +117,7 @@ router.post('/:id/flag', async (req, res, next) => {
 // ═══════════════════════════════════════════
 // AI AUDIT — run manually or from cron
 // ═══════════════════════════════════════════
-router.post('/audit/run', async (req, res, next) => {
+router.post('/audit/run', requireAdmin, async (req, res, next) => {
   try {
     const { maxEntries, forceAll, flaggedOnly } = req.body;
     const result = await KBService.runAIAudit({ maxEntries: maxEntries || 10, forceAll: !!forceAll, flaggedOnly: !!flaggedOnly });
@@ -123,7 +126,7 @@ router.post('/audit/run', async (req, res, next) => {
 });
 
 // POST /auto-sync — trigger auto-sync from live data sources
-router.post('/auto-sync', async (req, res, next) => {
+router.post('/auto-sync', requireAdmin, async (req, res, next) => {
   try {
     const result = await KBService.autoSync();
     res.json(result);
@@ -140,7 +143,7 @@ router.get('/tokens/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/tokens/check', async (req, res, next) => {
+router.post('/tokens/check', requireAdmin, async (req, res, next) => {
   try {
     const result = await KBService.checkTokenHealth();
     res.json(result);

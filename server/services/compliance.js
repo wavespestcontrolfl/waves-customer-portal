@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
-const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
+const { etDateString, etParts, etCalendarDayOf, etCalendarDaysUntil } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
 const { capIdMap, withEntryCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
@@ -756,11 +756,12 @@ const ComplianceService = {
     const techs = await db('technicians')
       .whereNotNull('fl_applicator_license')
       .select('id', 'name', 'fl_applicator_license', 'license_expiry');
+    // Same ET calendar rule as the Licenses tab (routes/admin-compliance-v2.js):
+    // the expiry day itself is still valid, so it counts as expiring soon.
     const expiringLicenses = techs.filter(t => {
       if (!t.license_expiry) return false;
-      const exp = new Date(t.license_expiry);
-      const daysLeft = (exp - new Date()) / 86400000;
-      return daysLeft <= 90 && daysLeft > 0;
+      const daysLeft = etCalendarDaysUntil(t.license_expiry);
+      return daysLeft >= 0 && daysLeft <= 90;
     });
 
     // Recent applications

@@ -14,7 +14,7 @@ const LICENSE_UPDATE_FIELDS = new Set([
 ]);
 
 const { validDateOnly } = require('../utils/date-only');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDaysUntil } = require('../utils/datetime-et');
 const training = require('../services/technician-training-dates');
 
 // GATE_TECH_TRAINING_DATES (dark): four more dates a license update may carry (F.S. 482.091; docs/gates-and-env.md).
@@ -124,8 +124,11 @@ async function trainingBlocksFor(ids) {
 // GET /api/admin/compliance-v2/licenses — technician license info
 router.get('/licenses', async (req, res, next) => {
   try {
+    // license_expiry as YYYY-MM-DD: pg hands a DATE back as a UTC-midnight
+    // Date, which the tab printed as a timestamp and the edit dialog sent back
+    // to PUT, where validDateOnly refused it.
     const techs = await db('technicians')
-      .select('id', 'name', 'email', 'phone', 'fl_applicator_license', 'license_expiry', 'license_categories', 'active');
+      .select('id', 'name', 'email', 'phone', 'fl_applicator_license', dateText('license_expiry'), 'license_categories', 'active');
     const now = new Date();
     const trainingBlocks = techTrainingDatesLive() ? await trainingBlocksFor(techs.map(t => t.id)) : new Map();
     res.json({
@@ -134,7 +137,11 @@ router.get('/licenses', async (req, res, next) => {
         if (t.fl_applicator_license) {
           if (!t.license_expiry) licenseStatus = 'active';
           else {
-            const daysLeft = (new Date(t.license_expiry) - now) / 86400000;
+            // ET calendar days: a license is valid THROUGH its expiry day
+            // (repo rule, admin-contracts applicatorLicenseCurrent). The old
+            // UTC-midnight instant math read it expired from 8 PM ET the
+            // evening before (operations audit OP-14).
+            const daysLeft = etCalendarDaysUntil(t.license_expiry, now);
             if (daysLeft < 0) licenseStatus = 'expired';
             else if (daysLeft <= 90) licenseStatus = 'expiring_soon';
             else licenseStatus = 'active';
