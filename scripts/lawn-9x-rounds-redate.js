@@ -15,7 +15,7 @@
  *   node scripts/lawn-9x-rounds-redate.js --parent <uuid>            # one series (its root row id)
  *   node scripts/lawn-9x-rounds-redate.js --max-shift-days 14        # a series with a visit moving further is held
  *   node scripts/lawn-9x-rounds-redate.js --allow-long-shift <uuid>  # (repeatable) let that series move further
- *   node scripts/lawn-9x-rounds-redate.js --anchor <uuid>=2027-01-19 # (repeatable) owner anchor for a series
+ *   node scripts/lawn-9x-rounds-redate.js --anchor <uuid>=2027-01-28 # (repeatable) owner anchor for a series
  *
  * Re-running is safe: a converted series is skipped, and a series whose moves landed but whose conversion
  * failed plans no moves and converts. Under `railway run node scripts/lawn-9x-rounds-redate.js`, Railway
@@ -57,11 +57,11 @@ function setFlag(out, flag, value) {
   return null;
 }
 
-// --anchor <parentId>=<YYYY-MM-DD>: validated like an area anchor (a Mon-Fri date well inside its round).
+// --anchor <parentId>=<YYYY-MM-DD>: validated like an area anchor (lawn-area-days.js validAreaAnchor).
 function setAnchor(out, value) {
   const { validAreaAnchor } = require('../server/services/lawn-area-days');
   const [id, date] = String(value).split('=');
-  if (!UUID.test(id || '') || !validAreaAnchor(date)) return `Invalid --anchor "${value}": use <series id>=<YYYY-MM-DD>, a weekday inside its round.`;
+  if (!UUID.test(id || '') || !validAreaAnchor(date)) return `Invalid --anchor "${value}": use <series id>=<YYYY-MM-DD>, a Mon-Fri date 30 or more days into its round and 3 or more days before its end.`;
   out.anchors.set(id, date);
   return null;
 }

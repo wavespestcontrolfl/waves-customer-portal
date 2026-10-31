@@ -20,7 +20,8 @@ const { parseCliArgs, summarizePlans } = require('../../scripts/lawn-9x-rounds-r
 
 const { planSeriesRedate, stayReason, reviewPlan, applySeries, convertSeries } = redate;
 
-// Parrish's area day (a Tuesday in round 1). The next visit, then a 42-day cadence.
+// An area day (a Tuesday in round 1). The planner takes the anchor as given (the area module
+// validates real ones). The next visit, then a 42-day cadence.
 const AREA = '2027-01-12';
 const NOW = Date.parse('2026-10-31T12:00:00Z');
 const PARENT = '11111111-1111-4111-8111-111111111111';
@@ -418,15 +419,16 @@ describe('the command line', () => {
   test('reads the selectors, the limit and the repeatable flags', () => {
     const other = '44444444-4444-4444-8444-444444444444';
     const opts = parseCliArgs(['--apply', '--parent', PARENT, '--customer', CUSTOMER, '--max-shift-days', '21',
-      '--allow-long-shift', PARENT, '--allow-long-shift', other, '--anchor', `${PARENT}=2027-01-19`]);
+      '--allow-long-shift', PARENT, '--allow-long-shift', other, '--anchor', `${PARENT}=2027-01-28`]);
     expect(opts).toMatchObject({ apply: true, parentId: PARENT, customerId: CUSTOMER, maxShiftDays: 21 });
     expect([...opts.allowLongShift]).toEqual([PARENT, other]);
-    expect(opts.anchors.get(PARENT)).toBe('2027-01-19');
+    expect(opts.anchors.get(PARENT)).toBe('2027-01-28');
   });
 
   test.each([
     ['--max-shift-days', '0'], ['--max-shift-days', 'x'], ['--parent', 'not-an-id'],
     ['--anchor', `${PARENT}=2027-01-16`], ['--anchor', `${PARENT}=2027-01-02`], ['--anchor', '2027-01-19'],
+    ['--anchor', `${PARENT}=2027-01-19`], // a Tuesday 25 days into its round: too early for an area day
   ])('rejects %s %s', (flag, value) => {
     expect(parseCliArgs([flag, value]).error).toMatch(/Invalid/);
   });
