@@ -384,11 +384,13 @@ function isStampedZeroVisit(svc) {
 // GATE_JOB_COST_STANDARD_MINUTES revenue (owner ruling 2026-10-31). Order:
 //   1. a recorded revenue above $0 is kept under keepRecordedRevenue; a recorded $0 falls through to the
 //      visit's OWN sources below, never to customers.monthly_rate (today's plan, not this visit's);
-//   2. always-free types and included follow-ups are $0, then the explicit visit price, then an unpriced
-//      consultation or a callback is $0 (today's order);
-//   3. the visit's share of its paid annual-prepay term, BEFORE the stamped-zero rule because covered
-//      visits carry estimated_price 0; then its linked invoice's service lines;
-//   4. a stamped zero is $0; the monthly_rate fallback runs only when nothing recorded is being kept.
+//   2. always-free types and included follow-ups are $0;
+//   3. the visit's share of its paid annual-prepay term, BEFORE its price: annual prepay keeps the full
+//      estimated_price on a covered visit and stamps the discounted share in prepaid_amount, and a covered
+//      visit can also carry estimated_price 0 (the stamped-zero rule below);
+//   4. the explicit visit price, then an unpriced consultation or a callback is $0 (today's order), then its
+//      linked invoice's service money;
+//   5. a stamped zero is $0; the monthly_rate fallback runs only when nothing recorded is being kept.
 // Pure (no I/O): ownRevenue = { prepayShare, invoiceTotal } is loaded by loadOwnRevenueSources.
 function deriveRevenueFromOwnSources({
   serviceRecord, scheduledService, customer, ignoreExistingRevenue, keepRecordedRevenue, ownRevenue,
@@ -400,29 +402,35 @@ function deriveRevenueFromOwnSources({
 
   const serviceType = svc.service_type || rec.service_type;
   if (svc.followup_included === true || isAlwaysFreeServiceType(serviceType)) return 0;
+  const prepayShare = positiveMoney(ownRevenue.prepayShare);
+  if (prepayShare != null) return prepayShare;
   const visitPrice = positiveMoney(svc.estimated_price);
   if (visitPrice != null) return visitPrice;
   if (isConsultationServiceType(serviceType) || isCallbackVisit(svc, rec)) return 0;
 
-  const ownMoney = positiveMoney(ownRevenue.prepayShare) ?? positiveMoney(ownRevenue.invoiceTotal);
-  if (ownMoney != null) return ownMoney;
+  const invoiceMoney = positiveMoney(ownRevenue.invoiceTotal);
+  if (invoiceMoney != null) return invoiceMoney;
   if (isStampedZeroVisit(svc)) return 0;
   return (keepRecordedRevenue ? null : positiveMoney(customer?.monthly_rate)) ?? 0;
 }
 
-// The visit's share of its paid annual-prepay term: prepay_amount over the larger of the term's covered visit
-// count (coverage_visit_count) and its linked visits that still count. Visits not yet scheduled keep their
-// share, and the linked visits together never book more than the prepayment. "Paid" is the canonical
-// paid-coverage query (coveredTermsAsOf with no date: a paid status, a prepay invoice that is not void or
-// refunded, and a payment that was not fully refunded).
+// The visit's share of its paid annual-prepay term. "Paid" is the canonical paid-coverage query
+// (coveredTermsAsOf with no date: a paid status, a prepay invoice that is not void or refunded, and a payment
+// that was not fully refunded). The share is the allocation annual prepay stamped on the visit
+// (applyPrepaidCoverageForTerm: prepaid_amount with prepaid_method ANNUAL_PREPAY_PREPAID_METHOD). A visit
+// with no stamp (a legacy term) gets prepay_amount over the larger of the term's covered visit count
+// (coverage_visit_count) and its linked visits that still count: visits not yet scheduled keep their share,
+// and the linked visits together never book more than the prepayment.
 async function loadPrepayVisitShare(db, svc) {
   if (!svc.annual_prepay_term_id) return 0;
   try {
-    const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+    const { coveredTermsAsOf, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
     const term = await coveredTermsAsOf(db, null)
       .where('t.id', svc.annual_prepay_term_id)
       .first('t.id', 't.prepay_amount', 't.coverage_visit_count');
     if (!term || !(Number(term.prepay_amount) > 0)) return 0;
+    const stamped = svc.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD ? positiveMoney(svc.prepaid_amount) : null;
+    if (stamped != null) return stamped;
     const counted = await db('scheduled_services')
       .where({ annual_prepay_term_id: term.id })
       .whereNotIn('status', PREPAY_UNCOUNTED_VISIT_STATUSES)
@@ -495,13 +503,13 @@ async function loadLinkedInvoiceTotal(db, svc, record) {
 }
 
 // The visit's own revenue sources (GATE_JOB_COST_STANDARD_MINUTES). A visit whose recorded revenue above $0
-// wins (kept, or not recomputed) or that has its own price never reaches them, so it skips the two queries.
+// wins (kept, or not recomputed) never reaches them, so it skips the queries.
 async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = false, recomputeRevenue = false } = {}) {
   const recordedWins = Number(record?.revenue) > 0 && (keepRecordedRevenue || !recomputeRevenue);
-  const visitPrice = Number(svc.estimated_price);
-  if (recordedWins || (Number.isFinite(visitPrice) && visitPrice > 0)) return { prepayShare: 0, invoiceTotal: 0 };
+  if (recordedWins) return { prepayShare: 0, invoiceTotal: 0 };
   const prepayShare = await loadPrepayVisitShare(db, svc);
-  const invoiceTotal = prepayShare > 0 ? 0 : await loadLinkedInvoiceTotal(db, svc, record);
+  // The invoice is read only when neither the prepay share nor the visit's own price comes first.
+  const invoiceTotal = prepayShare > 0 || Number(svc.estimated_price) > 0 ? 0 : await loadLinkedInvoiceTotal(db, svc, record);
   return { prepayShare, invoiceTotal };
 }
 

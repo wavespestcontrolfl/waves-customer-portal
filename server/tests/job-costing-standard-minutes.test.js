@@ -10,6 +10,7 @@ jest.mock('../services/ad-attribution-sync', () => ({
 jest.mock('../services/tech-cost-rates', () => ({ loadVisitRates: jest.fn() }));
 // Stand-in for the canonical paid-coverage query: a term is paid-covered when its test row says covered: true.
 jest.mock('../services/annual-prepay-renewals', () => ({
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
   coveredTermsAsOf: jest.fn((conn) => {
     const terms = conn('annual_prepay_terms');
     const query = {
@@ -319,6 +320,23 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await cost(fakeDb(legacyTables), KEEP)).revenue).toBe(0);
       // The same invoice with no term naming it is an ordinary visit invoice.
       expect((await cost(fakeDb({ ...legacyTables, annual_prepay_terms: [] }), KEEP)).revenue).toBe(432);
+    });
+
+    test('a paid prepaid visit books its discounted allocation, before its full price', async () => {
+      // Twelve $100 visits prepaid for $1,080: annual prepay keeps estimated_price 100 and stamps 90.
+      const term = { id: 'term-1', customer_id: 'cust-1', prepay_amount: '1080.00', coverage_visit_count: 12, covered: true };
+      const run = (svcPatch, termPatch = {}) => cost(fakeDb({
+        ...withSvc({ estimated_price: 100, annual_prepay_term_id: 'term-1', ...svcPatch }),
+        ...withRecord({ revenue: 0 }),
+        annual_prepay_terms: [{ ...term, ...termPatch }],
+      }), KEEP);
+      expect((await run({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '90.00' })).revenue).toBe(90);
+      // No stamp (a legacy term): 1,080 / 12, still before the full price.
+      expect((await run({})).revenue).toBe(90);
+      // A stamp from another prepaid method is not the annual prepay allocation.
+      expect((await run({ prepaid_method: 'cash', prepaid_amount: '40.00' })).revenue).toBe(90);
+      // A term no longer paid (refunded or void): the visit's own price, as before.
+      expect((await run({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '90.00' }, { covered: false })).revenue).toBe(100);
     });
 
     test('only a term the canonical paid-coverage query returns gives a share', async () => {
