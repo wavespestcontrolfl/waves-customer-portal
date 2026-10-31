@@ -1076,7 +1076,7 @@ router.delete('/schedule/:id', async (req, res, next) => {
           updated_at: new Date(),
         });
       if (!cleared) {
-        return res.status(409).json({ error: 'Publishing already started for this post, so it can no longer be unscheduled.' });
+        return res.status(409).json({ error: 'Publishing already started for this post, so it can no longer be unscheduled. If it looks stuck, try again in 30 minutes.' });
       }
       // A preview PR the run already opened stays open for approval.
       return res.json({ success: true, type: 'blog', id, pr_number: blog.astro_pr_number || null });

@@ -27,7 +27,14 @@ const BLOG_STATUS_LABELS = {
   published: "Published",
   failed: "Failed",
 };
-const statusLabel = item => (item.type === "blog" && BLOG_STATUS_LABELS[item.status]) || item.status;
+// pending_review on a live post means its scheduled social share is next.
+const statusLabel = item => {
+  if (item.type !== "blog") return item.status;
+  if (item.status === "pending_review" && item.astroStatus === "live") return "Live, sharing to social";
+  return BLOG_STATUS_LABELS[item.status] || item.status;
+};
+// A schedule the run has not started, or one it parked as failed, can be withdrawn.
+const UNSCHEDULABLE = new Set(["pending", "failed"]);
 // The scheduled run skips drafts with a PR, a failed publish or no body, so
 // the picker offers only drafts it can publish (BLOG-03).
 const schedulableDraft = post => Boolean(post.content) && !post.astro_pr_number && !post.astro_branch_name && (!post.astro_status || post.astro_status === "draft") && post.publish_status !== "publishing";
@@ -304,7 +311,7 @@ export default function ContentCalendar() {
                 <div className="text-ink-secondary">{statusLabel(item)} · {item.platforms?.join(", ") || item.type}</div>
               </div>
               <Badge tone="neutral">{statusLabel(item)}</Badge>
-              {item.type === "blog" && item.status === "pending" && (
+              {item.type === "blog" && UNSCHEDULABLE.has(item.status) && (
                 <Button variant="secondary" onClick={() => handleUnschedule(item)} loading={unscheduling === item.id} disabled={Boolean(unscheduling)}>Unschedule</Button>
               )}
             </div>

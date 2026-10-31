@@ -156,15 +156,18 @@ it('says when the draft list could not load instead of showing an empty picker',
 it('labels a scheduled blog by its step and withdraws a pending one',async()=>{
   const calendar=[
     {id:'b1',title:'Queued blog',type:'blog',scheduledDate:day,status:'pending'},
-    {id:'b2',title:'Preview blog',type:'blog',scheduledDate:day,status:'pending_review'},
+    {id:'b2',title:'Preview blog',type:'blog',scheduledDate:day,status:'pending_review',astroStatus:'pr_open'},
+    {id:'b3',title:'Live blog',type:'blog',scheduledDate:day,status:'pending_review',astroStatus:'live'},
+    {id:'b4',title:'Parked blog',type:'blog',scheduledDate:day,status:'failed'},
   ];
   vi.stubGlobal('fetch',blogFetch({calendar}));
   render(<ContentCalendar/>);
-  fireEvent.click(await screen.findByRole('button',{name:/12, .*2 scheduled items/}));
+  fireEvent.click(await screen.findByRole('button',{name:/12, .*4 scheduled items/}));
   expect(screen.getAllByText('Awaiting approval').length).toBeGreaterThan(0);
-  // only the run that has not started can be withdrawn
+  expect(screen.getAllByText('Live, sharing to social').length).toBeGreaterThan(0);
+  // a run that has not started, or one parked as failed, can be withdrawn
   const unschedule=screen.getAllByRole('button',{name:'Unschedule'});
-  expect(unschedule).toHaveLength(1);
+  expect(unschedule).toHaveLength(2);
   const calendarReads=fetch.mock.calls.filter(([u])=>String(u).includes('/calendar?')).length;
   fireEvent.click(unschedule[0]);
   await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/content/schedule/b1',expect.objectContaining({method:'DELETE'})));

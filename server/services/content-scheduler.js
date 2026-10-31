@@ -2,7 +2,9 @@
  * Content Scheduler Service
  *
  * Manages the content calendar — scheduling blog posts and social media posts,
- * and auto-publishing them when their scheduled time arrives.
+ * and acting on them when their scheduled time arrives: a social post
+ * publishes, and a blog post opens its Astro preview PR, which goes live when
+ * an admin approves it.
  */
 
 const db = require('../models/db');
@@ -386,7 +388,7 @@ const ContentScheduler = {
             .where('publish_date', '<', range.end);
         });
       })
-      .select('id', 'title', 'status', 'publish_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
+      .select('id', 'title', 'status', 'publish_status', 'astro_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
 
     const socials = await db('social_media_posts')
       .where('scheduled_for', '>=', range.start)
@@ -402,6 +404,7 @@ const ContentScheduler = {
         title: b.title,
         scheduledDate: b.scheduled_publish_at || dateColumnKey(b.publish_date),
         status: b.publish_status || b.status,
+        astroStatus: b.astro_status || null,
         platforms: ['blog'],
         tag: b.tag,
         city: b.city,
