@@ -507,9 +507,14 @@ describe('runCallContactCorrection', () => {
     expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
     expect(knex._data.customer_field_candidates.every((c) => c.status === 'pending')).toBe(true);
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    const [, title, body] = mockNotifyAdmin.mock.calls[0];
-    expect(title).toContain('proposed from a call');
-    expect(body).toContain('jordan.rivers@example.com');
+    const [category, title, , options] = mockNotifyAdmin.mock.calls[0];
+    // Raised through raiseAdminAlert (alert step E2): same category and bell tag, a rule-format headline
+    // naming the customer, and the spoken values kept in the detail.
+    expect(category).toBe('customer');
+    expect(title).toBe("Customers — review Jordan Riverz's contact fixes from a call");
+    expect(options.bell).toBe(true);
+    expect(options.detail).toContain('jordan.rivers@example.com');
+    expect(options.metadata).toMatchObject({ area: 'Customers', severity: 'needs-you', who: 'person', doneWhen: 'contact_proposal_reviewed' });
   });
 
   it('ignores routine mentions — an evidence quote without correction intent is not a mandate', async () => {
