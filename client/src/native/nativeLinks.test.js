@@ -6,11 +6,7 @@ import {
   navigateToCustomerUrl,
   sameOriginUrl,
 } from './nativeLinks';
-import {
-  handleVitePreloadError,
-  isStaleChunkReloadPending,
-  resetStaleChunkReloadForTests,
-} from '../lib/staleChunkReload';
+import { handleVitePreloadError, resetStaleChunkReloadForTests } from '../lib/staleChunkReload';
 
 const loc = { origin: 'https://portal.wavespestcontrol.com' };
 
@@ -119,14 +115,13 @@ describe('nativeLinks', () => {
     sessionStorage.clear();
     const reload = vi.fn();
     const preloadError = () => new Event('vite:preloadError', { cancelable: true });
-    let windowOpenAtAssign;
     const started = { ...loc, pathname: '/', search: '', hash: '',
-      assign: () => { windowOpenAtAssign = isStaleChunkReloadPending(); } };
+      assign: () => handleVitePreloadError(preloadError(), reload) };
     expect(navigateToCustomerUrl('/book', started)).toBe(true);
-    expect(windowOpenAtAssign).toBe(true);
     handleVitePreloadError(preloadError(), reload);
     expect(reload).not.toHaveBeenCalled();
 
+    resetStaleChunkReloadForTests();
     const refused = { ...started, assign: () => { throw new Error('navigation denied'); } };
     expect(navigateToCustomerUrl('/book', refused)).toBe(false);
     handleVitePreloadError(preloadError(), reload);

@@ -105,6 +105,14 @@ test('while an app link navigates away, a cancelled chunk holds the placeholder 
   expect(reported.calls).toHaveLength(0);
 });
 
+test('a navigation that has held no chunk does not hide a real page crash', async () => {
+  markPageNavigating(vi.fn());
+  function Broken() { throw new TypeError('real render bug'); }
+  renderInBoundary(Broken);
+  expect(await screen.findByText('Something went wrong')).toBeInTheDocument();
+  expect(reported.calls).toHaveLength(1);
+});
+
 test('a chunk held during a navigation that never commits is recovered by a reload when the window ends', () => {
   vi.useFakeTimers();
   const heal = vi.fn();
