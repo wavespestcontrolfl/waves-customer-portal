@@ -105,10 +105,24 @@ test('while an app link navigates away, a cancelled chunk holds the placeholder 
   expect(reported.calls).toHaveLength(0);
 });
 
-test('a page still open when the navigation window ends reloads a stale chunk as before', () => {
+test('a chunk held during a navigation that never commits is recovered by a reload when the window ends', () => {
   vi.useFakeTimers();
-  markPageNavigating();
+  const heal = vi.fn();
+  markPageNavigating(heal);
+  handleVitePreloadError(preloadErrorEvent(), vi.fn());
+  vi.advanceTimersByTime(29999);
+  expect(heal).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  expect(heal).toHaveBeenCalledTimes(1);
+  expect(isStaleChunkReloadPending()).toBe(true);
+});
+
+test('a navigation window with no held chunk ends without a reload, and later stale chunks reload as before', () => {
+  vi.useFakeTimers();
+  const heal = vi.fn();
+  markPageNavigating(heal);
   vi.advanceTimersByTime(30000);
+  expect(heal).not.toHaveBeenCalled();
   const reload = vi.fn();
   const stale = preloadErrorEvent();
   handleVitePreloadError(stale, reload);

@@ -21,11 +21,12 @@
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
 // Long enough for a slow navigation to commit. It bounds how long a page whose
-// navigation never committed keeps placeholders instead of reloading.
+// navigation never committed keeps placeholders before it reloads.
 const NAVIGATION_WINDOW_MS = 30000;
 
 let reloadPending = false;
 let navigatingUntil = 0;
+let failedWhileNavigating = false;
 
 function pageNavigating() {
   return Date.now() < navigatingUntil;
@@ -41,11 +42,25 @@ export function markStaleChunkReloadPending() {
 
 // Call right before location.assign. Returns the call that closes the window
 // when the navigation did not start.
-export function markPageNavigating() {
+export function markPageNavigating(reload = () => window.location.reload()) {
   const until = Date.now() + NAVIGATION_WINDOW_MS;
   navigatingUntil = until;
+  const timer = setTimeout(() => {
+    if (navigatingUntil !== until) return;
+    navigatingUntil = 0;
+    if (!failedWhileNavigating) return;
+    // This page is still here, so the navigation never committed, and React.lazy
+    // keeps the placeholder each held chunk resolved to. Reload, as for a stale
+    // chunk. No one-shot guard: this runs once per navigation, and the next
+    // document skips the launch URL it already consumed.
+    failedWhileNavigating = false;
+    markStaleChunkReloadPending();
+    reload();
+  }, NAVIGATION_WINDOW_MS);
   return () => {
-    if (navigatingUntil === until) navigatingUntil = 0;
+    if (navigatingUntil !== until) return;
+    navigatingUntil = 0;
+    clearTimeout(timer);
   };
 }
 
@@ -53,6 +68,7 @@ export function markPageNavigating() {
 // genuine outage still surfaces instead of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
   if (pageNavigating()) {
+    failedWhileNavigating = true;
     event.preventDefault();
     return;
   }
@@ -71,4 +87,5 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 export function resetStaleChunkReloadForTests() {
   reloadPending = false;
   navigatingUntil = 0;
+  failedWhileNavigating = false;
 }
