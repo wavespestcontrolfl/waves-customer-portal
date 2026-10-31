@@ -319,6 +319,18 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(await messagesOf('a')).toHaveLength(1);
     });
 
+    test('a page message in the same second as the customer message does not count as an answer', async () => {
+      const when = ago(1);
+      conversation('tie', { name: 'Pat Synthetic', unread: 1, messages: [
+        { fromPage: false, text: 'Are you open today?', at: when },
+        { fromPage: true, text: 'Hello', at: new Date(when.getTime()) },
+      ] });
+      await messenger.pollMessenger();
+      const bells = await bellsOf('tie');
+      expect(bells).toHaveLength(1);
+      expect(bells[0].done_at).toBeNull();
+    });
+
     test('a bell write that answers null fails the import, and the next poll rings it', async () => {
       const compose = require('../services/admin-alert-compose');
       conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'Please call me', at: ago(2) }] });

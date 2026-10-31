@@ -314,7 +314,9 @@ async function reconcileBell(thread) {
       .orderBy('created_at', 'desc').first('body', 'twilio_sid', 'created_at', 'is_read');
     const latestOut = await trx('messages').where({ conversation_id: thread.id, direction: 'outbound' })
       .max({ at: 'created_at' }).first();
-    const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) >= new Date(latestIn.created_at));
+    // Answered only by a reply strictly after the customer's latest message: Facebook times are to the
+    // second, so a tie does not prove which came first and the bell stays.
+    const answered = latestOut?.at && (!latestIn || new Date(latestOut.at) > new Date(latestIn.created_at));
     if (answered) return closeBell(thread.id, { through: latestIn || null, trx });
     if (latestIn && latestIn.is_read !== true) return ringBell(thread, { body: latestIn.body, key: latestIn.twilio_sid }, { trx });
     return null;
@@ -434,7 +436,7 @@ function threadsQuery(req) {
 }
 
 const iso = (value) => (value ? new Date(value).toISOString() : null);
-const isAnswered = (row) => !row.last_in || (row.last_out && new Date(row.last_out) >= new Date(row.last_in));
+const isAnswered = (row) => !row.last_in || (row.last_out && new Date(row.last_out) > new Date(row.last_in));
 const canReplyNow = (row, now = new Date()) => Boolean(
   row.last_in && String(row.contact_external_id || '').startsWith('messenger:')
   && now - new Date(row.last_in) < REPLY_WINDOW_MS,
@@ -461,7 +463,7 @@ const THREAD_COLUMNS = ['c.id', 'c.contact_label', 'c.contact_external_id', 's.l
 
 // Threads waiting for an answer: the latest customer message is newer than any reply.
 // One definition for the tab count, whatever page of the list is on screen.
-const UNANSWERED_SQL = 's.last_in IS NOT NULL AND (s.last_out IS NULL OR s.last_in > s.last_out)';
+const UNANSWERED_SQL = 's.last_in IS NOT NULL AND (s.last_out IS NULL OR s.last_in >= s.last_out)';
 const SORT_KEY_SQL = "date_trunc('milliseconds', GREATEST(s.last_in, s.last_out))";
 
 async function countUnanswered(req) {
