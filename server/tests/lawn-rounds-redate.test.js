@@ -342,10 +342,12 @@ describe('applySeries', () => {
       },
     });
     // The reminder is re-timed with no notification; no other message path exists on these fakes.
+    // Fenced to the slot the move committed, so a newer reschedule keeps its own reminder.
+    const silent = (date, windowStart) => ({ sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date, windowStart } });
     expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1], c[2]])).toEqual([
-      ['v2', '2027-01-12T09:00', { sendNotification: false, keepPendingConfirmation: true }],
-      ['v3', '2027-02-23T09:00', { sendNotification: false, keepPendingConfirmation: true }],
-      ['v4', '2027-03-30T09:00', { sendNotification: false, keepPendingConfirmation: true }],
+      ['v2', '2027-01-12T09:00', silent('2027-01-12', '09:00')],
+      ['v3', '2027-02-23T09:00', silent('2027-02-23', '09:00')],
+      ['v4', '2027-03-30T09:00', silent('2027-03-30', '09:00')],
     ]);
     expect(out.moved.map((m) => m.tech)).toEqual([TECH, TECH, TECH]);
   });
@@ -359,8 +361,9 @@ describe('applySeries', () => {
     expect(out.status).toBe('converted');
     const calls = Object.fromEntries(w.rebooker.reschedule.mock.calls.map(([id, date, window]) => [id, [date, window]]));
     expect(calls).toEqual({ v2: ['2027-01-12', null], v3: ['2027-02-23', { start: '09:00', end: '10:00' }], v4: ['2027-03-30', { start: '10:00', end: '11:00' }] });
-    expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1]]))
-      .toEqual([['v2', '2027-01-12T08:00'], ['v3', '2027-02-23T09:00'], ['v4', '2027-03-30T10:00']]);
+    expect(w.reminders.handleReschedule.mock.calls.map((c) => [c[0], c[1], c[2].expectSchedule]))
+      .toEqual([['v2', '2027-01-12T08:00', { date: '2027-01-12', windowStart: null }], ['v3', '2027-02-23T09:00', { date: '2027-02-23', windowStart: '09:00' }],
+        ['v4', '2027-03-30T10:00', { date: '2027-03-30', windowStart: '10:00' }]]);
   });
 
   test('the conversion runs only after every move landed, under the series locks', async () => {

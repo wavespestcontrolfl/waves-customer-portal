@@ -302,8 +302,11 @@ async function moveVisitToRound(conn, deps, row) {
     },
   });
   if (result && result.smsSent === true) throw new Error(`visit ${row.id}: the rebooker reported a customer text; stopping`);
-  // The reminder reads the committed row; an untimed visit uses its 08:00 convention.
-  await deps.reminders.handleReschedule(row.id, `${row.to}T${row.ws || '08:00'}`, { sendNotification: false, keepPendingConfirmation: true });
+  // The reminder reads the committed row (an untimed visit uses its 08:00 convention), and only while the visit
+  // still sits where this move put it: a newer reschedule keeps its own reminder (expectSchedule).
+  await deps.reminders.handleReschedule(row.id, `${row.to}T${row.ws || '08:00'}`, {
+    sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: row.to, windowStart: row.ws },
+  });
   return v.tech;
 }
 
