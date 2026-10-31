@@ -1657,6 +1657,21 @@ function ProjectRow({ project, active, onSelect, compactType }) {
 // in an overlay so project-backed visits (WDO, pre-treat cert) open their
 // report in place from the schedule — the pest-completion interaction
 // (owner ask 2026-07-13). Self-contained: fetches its own project by id.
+const DETAIL_CLOSE_STYLE = {
+  background: "transparent",
+  border: "none",
+  color: "#71717A",
+  fontSize: 22,
+  cursor: "pointer",
+  width: 44,
+  height: 44,
+  padding: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+};
+
 export function ProjectDetail({
   projectId,
   typesRegistry,
@@ -2480,9 +2495,18 @@ export function ProjectDetail({
           borderRadius: 6,
           padding: 24,
           color: "#71717A",
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 12,
         }}
       >
-        {loading ? "Loading project…" : error || "Project unavailable."}
+        <span>{loading ? "Loading project…" : error || "Project unavailable."}</span>
+        {/* A deep link to a missing report hides the list on a phone, so
+            this state keeps the header's way back to the list. */}
+        <button type="button" onClick={onClose} style={DETAIL_CLOSE_STYLE} aria-label="Close">
+          ×
+        </button>
       </div>
     );
   }
@@ -2579,20 +2603,7 @@ export function ProjectDetail({
         <button
           type="button"
           onClick={onClose}
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#71717A",
-            fontSize: 22,
-            cursor: "pointer",
-            width: 44,
-            height: 44,
-            padding: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
+          style={DETAIL_CLOSE_STYLE}
           aria-label="Close"
         >
           ×

@@ -5,7 +5,8 @@ import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
+const viewport = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
 vi.mock("../../components/tech/CreateProjectModal", () => ({ default: ({ onClose }) => <div role="dialog" aria-label="Create report"><button onClick={onClose}>Cancel creation</button></div> }));
 vi.mock("../../components/tech/WdoIntelligenceBar", () => ({ default: () => <div>WDO intelligence fixture</div> }));
 vi.mock("../../components/tech/WdoSignaturePad", () => ({ default: () => <div>WDO signature fixture</div> }));
@@ -400,5 +401,22 @@ describe("Reports deep link outside the loaded lists", () => {
       : response(fixtureFor(url, options))));
     mount("/admin/projects?projectId=missing-1");
     expect(await screen.findByText("Project not found")).toBeInTheDocument();
+  });
+
+  it("keeps a way back to the list on a phone when the deep-linked report is missing", async () => {
+    viewport.mobile = true;
+    try {
+      listWithout((path, url, options) => (path.startsWith("/admin/projects/missing-1")
+        ? response({ error: "Project not found" }, 404)
+        : response(fixtureFor(url, options))));
+      mount("/admin/projects?projectId=missing-1");
+      expect(await screen.findByText("Project not found")).toBeInTheDocument();
+      expect(screen.queryByText("No reports match these filters.")).not.toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(await screen.findByText("No reports match these filters.")).toBeVisible();
+      expect(screen.queryByText("Project not found")).not.toBeInTheDocument();
+    } finally {
+      viewport.mobile = false;
+    }
   });
 });
