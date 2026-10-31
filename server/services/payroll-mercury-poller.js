@@ -32,6 +32,7 @@ const SENT_WINDOW_MS = 60 * DAY_MS;
 const SENT_REREAD_MS = 23 * 60 * MINUTE_MS;
 const LOOKBACK_MS = 5 * MINUTE_MS;
 const RETURN_WINDOW_NOTE = 'No return seen in 60 days';
+const TERMINAL_BELL_WINDOW_MS = 7 * DAY_MS;
 const BAD_TRANSACTION = ['failed', 'cancelled', 'blocked'];
 
 const gateOn = (name) => {
@@ -232,6 +233,21 @@ async function closeReturnWindow(conn, now, accountId) {
     .update({ resolution: RETURN_WINDOW_NOTE, updated_at: now });
 }
 
+// A state change commits before its bell is written, and a bell that failed to write would be lost once the row leaves
+// the poll. Each tick raises again the bell of a recently closed payment with no newer attempt; the dedupe key makes
+// it one row, and a bell the owner already closed is not rung again.
+async function reraiseTerminalBells(conn, now) {
+  const rows = await conn('payroll_payments as p').join('payroll_checks as c', 'c.id', 'p.check_id')
+    .whereIn('p.state', ['failed', 'rejected', 'cancelled', 'returned'])
+    .where('p.resolved_at', '>', new Date(now.getTime() - TERMINAL_BELL_WINDOW_MS))
+    .whereNotExists(function later() {
+      this.select(conn.raw('1')).from('payroll_payments as n').whereRaw('n.check_id = p.check_id AND n.attempt > p.attempt');
+    })
+    .limit(50)
+    .select('p.*', 'c.employee_name', conn.raw("to_char(c.pay_date, 'YYYY-MM-DD') as pay_date"));
+  for (const row of rows) await alerts.raisePaymentAlert(row.state, row, { conn });
+}
+
 // Reads each due row once. Stops at the first refused key. Returns { read, changed, failed, refused, answered }.
 async function pollRows(rows, ctx) {
   const out = { read: 0, changed: 0, failed: 0, mismatched: 0, refused: false, answered: false };
@@ -258,6 +274,10 @@ async function pollRows(rows, ctx) {
 async function pollPayments({ client = createClient(), conn = db, now = new Date() } = {}) {
   if (!payrollOn() || !statusOn()) return { read: 0, changed: 0, failed: 0, skipped: 'gate_off' };
   if (!client.configured) return { read: 0, changed: 0, failed: 0, skipped: 'not_configured' };
+  // Before this tick's own changes, so a bell raised below is not raised twice in one tick.
+  try { await reraiseTerminalBells(conn, now); } catch (err) {
+    logger.error(`[payroll-mercury-poller] bells not re-raised (${(err && (err.code || err.name)) || 'error'})`);
+  }
   const out = await pollRows(await dueRows(conn, now), { client, conn, now });
   if (out.refused) await alerts.raiseKeyAlert();
   else if (out.answered) await alerts.closeKeyBell({ conn });

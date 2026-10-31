@@ -34,6 +34,7 @@ const BLOCKING_STATES = ['queued', 'requested', 'unknown', 'approved', 'sent'];
 const RETRY_STATES = ['failed', 'rejected', 'cancelled', 'returned'];
 const KEY_STALE_DAYS = 38;
 const SEND_AGAIN_LOOKBACK_DAYS = 7;
+const ATTEMPT_SLACK_MS = 60 * 60 * 1000;
 const MAX_ERROR = 200;
 const EXTERNAL_MEMO = 'Waves pay';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -364,16 +365,19 @@ async function loadSendableCheck(conn, checkId) {
   return check;
 }
 
-// True when Mercury shows a live request or a transaction of this amount to this recipient in the last 7 days.
-async function mercuryHoldsSameAmount(client, { recipientId, amountCents, now }) {
-  const since = now.getTime() - SEND_AGAIN_LOOKBACK_DAYS * DAY_MS;
+// True when Mercury shows a request or transaction of this amount to this recipient that could be the unknown attempt
+// or a recent twin: any still-open request whatever its age, and any request or transaction made in the last 7 days or
+// since the attempt was made, whichever reaches further back.
+async function mercuryHoldsSameAmount(client, { recipientId, amountCents, now, attemptAt }) {
+  const weekAgo = now.getTime() - SEND_AGAIN_LOOKBACK_DAYS * DAY_MS;
+  const since = Math.min(weekAgo, attemptAt ? new Date(attemptAt).getTime() - ATTEMPT_SLACK_MS : weekAgo);
   const recent = (iso) => Boolean(iso) && new Date(iso).getTime() >= since;
   const [requests, transactions] = await Promise.all([
     client.listRequests(),
     client.listTransactions({ start: etDateString(new Date(since)) }),
   ]);
   const requestHit = requests.some((r) => r.recipientId === recipientId && r.amountCents === amountCents
-    && recent(r.createdAt) && !['rejected', 'cancelled'].includes(r.status));
+    && (r.status === 'pendingApproval' || (recent(r.createdAt) && r.status !== 'rejected' && r.status !== 'cancelled')));
   const transactionHit = transactions.some((t) => t.counterpartyId === recipientId && t.amountCents === amountCents
     && recent(t.createdAt) && !['failed', 'cancelled', 'blocked'].includes(t.status));
   return requestHit || transactionHit;
@@ -387,7 +391,7 @@ async function assertUnknownCleared(client, before, check, now) {
   }
   let held;
   try {
-    held = await mercuryHoldsSameAmount(client, { recipientId: before.recipient_id, amountCents: Number(before.amount_cents), now });
+    held = await mercuryHoldsSameAmount(client, { recipientId: before.recipient_id, amountCents: Number(before.amount_cents), now, attemptAt: before.created_at });
   } catch (err) { throw await readFailure(err); }
   if (held) throw new PayrollError(409, 'Mercury already shows a request or payment of this amount to this person in the last 7 days. Check Mercury first.');
 }
@@ -404,7 +408,7 @@ async function sendAgain(checkId, input, actor, { client = createClient(), conn 
   if (!mode) throw new PayrollError(409, 'This payment is still open. Wait for it to finish, or reject it in Mercury first.');
   if (mode === 'confirm') {
     if (!v.confirmNothingWaiting) throw new PayrollError(409, 'Confirm that nothing is waiting in Mercury first.');
-    const stored = await conn('payroll_payments').where({ id: before.id }).first('recipient_id', 'account_id', 'amount_cents');
+    const stored = await conn('payroll_payments').where({ id: before.id }).first('recipient_id', 'account_id', 'amount_cents', 'created_at');
     await assertUnknownCleared(client, { ...before, ...stored }, check, now);
   }
   const queued = await conn.transaction(async (trx) => {

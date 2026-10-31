@@ -452,9 +452,27 @@ postgres('payroll Mercury paychecks', () => {
         client.listTransactions.mockResolvedValue([]);
         client.listRequests.mockResolvedValue([
           { requestId: 'a', status: 'pendingApproval', recipientId: recipient, amountCents: amount + 1, createdAt: new Date().toISOString() },
-          { requestId: 'b', status: 'pendingApproval', recipientId: recipient, amountCents: amount, createdAt: '2020-01-01T00:00:00Z' },
+          { requestId: 'b', status: 'approved', recipientId: recipient, amountCents: amount, createdAt: '2020-01-01T00:00:00Z' },
           { requestId: 'c', status: 'rejected', recipientId: recipient, amountCents: amount, createdAt: new Date().toISOString() },
         ]);
+        expect((await sendAgain(target.id, { confirmNothingWaiting: true }, client)).outcome).toBe('requested');
+      });
+
+      it('an unknown attempt older than a week: a still-pending request of any age, or a transaction since the attempt, blocks the retry', async () => {
+        const { target, recipient, row } = await unknownCheck();
+        const amount = Number(row.amount_cents);
+        const old = new Date(Date.now() - 20 * 24 * 3600 * 1000);
+        await trx('payroll_payments').where({ id: row.id }).update({ created_at: old });
+        const client = fakeClient();
+        client.listRequests.mockResolvedValue([{ requestId: 'p', status: 'pendingApproval', recipientId: recipient, amountCents: amount, createdAt: new Date(old.getTime() + 60000).toISOString() }]);
+        await expect(sendAgain(target.id, { confirmNothingWaiting: true }, client)).rejects.toMatchObject({ status: 409 });
+        client.listRequests.mockResolvedValue([]);
+        client.listTransactions.mockResolvedValue([{ id: 't', status: 'sent', counterpartyId: recipient, amountCents: amount, createdAt: new Date(old.getTime() + 3600000).toISOString() }]);
+        await expect(sendAgain(target.id, { confirmNothingWaiting: true }, client)).rejects.toMatchObject({ status: 409 });
+        // The read reaches back to the attempt, not just seven days.
+        const start = new Date(`${client.listTransactions.mock.calls[0][0].start}T00:00:00Z`).getTime();
+        expect(start).toBeLessThanOrEqual(old.getTime());
+        client.listTransactions.mockResolvedValue([]);
         expect((await sendAgain(target.id, { confirmNothingWaiting: true }, client)).outcome).toBe('requested');
       });
 
@@ -824,6 +842,22 @@ postgres('payroll Mercury paychecks', () => {
       const ctx = await sent();
       await poll(ctx.client, NOW);
       expect(alerts.closeKeyBell).toHaveBeenCalledWith(expect.not.objectContaining({ kind: 'send' }));
+    });
+
+    it('a bell that failed to write is raised again on a later tick, once, and not for a payment with a newer attempt', async () => {
+      const ctx = await sent();
+      const row = await ctx.row();
+      await setState(row.id, { state: 'rejected', resolved_at: NOW });
+      const bells = jest.spyOn(alerts, 'raisePaymentAlert').mockResolvedValue(true);
+      await poll(ctx.client, NOW);
+      expect(bells).toHaveBeenCalledWith('rejected', expect.objectContaining({ id: row.id }), expect.anything());
+      bells.mockClear();
+      await trx('payroll_payments').insert({
+        check_id: row.check_id, attempt: 2, state: 'requested', idempotency_key: randomUUID(), note: `waves-pay:${randomUUID()}`,
+        amount_cents: 100, recipient_id: 'r', account_id: ACCOUNT, mercury_request_id: 'req-2',
+      });
+      await poll(ctx.client, NOW);
+      expect(bells.mock.calls.map(([event]) => event)).not.toContain('rejected');
     });
 
     it('a Mercury error on one row does not stop the others, and a working read closes the key bell', async () => {
