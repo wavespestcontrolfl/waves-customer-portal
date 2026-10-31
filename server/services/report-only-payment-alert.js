@@ -98,12 +98,14 @@ async function runReportOnlyPaymentCheck({ now = new Date() } = {}) {
   let raised = 0;
   for (const [key, { invoice, record }] of owed) {
     try {
-      // A standing row for the key dedupes silently: one ring per episode. A
-      // row this pass closed (a bank payment processing, a payer handoff) and
-      // whose bill is owed again (the debit returned) reopens and rings.
+      // One ring per episode. A standing row is rewritten quietly, so the
+      // amount follows a partial payment; a row this pass closed (a bank
+      // payment processing, a payer handoff) whose bill is owed again (the
+      // debit returned) reopens and rings.
       const composed = composeAdminAlert(alertSpec(invoice, record));
       await episodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
         link: composed.link, dedupeKey: key, metadata: composed.metadata,
+        refreshOnDedupe: true, ringOnRefresh: () => false,
       });
       raised += 1;
     } catch (err) {

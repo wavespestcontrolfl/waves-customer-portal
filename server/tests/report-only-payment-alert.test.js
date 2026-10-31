@@ -138,6 +138,18 @@ postgres('report-only payment alert (live Postgres)', () => {
     for (const { invoiceId } of [today, noMarker, old, payer]) expect(await bells(invoiceId)).toHaveLength(0);
   }, DB_TIMEOUT_MS);
 
+  test('a partial payment rewrites the standing bell with the new balance, without ringing again', async () => {
+    const { invoiceId } = await completion();
+    await runReportOnlyPaymentCheck({ now: NOW });
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [alertKey(invoiceId)]).update({ read_at: new Date('2040-03-04T14:00:00Z') });
+    await trx('invoices').where({ id: invoiceId }).update({ amount_paid: 50 });
+    await runReportOnlyPaymentCheck({ now: NOW });
+    const rows = await bells(invoiceId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe("Billing — record Synthetic Fixture's $67.00 payment");
+    expect(rows[0].read_at).not.toBeNull();
+  }, DB_TIMEOUT_MS);
+
   test('a bank payment that is processing closes the bell; a debit that returns reopens it and rings again', async () => {
     const { invoiceId } = await completion();
     await runReportOnlyPaymentCheck({ now: NOW });
