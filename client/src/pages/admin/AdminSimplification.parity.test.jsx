@@ -84,7 +84,7 @@ describe("preserved Settings and diagnostic capabilities", () => {
     expect(screen.queryByRole("button", { name: "Integrations", exact: true })).not.toBeInTheDocument();
   });
 
-  it("shows loading and failed catalog reads instead of a successful empty catalog", async () => {
+  it("shows loading and failed catalog reads instead of a successful empty catalog, and Try again reloads", async () => {
     pending = "/integrations/health";
     mount(<IntegrationHealthSection />);
     expect(screen.getByText("Loading integrations...")).toBeInTheDocument();
@@ -92,6 +92,20 @@ describe("preserved Settings and diagnostic capabilities", () => {
     mount(<IntegrationHealthSection />);
     expect(await screen.findByText(/Failed to load integrations: HTTP 503/)).toBeInTheDocument();
     expect(screen.queryByText("Synthetic provider")).not.toBeInTheDocument();
+    failure = null;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Synthetic provider")).toBeInTheDocument();
+    expect(screen.queryByText(/Failed to load integrations/)).not.toBeInTheDocument();
+  });
+
+  it("says so when Refresh checks fails, and keeps the list", async () => {
+    mount(<IntegrationHealthSection />);
+    expect(await screen.findByText("Synthetic provider")).toBeInTheDocument();
+    failure = "/token-health/check";
+    fireEvent.click(screen.getByRole("button", { name: "Refresh checks" }));
+    expect((await screen.findByText("Failed to refresh checks: HTTP 503")).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByText("Synthetic provider")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh checks" })).toBeEnabled();
   });
 
   it("keeps runtime alerts, time windows, resume refresh and polling cleanup", async () => {
