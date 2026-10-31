@@ -1054,7 +1054,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // 'manual_no_visit' stays re-correctable under the same relaxation — it is
   // a human's earlier technician-less confirm, and re-matching it must not
   // demand the technician the first confirm proved absent.
-  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit';
+  // The review matcher's open suggestion (review-name-match.js) is confirmed through this endpoint
+  // too, from a queue that lists reviews of any age and rating: the same relaxation applies, and an
+  // ineligible review links without a payout.
+  const isClickAutoCorrection = review.link_source === 'click_auto' || review.link_source === 'manual_no_visit'
+    || openNameMatch(review);
   let payoutEligible = true;
   if (!policy.enabled) {
     if (!isClickAutoCorrection) throw operationalError('Review incentive policy is disabled', 422, 'policy_disabled');

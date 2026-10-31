@@ -19,7 +19,7 @@ function fakeConn(reviews) {
   const conn = jest.fn(() => {
     const q = {
       wheres: [],
-      whereRaw() { return q; },
+      whereRaw(sql, bindings) { if (bindings) q.wheres.push(['raw', sql, bindings]); return q; },
       whereNull(column) { q.wheres.push(['null', column]); return q; },
       whereNotNull(column) { q.wheres.push(['notNull', column]); return q; },
       where(arg) { q.wheres.push(['eq', arg]); return q; },
@@ -29,6 +29,7 @@ function fakeConn(reviews) {
     return q;
   });
   conn.updates = updates;
+  conn.raw = (sql, bindings) => ({ raw: sql, bindings });
   return conn;
 }
 
@@ -51,7 +52,8 @@ const review = (id, reviewerName, extra = {}) => ({
   name_match_result: null,
   name_match_customer_id: null,
   name_match_reason: null,
-  name_match_dismissed_customer_id: null,
+  name_match_dismissed_customer_ids: [],
+  name_match_dismissed_at: null,
   ...extra,
 });
 
@@ -89,29 +91,41 @@ describe('runReviewNameMatch', () => {
     ]);
     const out = await runReviewNameMatch({ conn, mode: 'on', now });
     expect(out).toMatchObject({ mode: 'on', reviews: 3, changed: 2, written: 2 });
+    const unchangedDismissal = ['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [null]];
     expect(conn.updates).toEqual([
       {
-        wheres: [['eq', { id: 'r1' }], ['null', 'missing_since'], ['null', 'customer_id']],
+        wheres: [['eq', { id: 'r1' }], ['null', 'missing_since'], unchangedDismissal, ['null', 'customer_id']],
         patch: { name_match_result: 'pause', name_match_customer_id: 'c1', name_match_reason: 'near', name_match_at: now },
       },
       {
-        wheres: [['eq', { id: 'r3' }], ['null', 'missing_since'], ['eq', { customer_id: 'c3' }]],
+        wheres: [['eq', { id: 'r3' }], ['null', 'missing_since'], unchangedDismissal, ['eq', { customer_id: 'c3' }]],
         patch: { name_match_result: 'disputed', name_match_customer_id: 'c3', name_match_reason: 'clash', name_match_at: now },
       },
     ]);
   });
 
-  test('a customer a person ruled out is never named again for that review; a kept link is not disputed', async () => {
+  test('every customer a person ruled out is never named again for that review; a kept link is not disputed', async () => {
     const conn = fakeConn([
-      review('r1', 'Dana Fenwikc', { name_match_dismissed_customer_id: 'c1' }),
-      review('r3', 'Gwen Harlowe', { customer_id: 'c3', name_match_dismissed_customer_id: 'c3' }),
+      // Two dismissals on one review: the first ruled-out customer stays out too.
+      review('r1', 'Dana Fenwikc', { name_match_dismissed_customer_ids: ['c1', 'c2'] }),
+      review('r3', 'Gwen Harlowe', { customer_id: 'c3', name_match_dismissed_customer_ids: ['c3'] }),
     ]);
     loadEvidenceCandidates.mockResolvedValue([
       candidate('c1', 'Dana', 'Fenwick'),
+      // An exact name: it would be the link if its dismissal were forgotten.
+      candidate('c2', 'Dana', 'Fenwikc'),
       candidate('c3', 'Gwen', 'Harlowe', { timeline: { createdAt: '2026-10-25T14:00:00Z' } }),
     ]);
     const out = await runReviewNameMatch({ conn, mode: 'on' });
     expect(out).toMatchObject({ counts: { none: 2 }, changed: 0, written: 0 });
+  });
+
+  test('a write is conditioned on the dismissal the pass read, so a dismissal made mid-pass stands', async () => {
+    const dismissedAt = new Date('2026-10-31T12:00:00Z');
+    const conn = fakeConn([review('r1', 'Dana Fenwikc', { name_match_dismissed_customer_ids: ['c9'], name_match_dismissed_at: dismissedAt })]);
+    loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Dana', 'Fenwick')]);
+    await runReviewNameMatch({ conn, mode: 'on' });
+    expect(conn.updates[0].wheres).toContainEqual(['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [dismissedAt]]);
   });
 
   test('a decision that no longer holds is cleared', async () => {
@@ -131,7 +145,9 @@ describe('dismissNameMatch', () => {
     expect(conn.updates).toEqual([{
       wheres: [['eq', { id: 'r1', name_match_customer_id: 'c1' }], ['notNull', 'name_match_result']],
       patch: expect.objectContaining({
-        name_match_dismissed_customer_id: 'c1', name_match_result: null, name_match_customer_id: null, name_match_reason: null,
+        // Appended to the list: earlier dismissals stay.
+        name_match_dismissed_customer_ids: { raw: 'array_append(name_match_dismissed_customer_ids, ?::uuid)', bindings: ['c1'] },
+        name_match_result: null, name_match_customer_id: null, name_match_reason: null,
       }),
     }]);
   });
@@ -141,6 +157,7 @@ describe('dismissNameMatch', () => {
       const q = { where: () => q, whereNotNull: () => q, update: async () => 0 };
       return q;
     });
+    conn.raw = () => ({});
     await expect(dismissNameMatch({ reviewId: 'r1', customerId: 'c1', conn })).rejects.toMatchObject({ statusCode: 409 });
     await expect(dismissNameMatch({ reviewId: 'r1', conn })).rejects.toMatchObject({ statusCode: 400 });
   });

@@ -9,8 +9,8 @@
  *
  * Nothing here links a review, marks a customer or sends anything. The Reviews match queue lists the
  * decisions that name a customer for one tap (the existing manual match does the link), and a later
- * send-time guard reads them under its own gate. A person who rules a customer out for a review
- * (name_match_dismissed_customer_id) is never suggested for that review again.
+ * send-time guard reads them under its own gate. A customer a person ruled out for a review
+ * (name_match_dismissed_customer_ids) is never suggested for that review again.
  *
  * Mode (reviewNameMatchMode, read at call time): off = nothing runs; shadow = score and log the
  * counts, write nothing; on = write the decisions that changed. Runs after the hourly review sync.
@@ -29,13 +29,14 @@ const NAMES_A_CUSTOMER = new Set(['link', 'link_confirm', 'pause', 'household'])
 const NO_DECISION = Object.freeze({ result: null, customerId: null, reason: null });
 
 const idOf = (value) => (value === null || value === undefined ? null : String(value));
+const ruledOut = (review) => new Set((review.name_match_dismissed_customer_ids || []).map(String));
 
 // The decision for one unlinked review.
 function decideUnlinked(review, candidates, { linkedBy, surnameHolderCount }) {
   const subject = { reviewerName: review.reviewer_name, reviewedAt: review.review_created_at, locationId: review.location_id };
-  const ruledOut = idOf(review.name_match_dismissed_customer_id);
+  const excluded = ruledOut(review);
   const scored = candidates
-    .filter((c) => idOf(c.customerId) !== ruledOut)
+    .filter((c) => !excluded.has(idOf(c.customerId)))
     .map((c) => scoreCandidate(subject, { ...c, linkedProfiles: (linkedBy.get(idOf(c.customerId)) || []).map((r) => r.location_id) }));
   const decision = decideReviewLink(scored, { surnameHolderCount });
   if (decision.result === 'none') return NO_DECISION;
@@ -51,7 +52,7 @@ function decideUnlinked(review, candidates, { linkedBy, surnameHolderCount }) {
 // asked again.
 function decideLinked(review, byId) {
   const linked = byId.get(idOf(review.customer_id));
-  if (!linked || idOf(review.name_match_dismissed_customer_id) === idOf(review.customer_id)) return NO_DECISION;
+  if (!linked || ruledOut(review).has(idOf(review.customer_id))) return NO_DECISION;
   const dates = dateVerdict(review.review_created_at, firstKnownContactAt(linked.timeline));
   if (dates !== 'clash' && dates !== 'clash_early') return NO_DECISION;
   return { result: 'disputed', customerId: review.customer_id, reason: dates };
@@ -67,7 +68,7 @@ async function computeDecisions(conn) {
     .whereRaw("(reviewer_name IS NULL OR reviewer_name <> '_stats')")
     .whereNull('missing_since')
     .select('id', 'location_id', 'reviewer_name', 'review_created_at', 'customer_id',
-      'name_match_result', 'name_match_customer_id', 'name_match_reason', 'name_match_dismissed_customer_id');
+      'name_match_result', 'name_match_customer_id', 'name_match_reason', 'name_match_dismissed_customer_ids', 'name_match_dismissed_at');
   const candidates = await loadEvidenceCandidates(conn);
   const byId = new Map(candidates.map((c) => [idOf(c.customerId), c]));
   const holders = new Map();
@@ -99,9 +100,10 @@ async function runReviewNameMatch({ conn = db, mode = reviewNameMatchMode(), now
 
   let written = 0;
   for (const { review, next } of changes) {
-    // Only onto the link state the decision was made for: a manual match or a removal that
-    // committed since the read keeps the row as it is until the next pass.
-    const query = conn('google_reviews').where({ id: review.id }).whereNull('missing_since');
+    // Only onto the row as it was read: a manual match, a removal or a dismissal that committed
+    // since the read keeps the row as it is until the next pass.
+    const query = conn('google_reviews').where({ id: review.id }).whereNull('missing_since')
+      .whereRaw('name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [review.name_match_dismissed_at || null]);
     if (review.customer_id) query.where({ customer_id: review.customer_id });
     else query.whereNull('customer_id');
     written += await query.update({
@@ -127,7 +129,7 @@ async function dismissNameMatch({ reviewId, customerId, conn = db } = {}) {
     .where({ id: reviewId, name_match_customer_id: customerId })
     .whereNotNull('name_match_result')
     .update({
-      name_match_dismissed_customer_id: customerId,
+      name_match_dismissed_customer_ids: conn.raw('array_append(name_match_dismissed_customer_ids, ?::uuid)', [customerId]),
       name_match_dismissed_at: new Date(),
       name_match_result: null,
       name_match_customer_id: null,

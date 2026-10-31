@@ -310,6 +310,11 @@ describe("Reviews workspace foundation", () => {
               nameKind: "near", role: "holder", dates: "fits", firstContactAt: "2026-10-22T14:00:00.000Z", contactAfterReview: true,
               tap: false, recent: false, saidReviewed: false, alreadyLinkedHere: false,
             },
+          }, {
+            // An old review's customer often has no visit near it: the no-visit confirm is offered.
+            id: "customer-old",
+            name: "Dana Fenwick Senior",
+            services: [],
           }],
           likelyReviewers: [],
         });
@@ -345,6 +350,7 @@ describe("Reviews workspace foundation", () => {
     // A first contact after the review: the first click only warns.
     fireEvent.click(screen.getByRole("button", { name: "Match" }));
     const matchButton = await screen.findByRole("button", { name: /Synthetic Tech/ });
+    expect(screen.getByRole("button", { name: "Confirm match (no visit on file)" })).toBeInTheDocument();
     fireEvent.click(matchButton);
     expect(await screen.findByRole("status")).toHaveTextContent("first contact came after the review");
     expect(posts).toEqual([]);

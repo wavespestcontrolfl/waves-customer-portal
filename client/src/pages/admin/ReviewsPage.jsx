@@ -942,7 +942,8 @@ function RepairCandidateCard({
       )}
       <div className="flex gap-[8px] flex-wrap mt-[10px]">
         {(candidate.services || []).length === 0 ? (
-          review.reason === "click_auto_confirm" ? (
+          review.reason === "click_auto_confirm" ||
+          UNCAPPED_QUEUE_REASONS.has(review.reason) ? (
             // Click-auto rows must stay correctable even with no recent
             // technician visit: the payout stays unminted server-side, so a
             // technician-less confirm is allowed for exactly these rows

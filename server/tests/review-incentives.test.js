@@ -485,6 +485,31 @@ describe('review incentives', () => {
     ]);
   });
 
+  test('Match confirms a queued matcher suggestion on an old review without a payout; a plain old review is still refused', async () => {
+    const oldReview = {
+      id: 'review-old', customer_id: null, reviewer_name: 'Dana Fenwikc', star_rating: 5,
+      review_created_at: '2025-12-13T16:00:00.000Z', location_id: 'bradenton', google_review_id: 'accounts/1/locations/2/reviews/old',
+    };
+    const make = (extra) => createDbMock({
+      customers: [{ id: 'customer-dana', first_name: 'Dana', last_name: 'Fenwick', active: true }],
+      technicians: [],
+      service_records: [],
+      google_reviews: [{ ...oldReview, ...extra }],
+    });
+    const attrs = { reviewId: 'review-old', customerId: 'customer-dana', technicianId: null, serviceRecordId: null, noVisit: true, adminId: 'admin-1' };
+    const programPolicy = { ...policy, programStartsAt: '2026-06-01T00:00:00.000Z' };
+
+    const queued = make({ name_match_result: 'pause', name_match_customer_id: 'customer-dana', name_match_reason: 'near' });
+    await ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: queued, policy: programPolicy });
+    expect(queued.__state.rows.google_reviews[0]).toMatchObject({ customer_id: 'customer-dana', link_source: 'manual_no_visit' });
+    expect(queued.__state.rows.review_incentive_payouts).toHaveLength(0);
+
+    const plain = make({});
+    await expect(ReviewIncentives.manualAttributeGoogleReview(attrs, { conn: plain, policy: programPolicy }))
+      .rejects.toMatchObject({ code: 'review_before_program_start' });
+    expect(plain.__state.rows.google_reviews[0].customer_id).toBeNull();
+  });
+
   test('candidate search puts the matcher\'s suggestion first even when the name search misses it', async () => {
     const conn = createDbMock({
       customers: [
