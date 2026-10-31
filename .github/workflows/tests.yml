@@ -145,13 +145,22 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
-      - name: Grouped closeout transaction tests
+      # The gate-code suites in the second command gate on
+      # `process.env.DATABASE_URL ? describe : describe.skip`, not the
+      # `const SKIP` line the DB-gated step greps for, so until 2026-10-30 they
+      # ran nowhere in CI. They run here, after closeout on the third server:
+      # this lane sits idle for most of the job, while the DB-gated lane already
+      # sets the job's length. Do not add the `const SKIP` line to them, or they
+      # run twice.
+      - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
+        run: |
+          npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
