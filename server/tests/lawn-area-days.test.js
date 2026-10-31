@@ -205,6 +205,17 @@ describe('lawnAreaRoundAnchor reads the address', () => {
     expect(await newSeriesAreaAnchor(addressConn({}), parent, 'custom')).toBeNull();
     expect(await newSeriesAreaAnchor(addressConn({}), { ...parent, recurring_round_anchor_date: '2026-11-03' }, LAWN_ROUNDS_9)).toBeNull();
   });
+
+  test('an existing series with no stored anchor never adopts an area later (a config edit moves no existing series)', async () => {
+    // Created outside every area (or under `{}`): no stored anchor, but it has child rows.
+    const parent = { id: 'p1', customer_id: 'c1', service_address_zip: '34219', service_address_city: 'Parrish' };
+    expect(await newSeriesAreaAnchor(addressConn({ parentRow: { id: 'child-1' } }), parent, LAWN_ROUNDS_9)).toBeNull();
+    // A child read that fails counts as an existing series.
+    const failing = (table) => (table === 'scheduled_services'
+      ? { where: () => ({ first: async () => { throw new Error('db down'); } }) }
+      : addressConn({})(table));
+    expect(await newSeriesAreaAnchor(failing, parent, LAWN_ROUNDS_9)).toBeNull();
+  });
 });
 
 describe('an invalid anchor ignores its area', () => {
