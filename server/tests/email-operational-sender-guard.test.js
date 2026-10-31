@@ -28,6 +28,10 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'newsletter@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
     expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
     expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@portal.wavespestcontrol.com', GOOG('portal.wavespestcontrol.com'))).toBe(true);
+    // The newsletter's sending subdomain (owner 2026-10-31), signed as itself.
+    expect(shouldSkipAutoAction('marketing_newsletter', 'events@news.wavespestcontrol.com', GOOG('news.wavespestcontrol.com'))).toBe(true);
+    // Non-destructive handlers must not match or draft for our own subdomain copies either.
+    expect(shouldSkipAutoAction('customer_request', 'events@news.wavespestcontrol.com', GOOG('news.wavespestcontrol.com'))).toBe(true);
   });
 
   test('skips destructive actions for other operational domains (Google security notices etc.)', () => {

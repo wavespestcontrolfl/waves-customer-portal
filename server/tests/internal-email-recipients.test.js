@@ -20,6 +20,11 @@ describe('internal email recipient guardrails', () => {
 
   test('allows Waves-owned addresses and the logged-in admin email', () => {
     expect(isInternalEmailRecipient('newsletter@wavespestcontrol.com')).toBe(true);
+    // The newsletter's sending subdomain is ours too (owner 2026-10-31).
+    expect(isInternalEmailRecipient('events@news.wavespestcontrol.com')).toBe(true);
+    expect(isInternalEmailRecipient('newsletter@news.wavespestcontrol.com')).toBe(true);
+    // Only the named subdomain: a look-alike domain is not ours.
+    expect(isInternalEmailRecipient('events@news-wavespestcontrol.com')).toBe(false);
     expect(isInternalEmailRecipient('owner@example.com', { adminEmail: 'owner@example.com' })).toBe(true);
     expect(assertInternalEmailRecipient(
       'Owner@Example.com',

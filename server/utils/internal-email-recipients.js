@@ -1,4 +1,6 @@
-const DEFAULT_INTERNAL_DOMAINS = ['wavespestcontrol.com'];
+// news.wavespestcontrol.com is the newsletter's sending subdomain (owner
+// 2026-10-31): its copies land in contact@ and must read as ours, not a customer.
+const DEFAULT_INTERNAL_DOMAINS = ['wavespestcontrol.com', 'news.wavespestcontrol.com'];
 const DEFAULT_INTERNAL_EMAILS = [
   'contact@wavespestcontrol.com',
   'newsletter@wavespestcontrol.com',

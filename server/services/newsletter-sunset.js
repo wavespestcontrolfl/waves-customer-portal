@@ -262,7 +262,8 @@ function buildWinbackDraftRow({ queued = false } = {}) {
     text_body: WINBACK_TEXT,
     preview_text: "One click keeps you on the list — otherwise we'll quietly stop.",
     from_name: 'Waves Pest Control',
-    from_email: 'newsletter@wavespestcontrol.com',
+    // Same sending subdomain as the weekly issue (owner 2026-10-31).
+    from_email: 'newsletter@news.wavespestcontrol.com',
     reply_to: 'contact@wavespestcontrol.com',
     ...(queued ? autoQueued() : { status: 'draft' }),
     segment_filter: { tags: [REENGAGEMENT_TAG] },
