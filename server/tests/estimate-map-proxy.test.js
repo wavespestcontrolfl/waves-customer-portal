@@ -671,6 +671,17 @@ describe('scrub covers escaped and differently-keyed URLs', () => {
     expect(mapImage.scrubMapsKeysFromString(`${BASE}&amp;key=${OTHER}&amp;size=640x640`)).toContain('&amp;size=640x640');
   });
 
+  test('a Google key in the newer AQ. format goes too: bare, as key=, and inside a maps URL', () => {
+    const BOUND = 'A' + 'Q.' + 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3' + 'x_zzzzzzzz';
+    for (const f of [`bare ${BOUND} shape`, `see this: key=${BOUND} in prose`, `${BASE}&amp;key=${BOUND}&amp;size=640x640`]) {
+      const out = mapImage.scrubMapsKeysFromString(f);
+      expect(out).not.toContain(BOUND.slice(0, 12));
+      expect(out).not.toMatch(/key=/i);
+    }
+    expect(mapImage.scrubMapsKeysDeep({ a: [`x ${BOUND}`] })).toEqual({ a: ['x '] });
+    expect(mapImage.scrubMapsKeysFromString('Grade AQ. ok, AQ.abc')).toBe('Grade AQ. ok, AQ.abc');
+  });
+
   test('our own proxy paths are never mangled, even when a token contains an AIza run; real keys still go', () => {
     const oddToken = 'AIzaSyABCDEFGHIJKLMNOPQRSTUV'; // AIza + 24 chars: shaped like a bare key
     const paths = [

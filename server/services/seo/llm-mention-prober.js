@@ -272,11 +272,11 @@ class LLMMentionProber {
     // Preserve the configured benchmark model across comparable runs.
     const model = process.env.GEMINI_MENTIONS_MODEL || 'gemini-2.5-flash';
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       const res = await fetch(url, {
         method: 'POST',
         signal: AbortSignal.timeout(60000),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: query }] }],
           tools: [{ google_search: {} }], // live grounding

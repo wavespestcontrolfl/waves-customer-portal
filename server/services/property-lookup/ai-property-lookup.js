@@ -1795,10 +1795,10 @@ async function lookupPropertyFromGemini(address) {
       timeoutMs,
     });
 
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_PROPERTY_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_PROPERTY_MODEL}:generateContent`, {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
       body: JSON.stringify({
         contents: [{ parts: [{ text: buildPropertyPrompt(address) }] }],
         tools: [{ googleSearch: {} }],
