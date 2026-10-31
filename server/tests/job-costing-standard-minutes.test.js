@@ -349,6 +349,27 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await cost(fakeDb({ ...tables, invoices: [feeOnly] }), KEEP)).revenue).toBe(0);
     });
 
+    test('invoice totals: deposit credits are payments, discounts come off once, a waived fee nets out', async () => {
+      const run = (invoice) => cost(fakeDb({
+        ...withSvc(unpriced), ...withRecord({ revenue: 0 }), invoices: [{ service_record_id: 'rec-1', status: 'paid', ...invoice }],
+      }), KEEP);
+      const service = { description: 'Quarterly Pest Control Service', amount: 100 };
+      // A $40 estimate deposit credit is a prior payment, not a discount: $100.
+      const deposit = { description: 'Deposit applied', category: 'deposit_credit', amount: -40 };
+      expect((await run({ subtotal: '100.00', discount_amount: '0.00', line_items: [service, deposit] })).revenue).toBe(100);
+      // A document-level discount with no line: $100 - $20.
+      expect((await run({ subtotal: '100.00', discount_amount: '20.00', line_items: [service] })).revenue).toBe(80);
+      // A line-backed discount is in discount_amount once, never twice.
+      const lineDiscount = { description: 'Multi-Home Discount', amount: -20 };
+      expect((await run({ subtotal: '100.00', discount_amount: '20.00', line_items: [service, lineDiscount] })).revenue).toBe(80);
+      // A setup fee and its waiver line net to $0 of fee: the service stays $100.
+      const fee = { description: 'WaveGuard Membership — one-time setup', amount: 99 };
+      const waiver = { description: 'Setup fee waiver', amount: -99 };
+      expect((await run({ subtotal: '199.00', discount_amount: '99.00', line_items: [service, fee, waiver] })).revenue).toBe(100);
+      // An unwaived setup fee comes off the subtotal.
+      expect((await run({ subtotal: '199.00', discount_amount: '0.00', line_items: [service, fee] })).revenue).toBe(100);
+    });
+
     test('monthly_rate is never used under keepRecordedRevenue, and is the old fallback without it', async () => {
       const tables = { ...withSvc(unpriced), ...withRecord({ revenue: 0 }) };
       expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);

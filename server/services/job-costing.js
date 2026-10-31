@@ -436,25 +436,35 @@ async function loadPrepayVisitShare(db, svc) {
   }
 }
 
-// The service money on one invoice's line_items (jsonb array of { description, quantity, unit_price, amount,
-// category }, written by invoice.js): amount, else unit_price x quantity (the same reading
-// estimate-first-application-invoice.js sumPositiveSetupFeeCents uses), minus setup, membership and
-// onboarding fee lines and tax. Tax also lives in invoices.tax_amount, never in the lines.
-function serviceLineTotal(rawLineItems) {
-  let items = rawLineItems;
+// The service money on one invoice, from the totals invoice.js keeps (calculateUpdateFinancials): subtotal is
+// the positive lines and discount_amount every discount, line-backed or document-level. A deposit credit
+// (category deposit_credit) is a prior payment, in neither. Setup, membership and onboarding fee lines are
+// not visit revenue: each one's net (the fee, less any waiver line, which discount_amount already took out)
+// comes off. Line amounts read as invoice.js does: amount, else unit_price x quantity. Tax and the card fee
+// sit outside these totals; a legacy invoice with no subtotal uses its positive lines.
+function invoiceServiceRevenue(invoice) {
+  let items = invoice.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
-  if (!Array.isArray(items)) return 0;
-  return items.reduce((sum, li) => {
-    if (INVOICE_NON_SERVICE_LINE_RE.test(`${li?.description || ''} ${li?.category || ''}`)) return sum;
+  if (!Array.isArray(items)) items = [];
+  let positive = 0;
+  let feeNet = 0;
+  for (const li of items) {
+    if (li?.category === 'deposit_credit') continue;
     const qty = li?.quantity != null ? Number(li.quantity) : 1;
     const amount = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-    return Number.isFinite(amount) ? sum + amount : sum;
-  }, 0);
+    if (!Number.isFinite(amount)) continue;
+    if (amount > 0) positive += amount;
+    if (INVOICE_NON_SERVICE_LINE_RE.test(`${li?.description || ''} ${li?.category || ''}`)) feeNet += amount;
+  }
+  const storedSubtotal = invoice.subtotal == null ? NaN : Number(invoice.subtotal);
+  const subtotal = Number.isFinite(storedSubtotal) ? storedSubtotal : positive;
+  const discount = Number(invoice.discount_amount) || 0;
+  return Math.max(0, round2(subtotal - discount - feeNet));
 }
 
-// The newest non-void invoice written for this visit's service record: its service lines. A prepay invoice
+// The newest non-void invoice written for this visit's service record: its service money. A prepay invoice
 // (annual_prepay_term_id set) bills the whole term, not this visit: its share comes from loadPrepayVisitShare.
 async function loadLinkedInvoiceTotal(db, record) {
   if (!record?.id) return 0;
@@ -464,8 +474,8 @@ async function loadLinkedInvoiceTotal(db, record) {
       .whereNotIn('status', INVOICE_NO_REVENUE_STATUSES)
       .whereNull('annual_prepay_term_id')
       .orderBy('created_at', 'desc')
-      .first('line_items');
-    return invoice ? round2(serviceLineTotal(invoice.line_items)) : 0;
+      .first('line_items', 'subtotal', 'discount_amount');
+    return invoice ? invoiceServiceRevenue(invoice) : 0;
   } catch (err) {
     logger.debug(`[job-costing] linked invoice error: ${err.message}`);
     return 0;
