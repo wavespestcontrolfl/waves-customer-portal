@@ -95,6 +95,18 @@ describe('requestSendMoney', () => {
     await expect(slow.requestSendMoney({ recipientId: RECIPIENT, amountCents: 100, idempotencyKey: 'k', note: 'n', externalMemo: 'm' })).rejects.toMatchObject({ kind: 'unknown' });
   });
 
+  test('a body that never arrives times out as unknown: the timer runs until the body is read', async () => {
+    const stalled = { status: 200, json: (/* never settles */) => new Promise(() => {}) };
+    const fetchImpl = jest.fn(async (_url, { signal }) => ({
+      status: 200,
+      json: () => new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('aborted'))); }),
+    }));
+    expect(stalled.status).toBe(200);
+    const client = createClient({ fetchImpl, env, timeoutMs: 10 });
+    await expect(client.requestSendMoney({ recipientId: RECIPIENT, amountCents: 100, idempotencyKey: 'k', note: 'n', externalMemo: 'm' })).rejects.toMatchObject({ kind: 'unknown' });
+    await expect(client.getBalance()).rejects.toMatchObject({ kind: 'unknown' });
+  });
+
   test('an error code with odd characters is dropped', async () => {
     const client = createClient({ fetchImpl: fakeFetch(answer(400, { errors: { errorCode: 'has spaces and 1234567890 account' } })), env });
     const error = await client.requestSendMoney({ recipientId: RECIPIENT, amountCents: 100, idempotencyKey: 'k', note: 'n', externalMemo: 'm' }).catch((e) => e);

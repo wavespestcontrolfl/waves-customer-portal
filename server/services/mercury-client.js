@@ -68,12 +68,17 @@ function errorFor(status, parsed) {
   return new MercuryError('rejected', { status, code });
 }
 
-// One HTTP exchange with a timeout. A network error or a timeout is `unknown`: the request may have arrived.
+// One HTTP exchange with a timeout that stays on until the body is read: fetch resolves at the headers, and a stalled
+// body must not hang a batch. A network error, a timeout or an unreadable body is `unknown` for a 2xx (the request may
+// have been taken); an error answer with no readable body keeps its status.
 async function exchange(fetchImpl, url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...options, signal: controller.signal });
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    let parsed = null;
+    try { parsed = await response.json(); } catch { parsed = null; }
+    return { status: response.status, parsed };
   } catch {
     throw new MercuryError('unknown');
   } finally {
@@ -92,7 +97,7 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
     }
     const url = new URL(`${config.base}${path}`);
     for (const [key, value] of Object.entries(query || {})) if (value != null) url.searchParams.set(key, String(value));
-    const response = await exchange(fetchImpl, url.toString(), {
+    const { status, parsed } = await exchange(fetchImpl, url.toString(), {
       method,
       headers: {
         Authorization: `Bearer ${config.token}`,
@@ -101,10 +106,8 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     }, timeoutMs);
-    let parsed = null;
-    try { parsed = await response.json(); } catch { parsed = null; }
-    if (response.status < 200 || response.status >= 300) throw errorFor(response.status, parsed);
-    if (parsed === null || typeof parsed !== 'object') throw new MercuryError('unknown', { status: response.status });
+    if (status < 200 || status >= 300) throw errorFor(status, parsed);
+    if (parsed === null || typeof parsed !== 'object') throw new MercuryError('unknown', { status });
     return parsed;
   }
 

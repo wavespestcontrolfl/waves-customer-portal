@@ -372,36 +372,48 @@ async function mercuryHoldsSameAmount(client, { recipientId, amountCents, now })
   return requestHit || transactionHit;
 }
 
+// The unknown attempt went to the recipient and account it stored. If the account has changed since, this client cannot
+// look there: fail closed rather than miss the original request.
+async function assertUnknownCleared(client, before, check, now) {
+  if (before.account_id !== client.accountId) {
+    throw new PayrollError(409, 'The Mercury account changed since that request. Check the old account in Mercury yourself before you send again.');
+  }
+  let held;
+  try {
+    held = await mercuryHoldsSameAmount(client, { recipientId: before.recipient_id, amountCents: Number(before.amount_cents), now });
+  } catch (err) { throw await readFailure(err); }
+  if (held) throw new PayrollError(409, 'Mercury already shows a request or payment of this amount to this person in the last 7 days. Check Mercury first.');
+}
+
 async function sendAgain(checkId, input, actor, { client = createClient(), conn = db, now = new Date() } = {}) {
   requireUuid(checkId, 'Paycheck');
   const v = validate(sendAgainSchema, input);
   requireReady(client, { pay: true });
   const actorId = actorOf(actor);
   const check = await loadSendableCheck(conn, checkId);
-  if (!check.mercury_recipient_id) throw new PayrollError(409, 'Save the Mercury recipient id for this employee first.');
   const before = (await latestPayments(conn, [checkId])).get(checkId);
   if (!before) throw new PayrollError(409, 'Nothing was sent yet. Use Send to Mercury.');
   const mode = canSendAgainOf(before);
   if (!mode) throw new PayrollError(409, 'This payment is still open. Wait for it to finish, or reject it in Mercury first.');
   if (mode === 'confirm') {
     if (!v.confirmNothingWaiting) throw new PayrollError(409, 'Confirm that nothing is waiting in Mercury first.');
-    let held;
-    try {
-      held = await mercuryHoldsSameAmount(client, { recipientId: check.mercury_recipient_id, amountCents: Number(check.net_cents), now });
-    } catch (err) { throw await readFailure(err); }
-    if (held) throw new PayrollError(409, 'Mercury already shows a request or payment of this amount to this person in the last 7 days. Check Mercury first.');
+    const stored = await conn('payroll_payments').where({ id: before.id }).first('recipient_id', 'account_id', 'amount_cents');
+    await assertUnknownCleared(client, { ...before, ...stored }, check, now);
   }
   const queued = await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
-    const now_ = await trx('payroll_payments').where({ check_id: checkId }).orderBy('attempt', 'desc').forUpdate().first();
-    if (!now_ || now_.id !== before.id || now_.state !== before.state) throw new PayrollError(409, 'This payment changed. Reload and look again.');
-    if (now_.state === 'unknown') {
-      await trx('payroll_payments').where({ id: now_.id }).update({
+    // Everything is judged again under the lock: a void or a recipient change may have landed since the reads above.
+    const fresh = await loadSendableCheck(trx, checkId);
+    if (!fresh.mercury_recipient_id) throw new PayrollError(409, 'Save the Mercury recipient id for this employee first.');
+    const latest = await trx('payroll_payments').where({ check_id: checkId }).orderBy('attempt', 'desc').forUpdate().first();
+    if (!latest || latest.id !== before.id || latest.state !== before.state) throw new PayrollError(409, 'This payment changed. Reload and look again.');
+    if (latest.state === 'unknown') {
+      await trx('payroll_payments').where({ id: latest.id }).update({
         state: 'failed', resolved_at: trx.fn.now(), updated_at: trx.fn.now(),
         resolution: 'Owner confirmed nothing was waiting in Mercury and sent again',
       });
     }
-    const row = await insertQueued(trx, { check, recipientId: check.mercury_recipient_id, accountId: client.accountId, actorId });
+    const row = await insertQueued(trx, { check: fresh, recipientId: fresh.mercury_recipient_id, accountId: client.accountId, actorId });
     await audit(trx, actorId, 'payroll.mercury_send_again', 'payroll_checks', checkId, { check_id: checkId, payment_id: row.id, attempt: row.attempt });
     return row;
   });

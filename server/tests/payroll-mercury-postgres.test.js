@@ -436,6 +436,46 @@ postgres('payroll Mercury paychecks', () => {
         expect(client.requestSendMoney).toHaveBeenCalledTimes(1);
       });
 
+      it('looks for the original destination: the stored recipient, and a changed account is refused', async () => {
+        const { target, recipient, row } = await unknownCheck();
+        const amount = Number(row.amount_cents);
+        // The employee's recipient id changes after the lost answer; the original request is still found.
+        await trx('technicians').where({ mercury_recipient_id: recipient }).update({ mercury_recipient_id: randomUUID() });
+        const client = fakeClient();
+        client.listRequests.mockResolvedValue([{ requestId: 'r', status: 'pendingApproval', recipientId: recipient, amountCents: amount, createdAt: new Date().toISOString() }]);
+        await expect(sendAgain(target.id, { confirmNothingWaiting: true }, client)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/already shows/) });
+        // A client on another account cannot look where the original went: fail closed, no read, no request.
+        const other = fakeClient({ accountId: randomUUID() });
+        await expect(sendAgain(target.id, { confirmNothingWaiting: true }, other)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/account changed/) });
+        expect(other.listRequests).not.toHaveBeenCalled();
+        expect(other.requestSendMoney).not.toHaveBeenCalled();
+      });
+
+      it('a void that lands first stops the retry: the check is judged again under the lock', async () => {
+        const { run, check } = await bankRun();
+        await sendRun(run.id, fakeClient());
+        const old = (await payments(check('Sample Alpha').id))[0];
+        await setState(old.id, { state: 'failed' });
+        const client = fakeClient();
+        // The void commits between the retry's first read and its locked transaction.
+        const conn = new Proxy(trx, {
+          apply: (_t, _this, args) => trx(...args),
+          get: (_t, key) => {
+            if (key === 'transaction') {
+              return async (work) => {
+                await trx('payroll_checks').where({ run_id: run.id }).update({ status: 'voided' });
+                return trx.transaction(work);
+              };
+            }
+            const value = trx[key];
+            return typeof value === 'function' ? value.bind(trx) : value;
+          },
+        });
+        await expect(mercury.sendAgain(check('Sample Alpha').id, {}, ADMIN_ID, { client, conn })).rejects.toMatchObject({ status: 409 });
+        expect(client.requestSendMoney).not.toHaveBeenCalled();
+        expect(await payments(check('Sample Alpha').id)).toHaveLength(1);
+      });
+
       it('a Mercury read that fails refuses the retry', async () => {
         const { target } = await unknownCheck();
         const client = fakeClient();
