@@ -199,8 +199,9 @@ describe('reviewPlan', () => {
     const unassigned = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: null }))));
     const out = await reviewPlan(conn, unassigned, { rebooker });
     expect(out.held).toBeNull();
-    expect(out.moves.map((m) => [m.id, m.ws, m.we])).toEqual([['v2', '10:00', '11:00'], ['v3', '10:00', '11:00'], ['v4', '10:00', '11:00']]);
-    expect(out.visits.find((v) => v.id === 'v2')).toMatchObject({ ws: '10:00', we: '11:00' });
+    expect(out.moves.map((m) => [m.id, m.toWs, m.toWe])).toEqual([['v2', '10:00', '11:00'], ['v3', '10:00', '11:00'], ['v4', '10:00', '11:00']]);
+    // The source time stays beside the reviewed one.
+    expect(out.visits.find((v) => v.id === 'v2')).toMatchObject({ ws: '09:00', we: '10:00', toWs: '10:00', toWe: '11:00' });
     expect(rebooker.previewMoveConflicts.mock.calls.slice(0, 2).map(([id, date, window, opts]) => [id, date, window, opts.conn]))
       .toEqual([['v2', '2027-01-12', { start: '09:00', end: '10:00' }, conn], ['v2', '2027-01-12', { start: '10:00', end: '11:00' }, conn]]);
   });
@@ -208,7 +209,7 @@ describe('reviewPlan', () => {
   test('a start stays on the hour and the end follows the length (a 90-minute visit)', async () => {
     const long = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { we: '10:30', dur: 90 })]));
     const rebooker = { previewMoveConflicts: jest.fn(async (id, date, window) => (window.start === '09:00' ? [{ id: 'x' }] : [])) };
-    expect((await reviewPlan(conn, long, { rebooker })).moves[0]).toMatchObject({ ws: '10:00', we: '11:30' });
+    expect((await reviewPlan(conn, long, { rebooker })).moves[0]).toMatchObject({ toWs: '10:00', toWe: '11:30' });
   });
 
   test('a day with no open time in working hours holds the series: hour taken; an untimed move needs none', async () => {
@@ -220,7 +221,7 @@ describe('reviewPlan', () => {
     const untimed = planSeriesRedate(series([visit('v1', '2026-11-17'), visit('v2', '2026-12-29', { ws: null, we: null })]));
     const free = await reviewPlan(conn, untimed, { rebooker: full });
     expect(free.held).toBeNull();
-    expect(free.moves[0]).toMatchObject({ id: 'v2', ws: null, we: null });
+    expect(free.moves[0]).toMatchObject({ id: 'v2', ws: null, we: null, toWs: null });
   });
 
   test('a closed day holds the series', async () => {
@@ -231,11 +232,11 @@ describe('reviewPlan', () => {
   test('an earlier planned series in the run claims its hour, whatever the technician; a held series claims none', async () => {
     const reserved = new Map();
     const rebooker = scheduleWith([]);
-    expect((await reviewPlan(conn, plan(), { reserved, rebooker })).moves.map((m) => m.ws)).toEqual(['09:00', '09:00', '09:00']);
+    expect((await reviewPlan(conn, plan(), { reserved, rebooker })).moves.map((m) => m.toWs)).toEqual(['09:00', '09:00', '09:00']);
     const otherTech = planSeriesRedate(series(legacy().map((v) => ({ ...v, tech: 'another-tech' }))));
     const second = await reviewPlan(conn, otherTech, { reserved, rebooker });
     expect(second.held).toBeNull();
-    expect(second.moves.map((m) => m.ws)).toEqual(['10:00', '10:00', '10:00']);
+    expect(second.moves.map((m) => m.toWs)).toEqual(['10:00', '10:00', '10:00']);
     expect(reserved.get('2027-01-12')).toEqual([['09:00', '10:00'], ['10:00', '11:00']]);
     const heldFirst = new Map();
     await reviewPlan(conn, plan(), { reserved: heldFirst, rebooker, closedDates: new Set(['2027-01-12']) });
@@ -322,7 +323,7 @@ function world({ visits = legacy(), parentPattern = 'custom', terms = [], rebook
     prepay: { normalizeCoverageCadence: (v) => v || null, inferCoverageCadence: () => 'quarterly' },
   };
   const termWindows = Object.fromEntries(terms.map((term) => [term.id, { start: '2026-01-01', end: '2027-12-31' }]));
-  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { ws: r.ws, we: r.we, termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
+  const replan = async () => reviewPlan(conn, planSeriesRedate(series(live().map((r) => visit(r.id, r.d, { ws: r.ws, we: r.we, tech: r.tech, termId: r.term_id, prepaid: !!r.term_id })), { terms: termWindows })), { rebooker });
   return { conn, deps, rebooker, reminders, log, rows, state, replan, fail };
 }
 
@@ -431,6 +432,21 @@ describe('applySeries', () => {
     expect(out).toEqual({ status: 'held', why: 'hour taken' });
     expect(w.rebooker.reschedule).not.toHaveBeenCalled();
     expect(w.log).toEqual([]);
+  });
+
+  test('a time, technician or reviewed-time change since the plan skips the series', async () => {
+    for (const change of [{ ws: '13:00', window_start: '13:00:00' }, { tech: 'another-tech', technician_id: 'another-tech' }]) {
+      const w = world();
+      const plan = await w.replan();
+      Object.assign(w.rows.get('v3'), change);
+      expect(await applySeries(w.conn, w.deps, plan, w.replan)).toMatchObject({ status: 'skipped', why: 'series changed since the plan' });
+      expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    }
+    // The open hour the plan printed is taken now: the fresh review picks another hour, so the series is skipped.
+    const w = world();
+    const plan = await w.replan();
+    w.rebooker.previewMoveConflicts.mockImplementation(async (id, date, win) => (date === '2027-02-23' && win.start === '09:00' ? [{ id: 'x' }] : []));
+    expect(await applySeries(w.conn, w.deps, plan, w.replan)).toMatchObject({ status: 'skipped', why: 'series changed since the plan' });
   });
 
   test('a series that changed since the plan is skipped with the reason', async () => {

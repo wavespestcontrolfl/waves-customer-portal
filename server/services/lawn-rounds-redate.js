@@ -250,10 +250,11 @@ async function openStart(conn, rebooker, move, claimed) {
   return null;
 }
 
-// The schedule half of the plan. Each timed move gets its open start (openStart); a move with none, or a move onto
-// a closed day, holds the series. An untimed move keeps no time: auto-dispatch times it after the move.
-// `reserved` (Map date -> [[start, end]]) carries the hours earlier series in this run claim; this call adds this
-// plan's moves to it when the plan is not held.
+// The schedule half of the plan. Each timed move gets its open start (openStart) as toWs/toWe, beside its source
+// time (ws/we); a move with none, or a move onto a closed day, holds the series. An untimed move gets no time:
+// auto-dispatch times it after the move. `reserved` (Map date -> [[start, end]]) carries the hours earlier series in
+// this run claim; this call adds this plan's moves to it when the plan is not held. The reviewed signature adds each
+// visit's source time and technician and its reviewed time, so --apply skips a series whose plan would differ.
 async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new Map(), rebooker = require('./rebooker') } = {}) {
   const reasons = [...plan.heldReasons];
   const placed = new Map();
@@ -261,14 +262,21 @@ async function reviewPlan(conn, plan, { closedDates = new Set(), reserved = new 
     if (closedDates.has(move.to)) reasons.push('closed day');
     const span = move.ws ? await openStart(conn, rebooker, move, reserved.get(move.to) || []) : [null, null];
     if (!span) reasons.push('hour taken');
-    else placed.set(move.id, { ...move, ws: span[0], we: span[1] });
+    else placed.set(move.id, { ...move, toWs: span[0], toWe: span[1] });
   }
   const held = [...new Set(reasons)];
   if (!held.length) {
-    for (const move of placed.values()) if (move.ws) reserved.set(move.to, [...(reserved.get(move.to) || []), [move.ws, move.we]]);
+    for (const move of placed.values()) if (move.toWs) reserved.set(move.to, [...(reserved.get(move.to) || []), [move.toWs, move.toWe]]);
   }
   const visits = plan.visits.map((v) => placed.get(v.id) || v);
-  return { ...plan, visits, moves: visits.filter((v) => v.kind === 'move'), heldReasons: held, held: held[0] || null };
+  return {
+    ...plan,
+    visits,
+    moves: visits.filter((v) => v.kind === 'move'),
+    heldReasons: held,
+    held: held[0] || null,
+    signature: JSON.stringify([plan.anchor, visits.map((v) => [v.id, v.from, v.ws, v.tech, v.to, v.toWs || null])]),
+  };
 }
 
 // Plan and review one series (the dry run and --apply both call this). An area plan held only because some area
@@ -297,7 +305,7 @@ async function moveVisitToRound(conn, deps, row) {
   const v = await unchanged(conn);
   // The planned open time (reviewPlan); an untimed visit moves by date only. A time taken since the plan is
   // refused by the rebooker's own commit check (SLOT_TAKEN), under its date lock; nothing is written.
-  const window = row.ws ? { start: row.ws, end: row.we } : null;
+  const window = row.toWs ? { start: row.toWs, end: row.toWe } : null;
   const result = await deps.rebooker.reschedule(row.id, row.to, window, MOVE_REASON, 'admin', {
     seriesPolicy: 'single',
     visitPolicy: 'single',
@@ -315,8 +323,8 @@ async function moveVisitToRound(conn, deps, row) {
   if (result && result.smsSent === true) throw new Error(`visit ${row.id}: the rebooker reported a customer text; stopping`);
   // The reminder reads the committed row (an untimed visit uses its 08:00 convention), and only while the visit
   // still sits where this move put it: a newer reschedule keeps its own reminder (expectSchedule).
-  await deps.reminders.handleReschedule(row.id, `${row.to}T${row.ws || '08:00'}`, {
-    sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: row.to, windowStart: row.ws },
+  await deps.reminders.handleReschedule(row.id, `${row.to}T${row.toWs || '08:00'}`, {
+    sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: row.to, windowStart: row.toWs || null },
   });
   return v.tech;
 }

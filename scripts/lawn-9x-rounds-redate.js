@@ -100,7 +100,7 @@ function printPlan(plan) {
     + `${plan.oldWeekday}->${plan.newWeekday}${plan.flags.length ? ` flags=[${plan.flags.join(', ')}]` : ''}`
     + `${plan.held ? ` HELD=[${plan.heldReasons.join(', ')}]` : ''}`);
   for (const v of plan.visits) {
-    const text = v.kind === 'move' ? `${v.from} -> ${v.to} ${v.ws || 'untimed'} (${v.shift > 0 ? '+' : ''}${v.shift}d)`
+    const text = v.kind === 'move' ? `${v.from} -> ${v.to} ${v.toWs || 'untimed'} (${v.shift > 0 ? '+' : ''}${v.shift}d)`
       : `keep ${v.from}${v.reason ? ` (${v.reason})` : v.kind === 'next' ? ' (next visit)' : ' (already on its round day)'}`;
     console.log(`  visit=${v.id} ${text}`);
   }
@@ -160,8 +160,14 @@ async function applyAll({ db, svc, plans, planFor, todayET }) {
   const dates = new Set();
   const counts = {};
   console.log('\nApplying');
+  // The hours earlier series in this run took, as the dry run reserved them: each re-plan reads a copy, and only the
+  // moves that landed are added, so a skipped series claims nothing.
+  const applyReserved = new Map();
   for (const plan of plans) {
-    const outcome = await svc.applySeries(db, deps, plan, (root) => planFor(root, new Map()));
+    const outcome = await svc.applySeries(db, deps, plan, (root) => planFor(root, new Map(applyReserved)));
+    for (const { row } of outcome.moved || []) {
+      if (row.toWs) applyReserved.set(row.to, [...(applyReserved.get(row.to) || []), [row.toWs, row.toWe]]);
+    }
     counts[outcome.status] = (counts[outcome.status] || 0) + 1;
     console.log(`[${outcome.status}] parent=${plan.parentId}${outcome.why ? ` ${outcome.why}` : ''} moved=${(outcome.moved || []).length}`
       + `${outcome.termsMoved ? ` prepay terms moved=${outcome.termsMoved}` : ''}`);
