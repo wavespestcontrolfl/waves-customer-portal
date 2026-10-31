@@ -19,7 +19,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { prepareInAppReader } from "../lib/tapToPay";
-import { registerInAppPush } from "../native/wavesAdminPush";
+import { registerInAppPush, releaseInAppPush } from "../native/wavesAdminPush";
 import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
@@ -203,6 +203,8 @@ export default function AdminLayoutV2() {
     // own guardLink/guardHistory nor any other page's in-app draft guard.
     // Ask the shared registry (client/src/lib/navigation-guard.js) first.
     if (!confirmLeaveIfGuarded()) return;
+    // Waves Admin: this iPhone stops getting staff alerts (needs the token).
+    void releaseInAppPush();
     clearEmailDrafts();
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");

@@ -45,6 +45,12 @@ final class StaffAlerts {
         UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
     }
 
+    // Sign-out: the next person on this iPhone sees none of these alerts.
+    func clearShown() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        setBadge(0)
+    }
+
     // Only portal pages open here; any other link is ignored.
     func open(link: String) {
         guard let url = URL(string: link, relativeTo: Portal.origin)?.absoluteURL, Portal.isPortal(url) else { return }

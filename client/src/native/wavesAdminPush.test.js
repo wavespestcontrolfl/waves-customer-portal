@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/adminFetch', () => ({ adminFetch: vi.fn(async () => ({ ok: true })) }));
 
 import { adminFetch } from '../lib/adminFetch';
-import { registerInAppPush, setInAppBadge } from './wavesAdminPush';
+import { registerInAppPush, releaseInAppPush, setInAppBadge } from './wavesAdminPush';
 
 const TOKEN = 'ab'.repeat(32);
 
@@ -25,6 +25,7 @@ function answer(detail) {
 
 afterEach(() => {
   delete window.webkit;
+  localStorage.clear();
   vi.clearAllMocks();
 });
 
@@ -71,5 +72,47 @@ describe('setInAppBadge', () => {
     expect(postMessage).toHaveBeenLastCalledWith({ type: 'badge', count: 4 });
     setInAppBadge(-2);
     expect(postMessage).toHaveBeenLastCalledWith({ type: 'badge', count: 0 });
+  });
+});
+
+describe('releaseInAppPush (sign-out)', () => {
+  it('waits for a sign-up still in flight, then releases the token with the sign-in that registered it', async () => {
+    const postMessage = installApp();
+    localStorage.setItem('waves_admin_token', 'staff-jwt');
+    let finishSignUp;
+    adminFetch.mockImplementationOnce(() => new Promise((resolve) => { finishSignUp = resolve; }));
+    const cleanup = registerInAppPush();
+    answer({ token: TOKEN, environment: 'sandbox' });
+
+    const released = releaseInAppPush();
+    localStorage.removeItem('waves_admin_token'); // sign-out goes on at once
+    expect(postMessage).toHaveBeenCalledWith({ type: 'clearAlerts' });
+    expect(adminFetch).toHaveBeenCalledTimes(1); // only the sign-up so far
+
+    finishSignUp({ ok: true });
+    await released;
+    expect(adminFetch).toHaveBeenLastCalledWith('/admin/push/native-unsubscribe', {
+      method: 'POST',
+      body: { token: TOKEN },
+      headers: { Authorization: 'Bearer staff-jwt' },
+    });
+    cleanup();
+  });
+
+  it('ignores a token that arrives after sign-out', async () => {
+    installApp();
+    const cleanup = registerInAppPush();
+    await releaseInAppPush();
+    answer({ token: TOKEN, environment: 'sandbox' });
+    expect(adminFetch).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it('only clears shown alerts when this iPhone never signed up, and does nothing in a browser', async () => {
+    await releaseInAppPush();
+    const postMessage = installApp();
+    await releaseInAppPush();
+    expect(postMessage).toHaveBeenCalledWith({ type: 'clearAlerts' });
+    expect(adminFetch).not.toHaveBeenCalled();
   });
 });

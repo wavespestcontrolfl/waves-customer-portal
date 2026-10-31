@@ -19,6 +19,7 @@ import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSave
 import { UiSurface } from "../../components/ui";
 import { PinnedWorkspaceLinks, WorkspaceGroup, WorkspaceLink } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
+import { releaseInAppPush } from "../../native/wavesAdminPush";
 
 // The Settings leaves this page lists inline: every entry of the former
 // mobile Settings index whose destination is NOT already a nav row or tab
@@ -50,6 +51,8 @@ export default function MorePage() {
   if (!isMobile) return <Navigate to="/admin" replace />;
 
   const handleLogout = () => {
+    // Waves Admin: this iPhone stops getting staff alerts (needs the token).
+    void releaseInAppPush();
     clearEmailDrafts();
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");

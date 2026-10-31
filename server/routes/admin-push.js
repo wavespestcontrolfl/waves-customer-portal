@@ -207,6 +207,23 @@ async function nativeSubscribe(req, res, next) {
 
 router.post('/native-subscribe', nativeSubscribe);
 
+// Sign-out on Waves Admin: the page releases this device's token before its
+// credentials go, so the iPhone stops getting this staff member's alerts.
+async function nativeUnsubscribe(req, res, next) {
+  try {
+    const { token } = req.body || {};
+    if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/i.test(token)) {
+      return res.status(400).json({ error: 'device token required' });
+    }
+    const deactivated = await db('push_subscriptions')
+      .where({ admin_user_id: req.technicianId, device_token: token, platform: 'ios' })
+      .update({ active: false });
+    return res.json({ ok: true, deactivated: Number(deactivated) || 0 });
+  } catch (err) { next(err); }
+}
+
+router.post('/native-unsubscribe', nativeUnsubscribe);
+
 router.post('/unsubscribe', async (req, res, next) => {
   try {
     const { endpoint } = req.body;
@@ -387,4 +404,4 @@ router.post('/test', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._handlers = { subscribe, nativeSubscribe };
+module.exports._handlers = { subscribe, nativeSubscribe, nativeUnsubscribe };

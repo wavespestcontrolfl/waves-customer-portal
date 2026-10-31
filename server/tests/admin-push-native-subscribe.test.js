@@ -26,7 +26,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { nativeSubscribe } = require('../routes/admin-push')._handlers;
+const { nativeSubscribe, nativeUnsubscribe } = require('../routes/admin-push')._handlers;
 
 const TOKEN = 'a1'.repeat(32);
 const TECH = { id: 'tech-1', active: true, role: 'admin', auth_token_version: 7, must_change_password: false };
@@ -101,5 +101,28 @@ describe('POST /api/admin/push/native-subscribe', () => {
       expect(res.statusCode).toBe(400);
     }
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/admin/push/native-unsubscribe', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('deactivates only the signed-in staff member\'s row for this iPhone', async () => {
+    const query = { where: jest.fn(() => query), update: jest.fn(async () => 1) };
+    db.mockImplementation(() => query);
+    const res = response();
+    await nativeUnsubscribe(request({ token: TOKEN }), res, jest.fn());
+
+    expect(db).toHaveBeenCalledWith('push_subscriptions');
+    expect(query.where).toHaveBeenCalledWith({ admin_user_id: 'tech-1', device_token: TOKEN, platform: 'ios' });
+    expect(query.update).toHaveBeenCalledWith({ active: false });
+    expect(res.body).toEqual({ ok: true, deactivated: 1 });
+  });
+
+  test('refuses a malformed token before any write', async () => {
+    const res = response();
+    await nativeUnsubscribe(request({ token: 'nope' }), res, jest.fn());
+    expect(res.statusCode).toBe(400);
+    expect(db).not.toHaveBeenCalled();
   });
 });

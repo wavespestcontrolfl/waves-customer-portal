@@ -219,6 +219,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/protocols/scripts` | admin-protocols |
 | GET | `/api/admin/protocols/seasonal-index` | admin-protocols |
 | POST | `/api/admin/push/native-subscribe` | admin-push |
+| POST | `/api/admin/push/native-unsubscribe` | admin-push |
 | GET | `/api/admin/push/preferences` | admin-push |
 | PUT | `/api/admin/push/preferences` | admin-push |
 | POST | `/api/admin/push/subscribe` | admin-push |
