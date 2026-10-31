@@ -8,8 +8,6 @@ import {
   FileCheck2,
   FileText,
   Newspaper,
-  Plus,
-  Wand2,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -394,60 +392,6 @@ function PostList({ status, onSelectPost }) {
                   {p.word_count > 0 && <span>{p.word_count} words</span>}
                 </div>{" "}
               </div>{" "}
-              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                {status === "queued" && !p.content && (
-                  <span
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 14,
-                      color: D.text,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      data-qa="blog-status-dot"
-                      style={{
-                        width: 5,
-                        height: 5,
-                        boxSizing: "border-box",
-                        borderRadius: "50%",
-                        border: `1px solid ${D.text}`,
-                      }}
-                    />
-                    Needs Content
-                  </span>
-                )}
-                {status === "queued" && p.content && (
-                  <span
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 14,
-                      color: D.muted,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      data-qa="blog-status-dot"
-                      style={{
-                        width: 5,
-                        height: 5,
-                        boxSizing: "border-box",
-                        borderRadius: "50%",
-                        border: `1px solid ${D.muted}`,
-                      }}
-                    />
-                    Content Ready
-                  </span>
-                )}
-              </div>{" "}
             </div>{" "}
           </div>
         ))
@@ -461,7 +405,6 @@ function PostList({ status, onSelectPost }) {
 // =========================================================================
 function PostEditor({ post, onBack, onUpdate }) {
   const [editing, setEditing] = useState(post);
-  const [generating, setGenerating] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [astroPublishing, setAstroPublishing] = useState(false);
   const [astroMerging, setAstroMerging] = useState(false);
@@ -539,29 +482,6 @@ function PostEditor({ post, onBack, onUpdate }) {
       setImageError(err.message || "Image generation failed");
     }
     setRegeneratingImage(false);
-  };
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    try {
-      const result = await adminPost(
-        `/admin/content/blog/${post.id}/generate`,
-        {},
-      );
-      if (result.content) {
-        setEditing((prev) => ({
-          ...prev,
-          content: result.content,
-          word_count: result.wordCount,
-          status: "draft",
-        }));
-      } else if (result.error) {
-        alert(`Generate failed: ${result.error}`);
-      }
-    } catch (err) {
-      alert(`Generate failed: ${err.message}`);
-    }
-    setGenerating(false);
   };
 
   const handleOptimize = async () => {
@@ -1378,44 +1298,9 @@ function PostEditor({ post, onBack, onUpdate }) {
             Content
           </div>{" "}
           <div style={{ display: "flex", gap: 8 }}>
-            {!editing.content && (
-              <button
-                onClick={handleGenerate}
-                disabled={generating}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 6,
-                  border: "none",
-                  background: D.teal,
-                  color: D.white,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: generating ? 0.5 : 1,
-                }}
-              >
-                {generating ? "Generating..." : "Generate Content"}
-              </button>
-            )}
             {editing.content && (
               <>
                 {" "}
-                <button
-                  onClick={handleGenerate}
-                  disabled={generating}
-                  style={{
-                    padding: "6px 14px",
-                    borderRadius: 6,
-                    border: `1px solid ${D.border}`,
-                    background: "transparent",
-                    color: D.muted,
-                    fontSize: 14,
-                    cursor: "pointer",
-                    opacity: generating ? 0.5 : 1,
-                  }}
-                >
-                  {generating ? "Regenerating..." : "Regenerate"}
-                </button>{" "}
                 <button
                   onClick={handleOptimize}
                   disabled={optimizing}
@@ -1543,8 +1428,8 @@ function PostEditor({ post, onBack, onUpdate }) {
               fontSize: 14,
             }}
           >
-            No content yet. Click "Generate Content" to create the blog post
-            with AI.
+            No content yet. New posts come from Autopilot; this one has no body
+            to edit or publish.
           </div>
         )}
         {editing.content && (
@@ -2535,468 +2420,11 @@ function AuditTab() {
 }
 
 // =========================================================================
-// GENERATE TAB
-// =========================================================================
-
-const CONTENT_TYPES = [
-  {
-    id: "blog_post",
-    label: "Blog Post",
-    desc: "800–1200 words, entity-complete, FAQ schema from SERP consensus",
-  },
-  {
-    id: "page_refresh",
-    label: "Page Refresh",
-    desc: "Update existing page: add missing entities, expand FAQs, fix schema",
-  },
-  {
-    id: "pest_pressure",
-    label: "Pest Pressure Report",
-    desc: "Weekly SWFL conditions + actionable advice",
-  },
-  {
-    id: "gbp_post",
-    label: "GBP Post",
-    desc: "150–300 words, Google Business Profile",
-  },
-  {
-    id: "service_page",
-    label: "Service Page",
-    desc: "1500–2000 words, full entity coverage, semantic depth",
-  },
-];
-
-const CITIES = [
-  "Lakewood Ranch",
-  "Parrish",
-  "Bradenton",
-  "Sarasota",
-  "Venice",
-  "North Port",
-  "Port Charlotte",
-];
-
-const SUGGESTIONS = {
-  blog_post: [
-    "Termite swarm season — what Lakewood Ranch homeowners need to know",
-    "Chinch bug damage vs drought stress — how to tell the difference",
-    "Why mosquito season starts earlier every year in Southwest Florida",
-    "German roach infestation — what it actually takes to eliminate them",
-    "Fertilizer blackout rules in Sarasota County — complete guide",
-    "Roof rats in SWFL — entry points, signs, and exclusion",
-  ],
-  page_refresh: [
-    "Refresh pest-control-bradenton-fl — add missing entities from SERP competitors",
-    "Expand lawn-care-sarasota-fl FAQs based on People Also Ask",
-    "Update termite-control-bradenton-fl schema to match SERP consensus",
-    "Add seasonal freshness signals to mosquito-control pages",
-    "Fill entity gaps on rodent-control-venice-fl vs top 5 competitors",
-  ],
-  pest_pressure: [
-    "This week in SWFL pest pressure — April conditions and what to watch",
-    "Rainy season pest surge — what is moving indoors right now",
-    "Post-storm pest activity — what homeowners should check",
-  ],
-  gbp_post: [
-    "Spring lawn tip: why your irrigation schedule needs to change now",
-    "Seeing winged insects near windows? Here is what they might be",
-    "Rodent season is ramping up — 3 signs to check today",
-  ],
-  service_page: [
-    "Quarterly pest control in Bradenton — what is included and what to expect",
-    "Rodent exclusion services — how we seal your home permanently",
-    "Mosquito control program — monthly treatment for SWFL yards",
-  ],
-};
-
-const ARTICLE_CHECKLIST = [
-  { label: "All entities competitors cover — no gaps" },
-  { label: "FAQ section from SERP consensus (People Also Ask)" },
-  { label: "Schema markup (FAQ, HowTo, LocalBusiness)" },
-  { label: "FAWN weather data (timestamped, station-specific)" },
-  { label: "UF/IFAS citation with EDIS publication ID" },
-  { label: "Specific neighborhood reference for target city" },
-  { label: "Real field observation from tech data" },
-  { label: "WaveGuard CTA tied to the specific problem" },
-];
-
-function GenerateTab({ onGenerated }) {
-  const [contentType, setContentType] = useState("blog_post");
-  const [topic, setTopic] = useState("");
-  const [city, setCity] = useState("Lakewood Ranch");
-  const [generating, setGenerating] = useState(false);
-  const [weather, setWeather] = useState(null);
-  const [signals, setSignals] = useState([]);
-
-  useEffect(() => {
-    adminFetch("/admin/content/weather")
-      .then((d) => {
-        setWeather(d.weather || d);
-        setSignals(d.signals || []);
-      })
-      .catch(() => {});
-  }, []);
-
-  const handleGenerate = async () => {
-    if (!topic.trim()) return;
-    setGenerating(true);
-    try {
-      const result = await adminPost("/admin/content/generate", {
-        topic: topic.trim(),
-        contentType,
-        targetCity: city,
-      });
-      setGenerating(false);
-      if (result.post || result.id) {
-        onGenerated();
-      }
-    } catch (err) {
-      alert(`Generate failed: ${err.message}`);
-      setGenerating(false);
-    }
-  };
-
-  const suggestions = SUGGESTIONS[contentType] || SUGGESTIONS.blog_post;
-
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "1fr 340px",
-        gap: 20,
-        alignItems: "start",
-      }}
-    >
-      {/* Left — main form */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-        {/* A) Content type selector */}
-        <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
-            Content Type
-          </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)",
-              gap: 10,
-            }}
-          >
-            {CONTENT_TYPES.map((ct) => (
-              <div
-                key={ct.id}
-                onClick={() => setContentType(ct.id)}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                  background: contentType === ct.id ? D.teal + "18" : D.bg,
-                  border: `1px solid ${contentType === ct.id ? D.teal : D.border}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    color: contentType === ct.id ? D.teal : D.heading,
-                  }}
-                >
-                  {ct.label}
-                </div>{" "}
-                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
-                  {ct.desc}
-                </div>{" "}
-              </div>
-            ))}
-          </div>{" "}
-        </Card>
-        {/* B) Topic input + suggestions */}
-        <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 8,
-            }}
-          >
-            Topic
-          </div>{" "}
-          <textarea
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="Describe the topic or paste a working title..."
-            rows={3}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.heading,
-              fontSize: 14,
-              lineHeight: 1.5,
-              fontFamily: "'Roboto', Arial, sans-serif",
-              resize: "vertical",
-              boxSizing: "border-box",
-            }}
-          />{" "}
-          <div
-            style={{
-              fontSize: 14,
-              color: D.muted,
-              marginTop: 8,
-              marginBottom: 6,
-            }}
-          >
-            Suggestions — click to use
-          </div>{" "}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {suggestions.map((s, i) => (
-              <button
-                key={i}
-                onClick={() => setTopic(s)}
-                style={{
-                  padding: "5px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: topic === s ? D.teal + "22" : "transparent",
-                  color: topic === s ? D.teal : D.muted,
-                  fontSize: 14,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  lineHeight: 1.3,
-                }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>{" "}
-        </Card>
-        {/* C) City selector */}
-        <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            Target City
-          </div>{" "}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {CITIES.map((c) => (
-              <button
-                key={c}
-                onClick={() => setCity(c)}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 4,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 14,
-                  fontWeight: 500,
-                  background: city === c ? D.teal : D.bg,
-                  color: city === c ? D.white : D.text,
-                  transition: "all 0.15s",
-                }}
-              >
-                {c}
-              </button>
-            ))}
-          </div>{" "}
-        </Card>
-        {/* E) Generate button */}
-        <button
-          className="admin-blog-generate"
-          onClick={handleGenerate}
-          disabled={generating || !topic.trim()}
-          style={{
-            padding: "14px 24px",
-            borderRadius: 10,
-            border: `1px solid ${D.teal}`,
-            background: D.teal,
-            color: D.white,
-            fontSize: 15,
-            fontWeight: 500,
-            cursor: generating ? "default" : "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 10,
-          }}
-        >
-          {generating ? (
-            <>
-              {" "}
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 16,
-                  height: 16,
-                  border: `2px solid ${D.white}44`,
-                  borderTopColor: D.white,
-                  borderRadius: "50%",
-                  animation: "spin 0.8s linear infinite",
-                }}
-              />
-              Generating — pulling FAWN data, building prompt...
-            </>
-          ) : (
-            <>
-              Generate {CONTENT_TYPES.find((c) => c.id === contentType)?.label}
-            </>
-          )}
-        </button>{" "}
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>{" "}
-      </div>
-      {/* D) Right — info panel */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        {/* Weather snapshot */}
-        <Card style={{ padding: 16 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            FAWN Weather
-          </div>
-          {weather ? (
-            <div style={{ fontSize: 14, color: D.text, lineHeight: 1.7 }}>
-              {weather.temp && (
-                <div>
-                  Temp:{" "}
-                  <span style={{ color: D.teal, fontFamily: MONO }}>
-                    {weather.temp}F
-                  </span>
-                </div>
-              )}
-              {weather.humidity && (
-                <div>
-                  Humidity:{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.humidity}%</span>
-                </div>
-              )}
-              {weather.rainfall && (
-                <div>
-                  Rainfall (7d):{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.rainfall}"</span>
-                </div>
-              )}
-              {weather.soilTemp && (
-                <div>
-                  Soil temp:{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.soilTemp}F</span>
-                </div>
-              )}
-              {weather.station && (
-                <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                  Station: {weather.station}
-                </div>
-              )}
-              {!weather.temp && (
-                <div style={{ color: D.muted }}>
-                  Weather data will be fetched at generation time
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ fontSize: 14, color: D.muted }}>
-              Weather data loads when API is connected
-            </div>
-          )}
-        </Card>
-        {/* Active signals */}
-        {signals.length > 0 && (
-          <Card style={{ padding: 16 }}>
-            {" "}
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: D.amber,
-                marginBottom: 8,
-              }}
-            >
-              Active Signals
-            </div>
-            {signals.map((s, i) => (
-              <div
-                key={i}
-                style={{
-                  fontSize: 14,
-                  color: D.text,
-                  marginBottom: 4,
-                  paddingLeft: 8,
-                  borderLeft: `2px solid ${D.amber}`,
-                }}
-              >
-                {s}
-              </div>
-            ))}
-          </Card>
-        )}
-        {/* Article checklist */}
-        <Card style={{ padding: 16 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            Every article includes
-          </div>
-          {ARTICLE_CHECKLIST.map((item, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 6,
-              }}
-            >
-              {" "}
-              <span
-                style={{ fontSize: 14, color: D.green, fontWeight: 500 }}
-              ></span>{" "}
-              <span style={{ fontSize: 14, color: D.text }}>
-                {item.label}
-              </span>{" "}
-            </div>
-          ))}
-        </Card>{" "}
-      </div>{" "}
-    </div>
-  );
-}
-
-// =========================================================================
 // MAIN PAGE
 // =========================================================================
 const ContentCalendar = lazy(() => import("./ContentCalendar"));
 const TABS = [
   { key: "posts", label: "Posts", Icon: FileText },
-  { key: "generate", label: "Generate", Icon: Wand2 },
   { key: "calendar", label: "Calendar", Icon: CalendarDays },
   { key: "audit", label: "Audit", Icon: FileCheck2 },
   { key: "autopilot", label: "Autopilot", Icon: Bot },
@@ -3006,21 +2434,23 @@ const TABS = [
 // Post lifecycle statuses are a sub-filter inside the Posts tab (was four
 // separate top-level tabs: Published/Drafts/Queued/Ideas). Keys are the
 // actual blog_posts.status values; counts come from
-// /admin/content/blog/analytics (byStatus).
+// /admin/content/blog/analytics (byStatus). Queued and Ideas only held
+// manual-create rows, retired 2026-10-30 (new posts come from Autopilot).
 const POST_STATUSES = [
   { key: "published", label: "Published" },
   { key: "draft", label: "Drafts" },
-  { key: "queued", label: "Queued" },
-  { key: "idea", label: "Ideas" },
 ];
+
+// Old links to the retired Queued / Ideas lists open Drafts.
+const RETIRED_POST_STATUS = { queued: "draft", idea: "draft" };
 
 // Legacy ?tab= keys (the pre-collapse top-level status tabs) → Posts sub-filter
 // status. Lets old deep links / history entries resolve to the right list.
 const LEGACY_POST_TAB = {
   published: "published",
   drafts: "draft",
-  queued: "queued",
-  ideas: "idea",
+  queued: "draft",
+  ideas: "draft",
 };
 
 export default function BlogPage() {
@@ -3039,7 +2469,7 @@ export default function BlogPage() {
       ? paramTab
       : "posts";
 
-  // Posts sub-filter (Published/Drafts/Queued/Ideas) is URL-backed via ?status=
+  // Posts sub-filter (Published/Drafts) is URL-backed via ?status=
   // so it survives refresh / bookmark / share. Legacy ?tab=drafts|queued|ideas|
   // published links still resolve (via legacyPostStatus) and stay stable on
   // reload — no normalization needed, since postStatus is derived, not stored.
@@ -3047,7 +2477,7 @@ export default function BlogPage() {
   const paramStatus = searchParams.get("status");
   const postStatus = VALID_POST_STATUSES.includes(paramStatus)
     ? paramStatus
-    : legacyPostStatus || "published";
+    : RETIRED_POST_STATUS[paramStatus] || legacyPostStatus || "published";
   const postId = searchParams.get("post");
 
   // Usage beacon for the leaf that actually RENDERS — legacy status deep
@@ -3130,7 +2560,6 @@ export default function BlogPage() {
     };
   }, [postId, postRetry]);
   const [counts, setCounts] = useState({});
-  const [generatingIdeas, setGeneratingIdeas] = useState(false);
   const setPostStatus = (status) =>
     setSearchParams(
       (current) => {
@@ -3141,24 +2570,12 @@ export default function BlogPage() {
       },
       { replace: true },
     );
-  const goToPosts = (status) => setPostStatus(status);
 
   useEffect(() => {
     adminFetch("/admin/content/blog/analytics")
       .then((d) => setCounts(d.byStatus || {}))
       .catch(() => {});
   }, [tab]);
-
-  const handleGenerateIdeas = async () => {
-    setGeneratingIdeas(true);
-    try {
-      await adminPost("/admin/content/blog/ideas", { count: 20 });
-      goToPosts("idea");
-    } catch (err) {
-      alert(`Idea generation failed: ${err.message}`);
-    }
-    setGeneratingIdeas(false);
-  };
 
   if (postId) {
     return (
@@ -3215,21 +2632,9 @@ export default function BlogPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Blog section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
-        action={
-          tab === "autopilot" || tab === "registry"
-            ? null
-            : {
-                label: generatingIdeas ? "Generating..." : "Create Blog",
-                icon: Plus,
-                onClick: handleGenerateIdeas,
-                disabled: generatingIdeas,
-              }
-        }
+        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
       />
-      {tab === "generate" ? (
-        <GenerateTab onGenerated={() => goToPosts("draft")} />
-      ) : tab === "audit" ? (
+      {tab === "audit" ? (
         <AuditTab />
       ) : tab === "calendar" ? (
         <Suspense

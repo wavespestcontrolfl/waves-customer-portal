@@ -1,7 +1,6 @@
 /**
  * Destructive-endpoint guards on /api/admin/content/blog/* (2026-07-15 audit):
- * - POST /blog/:id/generate refuses published / astro-active posts (it
- *   unconditionally overwrites content and forces status back to draft).
+ * - The manual create routes stay unmounted (owner 2026-10-30).
  * - DELETE /blog/:id refuses astro-active posts (orphans an open PR /
  *   strands a live page) and 404s on missing ids.
  * - PUT /blog/:id validates status and blocks the direct →published jump.
@@ -15,9 +14,7 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/content/blog-writer', () => ({
-  generatePost: jest.fn().mockResolvedValue({ success: true, content: 'x' }),
-}));
+jest.mock('../services/content/blog-writer', () => ({}));
 jest.mock('../services/content/blog-auditor', () => ({}));
 jest.mock('../config/models', () => ({}));
 jest.mock('../services/content-astro/spoke-sites', () => ({ invalidSpokeSites: () => [] }));
@@ -27,7 +24,6 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
 jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn() }));
 
 const db = require('../models/db');
-const BlogWriter = require('../services/content/blog-writer');
 const router = require('../routes/admin-content-v2');
 
 const POST_ID = '3f2a9c34-1111-2222-3333-444455556666';
@@ -103,58 +99,20 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('POST /blog/:id/generate guard', () => {
-  test('refuses a published post (content would be irreversibly overwritten)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'published', astro_status: 'live' };
-    const r = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(r.statusCode).toBe(409);
-    expect(BlogWriter.generatePost).not.toHaveBeenCalled();
-  });
-
-  test('refuses an astro-active draft (open PR would be orphaned from its content)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'pr_open' };
-    const r = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(r.statusCode).toBe(409);
-  });
-
-  test('refuses build_failed and marker-bearing publish_failed posts (PR/branch still exists)', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'build_failed' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: 88 };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    // branch-only failure marker (branch created, PR creation failed):
-    // astro_branch_name is the row's ONLY reference to the surviving branch
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: 'content/blog-x' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-
-    // publish_failed with NO external markers is a plain retryable row
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: null };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(200);
-
-    // mid-publish scheduler claim: markers don't exist yet but the publisher
-    // already captured the row's content (codex r3)
-    tableState.post = { id: POST_ID, status: 'queued', astro_status: 'draft', publish_status: 'publishing' };
-    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
-  });
-
-  test('allows a plain draft and 404s junk / missing ids', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'draft' };
-    const ok = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(ok.statusCode).toBe(200);
-    expect(BlogWriter.generatePost).toHaveBeenCalledWith(POST_ID);
-
-    tableState.post = null;
-    const missing = await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } });
-    expect(missing.statusCode).toBe(404);
-
-    const junk = await invoke('post', '/blog/:id/generate', { params: { id: 'not-a-uuid' } });
-    expect(junk.nextErr?.statusCode).toBe(404);
+describe('manual blog creation is retired (owner 2026-10-30)', () => {
+  test('no create route is mounted: new posts come from Autopilot', () => {
+    const mounted = router.stack
+      .filter((l) => l.route)
+      .flatMap((l) => Object.keys(l.route.methods).map((m) => `${m.toUpperCase()} ${l.route.path}`));
+    for (const gone of [
+      'POST /generate',
+      'POST /blog/ideas',
+      'POST /blog/bulk-generate',
+      'POST /blog/:id/generate',
+      'GET /weather',
+    ]) {
+      expect(mounted).not.toContain(gone);
+    }
   });
 });
 

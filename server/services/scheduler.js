@@ -7453,28 +7453,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
 // =========================================================================
-  // DAILY 5AM — Auto-generate next blog post content
-  // =========================================================================
-  cron.schedule('0 5 * * *', async () => {
-    logger.info('Running: blog post auto-generation');
-    try {
-      const BlogWriter = require('./content/blog-writer');
-      const nextPost = await db('blog_posts')
-        .where('status', 'queued')
-        .whereNull('content')
-        .orderBy('publish_date', 'asc')
-        .first();
-
-      if (nextPost) {
-        await BlogWriter.generatePost(nextPost.id);
-        logger.info(`Blog auto-generated: "${nextPost.title}"`);
-      }
-    } catch (err) {
-      logger.error(`Blog auto-generation failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // WEEKLY SUNDAY 6AM — Full blog content audit
   // =========================================================================
   cron.schedule('0 6 * * 0', async () => {
@@ -7492,20 +7470,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Blog audit failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // MONTHLY 1ST 6AM — Generate 20 new blog post ideas
-  // =========================================================================
-  cron.schedule('0 6 1 * *', async () => {
-    logger.info('Running: blog idea generation');
-    try {
-      const BlogWriter = require('./content/blog-writer');
-      const ideas = await BlogWriter.generateNewIdeas(20);
-      logger.info(`Generated ${ideas.length} new blog post ideas`);
-    } catch (err) {
-      logger.error(`Blog idea generation failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -65,17 +65,6 @@ function fixture(url, options = {}) {
     return { byStatus: { published: 1, draft: 1, queued: 2, idea: 3 } };
   if (parsed.pathname === "/api/admin/content/blog")
     return { posts: [post], counts: {} };
-  if (parsed.pathname === "/api/admin/content/weather")
-    return {
-      weather: {
-        temp: 88,
-        humidity: 70,
-        rainfall: 1.2,
-        soilTemp: 81,
-        station: "Synthetic station",
-      },
-      signals: ["Synthetic seasonal signal"],
-    };
   if (parsed.pathname === "/api/admin/content/blog/audit")
     return {
       audit: {
@@ -117,11 +106,6 @@ function fixture(url, options = {}) {
   )
     return { post: { ...post, ...JSON.parse(options.body) } };
   if (parsed.pathname === "/api/admin/content/blog/post-17") return { post };
-  if (
-    parsed.pathname === "/api/admin/content/generate" &&
-    options.method === "POST"
-  )
-    return { id: "generated-post" };
   return {};
 }
 
@@ -155,11 +139,11 @@ describe("Blog workspace foundation", () => {
       ),
     ).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Queued (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Published (1)" }));
     await waitFor(() =>
       expect(
         fetch.mock.calls.some(([url]) =>
-          String(url).includes("/admin/content/blog?status=queued"),
+          String(url).includes("/admin/content/blog?status=published"),
         ),
       ).toBe(true),
     );
@@ -168,11 +152,43 @@ describe("Blog workspace foundation", () => {
       "tab=posts",
     );
     expect(screen.getByTestId("location-search")).toHaveTextContent(
-      "status=queued",
+      "status=published",
     );
   });
 
-  it("keeps the generate request and draft handoff intact", async () => {
+  it("opens Drafts for links to the retired Queued and Ideas lists", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?tab=ideas"]}>
+        <BlogPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Synthetic termite guide");
+    expect(
+      fetch.mock.calls.some(([url]) =>
+        String(url).includes("/admin/content/blog?status=draft"),
+      ),
+    ).toBe(true);
+    expect(
+      screen.queryByRole("button", { name: /^(queued|ideas)/i }),
+    ).not.toBeInTheDocument();
+    cleanup();
+
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?tab=posts&status=queued"]}>
+        <BlogPage />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        fetch.mock.calls.filter(([url]) =>
+          String(url).includes("/admin/content/blog?status=draft"),
+        ).length,
+      ).toBeGreaterThan(1),
+    );
+  });
+
+  it("offers no manual create: an old Generate link opens Posts", async () => {
     render(
       <MemoryRouter initialEntries={["/admin/blog?tab=generate&keep=yes"]}>
         <BlogPage />
@@ -180,38 +196,44 @@ describe("Blog workspace foundation", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByText("Page Refresh", { exact: true }));
-    fireEvent.change(
-      screen.getByPlaceholderText(
-        "Describe the topic or paste a working title...",
+    await screen.findByText("Synthetic termite guide");
+    const nav = screen.getByRole("navigation", { name: "Blog section" });
+    expect(
+      within(nav).queryByRole("button", { name: /generate/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /create blog/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetch.mock.calls.some(([url]) =>
+        /\/admin\/content\/(generate|weather|blog\/ideas)/.test(String(url)),
       ),
-      { target: { value: "Synthetic refresh topic" } },
+    ).toBe(false);
+    expect(screen.getByTestId("location-search")).toHaveTextContent("keep=yes");
+  });
+
+  it("an empty post offers no AI body generation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, options = {}) => {
+        const parsed = new URL(String(url), "http://localhost");
+        if (parsed.pathname === "/api/admin/content/blog/post-17")
+          return jsonResponse({
+            post: { ...post, status: "idea", content: null, word_count: 0 },
+          });
+        return jsonResponse(fixture(url, options));
+      }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Sarasota" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Generate Page Refresh" }),
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?post=post-17"]}>
+        <BlogPage />
+      </MemoryRouter>,
     );
 
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        "/api/admin/content/generate",
-        expect.objectContaining({
-          method: "POST",
-          body: JSON.stringify({
-            topic: "Synthetic refresh topic",
-            contentType: "page_refresh",
-            targetCity: "Sarasota",
-          }),
-        }),
-      ),
-    );
-    expect(screen.getByTestId("location-search")).toHaveTextContent("keep=yes");
-    expect(screen.getByTestId("location-search")).toHaveTextContent(
-      "tab=posts",
-    );
-    expect(screen.getByTestId("location-search")).toHaveTextContent(
-      "status=draft",
-    );
+    await screen.findByText(/No content yet/);
+    expect(
+      screen.queryByRole("button", { name: /^(generate content|regenerate)$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the editor fields and preserves the save payload", async () => {
