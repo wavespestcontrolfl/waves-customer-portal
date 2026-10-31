@@ -282,4 +282,12 @@ describe('license status on the ET calendar', () => {
     const { json } = await call('GET', '/licenses');
     expect(json.technicians[0].licenseStatus).toBe(status);
   });
+
+  test('reads license_expiry as YYYY-MM-DD, the shape the edit dialog sends back', async () => {
+    table('technicians', [licenseRow()]);
+    await call('GET', '/licenses');
+    const select = calls.technicians.find(([name]) => name === 'select')[1];
+    expect(select).toContainEqual({ raw: "to_char(license_expiry, 'YYYY-MM-DD') as license_expiry" });
+    expect(select).not.toContain('license_expiry');
+  });
 });

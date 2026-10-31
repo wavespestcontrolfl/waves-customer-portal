@@ -7,7 +7,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString, etYearStart, etCalendarDaysUntil, addETDays } = require('../utils/datetime-et');
+const { etDateString, etYearStart, etCalendarDaysUntil, etCalendarDayOf, addETDays } = require('../utils/datetime-et');
 
 // ─── Nightly Maintenance Check ───────────────────────────────────
 /**
@@ -418,7 +418,9 @@ async function generateMaintenanceAlert(schedule, isOverdue) {
 
     let description = '';
     if (schedule.next_due_at) {
-      const dueDate = new Date(schedule.next_due_at);
+      // A DATE arrives as UTC midnight; formatted in ET it read one day early.
+      // Anchor its own calendar day at noon UTC before formatting.
+      const dueDate = new Date(`${etCalendarDayOf(schedule.next_due_at)}T12:00:00Z`);
       description += `Due date: ${dueDate.toLocaleDateString('en-US', { timeZone: 'America/New_York' })}. `;
     }
     if (schedule.next_due_miles) description += `Due at ${schedule.next_due_miles.toLocaleString()} miles. `;

@@ -124,8 +124,11 @@ async function trainingBlocksFor(ids) {
 // GET /api/admin/compliance-v2/licenses — technician license info
 router.get('/licenses', async (req, res, next) => {
   try {
+    // license_expiry as YYYY-MM-DD: pg hands a DATE back as a UTC-midnight
+    // Date, which the tab printed as a timestamp and the edit dialog sent back
+    // to PUT, where validDateOnly refused it.
     const techs = await db('technicians')
-      .select('id', 'name', 'email', 'phone', 'fl_applicator_license', 'license_expiry', 'license_categories', 'active');
+      .select('id', 'name', 'email', 'phone', 'fl_applicator_license', dateText('license_expiry'), 'license_categories', 'active');
     const now = new Date();
     const trainingBlocks = techTrainingDatesLive() ? await trainingBlocksFor(techs.map(t => t.id)) : new Map();
     res.json({
