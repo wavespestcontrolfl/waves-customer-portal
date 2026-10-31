@@ -2632,9 +2632,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // expected-state predicate makes the single path 409 instead —
         // caught below as a per-member failure the tech re-runs.
         const casPin = {
-          // The size-rule inputs this move's single-versus-series decision was made on: a series re-anchor that
-          // changed them since makes the write miss (the concurrent-change 409) instead of committing a stale single move.
-          ...Object.fromEntries(['recurring_pattern', 'date_exception', 'date_exception_cadence_date'].filter((col) => col in job)
+          // A recurring job's single-versus-series decision (the size rule) was made on its pattern, date exception,
+          // cadence date and date (the regular date of a row with no exception): a series re-anchor that changed any
+          // of them since makes the write miss (the concurrent-change 409) instead of committing a stale single move.
+          ...Object.fromEntries((job.is_recurring === true ? ['recurring_pattern', 'date_exception', 'date_exception_cadence_date', 'scheduled_date'] : [])
+            .filter((col) => col in job)
             .map((col) => [col, (col.endsWith('_date') ? dateOnlyString(job[col]) : job[col]) ?? null])),
           ...(wantsSeriesShift ? { scheduled_date: job.scheduled_date, window_start: job.window_start } : {}),
           // codex-review P1 (PR #4673): a technician-initiated
@@ -2643,8 +2645,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // and this call now makes the write miss and 409, the
           // same concurrent-change fence every other CAS field in
           // rebooker.reschedule already gets. Admin-initiated
-          // rain-outs (requireAssignedTechnicianId null) stay
-          // unscoped.
+          // rain-outs (requireAssignedTechnicianId null) pin no
+          // technician.
           ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
         };
         const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {

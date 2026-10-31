@@ -1077,19 +1077,20 @@ describe('rain-out service', () => {
         expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
       });
 
-      test('the single path pins the size-rule inputs the decision was made on; a job that carries none adds no pin', async () => {
+      test('the single path pins the size-rule inputs the decision was made on, the date included; a job that carries none pins its date', async () => {
         process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
         wireRecurring({ ...ROUNDS_SERVICE, date_exception: true, date_exception_cadence_date: new Date('2026-06-10T00:00:00Z') });
         SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
         await RainOut.commit(moveTo('2026-06-12'));
+        // A re-anchor that moved the date (the regular date of a row with no exception) makes the write miss too.
         expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({
-          recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2026-06-10',
+          recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2026-06-10', scheduled_date: '2026-06-11',
         });
         SmartRebooker.reschedule.mockClear();
         wireRecurring(RECURRING_SERVICE);
         SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
         await RainOut.commit({ ...moveTo('2026-06-12'), requireAssignedTechnicianId: 'tech-1' });
-        expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({ technician_id: 'tech-1' });
+        expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-06-11', technician_id: 'tech-1' });
       });
 
       test('the series shift asks the rebooker to confirm its scope on the locked anchor', async () => {
@@ -1132,7 +1133,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         expect.objectContaining({
           seriesPolicy: 'single',
-          expect: { technician_id: 'tech-1' },
+          expect: { scheduled_date: '2026-06-11', technician_id: 'tech-1' },
         }),
       );
     });
