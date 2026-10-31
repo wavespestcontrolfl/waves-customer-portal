@@ -130,7 +130,12 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     expect(shown.map((i) => i.id)).toEqual([recentChat, recentRequest, portalRequest]);
     expect(new Date(before.cutoff).getTime()).toBeLessThan(Date.now() - 13.9 * DAY);
     const chatItem = shown.find((i) => i.id === recentChat);
-    expect(chatItem).toMatchObject({ kind: 'chat', customer: { id: customerId, firstName: 'Pat' } });
+    expect(chatItem).toMatchObject({ kind: 'chat', customer: { id: customerId, firstName: 'Pat', hasTexts: false } });
+    expect(chatItem.customer.phone).toMatch(/\d{10}/);
+    // total counts every open item in the window, however many are listed
+    // (other suites may add rows meanwhile, so only a lower bound is stable).
+    expect(Number.isInteger(before.total)).toBe(true);
+    expect(before.total).toBeGreaterThanOrEqual(shown.length);
     expect(chatItem.customerMessage).toContain('chat asking about a pest question 1d');
     expect(chatItem.assistantReply).toBe(`Reply to ${chatItem.customerMessage}`);
     expect(shown.find((i) => i.id === recentRequest)).toMatchObject({ kind: 'request', category: 'general', status: 'new', description: 'Please call me' });

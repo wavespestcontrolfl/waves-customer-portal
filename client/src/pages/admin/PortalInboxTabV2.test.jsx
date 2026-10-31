@@ -13,19 +13,19 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 const chat = {
   kind: "chat", id: "esc-1", createdAt: "2026-10-30T15:00:00.000Z",
-  customer: { id: "cust-1", firstName: "Pat", lastName: "Synthetic" },
+  customer: { id: "cust-1", firstName: "Pat", lastName: "Synthetic", phone: "+19415550100", hasTexts: true },
   customerMessage: "Can you add mosquito service to my account?", summary: "wants mosquito", reason: "complex_question",
   assistantReply: "I will pass that to the team.",
 };
 const request = {
   kind: "request", id: "req-1", createdAt: "2026-10-29T15:00:00.000Z",
-  customer: { id: "cust-2", firstName: "Kim", lastName: "Sample" },
+  customer: { id: "cust-2", firstName: "Kim", lastName: "Sample", phone: "+19415550101", hasTexts: false },
   category: "scheduling", subject: "Move my visit", description: "Please move my visit to next week.",
   requestedService: "", source: "portal", urgency: "routine", status: "new",
 };
 
 function listing(overrides = {}) {
-  return { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [chat, request], older: { chats: 3, requests: 2 }, ...overrides };
+  return { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [chat, request], total: 2, older: { chats: 3, requests: 2 }, ...overrides };
 }
 
 function Where() {
@@ -72,6 +72,37 @@ describe("Portal inbox tab", () => {
     const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
     fireEvent.click(within(row).getByRole("button", { name: "Open customer" }));
     expect(screen.getByTestId("where")).toHaveTextContent("/admin/customers?customerId=cust-2");
+  });
+
+  it("opens a new text to the customer's phone when there is no thread, and disables Reply with no phone", async () => {
+    const noPhone = { ...request, id: "req-2", customer: { id: "cust-3", firstName: "Lee", lastName: "Example", phone: "", hasTexts: false } };
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [request, noPhone], total: 2 }) : { ok: true }));
+    mount();
+    const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply by text" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/communications?phone=%2B19415550101&action=sms#tab=sms");
+    const bare = screen.getByText("Lee Example").closest("[data-testid]");
+    expect(within(bare).getByRole("button", { name: "Reply by text" })).toBeDisabled();
+  });
+
+  it("shows how many of the total are listed, and loads the rest once the listed rows are handled", async () => {
+    const onCount = vi.fn();
+    let calls = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url !== "/admin/portal-inbox") return { ok: true };
+      calls += 1;
+      const third = { ...request, id: "req-3", customer: { id: "cust-4", firstName: "Sam", lastName: "Placeholder", phone: "+19415550104", hasTexts: false } };
+      return calls === 1 ? listing({ total: 3 }) : listing({ items: [third], total: 1 });
+    });
+    mount(onCount);
+    expect(await screen.findByText("Showing 2 of 3. The rest load as you handle these.")).toBeInTheDocument();
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(3));
+    fireEvent.click(within(screen.getByText("Pat Synthetic").closest("[data-testid]")).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Pat Synthetic")).not.toBeInTheDocument());
+    fireEvent.click(within(screen.getByText("Kim Sample").closest("[data-testid]")).getByRole("button", { name: "Mark handled" }));
+    expect(await screen.findByText("Sam Placeholder")).toBeInTheDocument();
+    expect(calls).toBe(2);
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(1));
   });
 
   it("marks a chat handled through the escalation route, then drops the row and lowers the count", async () => {
@@ -139,7 +170,7 @@ describe("Portal inbox tab", () => {
   });
 
   it("shows an empty state, and no Older line, when nothing is open", async () => {
-    adminFetch.mockImplementation(async () => listing({ items: [], older: { chats: 0, requests: 0 } }));
+    adminFetch.mockImplementation(async () => listing({ items: [], total: 0, older: { chats: 0, requests: 0 } }));
     mount();
     expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
     expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();

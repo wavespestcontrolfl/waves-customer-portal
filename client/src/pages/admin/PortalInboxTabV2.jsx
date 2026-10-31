@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Inbox, AlertTriangle } from "lucide-react";
 import { Badge, Button, Card, CardBody } from "../../components/ui";
@@ -48,6 +48,14 @@ function markHandled(item) {
   });
 }
 
+// Reply by text: open the customer's SMS thread when one exists, else a new
+// text to their phone (the Customer 360 SMS panel picks the same way).
+function replyHref(customer) {
+  if (customer?.id && customer.hasTexts) return `/admin/communications?thread=${encodeURIComponent(customer.id)}#tab=sms`;
+  if (customer?.phone) return `/admin/communications?phone=${encodeURIComponent(customer.phone)}&action=sms#tab=sms`;
+  return null;
+}
+
 function RequestDetails({ item }) {
   const meta = [item.category, item.requestedService, item.source && `via ${item.source}`, item.urgency === "urgent" && "urgent"]
     .filter(Boolean)
@@ -78,6 +86,7 @@ function ChatDetails({ item }) {
 
 function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
   const hasCustomer = Boolean(item.customer?.id);
+  const canReply = Boolean(replyHref(item.customer));
   return (
     <div className="py-4 first:pt-0 last:pb-0" data-testid={`portal-row-${item.kind}-${item.id}`}>
       <div className="flex items-center gap-2 flex-wrap">
@@ -87,7 +96,7 @@ function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
       </div>
       {item.kind === "chat" ? <ChatDetails item={item} /> : <RequestDetails item={item} />}
       <div className="flex flex-wrap gap-2 mt-3">
-        <Button type="button" density="comfortable" variant="secondary" disabled={!hasCustomer} onClick={() => onReply(item)}>
+        <Button type="button" density="comfortable" variant="secondary" disabled={!canReply} title={canReply ? undefined : "No phone on file"} onClick={() => onReply(item)}>
           Reply by text
         </Button>
         <Button type="button" density="comfortable" variant="secondary" disabled={!hasCustomer} onClick={() => onOpenCustomer(item)}>
@@ -182,12 +191,17 @@ export default function PortalInboxTabV2({ onCount }) {
   const [loadError, setLoadError] = useState("");
   const [busyKey, setBusyKey] = useState(null);
   const [rowErrors, setRowErrors] = useState({});
+  // Rows handled since the last load: when they empty a capped list that still
+  // has more open items (total), the tab loads the next ones once.
+  const handledSinceLoad = useRef(0);
 
   const load = useCallback(() => {
+    handledSinceLoad.current = 0;
     setLoadError("");
     return adminFetch("/admin/portal-inbox")
       .then((d) => {
-        setData({ cutoff: d.cutoff, items: d.items || [], older: d.older || { chats: 0, requests: 0 } });
+        const items = d.items || [];
+        setData({ cutoff: d.cutoff, items, total: Number.isFinite(d.total) ? d.total : items.length, older: d.older || { chats: 0, requests: 0 } });
       })
       .catch((err) => {
         setLoadError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Failed to load.");
@@ -196,8 +210,11 @@ export default function PortalInboxTabV2({ onCount }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const openCount = data ? data.items.length : null;
+  const openCount = data ? data.total : null;
   useEffect(() => { if (openCount !== null) onCount?.(openCount); }, [openCount, onCount]);
+  useEffect(() => {
+    if (data && data.items.length === 0 && data.total > 0 && handledSinceLoad.current > 0) load();
+  }, [data, load]);
 
   const rowKey = (item) => `${item.kind}:${item.id}`;
 
@@ -207,7 +224,8 @@ export default function PortalInboxTabV2({ onCount }) {
     setRowErrors((prev) => ({ ...prev, [key]: "" }));
     try {
       await markHandled(item);
-      setData((prev) => ({ ...prev, items: prev.items.filter((row) => rowKey(row) !== key) }));
+      handledSinceLoad.current += 1;
+      setData((prev) => ({ ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) }));
     } catch (err) {
       const message = isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Could not mark this handled. Try again.";
       setRowErrors((prev) => ({ ...prev, [key]: message }));
@@ -216,7 +234,10 @@ export default function PortalInboxTabV2({ onCount }) {
     }
   };
 
-  const reply = (item) => navigate(`/admin/communications?thread=${encodeURIComponent(item.customer.id)}#tab=sms`);
+  const reply = (item) => {
+    const href = replyHref(item.customer);
+    if (href) navigate(href);
+  };
   const openCustomer = (item) => navigate(`/admin/customers?customerId=${encodeURIComponent(item.customer.id)}`);
 
   return (
@@ -224,6 +245,11 @@ export default function PortalInboxTabV2({ onCount }) {
       <p className="text-14 text-ink-secondary">
         What customers asked for in the customer portal and nobody answered yet. Last 14 days.
       </p>
+      {data && data.total > data.items.length && (
+        <p className="text-14 text-ink-secondary" role="status">
+          Showing {data.items.length} of {data.total}. The rest load as you handle these.
+        </p>
+      )}
       {loadError && (
         <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
           <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {loadError}

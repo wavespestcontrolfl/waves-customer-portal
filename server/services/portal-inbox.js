@@ -90,8 +90,18 @@ const REPLY_SQL = `(
   ORDER BY m2.created_at ASC LIMIT 1
 )`;
 
+// hasTexts: the customer has an SMS thread, so Reply by text can open it;
+// otherwise the tab opens a new text to `phone` (the Customer 360 SMS panel rule).
+const HAS_TEXTS_SQL = '(c.id IS NOT NULL AND EXISTS (SELECT 1 FROM sms_log sl WHERE sl.customer_id = c.id)) AS has_texts';
+
 function customerOf(row) {
-  return { id: row.customer_id || null, firstName: row.first_name || '', lastName: row.last_name || '' };
+  return {
+    id: row.customer_id || null,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    phone: row.phone || '',
+    hasTexts: row.has_texts === true,
+  };
 }
 
 function chatItem(row) {
@@ -130,26 +140,29 @@ async function listRecent(cutoff) {
     .orderBy('e.created_at', 'desc')
     .limit(LIST_CAP)
     .select('e.id', 'e.created_at', 'e.customer_id', 'e.customer_message', 'e.summary', 'e.reason',
-      'c.first_name', 'c.last_name', db.raw(`${REPLY_SQL} AS assistant_reply`));
+      'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL), db.raw(`${REPLY_SQL} AS assistant_reply`));
   const requestRows = await openRequests()
     .leftJoin('customers as c', 'c.id', 'r.customer_id')
     .where('r.created_at', '>', cutoff)
     .orderBy('r.created_at', 'desc')
     .limit(LIST_CAP)
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
-      'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'c.first_name', 'c.last_name');
+      'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
   return [...chatRows.map(chatItem), ...requestRows.map(requestItem)]
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
+// `total` is every open item in the window; `items` holds at most LIST_CAP of
+// each kind, so the tab shows "N of total" and reloads when it runs out.
 async function list(now = new Date()) {
   const cutoff = windowCutoff(now);
-  const [items, chats, requests] = await Promise.all([
+  const [items, recent, chats, requests] = await Promise.all([
     listRecent(cutoff),
+    summary(cutoff),
     countOf(openChats().where('e.created_at', '<=', cutoff)),
     countOf(openRequests().where('r.created_at', '<=', cutoff)),
   ]);
-  return { cutoff: cutoff.toISOString(), items, older: { chats, requests } };
+  return { cutoff: cutoff.toISOString(), items, total: recent.count, older: { chats, requests } };
 }
 
 // Close the open admin bell alerts raised for these ids. `key` is the metadata
