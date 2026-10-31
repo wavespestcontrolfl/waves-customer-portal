@@ -75,6 +75,7 @@ router.post('/threads/:id/read', requireLive, async (req, res, next) => {
 });
 
 // POST /api/admin/messenger/threads/:id/reply { text } -> { sent: true } | 409 outside_window | 502 send_failed
+// (Facebook refused: nothing went out) | 504 send_uncertain (no confirmation: check Facebook before resending)
 router.post('/threads/:id/reply', requireLive, async (req, res, next) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';

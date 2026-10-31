@@ -119,6 +119,22 @@ describe("Messenger tab", () => {
     expect(adminFetch.mock.calls.filter(([url]) => url.endsWith("/reply"))).toHaveLength(1);
   });
 
+  it("says Facebook did not confirm, and keeps the text, when a send has no confirmation", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };
+      if (url.endsWith("/reply")) throw Object.assign(new Error("send_uncertain"), { status: 504 });
+      if (url.endsWith("/read")) return { updated: 0 };
+      return detailFor(open);
+    });
+    render(<MessengerTabV2 />);
+    fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+    const box = await screen.findByLabelText("Reply on Facebook");
+    fireEvent.change(box, { target: { value: "On our way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Facebook did not confirm this reply. Check the thread in Facebook before you send it again.");
+    expect(box).toHaveValue("On our way");
+  });
+
   it("shows a plain error and keeps the text when Facebook refuses the reply", async () => {
     adminFetch.mockImplementation(async (url) => {
       if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: threads.filter((t) => !t.answered).length };

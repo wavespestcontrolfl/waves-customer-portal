@@ -87,6 +87,13 @@ async function graph(urlOrPath, { token, params = {}, method = 'GET', body } = {
   return json;
 }
 
+// A failure for the logs: Facebook's status and code, or the error's name and database code.
+// Never the error text: a database error can quote the row it refused, and a row holds message text.
+function safeError(err) {
+  if (err?.status) return `Facebook HTTP ${err.status}, code ${err.fbCode ?? 'none'}`;
+  return [err?.name || 'Error', err?.code].filter(Boolean).join(' ');
+}
+
 // ── cursor ────────────────────────────────────────────────────
 
 async function readCursor() {
@@ -333,7 +340,7 @@ async function pollMessenger({ now = new Date(), limits: override } = {}) {
       inserted += (await importConversation(config, conv, { since, firstRun, limits })).inserted;
     } catch (err) {
       failed += 1;
-      logger.warn(`[messenger-inbox] conversation not imported: ${err.message}`);
+      logger.warn(`[messenger-inbox] conversation not imported: ${safeError(err)}`);
     }
     const groupEnds = !changed[i + 1] || changed[i + 1].updatedAt.getTime() !== conv.updatedAt.getTime();
     if (groupEnds && !failed) advanced = conv.updatedAt;
@@ -489,11 +496,15 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
       },
     });
   } catch (err) {
-    logger.warn(`[messenger-inbox] reply not sent: ${err.message}`);
+    logger.warn(`[messenger-inbox] reply not sent: ${safeError(err)}`);
+    // No HTTP answer (a timeout or a dropped connection): Facebook may have delivered it, so the
+    // staff member must check before sending again. An HTTP error is a refusal: nothing went out.
+    if (!err?.status) return { ok: false, status: 504, error: 'send_uncertain' };
     return { ok: false, status: 502, error: 'send_failed' };
   }
   const mid = sent?.message_id;
-  if (!mid) return { ok: false, status: 502, error: 'send_failed' };
+  // A 200 without a message id: Facebook took the request but did not confirm a message.
+  if (!mid) return { ok: false, status: 504, error: 'send_uncertain' };
 
   const actorId = req.technicianId || null;
   let message = null;
@@ -519,12 +530,12 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
     }
   } catch (err) {
     // Facebook has the reply; a resend would double it. The next poll stores it.
-    logger.error(`[messenger-inbox] reply sent but not stored: ${err.message}`);
+    logger.error(`[messenger-inbox] reply sent but not stored: ${safeError(err)}`);
   }
   try {
     await closeBell(row.id);
   } catch (err) {
-    logger.warn(`[messenger-inbox] bell not closed after reply: ${err.message}`);
+    logger.warn(`[messenger-inbox] bell not closed after reply: ${safeError(err)}`);
   }
   return { ok: true, message: message ? { id: message.id, createdAt: iso(message.created_at) } : null };
 }

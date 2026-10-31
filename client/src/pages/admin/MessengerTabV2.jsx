@@ -101,7 +101,8 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
     } catch (err) {
       setError(isRateLimitError(err) ? SLOW_DOWN
         : err?.status === 409 ? WINDOW_NOTE
-          : "Facebook did not accept the reply. Nothing was sent.");
+          : err?.status === 504 ? "Facebook did not confirm this reply. Check the thread in Facebook before you send it again."
+            : "Facebook did not accept the reply. Nothing was sent.");
     } finally {
       inFlight.current = false;
       setSending(false);

@@ -53,6 +53,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       const json = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
       if (init.method === 'POST') {
         sends.push(JSON.parse(init.body));
+        if (fb.sendThrows) throw new TypeError('fetch failed');
         return json(fb.sendStatus === 200 ? fb.sendResult : { error: { code: 10, message: 'synthetic refusal' } }, fb.sendStatus);
       }
       const parts = url.pathname.split('/').filter(Boolean);
@@ -602,6 +603,23 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       const res = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
       expect(res.status).toBe(502);
       expect(await res.json()).toEqual({ error: 'send_failed' });
+      expect(await messagesOf('open')).toHaveLength(before);
+      expect((await bellsOf('open'))[0].done_at).toBeNull();
+    });
+
+    test('a send Facebook never confirmed is 504 send_uncertain and writes nothing; the bell stays open', async () => {
+      await seed();
+      const open = (await (await get('/threads')).json()).threads.find((t) => t.name === 'Pat Synthetic');
+      const before = (await messagesOf('open')).length;
+      fb.sendThrows = true;
+      const dropped = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
+      expect(dropped.status).toBe(504);
+      expect(await dropped.json()).toEqual({ error: 'send_uncertain' });
+      fb.sendThrows = false;
+      fb.sendResult = {};
+      const noId = await post(`/threads/${open.id}/reply`, { text: 'We can call you at 3.' });
+      expect(noId.status).toBe(504);
+      expect(await noId.json()).toEqual({ error: 'send_uncertain' });
       expect(await messagesOf('open')).toHaveLength(before);
       expect((await bellsOf('open'))[0].done_at).toBeNull();
     });
